@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Architecture - OpenISAC</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<style>
+    img {
+        box-shadow: none;
+        border: none;
+        mix-blend-mode: multiply;
+    }
+</style>
+
+<body>
+
+    <header>
+        <nav>
+            <a href="index.html" class="logo">OpenISAC</a>
+            <ul class="nav-links">
+                <li><a href="index.html">Home</a></li>
+                <li><a href="architecture.html" class="active">Architecture</a></li>
+                <li><a href="signal_processing.html">Signal Processing</a></li>
+                <li><a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank">GitHub</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="system-architecture">
+            <h2>System Architecture</h2>
+            <p>
+                The OpenISAC testbed comprises a Base Station (BS) and a User Equipment (UE), each built around a
+                Universal Software Radio Peripheral (USRP) synchronized by an oven-controlled crystal oscillator (OCXO).
+            </p>
+            <img src="images/SysArch.png" alt="System Architecture Diagram">
+            <p class="caption">Fig. 1. System architecture of OpenISAC.</p>
+
+            <p>
+                <strong>BS Node:</strong> A host PC connects to the USRP over USB/Ethernet, generates the ISAC baseband
+                waveform, and streams this to the USRP. The USRP transmits the signal and captures the radar echoes on a
+                separate receive antenna.
+            </p>
+            <p>
+                <strong>UE Node:</strong> A host PC interfaces with the USRP to acquire the downlink signal. It uses an
+                OCXO for synchronization, optionally disciplined via a DAC to minimize carrier/sampling offsets for
+                bistatic sensing.
+            </p>
+        </section>
+
+        <section id="bs-software">
+            <h2>Software Architecture of BS</h2>
+            <p>
+                The BS software is a multi-threaded pipeline that decouples I/O and computation using ring-buffer FIFOs.
+            </p>
+            <img src="images/SoftArchBS.png" alt="BS Software Diagram">
+            <p class="caption">Fig. 2. Software architecture of BS.</p>
+
+            <ul>
+                <li><strong>Bit Processing:</strong> Handles UDP payloads, LDPC encoding, and scrambling.</li>
+                <li><strong>OFDM Modulator:</strong> Performs QPSK mapping, pilot insertion, IFFT, and CP insertion.
+                    Pads frames with random bits if traffic is low.</li>
+                <li><strong>Radio I/O:</strong> "USRP-TX" sends waveforms; "USRP-RX" captures radar streams.</li>
+                <li><strong>Sensing Thread:</strong> Performs real-time monostatic sensing (OFDM demod, division,
+                    Range-Doppler map). Supports "stride" processing to balance load.</li>
+            </ul>
+        </section>
+
+        <section id="ue-software">
+            <h2>Software Architecture of UE</h2>
+            <p>
+                The UE is also a multi-threaded pipeline designed for robust synchronization and reception.
+            </p>
+            <img src="images/SoftArchUE.png" alt="UE Software Diagram">
+            <p class="caption">Fig. 3. Software architecture of UE.</p>
+
+            <ul>
+                <li><strong>USRP RX:</strong> Acquires downlink baseband stream and performs timing adjustments.</li>
+                <li><strong>OFDM Demodulator:</strong> Operates in two states:
+                    <ul>
+                        <li><em>SYNC_SEARCH:</em> Scans for ZC sync symbols to estimate frame boundary and CFO.</li>
+                        <li><em>NORMAL:</em> Performs FFT, channel estimation, equalization, and LLR computation.
+                            Re-enters search if lock is lost.</li>
+                    </ul>
+                </li>
+                <li><strong>Sensing Thread:</strong> Performs real-time bistatic sensing using {RX, TX} symbol pairs.
+                </li>
+                <li><strong>Bit Processing:</strong> Descrambles and LDPC decodes to recover the UDP payload.</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p>
+    </footer>
+
+</body>
+
+</html>

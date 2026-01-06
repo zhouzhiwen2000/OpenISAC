@@ -1,0 +1,6 @@
+numpy>=1.21.0
+matplotlib>=3.5.0
+scipy
+optuna
+#cupy-cuda12x # Uncomment the line above if you want to use CuPy for GPU acceleration
+numba

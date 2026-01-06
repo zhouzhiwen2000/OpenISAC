@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenISAC - Real-Time OFDM ISAC Platform</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+
+    <header>
+        <nav>
+            <a href="index.html" class="logo">OpenISAC</a>
+            <ul class="nav-links">
+                <li><a href="index.html" class="active">Home</a></li>
+                <li><a href="architecture.html">Architecture</a></li>
+                <li><a href="signal_processing.html">Signal Processing</a></li>
+                <li><a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank">GitHub</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <div class="hero">
+        <h1>OpenISAC</h1>
+        <p>A Versatile and High-Performance Open-Source Platform for Real-Time ISAC Experimentation</p>
+        <a href="#installation" class="cta-button">Get Started</a>
+    </div>
+
+    <main>
+        <section id="about">
+            <h2>About OpenISAC</h2>
+            <p>
+                Integrated sensing and communication (ISAC) is envisioned to be one of the key technologies in 6G.
+                OpenISAC is a versatile and high-performance open-source platform designed to bridge the gap between
+                theory and practice.
+            </p>
+            <p>
+                Built entirely on open-source software (UHD + C++ + Python), it supports real-time OFDM-based sensing
+                and communication.
+                A key feature is its novel over-the-air synchronization mechanism, enabling robust bistatic operations
+                without wired connections.
+            </p>
+        </section>
+
+        <section id="scope">
+            <h2>What it is — and what it is not</h2>
+
+            <h3>What OpenISAC is</h3>
+            <p>
+                OpenISAC is a simple OFDM-based communication and sensing system designed for academic experiments and
+                rapid algorithm validation.
+                Its goal is to provide a clean, minimal, easy-to-modify OFDM platform so researchers can iterate quickly
+                on PHY/sensing ideas without the overhead of a full standard-compliant stack.
+            </p>
+            <p>
+                Because it focuses on simplicity, OpenISAC typically requires less compute and can often run at higher
+                sampling rates than more complex, feature-complete systems.
+            </p>
+
+            <h3>What OpenISAC is not</h3>
+            <p>
+                OpenISAC is not intended to be a standard-compliant implementation. It does not aim to comply with
+                existing standards such as Wi-Fi or 5G NR.
+            </p>
+            <p>
+                It is also not meant to replace or compete with full-stack open-source standard implementations such as
+                openwifi or OpenAirInterface. If your goal is interoperability, standards compliance, or a
+                production-grade protocol stack, those projects are the right direction.
+            </p>
+
+            <h3>When to use it</h3>
+            <ul>
+                <li>Prototyping and testing new OFDM/ISAC algorithms</li>
+                <li>Fast “idea → experiment” cycles with a minimal PHY</li>
+                <li>Research setups where interoperability is not required</li>
+            </ul>
+
+            <h3>When not to use it</h3>
+            <ul>
+                <li>Building a Wi-Fi/NR-compatible system</li>
+                <li>Needing real-world standard features (full MAC/stack behavior, interoperability,
+                    certification-oriented behavior, etc.)</li>
+            </ul>
+        </section>
+
+        <section id="sensing-demo">
+            <h2>Sensing Demo</h2>
+            <div class="demo-grid">
+                <div class="demo-card">
+                    <div class="video-wrapper">
+                        <video controls muted loop playsinline>
+                            <source src="https://vids.zzw123app.top/videos/Drone_Moving.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <h3>Delay-Doppler Sensing</h3>
+                    <p>Real-time delay-Doppler map of a moving drone.</p>
+                </div>
+                <div class="demo-card">
+                    <div class="video-wrapper">
+                        <video controls muted loop playsinline>
+                            <source src="https://vids.zzw123app.top/videos/MTI_on_vs_off.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <h3>Clutter Rejection</h3>
+                    <p>Comparison of MTI clutter rejection filter ON and OFF.</p>
+                </div>
+                <div class="demo-card">
+                    <div class="video-wrapper">
+                        <video controls muted loop playsinline>
+                            <source src="https://vids.zzw123app.top/videos/MicroDoppler_Up_Down.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <h3>Micro-Doppler Sensing</h3>
+                    <p>Micro-Doppler signatures of drone ascending and descending.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="comm-demo">
+            <h2>Communication Demo</h2>
+            <div class="demo-grid">
+                <div class="demo-card">
+                    <div class="video-wrapper">
+                        <video controls muted loop playsinline>
+                            <source src="https://vids.zzw123app.top/videos/Communication.mp4" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    <h3>Video Streaming</h3>
+                    <p>Real-time video streaming via ffmpeg over the ISAC link.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="hardware">
+            <h2>Hardware Requirements</h2>
+            <h3>Backend (C++)</h3>
+
+            <p>To set up the complete system, you will need:</p>
+            <ul>
+                <li><strong>USRP Devices</strong>: 2 units (e.g., USRP X310, B210)</li>
+                <li><strong>Computers</strong>: 2 units (High performance recommended)</li>
+                <li><strong>Antennas</strong>: 3 total</li>
+                <li><strong>OCXO</strong>: 2 units (Required for both USRPs)</li>
+            </ul>
+
+            <h4>Connection Setup</h4>
+            <p><strong>BS Node:</strong> 1x Computer, 1x USRP (2 Antennas: 1 TX, 1 RX), OCXO.</p>
+            <p><strong>UE Node:</strong> 1x Computer, 1x USRP (1 Antenna: RX), OCXO.</p>
+
+            <h4>Interface</h4>
+            <ul>
+                <li>>= 10 Gigabit Ethernet (10GbE) for X-series</li>
+                <li>USB 3.0 for B-series</li>
+            </ul>
+
+            <h3>Frontend (Python)</h3>
+            <ul>
+                <li><strong>Computer</strong>: 1x Computer (Windows or Linux). Can be one of the backend computers or a
+                    separate machine.</li>
+                <li><strong>CPU</strong>: High performance CPU (i7 10700 or better) if no GPU is available.</li>
+                <li><strong>GPU</strong>: A Nvidia GPU is recommended for acceleration.</li>
+            </ul>
+        </section>
+
+        <section id="software">
+            <h2>Software Requirements</h2>
+            <h3>Backend (C++)</h3>
+
+            <h4>Operating System</h4>
+            <p>Ubuntu 24.04 LTS</p>
+
+            <h4 id="installation">Dependencies & Installation</h4>
+
+            <h5>1. DPDK (Optional)</h5>
+            <pre><code class="language-bash">sudo apt update
+sudo apt upgrade
+sudo apt install dpdk dpdk-dev</code></pre>
+            <p><em>Note: Install DPDK before building UHD if you plan to use it.</em></p>
+
+            <h5>2. UHD (USRP Hardware Driver)</h5>
+            <p>Follow the <a
+                    href="https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux"
+                    target="_blank">official Ettus guide</a>. Tested on UHD v4.9.0.1.</p>
+
+            <h5>3. Install Aff3ct</h5>
+            <pre><code class="language-bash">sudo apt-get install nlohmann-json3-dev
+git clone https://github.com/aff3ct/aff3ct.git
+cd aff3ct
+git submodule update --init --recursive
+mkdir build
+cd build
+cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER="g++" -DCMAKE_BUILD_TYPE="Release" \
+-DCMAKE_CXX_FLAGS="-funroll-loops -march=native" -DAFF3CT_COMPILE_EXE="OFF" \
+-DAFF3CT_COMPILE_SHARED_LIB="ON" -DSPU_STACKTRACE="OFF" -DSPU_STACKTRACE_SEGFAULT="OFF" \
+-DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS} -faligned-new"
+make -j$(nproc)
+sudo make install</code></pre>
+
+            <h5>4. Clone & Build OpenISAC</h5>
+            <pre><code class="language-bash">cd ~
+git clone https://github.com/zhouzhiwen2000/OpenISAC.git
+cd OpenISAC
+mkdir build
+cd build
+cmake ..
+make -j$(nproc)</code></pre>
+
+            <h5>5. Performance Tuning</h5>
+            <pre><code class="language-bash">cd ~/OpenISAC
+chmod +x set_performance.bash
+./set_performance.bash</code></pre>
+            <p><em>Note: <code>secure_boot</code> needs to be turned off in your BIOS settings to enable
+                    <code>RT_RUNTIME_SHARE</code> functionality.</em></p>
+
+
+            <h6>UHD Thread Priority Configuration</h6>
+            <p>If you see <code>[WARNING] [UHD] Failed to set desired affinity for thread</code>, you need to enable
+                real-time priority for your user.</p>
+            <pre><code class="language-bash">sudo groupadd usrp
+sudo usermod -aG usrp $USER</code></pre>
+            <p>Then add the following line to <code>/etc/security/limits.conf</code>:</p>
+            <pre><code class="language-text">@usrp - rtprio 99</code></pre>
+            <p><em>Log out and back in for changes to take effect.</em></p>
+
+            <h5>6. CPU Isolation and Execution</h5>
+            <p>To ensure stable real-time performance, isolate CPU cores for signal processing.</p>
+
+            <p><strong>Step 1: Isolate System Cores</strong></p>
+            <pre><code class="language-bash">cd ~/OpenISAC
+chmod +x isolate_cpus.bash
+sudo ./isolate_cpus.bash</code></pre>
+
+            <p><strong>Step 2: Run Application on Isolated Cores</strong></p>
+            <p>Use the script to launch your application on the isolated cores:</p>
+            <pre><code class="language-bash">cd build
+sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
+            <p><em>Note: Always use the wrapper script when CPU isolation is active.</em></p>
+
+            <p><strong>Reset Configuration (Optional)</strong></p>
+            <p>To restore the system to its default state (allowing all processes to use all cores):</p>
+            <pre><code class="language-bash">sudo ./isolate_cpus.bash reset</code></pre>
+
+            <h3>Frontend (Python)</h3>
+
+            <p>It is recommended to use a <code>conda</code> or <code>venv</code> environment with <strong>Python
+                    3.13</strong>.</p>
+
+            <h4>Install Dependencies</h4>
+            <pre><code class="language-bash">pip install -r requirements.txt</code></pre>
+
+            <p><strong>Note:</strong> <code>ffmpeg</code> is required for video streaming demonstrations.</p>
+            <ul>
+                <li><strong>Ubuntu:</strong> <code>sudo apt install ffmpeg</code></li>
+                <li><strong>Windows:</strong> Download from <a href="https://ffmpeg.org/download.html"
+                        target="_blank">ffmpeg.org</a> and add to PATH, or place executable in the working directory.
+                </li>
+            </ul>
+
+            <h4>Enable GPU Acceleration (Optional)</h4>
+            <p>If an Nvidia GPU is available, install <code>cupy-cuda12x</code> to enable GPU acceleration:</p>
+            <pre><code class="language-bash">pip install cupy-cuda12x</code></pre>
+        </section>
+
+        <section id="usage">
+            <h2>Typical Usage Example</h2>
+
+            <h3>1. Startup of the BS</h3>
+            <pre><code class="language-bash">sudo -s
+cd build
+# For X310:
+sudo ../isolate_cpus.bash run ./OFDMModulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+
+# For B210:
+sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"</code></pre>
+            <p><em>Add <code>--default-ip=&lt;your front end IP&gt;</code> if you are using a separate computer for the
+                    frontend.</em></p>
+
+            <h3>2. Startup of the UE</h3>
+            <pre><code class="language-bash">sudo -s
+cd build
+# For X310:
+sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+
+# For B210:
+sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"</code></pre>
+            <p><em>Add <code>--default-ip=&lt;your front end IP&gt;</code> if you are using a separate computer for the
+                    frontend.</em></p>
+
+            <h3>3. Stream video to the BS</h3>
+            <pre><code class="language-bash">ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 3000k -minrate 3000k -maxrate 3000k -bufsize 1M -f rtp -sdp_file video.sdp "rtp://&lt;your IP of the BS&gt;:50000"</code></pre>
+            <p><em>If you are streaming locally, your IP of the BS can be set to 127.0.0.1.</em></p>
+
+            <h3>4. Play video from the UE</h3>
+            <p>Copy <code>video.sdp</code> to the video receiver, modify <code>m=video 50000 RTP/AVP 96</code> to
+                <code>m=video 50001 RTP/AVP 96</code>.
+            </p>
+            <pre><code class="language-bash">ffplay -protocol_whitelist file,rtp,udp -i video1.sdp</code></pre>
+            <p><em>Note that this command should be run on the frontend.</em></p>
+
+            <h3>5. Run monostatic frontend</h3>
+            <pre><code class="language-bash">python3 .\plot_sensing_microDoppler_CPP_MTI.py</code></pre>
+
+            <h3>6. Run bistatic frontend</h3>
+            <pre><code class="language-bash">python3 .\plot_bi_sensing_microDoppler_CPP_MTI.py</code></pre>
+
+            <h2>Arguments Table</h2>
+
+            <h3>OFDM Modulator</h3>
+            <p>The <code>OFDMModulator</code> (BS Node) can be configured using the following command-line arguments:
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Argument</th>
+                        <th>Default Value</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>--args</code></td>
+                        <td><code>addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512</code>
+                        </td>
+                        <td>USRP device arguments</td>
+                    </tr>
+                    <tr>
+                        <td><code>--fft-size</code></td>
+                        <td><code>1024</code></td>
+                        <td>FFT size</td>
+                    </tr>
+                    <tr>
+                        <td><code>--cp-length</code></td>
+                        <td><code>128</code></td>
+                        <td>Cyclic Prefix length</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sync-pos</code></td>
+                        <td><code>1</code></td>
+                        <td>Synchronization symbol position index</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sample-rate</code></td>
+                        <td><code>50e6</code></td>
+                        <td>Sample rate (Hz)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--bandwidth</code></td>
+                        <td><code>50e6</code></td>
+                        <td>Analog bandwidth (Hz)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--center-freq</code></td>
+                        <td><code>2.4e9</code></td>
+                        <td>Center frequency (Hz)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--tx-gain</code></td>
+                        <td><code>20</code></td>
+                        <td>Transmission gain (dB)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--rx-gain</code></td>
+                        <td><code>30</code></td>
+                        <td>Reception gain (dB)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--rx-channel</code></td>
+                        <td><code>1</code></td>
+                        <td>RX channel index on the USRP</td>
+                    </tr>
+                    <tr>
+                        <td><code>--zc-root</code></td>
+                        <td><code>29</code></td>
+                        <td>Zadoff-Chu sequence root</td>
+                    </tr>
+                    <tr>
+                        <td><code>--num-symbols</code></td>
+                        <td><code>100</code></td>
+                        <td>Number of OFDM symbols per frame</td>
+                    </tr>
+                    <tr>
+                        <td><code>--clock-source</code></td>
+                        <td><code>external</code></td>
+                        <td>Clock source (<code>internal</code> or <code>external</code>)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--system-delay</code></td>
+                        <td><code>63</code></td>
+                        <td>System delay samples for alignment</td>
+                    </tr>
+                    <tr>
+                        <td><code>--wire-format-tx</code></td>
+                        <td><code>sc16</code></td>
+                        <td>USRP TX wire format (<code>sc8</code> or <code>sc16</code>)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--wire-format-rx</code></td>
+                        <td><code>sc16</code></td>
+                        <td>USRP RX wire format (<code>sc8</code> or <code>sc16</code>)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--mod-udp-ip</code></td>
+                        <td><code>0.0.0.0</code></td>
+                        <td>IP to bind for incoming UDP data payload</td>
+                    </tr>
+                    <tr>
+                        <td><code>--mod-udp-port</code></td>
+                        <td><code>50000</code></td>
+                        <td>Port to bind for incoming UDP data payload</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sensing-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>Destination IP for sensing data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sensing-port</code></td>
+                        <td><code>8888</code></td>
+                        <td>Destination port for sensing data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--default-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>Default IP for all services</td>
+                    </tr>
+                    <tr>
+                        <td><code>--cpu-cores</code></td>
+                        <td><code>0,1,2,3,4,5</code></td>
+                        <td>Comma-separated list of CPU cores to use</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h3>OFDM Demodulator</h3>
+            <p>The <code>OFDMDemodulator</code> (UE Node) supports the following arguments:</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Argument</th>
+                        <th>Default Value</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>--device-args</code></td>
+                        <td><code>num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520</code>
+                        </td>
+                        <td>USRP device arguments</td>
+                    </tr>
+                    <tr>
+                        <td><code>--fft-size</code></td>
+                        <td><code>1024</code></td>
+                        <td>FFT size</td>
+                    </tr>
+                    <tr>
+                        <td><code>--cp-length</code></td>
+                        <td><code>128</code></td>
+                        <td>Cyclic Prefix length</td>
+                    </tr>
+                    <tr>
+                        <td><code>--center-freq</code></td>
+                        <td><code>2.4e9</code></td>
+                        <td>Center frequency (Hz)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sample-rate</code></td>
+                        <td><code>50e6</code></td>
+                        <td>Sample rate (Hz)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--bandwidth</code></td>
+                        <td><code>50e6</code></td>
+                        <td>Analog bandwidth (Hz)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--rx-gain</code></td>
+                        <td><code>60</code></td>
+                        <td>Reception gain (dB)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--rx-channel</code></td>
+                        <td><code>0</code></td>
+                        <td>RX channel index</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sync-pos</code></td>
+                        <td><code>1</code></td>
+                        <td>Synchronization symbol position index</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sensing-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>IP for sending sensing data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sensing-port</code></td>
+                        <td><code>8889</code></td>
+                        <td>Port for sending sensing data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--control-port</code></td>
+                        <td><code>9999</code></td>
+                        <td>Port for receiving control commands</td>
+                    </tr>
+                    <tr>
+                        <td><code>--channel-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>IP for channel estimation output</td>
+                    </tr>
+                    <tr>
+                        <td><code>--channel-port</code></td>
+                        <td><code>12348</code></td>
+                        <td>Port for channel estimation output</td>
+                    </tr>
+                    <tr>
+                        <td><code>--pdf-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>IP for raw power delay profile (PDF) data output</td>
+                    </tr>
+                    <tr>
+                        <td><code>--pdf-port</code></td>
+                        <td><code>12349</code></td>
+                        <td>Port for raw power delay profile (PDF) data output</td>
+                    </tr>
+                    <tr>
+                        <td><code>--constellation-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>IP for constellation diagram data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--constellation-port</code></td>
+                        <td><code>12346</code></td>
+                        <td>Port for constellation diagram data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--freq-offset-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>IP for frequency offset data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--freq-offset-port</code></td>
+                        <td><code>12347</code></td>
+                        <td>Port for frequency offset data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--udp-output-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>Destination IP for decoded user data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--udp-output-port</code></td>
+                        <td><code>50001</code></td>
+                        <td>Destination port for decoded user data</td>
+                    </tr>
+                    <tr>
+                        <td><code>--zc-root</code></td>
+                        <td><code>29</code></td>
+                        <td>Zadoff-Chu sequence root</td>
+                    </tr>
+                    <tr>
+                        <td><code>--num-symbols</code></td>
+                        <td><code>100</code></td>
+                        <td>Number of symbols per frame</td>
+                    </tr>
+                    <tr>
+                        <td><code>--sensing-symbol-num</code></td>
+                        <td><code>100</code></td>
+                        <td>Number of symbols used for sensing</td>
+                    </tr>
+                    <tr>
+                        <td><code>--clock-source</code></td>
+                        <td><code>external</code></td>
+                        <td>Clock source (<code>internal</code> or <code>external</code>)</td>
+                    </tr>
+                    <tr>
+                        <td><code>--software-sync</code></td>
+                        <td><code>true</code></td>
+                        <td>Enable software synchronization</td>
+                    </tr>
+                    <tr>
+                        <td><code>--hardware-sync</code></td>
+                        <td><code>false</code></td>
+                        <td>Enable hardware synchronization</td>
+                    </tr>
+                    <tr>
+                        <td><code>--hardware-sync-tty</code></td>
+                        <td><code>/dev/ttyUSB0</code></td>
+                        <td>TTY device for hardware sync</td>
+                    </tr>
+                    <tr>
+                        <td><code>--wire-format-rx</code></td>
+                        <td><code>sc16</code></td>
+                        <td>USRP RX wire format</td>
+                    </tr>
+                    <tr>
+                        <td><code>--default-ip</code></td>
+                        <td><code>127.0.0.1</code></td>
+                        <td>Default IP for all services</td>
+                    </tr>
+                    <tr>
+                        <td><code>--cpu-cores</code></td>
+                        <td><code>0,1,2,3,4,5</code></td>
+                        <td>Comma-separated list of CPU cores to use</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p>
+    </footer>
+
+</body>
+<!-- Note: Images referenced here are placeholders. User to replace as needed. -->
+
+</html>
