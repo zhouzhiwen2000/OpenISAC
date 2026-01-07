@@ -1,5 +1,7 @@
 # OpenISAC
 
+[中文版本](README_zh.md)
+
 OpenISAC is a simple OFDM-based communication and sensing system designed for academic experiments and rapid algorithm validation.
 
 Its goal is to provide a clean, minimal, easy-to-modify OFDM platform so researchers can iterate quickly on PHY/sensing ideas without the overhead of a full standard-compliant stack.
@@ -65,7 +67,7 @@ To set up the complete system, you will need the following hardware:
 *   **USRP Devices**: 2 units (e.g., USRP X310, B210, etc.)
 *   **Computers**: 2 units (High performance recommended for signal processing)
 *   **Antennas**: 3
-*   **OCXO**: 2 units (Required for both USRPs)
+*   **OCXO/GPSDO**: 2 units (Required for both USRPs)
  
 #### Connection Setup
  
@@ -86,7 +88,7 @@ The system consists of two main nodes:
  
 #### Interface Requirements
 To support high bandwidth and sample rates, ensure the connection between the Computers and USRPs uses:
-*   **>= 10 Gigabit Ethernet (10GbE)** (Recommended for X-series)
+*   **>= 10 Gigabit Ethernet (10GbE)** (For X-series)
 *   **USB 3.0** (For B-series)
  
 ### Frontend (Python)
@@ -199,7 +201,7 @@ You must log out and log back into the account for the settings to take effect. 
 To ensure stable real-time performance, it is recommended to isolate CPU cores for the signal processing tasks. We provide a script `isolate_cpus.bash` to handle this automatically.
  
 **Step 1: Isolate System Cores**
-This command will restrict system processes to E-Cores (on Intel Hybrid Architecture) or a subset of cores, leaving P-Cores free for the application.
+This command will restrict system processes to E-Cores (on Intel Hybrid Architecture) or a subset of cores, leaving P-Cores or other CPU cores free for the application.
 ```bash
 cd ~/OpenISAC
 chmod +x isolate_cpus.bash
@@ -207,7 +209,7 @@ sudo ./isolate_cpus.bash
 ```
  
 **Step 2: Run Application on Isolated Cores**
-Use the `run` command of the script to launch your application on the isolated P-Cores. This ensures the application has exclusive access to high-performance resources.
+Use the `run` command of the script to launch your application on the isolated Cores. This ensures the application has exclusive access to high-performance resources.
  
 ```bash
 cd build
