@@ -13,6 +13,10 @@ Because it focuses on simplicity, OpenISAC typically requires less compute and c
 - Xiaoli Xu (Member, IEEE) (xiaolixu@seu.edu.cn)
 - Yong Zeng (Fellow, IEEE) (yong_zeng@seu.edu.cn)
 
+## Community
+
+- [Join our QQ Group](https://qm.qq.com/q/NIQRNGb0kY)
+
 ## What it is — and what it is not
 
 ### What OpenISAC is
