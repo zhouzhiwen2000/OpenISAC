@@ -157,8 +157,8 @@ current_frame = FrameBuffer()
 def send_skip_command():
     global sender_ip
     
-    # 等待直到获取发送方IP
-    for _ in range(100):  # 尝试100次
+    # Wait until sender IP is acquired
+    for _ in range(100):  # Try 100 times
         with sender_lock:
             if sender_ip is not None:
                 break
@@ -489,37 +489,37 @@ def accumulate_range_time_data():
 
 def calculate_micro_doppler():
     """
-    计算微多普勒谱，使用积累缓冲区中的5000个时间点
+    Calculate the micro-Doppler spectrum using 5000 accumulated time points from the buffer
     """
-    # 检查缓冲区大小
-    if len(micro_doppler_buffer) < 256:  # 至少需要256个点才能计算STFT
+    # Check buffer size
+    if len(micro_doppler_buffer) < 256:  # At least 256 points are required to calculate STFT
         return None, None, None
     
-    # 转换缓冲区为NumPy数组
+    # Convert buffer to NumPy array
     with buffer_lock:
         complex_signal = np.array(micro_doppler_buffer)
     
-    # 参数设置
-    fs = 1.0  # 归一化采样率
-    nfft = 256  # FFT点数
-    nperseg = 256  # 每段点数
-    noverlap = 192  # 重叠点数
+    # Parameter settings
+    fs = 1.0  # Normalized sampling rate
+    nfft = 256  # FFT size
+    nperseg = 256  # Points per segment
+    noverlap = 192  # Overlap points
     
-    # 计算STFT
+    # Calculate STFT
     f, t, Zxx = stft(complex_signal, fs=fs, window='hamming', 
                     nperseg=nperseg, noverlap=noverlap, nfft=nfft, 
                     return_onesided=False)
     
-    # 计算幅度并转为dB
+    # Calculate magnitude and convert to dB
     Pxx = np.abs(Zxx)
     Pxx_db = 20 * np.log10(Pxx + 1e-12)
     
-    # FFT shift将零频移到中心
+    # FFT shift to move zero frequency to the center
     Pxx_db_shifted = np.fft.fftshift(Pxx_db, axes=0)
     f_shifted = np.fft.fftshift(f)
     
-    # 保持零多普勒在中心
-    max_freq = 0.5  # 最大显示频率（归一化）
+    # Keep zero Doppler in the center
+    max_freq = 0.5  # Maximum display frequency (normalized)
     f_idx = (f_shifted > -max_freq) & (f_shifted < max_freq)
     
     return f_shifted[f_idx], t, Pxx_db_shifted[f_idx, :]
@@ -615,7 +615,7 @@ def send_alignment_command(adjustment):
     global sender_ip
     
     # Wait until sender IP is acquired
-    for _ in range(100):  # 尝试100次
+    for _ in range(100):  # Try 100 times
         with sender_lock:
             if sender_ip is not None:
                 break
@@ -648,7 +648,7 @@ def send_strd_command(val):
     """Send STRD configuration command"""
     try:
         strd_val = int(val)
-        # 确保值在合理范围内
+        # Ensure value is within reasonable range
         if strd_val < 1: strd_val = 1
         if strd_val > NUM_SYMBOLS: strd_val = NUM_SYMBOLS
         
@@ -789,7 +789,7 @@ range_submit_btn.label.set_fontsize(8)
 def set_range_bin(text):
     try:
         bin_val = int(text)
-        # 确保值在合理范围内
+        # Ensure value is within reasonable range
         if bin_val < 0: bin_val = 0
         if bin_val >= MAX_RANGE_BIN: bin_val = MAX_RANGE_BIN - 1
         
