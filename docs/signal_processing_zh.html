@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Signal Processing - OpenISAC</title>
+    <title>信号处理 - OpenISAC</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
     <!-- KaTeX for fast LaTeX rendering -->
@@ -38,78 +38,71 @@
 
     <header>
         <nav>
-            <a href="index.html" class="logo">OpenISAC</a>
+            <a href="index_zh.html" class="logo">OpenISAC</a>
             <ul class="nav-links">
-                <li><a href="index.html">Home</a></li>
-                <li><a href="architecture.html">Architecture</a></li>
-                <li><a href="signal_processing.html" class="active">Signal Processing</a></li>
+                <li><a href="index_zh.html">首页</a></li>
+                <li><a href="architecture_zh.html">架构</a></li>
+                <li><a href="signal_processing_zh.html" class="active">信号处理</a></li>
                 <li><a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank">GitHub</a></li>
-                <li><a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank">QQ Group</a></li>
-                <li><a href="signal_processing_zh.html">中文</a></li>
+                <li><a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank">QQ群</a></li>
+                <li><a href="signal_processing.html">En</a></li>
             </ul>
         </nav>
     </header>
 
     <main>
         <section id="signal-model">
-            <h2>Signal Model</h2>
-            <p>The BS-UE channel is modeled as:</p>
+            <h2>信号模型</h2>
+            <p>BS-UE 信道建模为：</p>
             $$ {h}_{\mathrm{UE}}\left( t,\tau \right) =\sum_{l=1}^L{\alpha _l\delta \left( \tau -\tau _l-\tau _d \right)
             e^{j2\pi \left( f_{D,l}+\Delta f_c \right) t}} $$
             <p>
-                where \(L\) is the number of multi-path components, \(\tau_d\) is the timing offset, and \(\Delta f_c\)
-                is the carrier-frequency offset.
+                其中 \(L\) 是多径分量的数量，\(\tau_d\) 是定时偏差，\(\Delta f_c\) 是载波频率偏差。
             </p>
-            <p>The monostatic sensing channel is:</p>
+            <p>单站感知信道为：</p>
             $$ {h}_{\mathrm{BS}}\left( t,\tau \right) =\sum_{p=1}^P{\beta _{p}\delta \left( \tau -\tau _{s,p} \right)
             e^{j2\pi f_{D,s,p} t}} $$
 
-            <h3>Continuous Wave vs. Packet Radio</h3>
+            <h3>连续波与分组无线电</h3>
             <p>
-                OpenISAC adopts a continuous-wave transmission scheme to enable more accurate and flexible Doppler
-                sensing, avoiding the jitter and irregular intervals of packet-based systems (like Wi-Fi).
+                OpenISAC 采用连续波传输方案，以实现更精确和灵活的多普勒感知，避免了基于分组的系统（如 Wi-Fi）的抖动和不规则间隔。
             </p>
             <img src="images/PacketVSCW.png" alt="Packet Radio vs Continuous Wave">
-            <p class="caption">Fig. 4. Comparison between packet radio and continuous wave radio.</p>
+            <p class="caption">图 4. 分组无线电与连续波无线电的比较。</p>
         </section>
 
         <section id="monostatic-sensing">
-            <h2>Monostatic Sensing</h2>
+            <h2>单站感知</h2>
             <img src="images/FlowGraph.png" alt="Monostatic Sensing Flow Graph">
-            <p class="caption">Fig. 5. Signal processing procedure for monostatic sensing.</p>
+            <p class="caption">图 5. 单站感知的信号处理流程。</p>
 
-            <p>The processing pipeline includes:</p>
+            <p>处理流程包括：</p>
             <ol>
-                <li><strong>OFDM Demodulation & Element-wise Division:</strong> Removes the influence of transmitted
-                    data symbols to obtain the TF channel matrices.
+                <li><strong>OFDM 解调与逐元素除法：</strong> 消除发送数据符号的影响以获得时频信道矩阵。
                     $$ \left( \boldsymbol{F}_{\mathrm{BS},\gamma} \right) _{n,m}=\frac{\left(
                     \boldsymbol{B}_{\mathrm{BS},\gamma} \right) _{n,m}}{b_{n,m,\gamma}} $$
                 </li>
-                <li><strong>Clutter Suppression:</strong> Applies an improved Moving Target Indication (MTI) procedure
-                    (IIR High-pass filter) to suppress static clutter.
+                <li><strong>杂波抑制：</strong> 应用改进的动目标显示 (MTI) 算法（IIR 高通滤波器）以抑制静态杂波。
                     $$ ( \tilde{\boldsymbol{F}}_{\mathrm{BS}} )_{n,m} = \frac{1}{a_0} \left( \sum_{i=0}^{I} b_i (
                     \grave{\boldsymbol{F}}_{\mathrm{BS}} )_{n,m-i} - \sum_{j=1}^{J} a_j (
                     \tilde{\boldsymbol{F}}_{\mathrm{BS}} )_{n,m-j} \right) $$
                 </li>
-                <li><strong>Delay-Doppler Processing:</strong> Computes the periodogram to estimate target range and
-                    velocity.
+                <li><strong>时延-多普勒处理：</strong> 计算周期图以估计目标距离和速度。
                     $$ \left(\mathrm{Per}_{\gamma}\right)_{k_{\tau},k_{f}} =\frac{1}{N M_s} \left|
                     \sum_{m=0}^{M_s-1}\sum_{n=0}^{N-1} (\tilde{\boldsymbol{F}}_{\mathrm{BS},\gamma})_{n,m}\, w[n,m]\,
                     e^{j2\pi \frac{n k_{\tau}}{N_{\mathrm{Per}}}} e^{-j2\pi \frac{m k_{f}}{M_{\mathrm{Per}}}} \right|^2
                     $$
                 </li>
-                <li><strong>Micro-Doppler Processing:</strong>
-                    <p>After clutter suppression, micro-Doppler analysis operates directly on the slow-time stream per
-                        range bin. First, form the delay-time matrix via an IFFT:</p>
+                <li><strong>微多普勒处理：</strong>
+                    <p>在杂波抑制之后，微多普勒分析直接在每个距离单元的慢时间流上进行。首先，通过 IFFT 形成时延-时间矩阵：</p>
                     $$ \left(\boldsymbol{R}_{\mathrm{BS}}\right)_{k_{\tau},m}
                     =\frac{1}{N}\sum_{n=0}^{N-1} \left(\tilde{\boldsymbol{F}}_{\mathrm{BS}}\right)_{n,m}\,e^{\,j2\pi
                     \frac{n k_{\tau}}{N}} $$
-                    <p>Then, select a working range bin \(k_{\tau}^\star\) and compute the Short-Time Fourier Transform
-                        (STFT):</p>
+                    <p>然后，选择一个工作距离单元 \(k_{\tau}^\star\) 并计算短时傅里叶变换 (STFT)：</p>
                     $$ \left(\boldsymbol{G}\right)_{m,k_f}
                     =\sum_{\ell=0}^{M_w-1} r_{\mathrm{BS}}\!\left[mM_H+\ell\right]\; w_\mathrm{md}[\ell]\;
                     e^{-j2\pi \frac{k_f\,\ell}{M_{\mathrm{md}}}} $$
-                    <p>The spectrogram is then calculated as:</p>
+                    <p>然后计算微多普勒谱：</p>
                     $$ \left( \mathrm{SPT} \right) _{m,k_f}=\frac{1}{M_w}\left| \left( \boldsymbol{G} \right) _{m,k_f}
                     \right|^2 $$
                 </li>
@@ -117,115 +110,98 @@
         </section>
 
         <section id="ue-reception">
-            <h2>UE Communication Reception</h2>
+            <h2>UE 通信接收</h2>
             <img src="images/FlowGraph_UE.png" alt="UE Processing Flow Graph">
-            <p class="caption">Fig. 6. Block diagram of UE communication reception.</p>
+            <p class="caption">图 6. UE 通信接收框图。</p>
 
-            <p>The UE operates in two states:</p>
+            <p>UE 在两种状态下运行：</p>
 
-            <h3>SYNC_SEARCH State</h3>
+            <h3>SYNC_SEARCH 状态</h3>
             <p>
-                The UE operates in a block-by-block fashion. In each iteration, it fetches a block of samples and
-                performs the following:
+                UE 以逐块方式运行。在每次迭代中，它获取一块样本并执行以下操作：
             </p>
             <ol>
-                <li><strong>Frame Detection & Timing Estimation:</strong> Performs a sliding correlation with the known
-                    Zadoff–Chu (ZC) synchronization symbol \(s_{\mathrm{ZC}}[k]\):
+                <li><strong>帧检测与定时估计：</strong> 与已知的 Zadoff–Chu (ZC) 同步符号 \(s_{\mathrm{ZC}}[k]\) 进行滑动相关：
                     $$ r[k]=\sum_{i=0}^{N_s-1}{y_{\mathrm{UE},\mathrm{sync}}\left[ k+i \right] s_{\mathrm{ZC}}^{*}\left[
                     i \right]} $$
-                    A peak in the normalized correlation energy \(r_N[k]\) indicates the frame boundary and initial
-                    timing offset \(\hat{k}_{\mathrm{TO}}\):
+                    归一化相关能量 \(r_N[k]\) 中的峰值指示帧边界和初始定时偏差 \(\hat{k}_{\mathrm{TO}}\)：
                     $$ r_N[k]=\frac{|r[k]|^2}{\sum_{n=0}^{N_{\mathrm{corr}}}|r[k]|^2} $$
                 </li>
-                <li><strong>Coarse Frequency Offset Estimation:</strong> Uses CP-tail correlations across multiple
-                    symbols to estimate the fractional frequency offset \(\hat{f}_o\):
+                <li><strong>粗频偏估计：</strong> 利用跨越多个符号的 CP 尾部相关性来估计分数倍频偏 \(\hat{f}_o\)：
                     $$ \hat{f}_o=\frac{\mathrm{arg}\!\bigl( r_{\mathrm{CP}} \bigr)}{2\pi T} $$
                 </li>
-                <li><strong>Correction:</strong> The estimated offsets are corrected via digital frequency retuning or
-                    OCXO adjustment, and sample alignment (padding/discarding).</li>
+                <li><strong>校正：</strong> 通过数字频率调节或 OCXO 调整以及样本对齐（填充/丢弃）来校正估计的偏差。</li>
             </ol>
 
 
 
-            <h3>NORMAL State</h3>
+            <h3>NORMAL 状态</h3>
             <p>
-                Once synchronized, the UE transitions to the NORMAL state to process frames:
+                一旦同步，UE 转换到 NORMAL 状态以处理帧：
             </p>
             <ol>
-                <li><strong>OFDM Demodulation:</strong> Removes CPs and performs FFT to obtain frequency-domain symbols:
+                <li><strong>OFDM 解调：</strong> 移除 CP 并执行 FFT 以获得频域符号：
                     $$ \left( \boldsymbol{B}_{\mathrm{UE},\gamma} \right)_{n,m} = b_{n,m,\gamma} \left(
                     \boldsymbol{H}_{\mathrm{UE},\gamma} \right)_{n,m} + \left( \boldsymbol{Z}_{\mathrm{UE},\gamma}
                     \right)_{n,m} $$
                 </li>
-                <li><strong>Channel Estimation:</strong> Uses the ZC symbol to estimate the channel response:
+                <li><strong>信道估计：</strong> 使用 ZC 符号估计信道响应：
                     $$ (\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m_{\mathrm{sync}}}=\frac{\left(
                     \boldsymbol{B}_{\mathrm{UE},\gamma} \right) _{n,m_{\mathrm{sync}}}}{z_n} $$
-                    The full-frame channel estimates are obtained by propagating the estimate at the synchronization
-                    symbol \(m_{\mathrm{sync}}\):
+                    全帧信道估计通过对同步符号 \(m_{\mathrm{sync}}\) 处的估计插值获得：
                     $$
                     (\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m}=(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m_{\mathrm{sync}}}\exp
                     \bigl( j2\pi ( m-m_{\mathrm{sync}} )( \hat{f}_{o,\gamma}T_O-n\Delta fN_s\Delta \hat{T}_{s,\gamma} )
                     \bigr) $$
                 </li>
-                <li><strong>CFO/SFO Tracking:</strong> Pilots are used to track residual carrier frequency offset (CFO)
-                    and sampling frequency offset (SFO) via Weighted Linear Regression (WLS) on pilot phase errors:
+                <li><strong>CFO/SFO 跟踪：</strong> 通过导频相位误差的加权线性回归 (WLS) 来跟踪残留载波频率偏差 (CFO) 和采样频率偏差 (SFO)：
                     $$ \hat{\boldsymbol{\theta}}_\gamma = \big( \boldsymbol{A}_\gamma^{{T}} \boldsymbol{W}_\gamma
                     \boldsymbol{A}_\gamma \big)^{-1} \boldsymbol{A}_\gamma^{{T}} \boldsymbol{W}_\gamma
                     \boldsymbol{\varphi}_{{UE},\gamma} $$
                 </li>
-                <li><strong>Equalization & Decoding:</strong> Performs channel equalization via one-tap frequency-domain
-                    equalization:
+                <li><strong>均衡与解码：</strong> 通过单抽头频域均衡实现信道均衡：
                     $$ \hat{b}_{n,m,\gamma}=\frac{\left( \boldsymbol{B}_{\mathrm{UE},\gamma} \right)
                     _{n,m}}{(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m}} $$
-                    Then, LLRs are computed, descrambled, and LDPC-decoded to recover the payload.
+                    然后，计算 LLR，解扰并进行 LDPC 解码以恢复有效载荷。
                 </li>
             </ol>
         </section>
 
         <section id="ue-bistatic-sensing">
-            <h2>UE Bistatic Sensing</h2>
+            <h2>UE 双站感知</h2>
             <p>
-                Signal processing for bistatic sensing involves reconstructing unknown modulation symbols and performing
-                Over-the-Air (OTA) synchronization.
+                双站感知的信号处理涉及重构未知的调制符号和执行空口 (OTA) 同步。
             </p>
 
-            <h3>Modulation Symbol Reconstruction</h3>
+            <h3>调制符号重构</h3>
             <p>
-                The reconstructed QPSK data symbol is obtained by making hard decisions on the equalized symbols
-                \(\hat{b}_{n,m,\gamma}\):
+                重构的 QPSK 数据符号是通过对均衡后的符号 \(\hat{b}_{n,m,\gamma}\) 进行硬判决获得的：
             </p>
             $$ \tilde{b}_{n,m,\gamma} = \frac{1}{\sqrt{2}}\big( \operatorname{sgn}(\mathrm{Re}\{\hat{b}_{n,m,\gamma}\})
             + j\operatorname{sgn}(\mathrm{Im}\{\hat{b}_{n,m,\gamma}\}) \big) $$
 
-            <h3>OTA Synchronization</h3>
+            <h3>OTA 同步</h3>
             <p>
-                Bistatic sensing requires robust real-time synchronization without a wired link. OpenISAC implements a
-                low-complexity over-the-air (OTA) synchronization scheme:
+                双站感知需要通过无线链路实现鲁棒实时同步。OpenISAC 实现了低复杂度的空口 (OTA) 同步方案：
             </p>
             <ol>
-                <li><strong>Fractional Timing Estimation:</strong> Refines the timing offset using Quinn's algorithm to
-                    obtain a fractional estimate \(\hat{\delta}_{\tau}\) from the delay-domain peak. The overall timing
-                    offset is estimated as:
+                <li><strong>分数定时估计：</strong> 使用 Quinn 算法细化定时偏差，从时延域峰值获得分数估计 \(\hat{\delta}_{\tau}\)。总定时偏差估计为：
                     $$ \hat{\tau}_{o,\gamma} = \frac{\hat{\delta}_{\tau}+k_{\max ,\gamma}}{f_s} $$
                 </li>
 
-                <li><strong>SIO Tracking:</strong> Estimates the Sampling Interval Offset (SIO)
-                    \(\epsilon_{\mathrm{SIO},w}\) by performing linear regression on the timing corrections over a
-                    window of \(\Gamma_W\) frames:
+                <li><strong>SIO 跟踪：</strong> 通过对 \(\Gamma_W\) 帧窗口上的定时偏差执行线性回归来估计采样间隔偏差 (SIO) \(\epsilon_{\mathrm{SIO},w}\)：
                     $$ \tilde{k}_{\tau,\gamma_w+\ell} \approx \epsilon_{\mathrm{SIO},w}\,\ell + \hat{k}_{\tau,\gamma_w}
                     $$
                 </li>
 
-                <li><strong>Recursive Update:</strong> Maintains a smooth estimate of the cumulative sensing timing
-                    offset \(\hat{k}^{\mathrm{sens}}_{\tau,\gamma}\) to avoid jitter:
+                <li><strong>递归更新：</strong> 维护累积感知定时偏差 \(\hat{k}^{\mathrm{sens}}_{\tau,\gamma}\) 的平滑估计以避免抖动：
                     $$ \hat{k}^{\mathrm{sens}}_{\tau,\gamma} = \hat{k}^{\mathrm{sens}}_{\tau,\gamma-1} +
                     \hat{\epsilon}_{\mathrm{SIO},w-1} - \hat{k}_{\mathrm{TO},\gamma-1} + \mu_\gamma e_\gamma $$
-                    where \(\mu_\gamma e_\gamma\) is a feedback correction term based on the tracking error.
+                    其中 \(\mu_\gamma e_\gamma\) 是基于跟踪误差的反馈校正项。
                 </li>
 
-                <li><strong>Channel Compensation:</strong>
-                    The estimated timing offset and SIO are applied to the bistatic channel matrix to compensate for
-                    synchronization errors:
+                <li><strong>信道补偿：</strong>
+                    将估计的定时偏差和 SIO 应用于双站信道矩阵以补偿同步误差：
                     $$ \left( \tilde{\boldsymbol{F}}_{\mathrm{UE},\gamma} \right) _{n,m} = \left(
                     \boldsymbol{F}_{\mathrm{UE},\gamma} \right) _{n,m} e^{j2\pi n\Delta f\left( \hat{k}_{\tau
                     ,\gamma}^{\mathrm{sens}}+mN_s\Delta \hat{T}_{as,w-1} \right)} $$
@@ -236,8 +212,8 @@
 
     <footer>
         <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p>
-        <p><strong>Authors:</strong> Zhiwen Zhou (zhiwen_zhou@seu.edu.cn), Chaoyue Zhang (chaoyue_zhang@seu.edu.cn),
-            Xiaoli Xu (xiaolixu@seu.edu.cn), Yong Zeng (yong_zeng@seu.edu.cn)</p>
+        <p><strong>作者:</strong> 周智文 (zhiwen_zhou@seu.edu.cn), 张超越 (chaoyue_zhang@seu.edu.cn),
+            徐晓莉 (xiaolixu@seu.edu.cn), 曾勇 (yong_zeng@seu.edu.cn)</p>
     </footer>
 
 </body>

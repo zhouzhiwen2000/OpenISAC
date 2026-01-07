@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统架构 - OpenISAC</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<style>
+    img {
+        box-shadow: none;
+        border: none;
+        mix-blend-mode: multiply;
+    }
+</style>
+
+<body>
+
+    <header>
+        <nav>
+            <a href="index_zh.html" class="logo">OpenISAC</a>
+            <ul class="nav-links">
+                <li><a href="index_zh.html">首页</a></li>
+                <li><a href="architecture_zh.html" class="active">架构</a></li>
+                <li><a href="signal_processing_zh.html">信号处理</a></li>
+                <li><a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank">GitHub</a></li>
+                <li><a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank">QQ群</a></li>
+                <li><a href="architecture.html">En</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="system-architecture">
+            <h2>系统架构</h2>
+            <p>
+                OpenISAC 实验平台包括一个基站 (BS) 和一个用户设备 (UE)，每个设备都基于USRP 构建，并由恒温晶振 (OCXO) 提供参考时钟。
+            </p>
+            <img src="images/SysArch.png" alt="系统架构图">
+            <p class="caption">图 1. OpenISAC 系统架构。</p>
+
+            <p>
+                <strong>BS 节点：</strong> 主控 PC 通过 USB/以太网连接 USRP，生成 ISAC 基带波形，并将其传输到 USRP。USRP 发送信号并在单独的接收天线上接收雷达回波。
+            </p>
+            <p>
+                <strong>UE 节点：</strong> 主控 PC 与 USRP 通信以获取下行链路信号。USRP 使用 OCXO 作为参考时钟，可选择通过 DAC 进行驯服，以最小化双站感知的载波/采样频率偏差。
+            </p>
+        </section>
+
+        <section id="bs-software">
+            <h2>BS 软件架构</h2>
+            <p>
+                BS 软件是一个多线程流水线，使用环形缓冲区 FIFO 将 I/O 与计算解耦。
+            </p>
+            <img src="images/SoftArchBS.png" alt="BS 软件架构图">
+            <p class="caption">图 2. BS 软件架构。</p>
+
+            <ul>
+                <li><strong>比特处理：</strong> 处理 UDP 负载、LDPC 编码和加扰。</li>
+                <li><strong>OFDM 调制器：</strong> 执行 QPSK 映射、导频插入、IFFT 和 CP 插入。如果流量较低，则用随机比特填充。</li>
+                <li><strong>无线电 I/O：</strong> “USRP-TX”发送波形；“USRP-RX”接收雷达回波。</li>
+                <li><strong>感知线程：</strong> 执行实时单站感知（OFDM 解调、除法、距离-多普勒图）。支持稀疏处理以降低运算负担。</li>
+            </ul>
+        </section>
+
+        <section id="ue-software">
+            <h2>UE 软件架构</h2>
+            <p>
+                UE 也是一个多线程流水线，专为鲁棒的同步和接收而设计。
+            </p>
+            <img src="images/SoftArchUE.png" alt="UE 软件架构图">
+            <p class="caption">图 3. UE 软件架构。</p>
+
+            <ul>
+                <li><strong>USRP RX：</strong> 获取下行基带信号并执行定时调整。</li>
+                <li><strong>OFDM 解调器：</strong> 在两种状态下运行：
+                    <ul>
+                        <li><em>SYNC_SEARCH：</em> 搜索 ZC 同步符号以估计帧边界和 CFO。</li>
+                        <li><em>NORMAL：</em> 执行 FFT、信道估计、均衡和 LLR 计算。如果失去锁定，则重新进入搜索状态。</li>
+                    </ul>
+                </li>
+                <li><strong>感知线程：</strong> 使用 {RX, TX} 符号对进行实时双站感知。
+                </li>
+                <li><strong>比特处理：</strong> 解扰和 LDPC 解码以恢复 UDP 负载。</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer>
+        <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p>
+        <p><strong>作者:</strong> 周智文 (zhiwen_zhou@seu.edu.cn), 张超越 (chaoyue_zhang@seu.edu.cn),
+            徐晓莉 (xiaolixu@seu.edu.cn), 曾勇 (yong_zeng@seu.edu.cn)</p>
+    </footer>
+
+</body>
+
+</html>
