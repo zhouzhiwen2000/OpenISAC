@@ -2,16 +2,16 @@
 
 OpenISAC is a simple OFDM-based communication and sensing system designed for academic experiments and rapid algorithm validation.
 
+Its goal is to provide a clean, minimal, easy-to-modify OFDM platform so researchers can iterate quickly on PHY/sensing ideas without the overhead of a full standard-compliant stack.
+
+Because it focuses on simplicity, OpenISAC typically requires less compute and can often run at higher sampling rates than more complex, feature-complete systems.
+
 ## Authors
 
 - Zhiwen Zhou (zhiwen_zhou@seu.edu.cn)
 - Chaoyue Zhang (chaoyue_zhang@seu.edu.cn)
 - Xiaoli Xu (Member, IEEE) (xiaolixu@seu.edu.cn)
 - Yong Zeng (Fellow, IEEE) (yong_zeng@seu.edu.cn)
-
-Its goal is to provide a clean, minimal, easy-to-modify OFDM platform so researchers can iterate quickly on PHY/sensing ideas without the overhead of a full standard-compliant stack.
-
-Because it focuses on simplicity, OpenISAC typically requires less compute and can often run at higher sampling rates than more complex, feature-complete systems.
 
 ## What it is — and what it is not
 
