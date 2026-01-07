@@ -6,6 +6,10 @@ Its goal is to provide a clean, minimal, easy-to-modify OFDM platform so researc
 
 Because it focuses on simplicity, OpenISAC typically requires less compute and can often run at higher sampling rates than more complex, feature-complete systems.
 
+If you find this repository useful, please cite our paper:
+
+> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2025.
+
 ## Authors
 
 - Zhiwen Zhou (zhiwen_zhou@seu.edu.cn)
@@ -13,9 +17,19 @@ Because it focuses on simplicity, OpenISAC typically requires less compute and c
 - Xiaoli Xu (Member, IEEE) (xiaolixu@seu.edu.cn)
 - Yong Zeng (Fellow, IEEE) (yong_zeng@seu.edu.cn)
 
+## Affiliation
+
+<img src="docs/images/SEUlogo.png" height="80" alt="SEU Logo" style="border:none; box-shadow:none;"> &nbsp;&nbsp; <img src="docs/images/PML.png" height="80" alt="PML Logo" style="border:none; box-shadow:none;">
+
+**Yong Zeng Group at the National Mobile Communications Research Laboratory, Southeast University and the Purple Mountain Laboratories**
+
 ## Community
 
 - [Join our QQ Group](https://qm.qq.com/q/NIQRNGb0kY)
+- [Bilibili Channel (Yong Zeng Group)](https://space.bilibili.com/627920129)
+- WeChat Official Account:
+
+  <img src="docs/images/WeChat.jpg" width="150" alt="WeChat QR Code">
 
 ## What it is — and what it is not
 
