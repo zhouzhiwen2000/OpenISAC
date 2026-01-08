@@ -10,7 +10,7 @@ OpenISAC 是一个基于 OFDM 的通信与感知一体化（ISAC）系统，专�
 
 如果您觉得这个仓库有用，请引用我们的论文：
 
-> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2025.
+> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2026.
 >
 > [[arXiv](https://arxiv.org/pdf/2601.03535)]
 

@@ -10,7 +10,7 @@ Because it focuses on simplicity, OpenISAC typically requires less compute and c
 
 If you find this repository useful, please cite our paper:
 
-> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2025.
+> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2026.
 >
 > [[arXiv](https://arxiv.org/pdf/2601.03535)]
 
