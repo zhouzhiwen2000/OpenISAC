@@ -195,6 +195,14 @@ struct Config {
     std::string wire_format_tx = "sc16";
     std::string wire_format_rx = "sc16";
     std::vector<size_t> available_cores = {0, 1, 2, 3, 4, 5};
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, sensing_proc, sensing_process, data_ingest, demodulation, or "all"
+    
+    // Check if a specific module should be profiled
+    bool should_profile(const std::string& module) const {
+        if (profiling_modules.empty()) return false;
+        if (profiling_modules == "all") return true;
+        return profiling_modules.find(module) != std::string::npos;
+    }
 
     // Calculate total samples per frame
     size_t samples_per_frame() const { 

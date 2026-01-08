@@ -1316,7 +1316,7 @@ private:
         
         // ============== Profiling report ==============
         prof_frame_count++;
-        if (prof_frame_count >= PROF_REPORT_INTERVAL && cfg_.enable_profiling) {
+        if (prof_frame_count >= PROF_REPORT_INTERVAL && cfg_.should_profile("demodulation")) {
             std::cout << "\n========== process_ofdm_frame Profiling (avg per frame, us) ==========" << std::endl;
             std::cout << "FFT (all symbols):    " << prof_fft_total / prof_frame_count << " us" << std::endl;
             std::cout << "Channel Estimation:   " << prof_channel_est_total / prof_frame_count << " us" << std::endl;
@@ -1741,7 +1741,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
         ("hardware-sync", po::value<bool>(&cfg.hardware_sync)->default_value(false), "Enable hardware synchronization")
         ("hardware-sync-tty", po::value<std::string>(&cfg.hardware_sync_tty)->default_value("/dev/ttyUSB0"), "Hardware sync TTY device")
         ("wire-format-rx", po::value<std::string>(&cfg.wire_format_rx)->default_value("sc16"), "RX wire format (sc8 or sc16)")
-        ("profiling", po::value<bool>(&cfg.enable_profiling)->default_value(false), "Enable detailed profiling output")
+        ("profiling-modules", po::value<std::string>(&cfg.profiling_modules)->default_value(""), "Comma-separated modules to profile: demodulation, or 'all'")
         ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores to use (e.g., 0,1,2,3,4,5,6)");
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);

@@ -435,6 +435,17 @@ private:
         std::vector<size_t> cpu_list = {_cfg.available_cores[core_idx]};
         uhd::set_thread_affinity(cpu_list);
         
+        // ============== Profiling variables ==============
+        using ProfileClock = std::chrono::high_resolution_clock;
+        static double prof_header_encode_total = 0.0;
+        static double prof_payload_encode_total = 0.0;
+        static double prof_enqueue_total = 0.0;
+        static int prof_packet_count = 0;
+        constexpr int PROF_REPORT_INTERVAL = 100;
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+        // =================================================
+        
         // Initialize UDP
         _udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (_udp_sock < 0) {
@@ -504,6 +515,7 @@ private:
             }
 
             // LDPC encode header
+            prof_step_start = ProfileClock::now();
             LDPCCodec::AlignedIntVector header_coded_bits;
             _ldpc.encode_frame(header_bytes, header_coded_bits);
             
@@ -513,6 +525,8 @@ private:
             // Convert to QPSK symbols
             LDPCCodec::AlignedIntVector header_qpsk_ints;
             _pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
+            prof_step_end = ProfileClock::now();
+            double header_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
             // Process payload data
             // Construct: Pure UDP data + padding(0x00) to make length a multiple of bytes_per_ldpc_block
@@ -523,6 +537,7 @@ private:
 
 
             // LDPC encode whole packet (may contain multiple LDPC blocks)
+            prof_step_start = ProfileClock::now();
             LDPCCodec::AlignedIntVector encoded_bits_all;
             _ldpc.encode_frame(input_bytes, encoded_bits_all); // bits: (#blocks*bytes_per_ldpc_block*8)
 
@@ -532,6 +547,8 @@ private:
             // Convert to QPSK symbol integers
             LDPCCodec::AlignedIntVector qpsk_ints_all;
             _pack_bits_qpsk(encoded_bits_all, qpsk_ints_all); // (#blocks*bytes_per_ldpc_block*8) ints
+            prof_step_end = ProfileClock::now();
+            double payload_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             // Construct final output: LDPC encoded header + encoded payload data
             AlignedIntVector packet;
@@ -541,12 +558,37 @@ private:
             // Print debug info
             // std::cout << "Packet constructed with size: " << packet.size() << std::endl;
             // Enqueue
+            prof_step_start = ProfileClock::now();
             {
                 std::unique_lock<std::mutex> lock(_data_mutex);
                 _data_not_full.wait(lock,[this]{return !_running.load() || !_data_packet_buffer.full();});
                 if (!_running.load()) break;
                 _data_packet_buffer.push_back(packet);
                 _data_not_empty.notify_one();
+            }
+            prof_step_end = ProfileClock::now();
+            double enqueue_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+            
+            // ============== Profiling accumulation ==============
+            prof_header_encode_total += header_encode_time;
+            prof_payload_encode_total += payload_encode_time;
+            prof_enqueue_total += enqueue_time;
+            prof_packet_count++;
+            
+            if (prof_packet_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("data_ingest")) {
+                std::cout << "\n========== _data_ingest_proc Profiling (avg per packet, us) ==========" << std::endl;
+                std::cout << "Header Encode:        " << prof_header_encode_total / prof_packet_count << " us" << std::endl;
+                std::cout << "Payload Encode:       " << prof_payload_encode_total / prof_packet_count << " us" << std::endl;
+                std::cout << "Enqueue:              " << prof_enqueue_total / prof_packet_count << " us" << std::endl;
+                double total = prof_header_encode_total + prof_payload_encode_total + prof_enqueue_total;
+                std::cout << "TOTAL:                " << total / prof_packet_count << " us" << std::endl;
+                std::cout << "======================================================================\n" << std::endl;
+                
+                // Reset counters
+                prof_header_encode_total = 0.0;
+                prof_payload_encode_total = 0.0;
+                prof_enqueue_total = 0.0;
+                prof_packet_count = 0;
             }
         }
         if (_udp_sock>=0) close(_udp_sock);
@@ -558,6 +600,20 @@ private:
      * Performs channel estimation and Range-Doppler processing.
      */
     void _sensing_process(const SensingFrame& frame) {
+        // ============== Profiling variables ==============
+        using ProfileClock = std::chrono::high_resolution_clock;
+        static double prof_fft_total = 0.0;
+        static double prof_channel_est_total = 0.0;
+        static double prof_mti_total = 0.0;
+        static double prof_window_total = 0.0;
+        static double prof_range_doppler_total = 0.0;
+        static double prof_send_total = 0.0;
+        static int prof_frame_count = 0;
+        constexpr int PROF_REPORT_INTERVAL = 100;
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+        // =================================================
+        
         // Send heartbeat for NAT traversal (once per second)
         static auto next_hb_time = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
@@ -569,6 +625,7 @@ private:
         static auto next_send_time = std::chrono::steady_clock::now();
         if (std::chrono::steady_clock::now() >= next_send_time) {
             // 1. Perform OFDM demodulation on received frame
+            prof_step_start = ProfileClock::now();
             std::vector<AlignedVector> rx_symbols;
             rx_symbols.reserve(_cfg.sensing_symbol_num);
             for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
@@ -579,35 +636,46 @@ private:
                 auto* dest = _channel_response_buffer.data() + i * _cfg.range_fft_size;
                 std::copy(_demod_fft_out.begin(), _demod_fft_out.end(), dest);
             }
+            prof_step_end = ProfileClock::now();
+            prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
-            // 2. Channel estimation (Frequency domain division)
-            #pragma omp simd
+            // 2. Channel estimation (Frequency domain division) + FFT shift
+            // Optimization: Use complex multiplication instead of division
+            // H = Rx / Tx = Rx * conj(Tx) / |Tx|^2
+            // For unit-magnitude Tx symbols (QPSK/ZC), |Tx|^2 = 1, so H = Rx * conj(Tx)
+            prof_step_start = ProfileClock::now();
+            const size_t half_size = _cfg.fft_size / 2;
+            
             for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                for (size_t k = 0; k < _cfg.fft_size; ++k) {
-                    size_t idx = i * _cfg.range_fft_size + k;
-                    _channel_response_buffer[idx] /= frame.tx_symbols[i][k];
-                }
-            }
-
-            for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                auto* symbol_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                const size_t half_size = _cfg.fft_size / 2;
+                auto* __restrict__ ch_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
+                const auto* __restrict__ tx_data = frame.tx_symbols[i].data();
                 
-                // In-place FFT shift - swap front and back halves
+                // Combined: channel estimation with multiplication + FFT shift
+                // Process first half -> write to second half position
                 #pragma omp simd
-                for (size_t j = 0; j < half_size; ++j) {
-                    std::swap(symbol_data[j], symbol_data[j + half_size]);
+                for (size_t k = 0; k < half_size; ++k) {
+                    // Channel estimation: multiply by conjugate (for unit magnitude symbols)
+                    std::complex<float> tx_conj = std::conj(tx_data[k]);
+                    std::complex<float> est = ch_data[k] * tx_conj;
+                    // Store at shifted position (first half -> second half)
+                    ch_data[k] = ch_data[k + half_size] * std::conj(tx_data[k + half_size]);
+                    ch_data[k + half_size] = est;
                 }
             }
+            prof_step_end = ProfileClock::now();
+            prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             // Apply MTI Filter (Moving Target Indication)
             // Applied after channel estimation and FFT shift, before windowing and IFFT
+            prof_step_start = ProfileClock::now();
             if (enable_mti.load()) {
                 _mti_filter.apply(_channel_response_buffer, _cfg.fft_size, _cfg.sensing_symbol_num);
             }
+            prof_step_end = ProfileClock::now();
+            prof_mti_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             if (!skip_sensing_fft.load()) {
-
+                prof_step_start = ProfileClock::now();
                 for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
                     auto* symbol_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
                     #pragma omp simd
@@ -625,19 +693,52 @@ private:
                         _channel_response_buffer[idx] *= _doppler_window[i];
                     }
                 }
+                prof_step_end = ProfileClock::now();
+                prof_window_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
                 // 3. Batch process Range dimension (Process all symbols together)
+                prof_step_start = ProfileClock::now();
                 fftwf_execute(_range_ifft_plan);  // Range IFFT (Frequency to Time domain)
                 
                 // 4. Batch process Doppler dimension (Process all subcarriers together)
                 fftwf_execute(_doppler_fft_plan); // Doppler FFT (Time to Frequency domain)
+                prof_step_end = ProfileClock::now();
+                prof_range_doppler_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             }
 
             // 5. Send processing results
+            prof_step_start = ProfileClock::now();
             _sensing_sender.push_data(_channel_response_buffer);
             if(_cfg.range_fft_size != _cfg.fft_size || _cfg.doppler_fft_size != _cfg.fft_size) {
                 _channel_response_buffer.assign(_cfg.range_fft_size * _cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f));
             }
+            prof_step_end = ProfileClock::now();
+            prof_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+            
+            // ============== Profiling report ==============
+            prof_frame_count++;
+            if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("sensing_process")) {
+                std::cout << "\n========== _sensing_process Profiling (avg per frame, us) ==========" << std::endl;
+                std::cout << "FFT Demodulation:     " << prof_fft_total / prof_frame_count << " us" << std::endl;
+                std::cout << "Channel Estimation:   " << prof_channel_est_total / prof_frame_count << " us" << std::endl;
+                std::cout << "MTI Filter:           " << prof_mti_total / prof_frame_count << " us" << std::endl;
+                std::cout << "Windowing:            " << prof_window_total / prof_frame_count << " us" << std::endl;
+                std::cout << "Range-Doppler FFT:    " << prof_range_doppler_total / prof_frame_count << " us" << std::endl;
+                std::cout << "Send Data:            " << prof_send_total / prof_frame_count << " us" << std::endl;
+                double total = prof_fft_total + prof_channel_est_total + prof_mti_total + prof_window_total + prof_range_doppler_total + prof_send_total;
+                std::cout << "TOTAL:                " << total / prof_frame_count << " us" << std::endl;
+                std::cout << "====================================================================\n" << std::endl;
+                
+                // Reset counters
+                prof_fft_total = 0.0;
+                prof_channel_est_total = 0.0;
+                prof_mti_total = 0.0;
+                prof_window_total = 0.0;
+                prof_range_doppler_total = 0.0;
+                prof_send_total = 0.0;
+                prof_frame_count = 0;
+            }
+            
             next_send_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
         }
         
@@ -837,7 +938,7 @@ private:
             
             // ============== Profiling report ==============
             prof_frame_count++;
-            if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.enable_profiling) {
+            if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("modulation")) {
                 std::cout << "\n========== _modulation_proc Profiling (avg per frame, us) ==========" << std::endl;
                 std::cout << "Data Fetch:           " << prof_data_fetch_total / prof_frame_count << " us" << std::endl;
                 std::cout << "Symbol Generation:    " << prof_symbol_gen_total / prof_frame_count << " us" << std::endl;
@@ -1071,10 +1172,22 @@ private:
         std::vector<size_t> cpu_list = {_cfg.available_cores[core_idx]};
         uhd::set_thread_affinity(cpu_list);
         
+        // ============== Profiling variables ==============
+        using ProfileClock = std::chrono::high_resolution_clock;
+        static double prof_frame_fetch_total = 0.0;
+        static double prof_symbol_extract_total = 0.0;
+        static double prof_sensing_process_total = 0.0;
+        static int prof_frame_count = 0;
+        constexpr int PROF_REPORT_INTERVAL = 100;
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+        // =================================================
+        
         while (_running.load()) {
             SymbolVector tx_symbols;
             AlignedVector rx_frame_data;
             bool has_frame = false;
+            prof_step_start = ProfileClock::now();
             {
                 while (!has_frame && _running.load()) {
                     std::unique_lock<std::mutex> rx_lock(_rx_mutex);
@@ -1105,8 +1218,11 @@ private:
 
                 if (!has_frame) continue;
             }
+            prof_step_end = ProfileClock::now();
+            prof_frame_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
             if (has_frame) {
+                prof_step_start = ProfileClock::now();
                 const size_t symbols_in_this_frame = tx_symbols.size();                
                 // Process all symbols in this frame matching global index
                 while (_global_symbol_index < symbols_in_this_frame) {
@@ -1128,6 +1244,9 @@ private:
                     
                     // Check if processing threshold is reached
                     if (_accumulated_tx_symbols.size() >= _cfg.sensing_symbol_num) {
+                        prof_step_end = ProfileClock::now();
+                        prof_symbol_extract_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+                        
                         // Construct sensing frame
                         SensingFrame sensing_frame;
                         sensing_frame.rx_symbols = std::move(_accumulated_rx_symbols);
@@ -1138,8 +1257,31 @@ private:
                         _accumulated_tx_symbols.clear();
                         
                         // Execute sensing process
+                        auto sensing_start = ProfileClock::now();
                         _sensing_process(sensing_frame);
+                        auto sensing_end = ProfileClock::now();
+                        prof_sensing_process_total += std::chrono::duration<double, std::micro>(sensing_end - sensing_start).count();
                         shadow_sensing_symbol_stride = sensing_sybmol_stride.load();
+                        
+                        // ============== Profiling report ==============
+                        prof_frame_count++;
+                        if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("sensing_proc")) {
+                            std::cout << "\n========== _sensing_proc Profiling (avg per sensing frame, us) ==========" << std::endl;
+                            std::cout << "Frame Fetch:          " << prof_frame_fetch_total / prof_frame_count << " us" << std::endl;
+                            std::cout << "Symbol Extract:       " << prof_symbol_extract_total / prof_frame_count << " us" << std::endl;
+                            std::cout << "Sensing Process:      " << prof_sensing_process_total / prof_frame_count << " us" << std::endl;
+                            double total = prof_frame_fetch_total + prof_symbol_extract_total + prof_sensing_process_total;
+                            std::cout << "TOTAL:                " << total / prof_frame_count << " us" << std::endl;
+                            std::cout << "==========================================================================\n" << std::endl;
+                            
+                            // Reset counters
+                            prof_frame_fetch_total = 0.0;
+                            prof_symbol_extract_total = 0.0;
+                            prof_sensing_process_total = 0.0;
+                            prof_frame_count = 0;
+                        }
+                        
+                        prof_step_start = ProfileClock::now(); // Reset for next symbol extraction
                     }
                 }
                 // Frame processing complete, reset global index (subtract symbols in this frame)
@@ -1198,7 +1340,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         ("mod-udp-port", po::value<int>(&cfg.modulator_udp_port)->default_value(50000), "Modulator UDP bind port for incoming payloads")
         ("sensing-ip", po::value<std::string>(&cfg.mono_sensing_ip), "Sensing destination IP")
         ("sensing-port", po::value<int>(&cfg.mono_sensing_port)->default_value(8888), "Sensing destination port")
-        ("profiling", po::value<bool>(&cfg.enable_profiling)->default_value(false), "Enable detailed profiling output")
+        ("profiling-modules", po::value<std::string>(&cfg.profiling_modules)->default_value(""), "Comma-separated modules to profile: modulation,sensing_proc,sensing_process,data_ingest or 'all'")
         ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores to use (e.g., 0,1,2,3,4,5,6)");
 
     po::variables_map vm;
