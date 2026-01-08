@@ -11,6 +11,8 @@ Because it focuses on simplicity, OpenISAC typically requires less compute and c
 If you find this repository useful, please cite our paper:
 
 > Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2025.
+>
+> [[arXiv](https://arxiv.org/pdf/2601.03535)]
 
 ## Authors
 
@@ -108,28 +110,13 @@ To support high bandwidth and sample rates, ensure the connection between the Co
  
 #### Dependencies & Installation
  
-##### 1. DPDK (Optional)
-Data Plane Development Kit (DPDK) is optional but recommended for high-performance networking with USRP X-series.
- 
-> **Note:** If you plan to use DPDK with UHD, you must install DPDK **before** building UHD so that UHD can detect and enable DPDK support.
- 
-```bash
-sudo apt update
-sudo apt upgrade
-sudo apt install dpdk dpdk-dev
-```
- 
-##### 2. UHD (USRP Hardware Driver)
+##### 1. UHD (USRP Hardware Driver)
 Install the UHD toolchain by following the official Ettus guide (Please follow the tutorial for Ubuntu 24.04):
 *   [Building and Installing the USRP Open-Source Toolchain on Linux](https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux#Update_and_Install_dependencies)
  
 > **Note:** This code has been tested on UHD v4.9.0.1. You can checkout this version using `git checkout v4.9.0.1`.
  
-##### 3. Setup DPDK (Optional)
-If you installed DPDK, configure it for use with UHD (follow the **UHD 4.x** instructions):
-*   [Getting Started with DPDK and UHD](https://kb.ettus.com/Getting_Started_with_DPDK_and_UHD)
- 
-##### 4. Install Aff3ct
+##### 2. Install Aff3ct
 This project uses the Aff3ct library for Forward Error Correction (FEC). Install it from source:
  
 ```bash
@@ -144,7 +131,7 @@ make -j$(nproc)
 sudo make install
 ```
  
-##### 5. Clone Repository
+##### 3. Clone Repository
 Clone the OpenISAC repository:
  
 ```bash
@@ -152,7 +139,7 @@ cd ~
 git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 ```
  
-##### 6. Build OpenISAC
+##### 4. Build OpenISAC
 Build the project using CMake:
  
 ```bash
@@ -163,7 +150,7 @@ cmake ..
 make -j$(nproc)
 ```
  
-##### 7. System Performance Tuning
+##### 5. System Performance Tuning
 Run the provided script to optimize your system settings for real-time processing:
  
 ```bash
@@ -197,7 +184,7 @@ Then add the line below to end of the file `/etc/security/limits.conf`:
  
 You must log out and log back into the account for the settings to take effect. In most Linux distributions, a list of groups and group members can be found in the `/etc/group` file.
  
-##### 8. CPU Isolation and Execution
+##### 6. CPU Isolation and Execution
 To ensure stable real-time performance, it is recommended to isolate CPU cores for the signal processing tasks. We provide a script `isolate_cpus.bash` to handle this automatically.
  
 **Step 1: Isolate System Cores**

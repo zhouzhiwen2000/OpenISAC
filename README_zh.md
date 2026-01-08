@@ -11,6 +11,8 @@ OpenISAC 是一个基于 OFDM 的通信与感知一体化（ISAC）系统，专�
 如果您觉得这个仓库有用，请引用我们的论文：
 
 > Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to *IEEE Trans. Wireless Commun.*, Jan. 2025.
+>
+> [[arXiv](https://arxiv.org/pdf/2601.03535)]
 
 ## 作者
 
@@ -108,28 +110,13 @@ OpenISAC 是一个基于 OFDM 的通信与感知一体化（ISAC）系统，专�
  
 #### 依赖项和安装
  
-##### 1. DPDK (可选)
-数据平面开发套件 (DPDK) 是可选的，但对于 USRP X 系列的10GbE网络推荐使用。
- 
-> **注意:** 如果您计划在 UHD 中使用 DPDK，您必须在构建 UHD **之前** 安装 DPDK，以便 UHD 可以检测并启用 DPDK 支持。
- 
-```bash
-sudo apt update
-sudo apt upgrade
-sudo apt install dpdk dpdk-dev
-```
- 
-##### 2. UHD (USRP 硬件驱动程序)
+##### 1. UHD (USRP 硬件驱动程序)
 按照 Ettus 官方指南安装 UHD 工具链 (请遵循 Ubuntu 24.04 的教程):
 *   [在 Linux 上构建和安装 USRP 开源工具链](https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux#Update_and_Install_dependencies)
  
 > **注意:** 此代码已在 UHD v4.9.0.1 上测试。您可以使用 `git checkout v4.9.0.1` 检出此版本。
  
-##### 3. 设置 DPDK (可选)
-如果您安装了 DPDK，请将其配置为与 UHD 一起使用 (按照 **UHD 4.x** 说明进行操作):
-*   [DPDK 和 UHD 入门](https://kb.ettus.com/Getting_Started_with_DPDK_and_UHD)
- 
-##### 4. 安装 Aff3ct
+##### 2. 安装 Aff3ct
 本项目使用 Aff3ct 库进行前向纠错 (FEC)。从源码安装：
  
 ```bash
@@ -144,7 +131,7 @@ make -j$(nproc)
 sudo make install
 ```
  
-##### 5. 克隆仓库
+##### 3. 克隆仓库
 克隆 OpenISAC 仓库：
  
 ```bash
@@ -152,7 +139,7 @@ cd ~
 git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 ```
  
-##### 6. 构建 OpenISAC
+##### 4. 构建 OpenISAC
 使用 CMake 构建项目：
  
 ```bash
@@ -163,7 +150,7 @@ cmake ..
 make -j$(nproc)
 ```
  
-##### 7. 系统性能调优
+##### 5. 系统性能调优
 运行提供的脚本以优化您的系统设置，以满足实时处理需求：
  
 ```bash
@@ -197,7 +184,7 @@ sudo usermod -aG usrp $USER
  
 您必须注销并重新登录帐户才能使设置生效。在大多数 Linux 发行版中，组和组成员列表可以在 `/etc/group` 文件中找到。
  
-##### 8. CPU 隔离和执行
+##### 6. CPU 隔离和执行
 为了确保稳定的实时性能，建议为信号处理任务隔离 CPU 核心。我们提供了一个脚本 `isolate_cpus.bash` 来自动处理此问题。
  
 **步骤 1: 隔离系统核心**

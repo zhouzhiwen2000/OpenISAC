@@ -51,6 +51,9 @@
             <p>
                 Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to <i>IEEE Trans. Wireless Commun.</i>, Jan. 2025.
             </p>
+            <p>
+                [<a href="https://arxiv.org/pdf/2601.03535" target="_blank">arXiv</a>]
+            </p>
         </section>
 
         <section id="affiliation">
@@ -209,18 +212,12 @@
 
             <h4 id="installation">Dependencies & Installation</h4>
 
-            <h5>1. DPDK (Optional)</h5>
-            <pre><code class="language-bash">sudo apt update
-sudo apt upgrade
-sudo apt install dpdk dpdk-dev</code></pre>
-            <p><em>Note: Install DPDK before building UHD if you plan to use it.</em></p>
-
-            <h5>2. UHD (USRP Hardware Driver)</h5>
+            <h5>1. UHD (USRP Hardware Driver)</h5>
             <p>Follow the <a
                     href="https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux"
                     target="_blank">official Ettus guide</a>. Tested on UHD v4.9.0.1.</p>
 
-            <h5>3. Install Aff3ct</h5>
+            <h5>2. Install Aff3ct</h5>
             <pre><code class="language-bash">sudo apt-get install nlohmann-json3-dev
 git clone https://github.com/aff3ct/aff3ct.git
 cd aff3ct
@@ -234,7 +231,7 @@ cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER="g++" -DCMAKE_BUILD_TYPE="Relea
 make -j$(nproc)
 sudo make install</code></pre>
 
-            <h5>4. Clone & Build OpenISAC</h5>
+            <h5>3. Clone & Build OpenISAC</h5>
             <pre><code class="language-bash">cd ~
 git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 cd OpenISAC
@@ -243,7 +240,7 @@ cd build
 cmake ..
 make -j$(nproc)</code></pre>
 
-            <h5>5. Performance Tuning</h5>
+            <h5>4. Performance Tuning</h5>
             <pre><code class="language-bash">cd ~/OpenISAC
 chmod +x set_performance.bash
 ./set_performance.bash</code></pre>
@@ -260,7 +257,7 @@ sudo usermod -aG usrp $USER</code></pre>
             <pre><code class="language-text">@usrp - rtprio 99</code></pre>
             <p><em>Log out and back in for changes to take effect.</em></p>
 
-            <h5>6. CPU Isolation and Execution</h5>
+            <h5>5. CPU Isolation and Execution</h5>
             <p>To ensure stable real-time performance, isolate CPU cores for signal processing.</p>
 
             <p><strong>Step 1: Isolate System Cores</strong></p>

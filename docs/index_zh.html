@@ -46,6 +46,9 @@
             <p>
                 Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to <i>IEEE Trans. Wireless Commun.</i>, Jan. 2025.
             </p>
+            <p>
+                [<a href="https://arxiv.org/pdf/2601.03535" target="_blank">arXiv</a>]
+            </p>
         </section>
 
         <section id="affiliation">
@@ -200,17 +203,10 @@
 
             <h4 id="installation">依赖项和安装</h4>
 
-            <h5>1. DPDK (可选)</h5>
-            <p>数据平面开发套件 (DPDK) 是可选的，但对于 USRP X 系列的10GbE网络推荐使用。</p>
-            <pre><code class="language-bash">sudo apt update
-sudo apt upgrade
-sudo apt install dpdk dpdk-dev</code></pre>
-            <p><em>注意: 如果您计划在 UHD 中使用 DPDK，您必须在构建 UHD <strong>之前</strong> 安装 DPDK。</em></p>
-
-            <h5>2. UHD (USRP 硬件驱动程序)</h5>
+            <h5>1. UHD (USRP 硬件驱动程序)</h5>
             <p>按照 <a href="https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux#Update_and_Install_dependencies" target="_blank">Ettus 官方指南</a> 安装 (UHD v4.9.0.1)。</p>
 
-            <h5>3. 安装 Aff3ct</h5>
+            <h5>2. 安装 Aff3ct</h5>
             <pre><code class="language-bash">sudo apt-get install nlohmann-json3-dev
 git clone https://github.com/aff3ct/aff3ct.git
 cd aff3ct
@@ -224,7 +220,7 @@ cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER="g++" -DCMAKE_BUILD_TYPE="Relea
 make -j$(nproc)
 sudo make install</code></pre>
 
-            <h5>4. 克隆并构建 OpenISAC</h5>
+            <h5>3. 克隆并构建 OpenISAC</h5>
             <pre><code class="language-bash">cd ~
 git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 cd OpenISAC
@@ -233,7 +229,7 @@ cd build
 cmake ..
 make -j$(nproc)</code></pre>
 
-            <h5>5. 系统性能调优</h5>
+            <h5>4. 系统性能调优</h5>
             <pre><code class="language-bash">cd ~/OpenISAC
 chmod +x set_performance.bash
 ./set_performance.bash</code></pre>
@@ -247,7 +243,7 @@ sudo usermod -aG usrp $USER</code></pre>
             <pre><code class="language-text">@usrp - rtprio  99</code></pre>
             <p><em>注销并重新登录以使更改生效。</em></p>
 
-            <h5>6. CPU 隔离和执行</h5>
+            <h5>5. CPU 隔离和执行</h5>
             <p>为了确保稳定的实时性能，建议为信号处理任务隔离 CPU 核心。</p>
 
             <p><strong>步骤 1: 隔离CPU核心</strong></p>
