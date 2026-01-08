@@ -243,7 +243,7 @@ cd build
 sudo ../isolate_cpus.bash run ./OFDMModulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
 
 # For B210:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"
+sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520" --wire-format-tx sc8
 ```
 *Add `--default-ip=<your front end IP>` if you are using a separate computer for the frontend.*
 
