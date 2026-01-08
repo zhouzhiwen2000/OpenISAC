@@ -870,6 +870,26 @@ private:
      * 6. LLR Calculation: Compute Log-Likelihood Ratios for soft decoding.
      */
     void process_ofdm_frame(const RxFrame& frame) {
+        // ============== Profiling variables ==============
+        using ProfileClock = std::chrono::high_resolution_clock;
+        static double prof_fft_total = 0.0;
+        static double prof_channel_est_total = 0.0;
+        static double prof_cfo_sfo_est_total = 0.0;
+        static double prof_equalization_total = 0.0;
+        static double prof_noise_est_total = 0.0;
+        static double prof_remodulate_total = 0.0;
+        static double prof_delay_spectrum_total = 0.0;
+        static double prof_timing_sync_total = 0.0;
+        static double prof_sensing_queue_total = 0.0;
+        static double prof_udp_send_total = 0.0;
+        static double prof_llr_total = 0.0;
+        static int prof_frame_count = 0;
+        constexpr int PROF_REPORT_INTERVAL = 434;
+        
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+        // =================================================
+        
         std::vector<AlignedVector> symbols;
         std::vector<AlignedVector> rx_symbols_raw;
         symbols.reserve(cfg_.num_symbols-1);
@@ -883,6 +903,7 @@ private:
         AlignedVector sync_symbol_freq;
         size_t pos = 0;
         //save_data(frame, "rx_frame.bin");
+        prof_step_start = ProfileClock::now();
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             AlignedVector symbol(cfg_.fft_size);
             std::copy(frame.frame_data.begin() + pos + cfg_.cp_length,
@@ -906,15 +927,21 @@ private:
             }
             pos += cfg_.fft_size + cfg_.cp_length;
         }
+        prof_step_end = ProfileClock::now();
+        prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
         // Calculate initial channel response H_est
+        prof_step_start = ProfileClock::now();
         AlignedVector H_est(cfg_.fft_size);
         #pragma omp simd
         for (size_t i = 0; i < cfg_.fft_size; ++i) {
             H_est[i] = sync_symbol_freq[i] / zc_freq_[i];
         }
+        prof_step_end = ProfileClock::now();
+        prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
         // Estimate frequency offset
+        prof_step_start = ProfileClock::now();
         const float T = (cfg_.fft_size + cfg_.cp_length) / cfg_.sample_rate;
         std::vector<int> pilot_indices(cfg_.pilot_positions.size());
         std::vector<float> weights(cfg_.pilot_positions.size(), 0.0f);
@@ -940,6 +967,9 @@ private:
         // Phase unwrapping with SIMD optimization
         unwrap(avg_phase_diff);
         auto [beta, alpha] = weightedlinearRegression(pilot_indices, avg_phase_diff, weights);// Calculate fixed phase difference alpha between OFDM symbols caused by CFO, and phase slope beta varying with subcarriers caused by SFO
+        prof_step_end = ProfileClock::now();
+        prof_cfo_sfo_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        
         // Process each data symbol (add phase compensation)
         float detected_freq_offset = alpha / (2 * M_PI * T);
         // Frequency offset correction
@@ -971,34 +1001,52 @@ private:
             }
         }
 
+        prof_step_start = ProfileClock::now();
+        // Pre-compute H_est inverse (ZF equalizer base) - done once per frame
+        static thread_local AlignedVector H_inv;
+        if (H_inv.size() != cfg_.fft_size) {
+            H_inv.resize(cfg_.fft_size);
+        }
+        
+        #pragma omp simd
+        for (size_t j = 0; j < cfg_.fft_size; ++j) {
+            const auto& h = H_est[j];
+            const float mag_sq = std::norm(h);
+            const float inv_mag_sq = 1.0f / mag_sq;
+            // H_inv = conj(H_est) / |H_est|^2 = 1/H_est
+            H_inv[j] = std::complex<float>(h.real() * inv_mag_sq, -h.imag() * inv_mag_sq);
+        }
+        
         for (size_t i = 0; i < symbols.size(); ++i) {
             auto& symbol = symbols[i];
             
-            int relative_symbol_index;
-            if (i < cfg_.sync_pos) {
-                relative_symbol_index = i- cfg_.sync_pos;
-            } else {
-                relative_symbol_index = i + 1 - cfg_.sync_pos;
-            }
-            auto phase_diff_CFO = alpha*relative_symbol_index;
+            const int relative_symbol_index = (i < cfg_.sync_pos) ? 
+                (static_cast<int>(i) - static_cast<int>(cfg_.sync_pos)) : 
+                (static_cast<int>(i) + 1 - static_cast<int>(cfg_.sync_pos));
+            const float phase_diff_CFO = alpha * relative_symbol_index;
+            const float beta_rel = beta * relative_symbol_index;
 
-            // Compensate phase for initial channel estimation
-            AlignedVector H_comp(H_est.size());
-            #pragma omp simd
-            for (size_t j = 0; j < H_comp.size(); ++j) {
-                auto phase_diff_SFO = beta * _actual_subcarrier_indices[j] * relative_symbol_index;
-                auto phase_diff = std::polar(1.0f, phase_diff_SFO + phase_diff_CFO);
-                H_comp[j] = H_est[j] * phase_diff;
-            }
-            
-            // Equalize using compensated channel estimation
+            // Equalization: symbol = symbol * H_inv * exp(-j*phase)
+            // Phase rotation: exp(-j*phase) = cos(phase) - j*sin(phase)
             #pragma omp simd
             for (size_t j = 0; j < cfg_.fft_size; ++j) {
-                symbol[j] /= H_comp[j];
+                const float phase = beta_rel * _actual_subcarrier_indices[j] + phase_diff_CFO;
+                // First multiply by H_inv
+                const auto& hinv = H_inv[j];
+                const auto& sym = symbol[j];
+                const float eq_re = sym.real() * hinv.real() - sym.imag() * hinv.imag();
+                const float eq_im = sym.real() * hinv.imag() + sym.imag() * hinv.real();
+                // Then rotate by -phase (derotate)
+                const float c = std::cos(phase);
+                const float s = std::sin(phase);
+                symbol[j] = std::complex<float>(eq_re * c + eq_im * s, eq_im * c - eq_re * s);
             }
         }
+        prof_step_end = ProfileClock::now();
+        prof_equalization_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
         // ================= Noise Variance Estimation (Based on equalized pilot error) =================
+        prof_step_start = ProfileClock::now();
         // Theoretical constellation points of pilots after equalization: corresponding positions in zc_freq_ (amplitude ~1). Error = y_eq_pilot - x_pilot
         // Estimate complex noise power E[|n|^2] = mean(|e|^2). Under BPSK/QPSK, LLR = 2*Re{y*x*}/sigma2 (Gray mapping splits per bit)
         if (!cfg_.pilot_positions.empty()) {
@@ -1026,43 +1074,52 @@ private:
                 _llr_scale = 2.0 / sigma2_dim; // = 4 / noise_var
             }
         }
+        prof_step_end = ProfileClock::now();
+        prof_noise_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         // =====================================================================
 
         // Remodulate frequency domain symbols (as TX frequency domain symbol estimation)
-        std::vector<AlignedVector> tx_symbols_est;
-        tx_symbols_est.reserve(cfg_.num_symbols);
+        prof_step_start = ProfileClock::now();
+        std::vector<AlignedVector> tx_symbols_est(cfg_.num_symbols);
+        
+        // Pre-compute QPSK constellation points
+        constexpr float QPSK_POS = static_cast<float>(M_SQRT1_2);
+        constexpr float QPSK_NEG = -static_cast<float>(M_SQRT1_2);
 
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             if (i == cfg_.sync_pos) {
                 // Sync symbol uses original ZC sequence
-                tx_symbols_est.push_back(zc_freq_);
+                tx_symbols_est[i] = zc_freq_;
             } else {
                 // Data symbol - remodulate based on demodulation results
-                AlignedVector modulated(cfg_.fft_size);
-                // Data positions - hard decision
-                size_t symbol_idx = (i < cfg_.sync_pos) ? i : i - 1;
-                // Calculate for all positions to ensure contiguous memory operations and fully utilize SIMD
+                tx_symbols_est[i].resize(cfg_.fft_size);
+                auto* __restrict__ mod_ptr = tx_symbols_est[i].data();
+                const size_t symbol_idx = (i < cfg_.sync_pos) ? i : i - 1;
+                const auto* __restrict__ sym_ptr = symbols[symbol_idx].data();
+                const auto* __restrict__ zc_ptr = zc_freq_.data();
+                
+                // SIMD-friendly hard decision without branches
                 #pragma omp simd
                 for (size_t j = 0; j < cfg_.fft_size; ++j) {
-                    auto s = symbols[symbol_idx][j];  // Get equalized symbol
-                    uint8_t real_bit = (s.real() > 0) ? 1 : 0;
-                    uint8_t imag_bit = (s.imag() > 0) ? 1 : 0;
-
-                    modulated[j] = std::complex<float>(
-                        real_bit ? 1.0f : -1.0f,
-                        imag_bit ? 1.0f : -1.0f
-                    ) * static_cast<float>(M_SQRT1_2);
+                    const float re = sym_ptr[j].real();
+                    const float im = sym_ptr[j].imag();
+                    // Use copysign for branchless QPSK mapping
+                    mod_ptr[j] = std::complex<float>(
+                        std::copysign(QPSK_POS, re),
+                        std::copysign(QPSK_POS, im)
+                    );
                 }
 
                 // Replace pilot positions with known pilots
                 for (auto pilot : cfg_.pilot_positions) {
-                    modulated[pilot] = zc_freq_[pilot];
+                    mod_ptr[pilot] = zc_ptr[pilot];
                 }
-
-                tx_symbols_est.push_back(modulated);
             }
         }
+        prof_step_end = ProfileClock::now();
+        prof_remodulate_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
+        prof_step_start = ProfileClock::now();
         AlignedVector delay_spectrum(cfg_.fft_size);
         fft_shift(H_est, ifft_input_);
         fftwf_execute(ifft_plan_);
@@ -1098,6 +1155,10 @@ private:
             fractional_delay = 0.0f;
         }
         float delay_offset_reading = adjusted_index + fractional_delay;
+        prof_step_end = ProfileClock::now();
+        prof_delay_spectrum_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        
+        prof_step_start = ProfileClock::now();
         sfo_estimator.update(delay_offset_reading, frame.Alignment);
         auto _sfo_per_frame = sfo_estimator.get_sfo_per_frame();
 
@@ -1166,8 +1227,11 @@ private:
             _delay_adjustment_count = 0;
         }
         _last_adjusted_index = adjusted_index;
+        prof_step_end = ProfileClock::now();
+        prof_timing_sync_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
         // Add sensing data to queue
+        prof_step_start = ProfileClock::now();
         SensingFrame sense_frame;
         sense_frame.rx_symbols = std::move(rx_symbols_raw);
         sense_frame.tx_symbols = std::move(tx_symbols_est);
@@ -1188,8 +1252,11 @@ private:
             }
         }
         sensing_cv_.notify_one();
+        prof_step_end = ProfileClock::now();
+        prof_sensing_queue_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
         // Channel response data
+        prof_step_start = ProfileClock::now();
         channel_sender_.add_data(std::move(H_est));
 
         // PDF data
@@ -1199,21 +1266,40 @@ private:
         const size_t last_idx = symbols.size() - 1;
         auto constellation_copy = symbols[last_idx];
         constellation_sender_.add_data(std::move(constellation_copy));
+        prof_step_end = ProfileClock::now();
+        prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
         // Extract data symbols to generate LLR
-        AlignedFloatVector frame_llr;
+        prof_step_start = ProfileClock::now();
         const size_t data_subcarriers_per_symbol = cfg_.fft_size - cfg_.pilot_positions.size();
-        frame_llr.reserve(symbols.size() * data_subcarriers_per_symbol * 2);
-        float scale_llr = (_llr_scale * M_SQRT1_2); // Symbol amplitude ~1/√2
-        if(scale_llr > 500.0f)
-            scale_llr = 500.0f;
-        for (const auto &sym : symbols) {
+        const size_t total_llr_count = symbols.size() * data_subcarriers_per_symbol * 2;
+        AlignedFloatVector frame_llr(total_llr_count);
+        float scale_llr = std::min(static_cast<float>(_llr_scale * M_SQRT1_2), 500.0f);
+        
+        // Build data subcarrier index list (once, cached)
+        static std::vector<size_t> data_indices;
+        if (data_indices.empty() || data_indices.size() != data_subcarriers_per_symbol) {
+            data_indices.clear();
+            data_indices.reserve(data_subcarriers_per_symbol);
             for (size_t k = 0; k < cfg_.fft_size; ++k) {
                 if (!pilot_mask[k]) {
-                    // LLR = scale * component value
-                    frame_llr.push_back(sym[k].real() * scale_llr); // bit0
-                    frame_llr.push_back(sym[k].imag() * scale_llr); // bit1
+                    data_indices.push_back(k);
                 }
+            }
+        }
+        
+        float* __restrict__ llr_ptr = frame_llr.data();
+        const size_t num_data_sc = data_indices.size();
+        
+        for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
+            const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
+            float* __restrict__ out_ptr = llr_ptr + sym_idx * num_data_sc * 2;
+            
+            #pragma omp simd
+            for (size_t i = 0; i < num_data_sc; ++i) {
+                const size_t k = data_indices[i];
+                out_ptr[i * 2]     = sym_ptr[k].real() * scale_llr;
+                out_ptr[i * 2 + 1] = sym_ptr[k].imag() * scale_llr;
             }
         }
         
@@ -1224,6 +1310,45 @@ private:
                 _data_llr_buffer.push_back(std::move(frame_llr));
                 _data_llr_cv.notify_one();
             }
+        }
+        prof_step_end = ProfileClock::now();
+        prof_llr_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        
+        // ============== Profiling report ==============
+        prof_frame_count++;
+        if (prof_frame_count >= PROF_REPORT_INTERVAL && cfg_.enable_profiling) {
+            std::cout << "\n========== process_ofdm_frame Profiling (avg per frame, us) ==========" << std::endl;
+            std::cout << "FFT (all symbols):    " << prof_fft_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Channel Estimation:   " << prof_channel_est_total / prof_frame_count << " us" << std::endl;
+            std::cout << "CFO/SFO Estimation:   " << prof_cfo_sfo_est_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Equalization:         " << prof_equalization_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Noise Estimation:     " << prof_noise_est_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Remodulation:         " << prof_remodulate_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Delay Spectrum:       " << prof_delay_spectrum_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Timing Sync:          " << prof_timing_sync_total / prof_frame_count << " us" << std::endl;
+            std::cout << "Sensing Queue:        " << prof_sensing_queue_total / prof_frame_count << " us" << std::endl;
+            std::cout << "UDP Send:             " << prof_udp_send_total / prof_frame_count << " us" << std::endl;
+            std::cout << "LLR Calculation:      " << prof_llr_total / prof_frame_count << " us" << std::endl;
+            double total = prof_fft_total + prof_channel_est_total + prof_cfo_sfo_est_total + 
+                          prof_equalization_total + prof_noise_est_total + prof_remodulate_total + 
+                          prof_delay_spectrum_total + prof_timing_sync_total + prof_sensing_queue_total + 
+                          prof_udp_send_total + prof_llr_total;
+            std::cout << "TOTAL:                " << total / prof_frame_count << " us" << std::endl;
+            std::cout << "======================================================================\n" << std::endl;
+            
+            // Reset counters
+            prof_fft_total = 0.0;
+            prof_channel_est_total = 0.0;
+            prof_cfo_sfo_est_total = 0.0;
+            prof_equalization_total = 0.0;
+            prof_noise_est_total = 0.0;
+            prof_remodulate_total = 0.0;
+            prof_delay_spectrum_total = 0.0;
+            prof_timing_sync_total = 0.0;
+            prof_sensing_queue_total = 0.0;
+            prof_udp_send_total = 0.0;
+            prof_llr_total = 0.0;
+            prof_frame_count = 0;
         }
     }
 
@@ -1616,6 +1741,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
         ("hardware-sync", po::value<bool>(&cfg.hardware_sync)->default_value(false), "Enable hardware synchronization")
         ("hardware-sync-tty", po::value<std::string>(&cfg.hardware_sync_tty)->default_value("/dev/ttyUSB0"), "Hardware sync TTY device")
         ("wire-format-rx", po::value<std::string>(&cfg.wire_format_rx)->default_value("sc16"), "RX wire format (sc8 or sc16)")
+        ("profiling", po::value<bool>(&cfg.enable_profiling)->default_value(false), "Enable detailed profiling output")
         ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores to use (e.g., 0,1,2,3,4,5,6)");
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);

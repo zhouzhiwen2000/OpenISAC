@@ -404,13 +404,17 @@ private:
         }
     }
 
+    // Pre-computed QPSK constellation lookup table
+    static constexpr float SQRT_2_INV = 0.7071067811865476f; // 1/sqrt(2)
+    const std::array<std::complex<float>, 4> _qpsk_table = {{
+        { SQRT_2_INV,  SQRT_2_INV},  // 00
+        { SQRT_2_INV, -SQRT_2_INV},  // 01
+        {-SQRT_2_INV,  SQRT_2_INV},  // 10
+        {-SQRT_2_INV, -SQRT_2_INV}   // 11
+    }};
+
     inline std::complex<float> _qpsk_mod(int x) const {
-        x &= 3;
-        const float sqrt_2_inv = 1/std::sqrt(2.0f);
-        return {
-            (x & 2) ? -sqrt_2_inv : sqrt_2_inv, // Real
-            (x & 1) ? -sqrt_2_inv : sqrt_2_inv // Imaginary
-        };
+        return _qpsk_table[x & 3];
     }
 
     /**
@@ -663,6 +667,19 @@ private:
         int frame_count = 0;
         constexpr int REPORT_INTERVAL = 434;  // Report average time every 434 frames (approx 1s)
 
+        // ============== Profiling variables ==============
+        using ProfileClock = std::chrono::high_resolution_clock;
+        static double prof_data_fetch_total = 0.0;
+        static double prof_symbol_gen_total = 0.0;
+        static double prof_ifft_total = 0.0;
+        static double prof_cp_write_total = 0.0;
+        static int prof_frame_count = 0;
+        constexpr int PROF_REPORT_INTERVAL = 434;
+        
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+        // =================================================
+
         const float scale = 1.0f / std::sqrt(_cfg.fft_size)/4; // Output digital signal power is 1/16
 
         // Pre-calculate pilot and data subcarrier indices to reduce branches inside loop
@@ -680,6 +697,7 @@ private:
             
             size_t frame_data_index = 0; // Entire frame data index
             // Pool of real data symbols available for this frame
+            prof_step_start = ProfileClock::now();
             AlignedIntVector data_pool;
             {
                 std::unique_lock<std::mutex> lock(_data_mutex);
@@ -695,39 +713,68 @@ private:
                 _data_not_full.notify_all();
             }
             size_t data_pool_pos = 0;
+            prof_step_end = ProfileClock::now();
+            prof_data_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+
+            double symbol_gen_time = 0.0;
+            double ifft_time = 0.0;
+            double cp_write_time = 0.0;
+
+            // Pre-allocate all symbols at once to avoid repeated allocations
+            current_symbols.resize(_cfg.num_symbols);
+            for (size_t i = 0; i < _cfg.num_symbols; ++i) {
+                current_symbols[i].resize(_cfg.fft_size);
+            }
 
             for (size_t i = 0; i < _cfg.num_symbols; ++i) {
                 const size_t pos = _symbol_positions[i];
                 auto* buf_ptr = current_frame.data() + pos;
 
+                prof_step_start = ProfileClock::now();
                 if (i == _cfg.sync_pos) {
                     // Sync symbol: Use ZC sequence for the whole symbol
-                    std::copy(_zc_seq.begin(), _zc_seq.end(), _fft_in.begin());
+                    std::memcpy(_fft_in.data(), _zc_seq.data(), _cfg.fft_size * sizeof(std::complex<float>));
                 } else {
                     // Non-sync symbol: Use real data symbols from data_pool, fallback to pre-generated data if exhausted
                     // Fill all pilots first (vectorization friendly)
-                    #pragma omp simd
-                    for (size_t idx=0; idx<_cfg.pilot_positions.size(); ++idx) {
+                    for (size_t idx = 0; idx < _cfg.pilot_positions.size(); ++idx) {
                         size_t k = _cfg.pilot_positions[idx];
-                        if (k < _cfg.fft_size) _fft_in[k] = _zc_seq[k];
+                        _fft_in[k] = _zc_seq[k];
                     }
-                    // Fill data subcarriers
+                    // Fill data subcarriers - use lookup table for QPSK
                     const size_t ds_count = data_subcarriers.size();
+                    const int* __restrict__ ds_ptr = data_subcarriers.data();
+                    auto* __restrict__ fft_ptr = _fft_in.data();
+                    const auto* __restrict__ pool_ptr = data_pool.data();
+                    const auto* __restrict__ pregen_ptr = _pregen_data.data();
+                    const size_t pool_size = data_pool.size();
+                    
                     #pragma omp simd
-                    for (size_t di=0; di<ds_count; ++di) {
-                        int k = data_subcarriers[di];
-                        int sym = (data_pool_pos < data_pool.size()) ? data_pool[data_pool_pos++] : _pregen_data[frame_data_index++];
-                        _fft_in[k] = _qpsk_mod(sym);
+                    for (size_t di = 0; di < ds_count; ++di) {
+                        const int k = ds_ptr[di];
+                        const int sym = (data_pool_pos + di < pool_size) ? 
+                            pool_ptr[data_pool_pos + di] : pregen_ptr[frame_data_index + di];
+                        fft_ptr[k] = _qpsk_table[sym & 3];
                     }
+                    // Update indices after loop
+                    const size_t used_from_pool = std::min(ds_count, pool_size > data_pool_pos ? pool_size - data_pool_pos : 0);
+                    data_pool_pos += used_from_pool;
+                    frame_data_index += ds_count - used_from_pool;
                 }
                 
-                // Save frequency domain data of current symbol (for sensing)
-                current_symbols.push_back(_fft_in);
+                // Save frequency domain data of current symbol (for sensing) - direct memcpy
+                std::memcpy(current_symbols[i].data(), _fft_in.data(), _cfg.fft_size * sizeof(std::complex<float>));
+                prof_step_end = ProfileClock::now();
+                symbol_gen_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
                 // IFFT transform
+                prof_step_start = ProfileClock::now();
                 fftwf_execute(_ifft_plan);
+                prof_step_end = ProfileClock::now();
+                ifft_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
                 // Add Cyclic Prefix (CP)
+                prof_step_start = ProfileClock::now();
                 #pragma omp simd
                 for (size_t j = 0; j < _cfg.cp_length; ++j) {
                     buf_ptr[j] = _fft_out[_cfg.fft_size - _cfg.cp_length + j] * scale;
@@ -738,7 +785,14 @@ private:
                 for (size_t j = 0; j < _cfg.fft_size; ++j) {
                     buf_ptr[_cfg.cp_length + j] = _fft_out[j] * scale;
                 }
+                prof_step_end = ProfileClock::now();
+                cp_write_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             }
+            
+            prof_symbol_gen_total += symbol_gen_time;
+            prof_ifft_total += ifft_time;
+            prof_cp_write_total += cp_write_time;
+
             frame_end = Clock::now();// Record frame end time
             double frame_time = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
             total_processing_time += frame_time;
@@ -779,6 +833,26 @@ private:
 
                 _symbols_buffer.push_back(std::move(current_symbols));
                 _symbols_not_empty.notify_one();
+            }
+            
+            // ============== Profiling report ==============
+            prof_frame_count++;
+            if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.enable_profiling) {
+                std::cout << "\n========== _modulation_proc Profiling (avg per frame, us) ==========" << std::endl;
+                std::cout << "Data Fetch:           " << prof_data_fetch_total / prof_frame_count << " us" << std::endl;
+                std::cout << "Symbol Generation:    " << prof_symbol_gen_total / prof_frame_count << " us" << std::endl;
+                std::cout << "IFFT (all symbols):   " << prof_ifft_total / prof_frame_count << " us" << std::endl;
+                std::cout << "CP & Write:           " << prof_cp_write_total / prof_frame_count << " us" << std::endl;
+                double total = prof_data_fetch_total + prof_symbol_gen_total + prof_ifft_total + prof_cp_write_total;
+                std::cout << "TOTAL:                " << total / prof_frame_count << " us" << std::endl;
+                std::cout << "===================================================================\n" << std::endl;
+                
+                // Reset counters
+                prof_data_fetch_total = 0.0;
+                prof_symbol_gen_total = 0.0;
+                prof_ifft_total = 0.0;
+                prof_cp_write_total = 0.0;
+                prof_frame_count = 0;
             }
         }
     }
@@ -1124,6 +1198,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         ("mod-udp-port", po::value<int>(&cfg.modulator_udp_port)->default_value(50000), "Modulator UDP bind port for incoming payloads")
         ("sensing-ip", po::value<std::string>(&cfg.mono_sensing_ip), "Sensing destination IP")
         ("sensing-port", po::value<int>(&cfg.mono_sensing_port)->default_value(8888), "Sensing destination port")
+        ("profiling", po::value<bool>(&cfg.enable_profiling)->default_value(false), "Enable detailed profiling output")
         ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores to use (e.g., 0,1,2,3,4,5,6)");
 
     po::variables_map vm;
