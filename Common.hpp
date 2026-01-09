@@ -169,6 +169,7 @@ struct Config {
 
     std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     std::string device_args = "";
+    std::string default_ip = "127.0.0.1";
     std::string mono_sensing_ip = "127.0.0.1";
     int mono_sensing_port = 8888;
     std::string mono_sensing_ip2 = "127.0.0.1";
