@@ -15,19 +15,6 @@ doppler_fft_size: 100
 device_args: "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"
 clock_source: external
 wire_format_rx: sc16
-sensing_ip: "127.0.0.1"
-sensing_port: 8889
-control_port: 9999
-channel_ip: "127.0.0.1"
-channel_port: 12348
-pdf_ip: "127.0.0.1"
-pdf_port: 12349
-constellation_ip: "127.0.0.1"
-constellation_port: 12346
-freq_offset_ip: "127.0.0.1"
-freq_offset_port: 12347
-udp_output_ip: "127.0.0.1"
-udp_output_port: 50001
 software_sync: true
 hardware_sync: false
 hardware_sync_tty: /dev/ttyUSB0
