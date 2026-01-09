@@ -143,6 +143,7 @@ git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 Build the project using CMake:
  
 ```bash
+sudo apt-get install libyaml-cpp-dev
 cd OpenISAC
 mkdir build
 cd build
@@ -210,6 +211,30 @@ To restore the system to its default state (allowing all processes to use all co
 ```bash
 sudo ./isolate_cpus.bash reset
 ```
+
+##### 7. Configuration
+The system now supports YAML configuration for easier parameter management.
+
+*   **Default Behavior**:
+    If `Modulator.yaml` or `Demodulator.yaml` exists in the execution directory, it will be loaded automatically.
+
+*   **Specify Config File**:
+    Use `-c` or `--config` to specify a custom configuration file:
+    ```bash
+    ./OFDMModulator -c my_config.yaml
+    ```
+
+*   **Save Configuration**:
+    Use `-s` or `--save-config` to save the current parameters (including defaults and command-line overrides) to a YAML file:
+    ```bash
+    ./OFDMModulator --save-config
+    ```
+    This will generate `Modulator.yaml` (or `Demodulator.yaml`) with the current settings.
+    
+    You can also specify a custom filename:
+    ```bash
+    ./OFDMModulator -s myconfig.yaml
+    ```
  
 ### Frontend (Python)
 
@@ -240,10 +265,12 @@ pip install cupy-cuda12x
 sudo -s
 cd build
 # For X310:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+cp ../Modulator_X310.yaml Modulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMModulator
 
 # For B210:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520" --wire-format-tx sc8
+cp ../Modulator_B210.yaml Modulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMModulator
 ```
 *Add `--default-ip=<your front end IP>` if you are using a separate computer for the frontend.*
 
@@ -252,10 +279,12 @@ sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_s
 sudo -s
 cd build
 # For X310:
-sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+cp ../Demodulator_X310.yaml Demodulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMDemodulator
 
 # For B210:
-sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"
+cp ../Demodulator_B210.yaml Demodulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMDemodulator
 ```
 *Add `--default-ip=<your front end IP>` if you are using a separate computer for the frontend.*
 

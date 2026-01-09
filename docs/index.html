@@ -49,7 +49,9 @@
                 If you find this repository useful, please cite our paper:
             </p>
             <p>
-                Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," submitted to <i>IEEE Trans. Wireless Commun.</i>, Jan. 2026.
+                Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for
+                OFDM-ISAC with Over-the-Air Synchronization," submitted to <i>IEEE Trans. Wireless Commun.</i>, Jan.
+                2026.
             </p>
             <p>
                 [<a href="https://arxiv.org/pdf/2601.03535" target="_blank">arXiv</a>]
@@ -59,11 +61,14 @@
         <section id="affiliation">
             <h2>Affiliation</h2>
             <div style="display: flex; align-items: center; gap: 20px; margin: 20px 0;">
-                <img src="images/SEUlogo.png" alt="SEU Logo" style="height: 80px; width: auto; border: none; box-shadow: none; margin: 0;">
-                <img src="images/PML.png" alt="PML Logo" style="height: 80px; width: auto; border: none; box-shadow: none; margin: 0;">
+                <img src="images/SEUlogo.png" alt="SEU Logo"
+                    style="height: 80px; width: auto; border: none; box-shadow: none; margin: 0;">
+                <img src="images/PML.png" alt="PML Logo"
+                    style="height: 80px; width: auto; border: none; box-shadow: none; margin: 0;">
             </div>
             <p>
-                <b>Yong Zeng Group at the National Mobile Communications Research Laboratory, Southeast University and the Purple Mountain Laboratories</b>
+                <b>Yong Zeng Group at the National Mobile Communications Research Laboratory, Southeast University and
+                    the Purple Mountain Laboratories</b>
             </p>
         </section>
 
@@ -71,7 +76,8 @@
             <h2>Community</h2>
             <ul>
                 <li><a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank">Join our QQ Group</a></li>
-                <li><a href="https://space.bilibili.com/627920129" target="_blank">Bilibili Channel (Yong Zeng Group)</a></li>
+                <li><a href="https://space.bilibili.com/627920129" target="_blank">Bilibili Channel (Yong Zeng
+                        Group)</a></li>
             </ul>
             <p>WeChat Official Account:</p>
             <p>
@@ -232,7 +238,8 @@ make -j$(nproc)
 sudo make install</code></pre>
 
             <h5>3. Clone & Build OpenISAC</h5>
-            <pre><code class="language-bash">cd ~
+            <pre><code class="language-bash">sudo apt-get install libyaml-cpp-dev
+cd ~
 git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 cd OpenISAC
 mkdir build
@@ -275,6 +282,25 @@ sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <p>To restore the system to its default state (allowing all processes to use all cores):</p>
             <pre><code class="language-bash">sudo ./isolate_cpus.bash reset</code></pre>
 
+            <h5>6. Configuration</h5>
+            <p>The system now supports YAML configuration for easier parameter management.</p>
+            <ul>
+                <li><strong>Default Behavior</strong>: If <code>Modulator.yaml</code> or <code>Demodulator.yaml</code>
+                    exists in the execution directory, it will be loaded automatically.</li>
+                <li><strong>Specify Config File</strong>: Use <code>-c</code> or <code>--config</code> to specify a
+                    custom configuration file:
+                    <pre><code class="language-bash">./OFDMModulator -c my_config.yaml</code></pre>
+                </li>
+                <li><strong>Save Configuration</strong>: Use <code>-s</code> or <code>--save-config</code> to save the
+                    current parameters to a YAML file:
+                    <pre><code class="language-bash">./OFDMModulator --save-config</code></pre>
+                    <p>This will generate <code>Modulator.yaml</code> (or <code>Demodulator.yaml</code>) with the
+                        current settings.</p>
+                    <p>You can also specify a custom filename:</p>
+                    <pre><code class="language-bash">./OFDMModulator -s myconfig.yaml</code></pre>
+                </li>
+            </ul>
+
             <h3>Frontend (Python)</h3>
 
             <p>It is recommended to use a <code>conda</code> or <code>venv</code> environment with <strong>Python
@@ -303,10 +329,12 @@ sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <pre><code class="language-bash">sudo -s
 cd build
 # For X310:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+cp ../Modulator_X310.yaml Modulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMModulator
 
 # For B210:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520" --wire-format-tx sc8</code></pre>
+cp ../Modulator_B210.yaml Modulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <p><em>Add <code>--default-ip=&lt;your front end IP&gt;</code> if you are using a separate computer for the
                     frontend.</em></p>
 
@@ -314,10 +342,12 @@ sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_s
             <pre><code class="language-bash">sudo -s
 cd build
 # For X310:
-sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+cp ../Demodulator_X310.yaml Demodulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMDemodulator
 
 # For B210:
-sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"</code></pre>
+cp ../Demodulator_B210.yaml Demodulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMDemodulator</code></pre>
             <p><em>Add <code>--default-ip=&lt;your front end IP&gt;</code> if you are using a separate computer for the
                     frontend.</em></p>
 

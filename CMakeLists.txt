@@ -32,7 +32,7 @@ set_target_properties(aff3ct::aff3ct-shared-lib PROPERTIES
 # Find third-party libraries
 pkg_check_modules(LIBDPDK QUIET libdpdk)
 pkg_check_modules(FFTW3f REQUIRED fftw3f)
-
+pkg_check_modules(YAMLCPP REQUIRED yaml-cpp)   # YAML configuration support
 # Check SIMD instruction set support (common optimization)
 include(CheckCXXCompilerFlag)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
@@ -93,6 +93,7 @@ target_link_libraries(OFDMModulator PRIVATE
     fftw3f_threads
     ${Boost_LIBRARIES}
     aff3ct::aff3ct-shared-lib
+    ${YAMLCPP_LIBRARIES}
 )
 
 target_compile_options(OFDMModulator PRIVATE
@@ -121,6 +122,7 @@ target_link_libraries(OFDMDemodulator PRIVATE
     OpenMP::OpenMP_CXX
     ${Boost_LIBRARIES}
     aff3ct::aff3ct-shared-lib
+    ${YAMLCPP_LIBRARIES}
 )
 
 target_compile_options(OFDMDemodulator PRIVATE
