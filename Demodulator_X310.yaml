@@ -1,0 +1,36 @@
+# OFDM Demodulator Configuration for X310
+fft_size: 1024
+cp_length: 128
+sync_pos: 1
+sample_rate: 50000000
+bandwidth: 50000000
+center_freq: 2400000000
+rx_gain: 60
+rx_channel: 0
+zc_root: 29
+num_symbols: 100
+sensing_symbol_num: 100
+range_fft_size: 1024
+doppler_fft_size: 100
+device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+clock_source: external
+wire_format_rx: sc16
+sensing_ip: "127.0.0.1"
+sensing_port: 8889
+control_port: 9999
+channel_ip: "127.0.0.1"
+channel_port: 12348
+pdf_ip: "127.0.0.1"
+pdf_port: 12349
+constellation_ip: "127.0.0.1"
+constellation_port: 12346
+freq_offset_ip: "127.0.0.1"
+freq_offset_port: 12347
+udp_output_ip: "127.0.0.1"
+udp_output_port: 50001
+software_sync: true
+hardware_sync: false
+hardware_sync_tty: /dev/ttyUSB0
+profiling_modules: ""
+pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
+cpu_cores: [0, 1, 2, 3, 4, 5]

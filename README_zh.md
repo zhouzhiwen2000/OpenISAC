@@ -143,6 +143,9 @@ git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 使用 CMake 构建项目：
  
 ```bash
+# 安装 libyaml-cpp-dev
+sudo apt-get install libyaml-cpp-dev
+
 cd OpenISAC
 mkdir build
 cd build
@@ -210,6 +213,25 @@ sudo ../isolate_cpus.bash run ./OFDMModulator
 ```bash
 sudo ./isolate_cpus.bash reset
 ```
+
+##### 7. 配置
+系统现已支持 YAML 配置，以便更轻松地管理参数。
+
+*   **默认行为**: 如果执行目录中存在 `Modulator.yaml` 或 `Demodulator.yaml`，它将被自动加载。
+*   **指定配置文件**: 使用 `-c` 或 `--config` 指定自定义配置文件：
+    ```bash
+    ./OFDMModulator -c my_config.yaml
+    ```
+*   **保存配置**: 使用 `-s` 或 `--save-config` 将当前参数（包括默认值和命令行覆盖的参数）保存到 YAML 文件：
+    ```bash
+    ./OFDMModulator --save-config
+    ```
+    这将生成包含当前设置的 `Modulator.yaml`（或 `Demodulator.yaml`）。
+    
+    您也可以指定自定义文件名：
+    ```bash
+    ./OFDMModulator -s myconfig.yaml
+    ```
  
 ### 前端 (Python)
 
@@ -240,10 +262,12 @@ pip install cupy-cuda12x
 sudo -s
 cd build
 # 对于 X310:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+cp ../Modulator_X310.yaml Modulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMModulator
 
 # 对于 B210:
-sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520" --wire-format-tx sc8
+cp ../Modulator_B210.yaml Modulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMModulator
 ```
 *如果您使用单独的计算机作为前端，请添加 `--default-ip=<your front end IP>`。*
 
@@ -252,10 +276,12 @@ sudo ../isolate_cpus.bash run ./OFDMModulator --args "num_recv_frames=512, num_s
 sudo -s
 cd build
 # 对于 X310:
-sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
+cp ../Demodulator_X310.yaml Demodulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMDemodulator
 
 # 对于 B210:
-sudo ../isolate_cpus.bash run ./OFDMDemodulator --args "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"
+cp ../Demodulator_B210.yaml Demodulator.yaml
+sudo ../isolate_cpus.bash run ./OFDMDemodulator
 ```
 *如果您使用单独的计算机作为前端，请添加 `--default-ip=<your front end IP>`。*
 

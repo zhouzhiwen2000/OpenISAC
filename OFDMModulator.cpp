@@ -24,8 +24,11 @@
 #include <functional>
 #include <unordered_map>
 #include <boost/program_options.hpp>
+#include <yaml-cpp/yaml.h>
+#include <filesystem>
 
 namespace po = boost::program_options;
+namespace fs = std::filesystem;
 
 using AlignedVector = std::vector<std::complex<float>, AlignedAllocator<std::complex<float>>>;
 using AlignedIntVector = std::vector<int, AlignedAllocator<int>>;
@@ -1299,53 +1302,173 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     std::signal(SIGINT, &signal_handler);
     uhd::set_thread_priority_safe();
     
-    // Configure parameters
+    // Default config file path
+    const std::string default_config_file = "Modulator.yaml";
+    
+    // Helper function: Save config to YAML file
+    auto save_config_to_yaml = [](const Config& cfg, const std::string& filepath) {
+        YAML::Emitter out;
+        out << YAML::BeginMap;
+        out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
+        out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
+        out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
+        out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
+        out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
+        out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
+        out << YAML::Key << "tx_gain" << YAML::Value << cfg.tx_gain;
+        out << YAML::Key << "rx_gain" << YAML::Value << cfg.rx_gain;
+        out << YAML::Key << "rx_channel" << YAML::Value << cfg.rx_channel;
+        out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
+        out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
+        out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
+        out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
+        out << YAML::Key << "system_delay" << YAML::Value << cfg.system_delay;
+        out << YAML::Key << "wire_format_tx" << YAML::Value << cfg.wire_format_tx;
+        out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
+        out << YAML::Key << "mod_udp_ip" << YAML::Value << cfg.modulator_udp_ip;
+        out << YAML::Key << "mod_udp_port" << YAML::Value << cfg.modulator_udp_port;
+        out << YAML::Key << "sensing_ip" << YAML::Value << cfg.mono_sensing_ip;
+        out << YAML::Key << "sensing_port" << YAML::Value << cfg.mono_sensing_port;
+        out << YAML::Key << "default_ip" << YAML::Value << cfg.default_ip;
+        out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
+        out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
+        out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
+        out << YAML::EndMap;
+        
+        std::ofstream fout(filepath);
+        if (!fout) {
+            std::cerr << "Error: Cannot write to config file: " << filepath << std::endl;
+            return false;
+        }
+        fout << out.c_str();
+        fout.close();
+        return true;
+    };
+    
+    // Helper function: Load config from YAML file
+    auto load_config_from_yaml = [](Config& cfg, const std::string& filepath) {
+        if (!fs::exists(filepath)) {
+            return false;
+        }
+        try {
+            YAML::Node config = YAML::LoadFile(filepath);
+            if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
+            if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
+            if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
+            if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
+            if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
+            if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
+            if (config["tx_gain"]) cfg.tx_gain = config["tx_gain"].as<double>();
+            if (config["rx_gain"]) cfg.rx_gain = config["rx_gain"].as<double>();
+            if (config["rx_channel"]) cfg.rx_channel = config["rx_channel"].as<size_t>();
+            if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
+            if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
+            if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
+            if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
+            if (config["system_delay"]) cfg.system_delay = config["system_delay"].as<int32_t>();
+            if (config["wire_format_tx"]) cfg.wire_format_tx = config["wire_format_tx"].as<std::string>();
+            if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
+            if (config["mod_udp_ip"]) cfg.modulator_udp_ip = config["mod_udp_ip"].as<std::string>();
+            if (config["mod_udp_port"]) cfg.modulator_udp_port = config["mod_udp_port"].as<int>();
+            if (config["sensing_ip"]) cfg.mono_sensing_ip = config["sensing_ip"].as<std::string>();
+            if (config["sensing_port"]) cfg.mono_sensing_port = config["sensing_port"].as<int>();
+            if (config["default_ip"]) cfg.default_ip = config["default_ip"].as<std::string>();
+            if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
+            if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
+            if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
+            return true;
+        } catch (const YAML::Exception& e) {
+            std::cerr << "Error parsing YAML config: " << e.what() << std::endl;
+            return false;
+        }
+    };
+    
+    // Configure default parameters
     Config cfg;
     cfg.fft_size = 1024;
     cfg.cp_length = 128;
     cfg.sync_pos = 1;
     cfg.sample_rate = 50e6;
+    cfg.bandwidth = 50e6;
     cfg.center_freq = 2.4e9;
     cfg.tx_gain = 30.0;
     cfg.rx_gain = 30.0;
     cfg.rx_channel = 1;
     cfg.zc_root = 29;
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
-    cfg.num_symbols = 100; // Symbols per frame
+    cfg.num_symbols = 100;
     cfg.mono_sensing_ip = "";
 
     // Add command line argument parsing
-    std::string default_ip = "127.0.0.1";
+    std::string config_file = default_config_file;
+    std::string save_config = "";
+    
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "help message")
-        ("default-ip", po::value<std::string>(&default_ip)->default_value("127.0.0.1"), "Default IP for all services")
-        ("args", po::value<std::string>(&cfg.device_args)->default_value("addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"), "USRP device arguments")
-        ("fft-size", po::value<size_t>(&cfg.fft_size)->default_value(1024), "FFT size")
-        ("cp-length", po::value<size_t>(&cfg.cp_length)->default_value(128), "CP length")
-        ("sync-pos", po::value<size_t>(&cfg.sync_pos)->default_value(1), "Sync position")
-        ("sample-rate", po::value<double>(&cfg.sample_rate)->default_value(50e6), "Sample rate")
-        ("bandwidth", po::value<double>(&cfg.bandwidth)->default_value(50e6), "Bandwidth")
-        ("center-freq", po::value<double>(&cfg.center_freq)->default_value(2.4e9), "Center frequency")
-        ("tx-gain", po::value<double>(&cfg.tx_gain)->default_value(20), "TX gain")
-        ("rx-gain", po::value<double>(&cfg.rx_gain)->default_value(30), "RX gain")
-        ("rx-channel", po::value<size_t>(&cfg.rx_channel)->default_value(1), "RX channel")
-        ("zc-root", po::value<int>(&cfg.zc_root)->default_value(29), "ZC root")
-        ("num-symbols", po::value<size_t>(&cfg.num_symbols)->default_value(100), "Number of symbols per frame")
-        ("clock-source", po::value<std::string>(&cfg.clocksource)->default_value("external"), "Clock source (internal or external)")
-        ("system-delay",po::value<int32_t>(&cfg.system_delay)->default_value(63), "System delay in samples (for alignment)")
-        ("wire-format-tx", po::value<std::string>(&cfg.wire_format_tx)->default_value("sc16"), "TX wire format (sc8 or sc16)")
-        ("wire-format-rx", po::value<std::string>(&cfg.wire_format_rx)->default_value("sc16"), "RX wire format (sc8 or sc16)")
-        ("mod-udp-ip", po::value<std::string>(&cfg.modulator_udp_ip)->default_value("0.0.0.0"), "Modulator UDP bind IP for incoming payloads")
-        ("mod-udp-port", po::value<int>(&cfg.modulator_udp_port)->default_value(50000), "Modulator UDP bind port for incoming payloads")
+        ("config,c", po::value<std::string>(&config_file)->default_value(default_config_file), "Config file path (default: Modulator.yaml)")
+        ("save-config,s", po::value<std::string>(&save_config)->implicit_value(""), "Save current config to file and exit (optionally specify filename)")
+        ("default-ip", po::value<std::string>(&cfg.default_ip), "Default IP for all services (default: 127.0.0.1)")
+        ("args", po::value<std::string>(&cfg.device_args), "USRP device arguments")
+        ("fft-size", po::value<size_t>(&cfg.fft_size), "FFT size (default: 1024)")
+        ("cp-length", po::value<size_t>(&cfg.cp_length), "CP length (default: 128)")
+        ("sync-pos", po::value<size_t>(&cfg.sync_pos), "Sync position (default: 1)")
+        ("sample-rate", po::value<double>(&cfg.sample_rate), "Sample rate (default: 50e6)")
+        ("bandwidth", po::value<double>(&cfg.bandwidth), "Bandwidth (default: 50e6)")
+        ("center-freq", po::value<double>(&cfg.center_freq), "Center frequency (default: 2.4e9)")
+        ("tx-gain", po::value<double>(&cfg.tx_gain), "TX gain (default: 20)")
+        ("rx-gain", po::value<double>(&cfg.rx_gain), "RX gain (default: 30)")
+        ("rx-channel", po::value<size_t>(&cfg.rx_channel), "RX channel (default: 1)")
+        ("zc-root", po::value<int>(&cfg.zc_root), "ZC root (default: 29)")
+        ("num-symbols", po::value<size_t>(&cfg.num_symbols), "Number of symbols per frame (default: 100)")
+        ("clock-source", po::value<std::string>(&cfg.clocksource), "Clock source (default: external)")
+        ("system-delay",po::value<int32_t>(&cfg.system_delay), "System delay in samples (default: 63)")
+        ("wire-format-tx", po::value<std::string>(&cfg.wire_format_tx), "TX wire format (default: sc16)")
+        ("wire-format-rx", po::value<std::string>(&cfg.wire_format_rx), "RX wire format (default: sc16)")
+        ("mod-udp-ip", po::value<std::string>(&cfg.modulator_udp_ip), "Modulator UDP bind IP (default: 0.0.0.0)")
+        ("mod-udp-port", po::value<int>(&cfg.modulator_udp_port), "Modulator UDP bind port (default: 50000)")
         ("sensing-ip", po::value<std::string>(&cfg.mono_sensing_ip), "Sensing destination IP")
-        ("sensing-port", po::value<int>(&cfg.mono_sensing_port)->default_value(8888), "Sensing destination port")
-        ("profiling-modules", po::value<std::string>(&cfg.profiling_modules)->default_value(""), "Comma-separated modules to profile: modulation,sensing_proc,sensing_process,data_ingest or 'all'")
-        ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores to use (e.g., 0,1,2,3,4,5,6)");
+        ("sensing-port", po::value<int>(&cfg.mono_sensing_port), "Sensing destination port (default: 8888)")
+        ("profiling-modules", po::value<std::string>(&cfg.profiling_modules), "Comma-separated modules to profile")
+        ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores");
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
+
+    if (vm.count("help")) {
+        std::cout << desc << std::endl;
+        return 0;
+    }
+
+    // Load config from YAML file (if exists), then CLI args override
+    if (fs::exists(config_file)) {
+        if (load_config_from_yaml(cfg, config_file)) {
+            std::cout << "Loaded config from: " << config_file << std::endl;
+        }
+    } else if (config_file == default_config_file) {
+        // Auto-create default config file with current defaults
+        if (save_config_to_yaml(cfg, config_file)) {
+            std::cout << "Config file '" << config_file << "' not found. Created with default values." << std::endl;
+        }
+    }
+    
+    // Re-parse CLI to override YAML values (only update options explicitly provided in CLI)
+    vm.clear(); // Clear to only contain CLI-specified options
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    // Handle --save-config option
+    if (vm.count("save-config")) {
+        std::string output_file = config_file; // Default to config_file
+        if (!save_config.empty()) {
+            output_file = save_config; // Use custom filename if provided
+        }
+        if (save_config_to_yaml(cfg, output_file)) {
+            std::cout << "Config saved to: " << output_file << std::endl;
+        }
+        return 0;
+    }
 
     // Sync sample rate and bandwidth defaults
     if (vm.count("sample-rate") && !vm.count("bandwidth")) {
@@ -1356,12 +1479,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         std::cout << "Sample rate not specified, using bandwidth: " << cfg.sample_rate / 1e6 << " MHz" << std::endl;
     }
 
-    if (cfg.mono_sensing_ip.empty()) cfg.mono_sensing_ip = default_ip;
-
-    if (vm.count("help")) {
-        std::cout << desc << std::endl;
-        return 0;
-    }
+    if (cfg.mono_sensing_ip.empty()) cfg.mono_sensing_ip = cfg.default_ip;
 
     if (vm.count("cpu-cores")) {
         std::string cores_str = vm["cpu-cores"].as<std::string>();

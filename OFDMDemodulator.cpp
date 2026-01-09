@@ -21,8 +21,11 @@
 #include <utility>
 #include <Common.hpp>
 #include <boost/program_options.hpp>
+#include <yaml-cpp/yaml.h>
+#include <filesystem>
 
 namespace po = boost::program_options;
+namespace fs = std::filesystem;
 
 /**
  * @brief OFDM Receiver Engine.
@@ -1676,6 +1679,112 @@ void signal_handler(int) {
 
 int UHD_SAFE_MAIN(int argc, char* argv[]) {
     std::signal(SIGINT, &signal_handler);
+    
+    // Default config file path
+    const std::string default_config_file = "Demodulator.yaml";
+    
+    // Helper function: Save config to YAML file
+    auto save_config_to_yaml = [](const Config& cfg, const std::string& filepath) {
+        YAML::Emitter out;
+        out << YAML::BeginMap;
+        out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
+        out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
+        out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
+        out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
+        out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
+        out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
+        out << YAML::Key << "rx_gain" << YAML::Value << cfg.rx_gain;
+        out << YAML::Key << "rx_channel" << YAML::Value << cfg.rx_channel;
+        out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
+        out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
+        out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
+        out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
+        out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
+        out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
+        out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
+        out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
+        out << YAML::Key << "sensing_ip" << YAML::Value << cfg.bi_sensing_ip;
+        out << YAML::Key << "sensing_port" << YAML::Value << cfg.bi_sensing_port;
+        out << YAML::Key << "control_port" << YAML::Value << cfg.control_port;
+        out << YAML::Key << "channel_ip" << YAML::Value << cfg.channel_ip;
+        out << YAML::Key << "channel_port" << YAML::Value << cfg.channel_port;
+        out << YAML::Key << "pdf_ip" << YAML::Value << cfg.pdf_ip;
+        out << YAML::Key << "pdf_port" << YAML::Value << cfg.pdf_port;
+        out << YAML::Key << "constellation_ip" << YAML::Value << cfg.constellation_ip;
+        out << YAML::Key << "constellation_port" << YAML::Value << cfg.constellation_port;
+        out << YAML::Key << "freq_offset_ip" << YAML::Value << cfg.freq_offset_ip;
+        out << YAML::Key << "freq_offset_port" << YAML::Value << cfg.freq_offset_port;
+        out << YAML::Key << "udp_output_ip" << YAML::Value << cfg.udp_output_ip;
+        out << YAML::Key << "udp_output_port" << YAML::Value << cfg.udp_output_port;
+        out << YAML::Key << "software_sync" << YAML::Value << cfg.software_sync;
+        out << YAML::Key << "hardware_sync" << YAML::Value << cfg.hardware_sync;
+        out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
+        out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
+        out << YAML::Key << "default_ip" << YAML::Value << cfg.default_ip;
+        out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
+        out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
+        out << YAML::EndMap;
+        
+        std::ofstream fout(filepath);
+        if (!fout) {
+            std::cerr << "Error: Cannot write to config file: " << filepath << std::endl;
+            return false;
+        }
+        fout << out.c_str();
+        fout.close();
+        return true;
+    };
+    
+    // Helper function: Load config from YAML file
+    auto load_config_from_yaml = [](Config& cfg, const std::string& filepath) {
+        if (!fs::exists(filepath)) {
+            return false;
+        }
+        try {
+            YAML::Node config = YAML::LoadFile(filepath);
+            if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
+            if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
+            if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
+            if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
+            if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
+            if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
+            if (config["rx_gain"]) cfg.rx_gain = config["rx_gain"].as<double>();
+            if (config["rx_channel"]) cfg.rx_channel = config["rx_channel"].as<size_t>();
+            if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
+            if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
+            if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
+            if (config["range_fft_size"]) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
+            if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
+            if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
+            if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
+            if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
+            if (config["sensing_ip"]) cfg.bi_sensing_ip = config["sensing_ip"].as<std::string>();
+            if (config["sensing_port"]) cfg.bi_sensing_port = config["sensing_port"].as<int>();
+            if (config["control_port"]) cfg.control_port = config["control_port"].as<int>();
+            if (config["channel_ip"]) cfg.channel_ip = config["channel_ip"].as<std::string>();
+            if (config["channel_port"]) cfg.channel_port = config["channel_port"].as<int>();
+            if (config["pdf_ip"]) cfg.pdf_ip = config["pdf_ip"].as<std::string>();
+            if (config["pdf_port"]) cfg.pdf_port = config["pdf_port"].as<int>();
+            if (config["constellation_ip"]) cfg.constellation_ip = config["constellation_ip"].as<std::string>();
+            if (config["constellation_port"]) cfg.constellation_port = config["constellation_port"].as<int>();
+            if (config["freq_offset_ip"]) cfg.freq_offset_ip = config["freq_offset_ip"].as<std::string>();
+            if (config["freq_offset_port"]) cfg.freq_offset_port = config["freq_offset_port"].as<int>();
+            if (config["udp_output_ip"]) cfg.udp_output_ip = config["udp_output_ip"].as<std::string>();
+            if (config["udp_output_port"]) cfg.udp_output_port = config["udp_output_port"].as<int>();
+            if (config["software_sync"]) cfg.software_sync = config["software_sync"].as<bool>();
+            if (config["hardware_sync"]) cfg.hardware_sync = config["hardware_sync"].as<bool>();
+            if (config["hardware_sync_tty"]) cfg.hardware_sync_tty = config["hardware_sync_tty"].as<std::string>();
+            if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
+            if (config["default_ip"]) cfg.default_ip = config["default_ip"].as<std::string>();
+            if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
+            if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
+            return true;
+        } catch (const YAML::Exception& e) {
+            std::cerr << "Error parsing YAML config: " << e.what() << std::endl;
+            return false;
+        }
+    };
+    
     Config cfg;
     // Set default values
     cfg.fft_size = 1024;
@@ -1688,9 +1797,10 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
     cfg.sensing_symbol_num = 100;
     cfg.sync_pos = 1;
     cfg.sample_rate = 50e6;
+    cfg.bandwidth = 50e6;
     cfg.rx_gain = 50.0;
     cfg.zc_root = 29;
-    cfg.device_args = ""; // Default device arguments
+    cfg.device_args = "";
     cfg.bi_sensing_ip = "";
     cfg.bi_sensing_port = 8889;
     cfg.control_port = 9999;
@@ -1703,49 +1813,88 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
     cfg.freq_offset_ip = "";
     cfg.freq_offset_port = 12347;
     cfg.udp_output_ip = "";
-    cfg.software_sync = true; // Enable software sync
+    cfg.software_sync = true;
 
     // Parse command line arguments
-    std::string default_ip = "127.0.0.1";
+    std::string config_file = default_config_file;
+    std::string save_config = "";
+    
     po::options_description desc("Allowed options");
     desc.add_options()
         ("help", "help message")
-        ("default-ip", po::value<std::string>(&default_ip)->default_value("127.0.0.1"), "Default IP for all services")
-        ("args", po::value<std::string>(&cfg.device_args)->default_value("num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"), "USRP device arguments")
-        ("fft-size", po::value<size_t>(&cfg.fft_size)->default_value(1024), "FFT size")
-        ("cp-length", po::value<size_t>(&cfg.cp_length)->default_value(128), "CP length")
-        ("center-freq", po::value<double>(&cfg.center_freq)->default_value(2.4e9), "Center frequency")
-        ("sample-rate", po::value<double>(&cfg.sample_rate)->default_value(50e6), "Sample rate")
-        ("bandwidth", po::value<double>(&cfg.bandwidth)->default_value(50e6), "Bandwidth")
-        ("rx-gain", po::value<double>(&cfg.rx_gain)->default_value(60), "RX gain")
-        ("rx-channel", po::value<size_t>(&cfg.rx_channel)->default_value(0), "RX channel")
-        ("sync-pos", po::value<size_t>(&cfg.sync_pos)->default_value(1), "Sync position")
+        ("config,c", po::value<std::string>(&config_file)->default_value(default_config_file), "Config file path (default: Demodulator.yaml)")
+        ("save-config,s", po::value<std::string>(&save_config)->implicit_value(""), "Save current config to file and exit (optionally specify filename)")
+        ("default-ip", po::value<std::string>(&cfg.default_ip), "Default IP for all services (default: 127.0.0.1)")
+        ("args", po::value<std::string>(&cfg.device_args), "USRP device arguments")
+        ("fft-size", po::value<size_t>(&cfg.fft_size), "FFT size (default: 1024)")
+        ("cp-length", po::value<size_t>(&cfg.cp_length), "CP length (default: 128)")
+        ("center-freq", po::value<double>(&cfg.center_freq), "Center frequency (default: 2.4e9)")
+        ("sample-rate", po::value<double>(&cfg.sample_rate), "Sample rate (default: 50e6)")
+        ("bandwidth", po::value<double>(&cfg.bandwidth), "Bandwidth (default: 50e6)")
+        ("rx-gain", po::value<double>(&cfg.rx_gain), "RX gain (default: 60)")
+        ("rx-channel", po::value<size_t>(&cfg.rx_channel), "RX channel (default: 0)")
+        ("sync-pos", po::value<size_t>(&cfg.sync_pos), "Sync position (default: 1)")
         ("sensing-ip", po::value<std::string>(&cfg.bi_sensing_ip), "Sensing data IP")
-        ("sensing-port", po::value<int>(&cfg.bi_sensing_port)->default_value(8889), "Sensing data port")
-        ("control-port", po::value<int>(&cfg.control_port)->default_value(9999), "Control command port")
+        ("sensing-port", po::value<int>(&cfg.bi_sensing_port), "Sensing data port (default: 8889)")
+        ("control-port", po::value<int>(&cfg.control_port), "Control command port (default: 9999)")
         ("channel-ip", po::value<std::string>(&cfg.channel_ip), "Channel data IP")
-        ("channel-port", po::value<int>(&cfg.channel_port)->default_value(12348), "Channel data port")
+        ("channel-port", po::value<int>(&cfg.channel_port), "Channel data port (default: 12348)")
         ("pdf-ip", po::value<std::string>(&cfg.pdf_ip), "PDF data IP")
-        ("pdf-port", po::value<int>(&cfg.pdf_port)->default_value(12349), "PDF data port")
+        ("pdf-port", po::value<int>(&cfg.pdf_port), "PDF data port (default: 12349)")
         ("constellation-ip", po::value<std::string>(&cfg.constellation_ip), "Constellation data IP")
-        ("constellation-port", po::value<int>(&cfg.constellation_port)->default_value(12346), "Constellation data port")
+        ("constellation-port", po::value<int>(&cfg.constellation_port), "Constellation data port (default: 12346)")
         ("freq-offset-ip", po::value<std::string>(&cfg.freq_offset_ip), "Frequency offset data IP")
-        ("freq-offset-port", po::value<int>(&cfg.freq_offset_port)->default_value(12347), "Frequency offset data port")
+        ("freq-offset-port", po::value<int>(&cfg.freq_offset_port), "Frequency offset data port (default: 12347)")
         ("udp-output-ip", po::value<std::string>(&cfg.udp_output_ip), "UDP output IP for decoded payloads")
-        ("udp-output-port", po::value<int>(&cfg.udp_output_port)->default_value(50001), "UDP output port for decoded payloads")
-        ("zc-root", po::value<int>(&cfg.zc_root)->default_value(29), "ZC root sequence")
-        ("num-symbols", po::value<size_t>(&cfg.num_symbols)->default_value(100), "Number of symbols per frame")
-        ("sensing-symbol-num", po::value<size_t>(&cfg.sensing_symbol_num)->default_value(100), "Number of symbols for sensing")
-        ("clock-source", po::value<std::string>(&cfg.clocksource)->default_value("external"), "Clock source (internal or external)")
-        ("software-sync", po::value<bool>(&cfg.software_sync)->default_value(true), "Enable software synchronization")
-        ("hardware-sync", po::value<bool>(&cfg.hardware_sync)->default_value(false), "Enable hardware synchronization")
-        ("hardware-sync-tty", po::value<std::string>(&cfg.hardware_sync_tty)->default_value("/dev/ttyUSB0"), "Hardware sync TTY device")
-        ("wire-format-rx", po::value<std::string>(&cfg.wire_format_rx)->default_value("sc16"), "RX wire format (sc8 or sc16)")
-        ("profiling-modules", po::value<std::string>(&cfg.profiling_modules)->default_value(""), "Comma-separated modules to profile: demodulation, or 'all'")
-        ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores to use (e.g., 0,1,2,3,4,5,6)");
+        ("udp-output-port", po::value<int>(&cfg.udp_output_port), "UDP output port (default: 50001)")
+        ("zc-root", po::value<int>(&cfg.zc_root), "ZC root sequence (default: 29)")
+        ("num-symbols", po::value<size_t>(&cfg.num_symbols), "Number of symbols per frame (default: 100)")
+        ("sensing-symbol-num", po::value<size_t>(&cfg.sensing_symbol_num), "Number of symbols for sensing (default: 100)")
+        ("clock-source", po::value<std::string>(&cfg.clocksource), "Clock source (default: external)")
+        ("software-sync", po::value<bool>(&cfg.software_sync), "Enable software synchronization (default: true)")
+        ("hardware-sync", po::value<bool>(&cfg.hardware_sync), "Enable hardware synchronization (default: false)")
+        ("hardware-sync-tty", po::value<std::string>(&cfg.hardware_sync_tty), "Hardware sync TTY device (default: /dev/ttyUSB0)")
+        ("wire-format-rx", po::value<std::string>(&cfg.wire_format_rx), "RX wire format (default: sc16)")
+        ("profiling-modules", po::value<std::string>(&cfg.profiling_modules), "Comma-separated modules to profile")
+        ("cpu-cores", po::value<std::string>(), "Comma-separated list of CPU cores");
+    
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
+
+    if (vm.count("help")) {
+        std::cout << desc << std::endl;
+        return 0;
+    }
+
+    // Load config from YAML file (if exists), then CLI args override
+    if (fs::exists(config_file)) {
+        if (load_config_from_yaml(cfg, config_file)) {
+            std::cout << "Loaded config from: " << config_file << std::endl;
+        }
+    } else if (config_file == default_config_file) {
+        // Auto-create default config file with current defaults
+        if (save_config_to_yaml(cfg, config_file)) {
+            std::cout << "Config file '" << config_file << "' not found. Created with default values." << std::endl;
+        }
+    }
+    
+    // Re-parse CLI to override YAML values (only update options explicitly provided in CLI)
+    vm.clear(); // Clear to only contain CLI-specified options
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    // Handle --save-config option
+    if (vm.count("save-config")) {
+        std::string output_file = config_file; // Default to config_file
+        if (!save_config.empty()) {
+            output_file = save_config; // Use custom filename if provided
+        }
+        if (save_config_to_yaml(cfg, output_file)) {
+            std::cout << "Config saved to: " << output_file << std::endl;
+        }
+        return 0;
+    }
 
     // Sync sample rate and bandwidth defaults
     if (vm.count("sample-rate") && !vm.count("bandwidth")) {
@@ -1756,17 +1905,12 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
         std::cout << "Sample rate not specified, using bandwidth: " << cfg.sample_rate / 1e6 << " MHz" << std::endl;
     }
 
-    if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = default_ip;
-    if (cfg.channel_ip.empty()) cfg.channel_ip = default_ip;
-    if (cfg.pdf_ip.empty()) cfg.pdf_ip = default_ip;
-    if (cfg.constellation_ip.empty()) cfg.constellation_ip = default_ip;
-    if (cfg.freq_offset_ip.empty()) cfg.freq_offset_ip = default_ip;
-    if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = default_ip;
-
-    if (vm.count("help")) {
-        std::cout << desc << std::endl;
-        return 0;
-    }
+    if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = cfg.default_ip;
+    if (cfg.channel_ip.empty()) cfg.channel_ip = cfg.default_ip;
+    if (cfg.pdf_ip.empty()) cfg.pdf_ip = cfg.default_ip;
+    if (cfg.constellation_ip.empty()) cfg.constellation_ip = cfg.default_ip;
+    if (cfg.freq_offset_ip.empty()) cfg.freq_offset_ip = cfg.default_ip;
+    if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_ip;
 
     if (vm.count("cpu-cores")) {
         std::string cores_str = vm["cpu-cores"].as<std::string>();
@@ -1787,7 +1931,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
     }
 
     if (cfg.hardware_sync) {
-        cfg.software_sync = false; // Disable software sync when hardware sync is enabled
+        cfg.software_sync = false;
         std::cout << "Hardware sync enabled. Software sync will be disabled." << std::endl;
     }
     uhd::set_thread_priority_safe(1, true);
