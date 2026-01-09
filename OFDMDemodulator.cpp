@@ -8,7 +8,6 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <immintrin.h>
 #include <fftw3.h>
 #include <csignal>
 #include <fstream>

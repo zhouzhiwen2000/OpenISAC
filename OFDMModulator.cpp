@@ -10,7 +10,6 @@
 #include <atomic>
 #include <csignal>
 #include <random>
-#include <immintrin.h>
 #include <omp.h>
 #include <fstream>
 #include <boost/circular_buffer.hpp>

@@ -121,7 +121,9 @@ public:
         if (n > (std::numeric_limits<size_type>::max() / sizeof(value_type))) {
             throw std::bad_alloc();
         }
-        void* ptr = std::aligned_alloc(Alignment, n * sizeof(value_type));
+        size_type bytes = n * sizeof(value_type);
+        size_type aligned_bytes = (bytes + Alignment - 1) & ~(Alignment - 1);
+        void* ptr = std::aligned_alloc(Alignment, aligned_bytes);
         if (!ptr) throw std::bad_alloc();
         return static_cast<pointer>(ptr);
     }
@@ -269,6 +271,12 @@ public:
             sockfd_ = -1;
             throw std::runtime_error("Invalid IP address: " + ip);
         }
+
+        // Increase send buffer size to avoid dropped packets
+        int sendbuff = 4 * 1024 * 1024; // 4MB
+        if (setsockopt(sockfd_, SOL_SOCKET, SO_SNDBUF, &sendbuff, sizeof(sendbuff)) < 0) {
+            std::cerr << "Warning: Failed to set send buffer size" << std::endl;
+        }
     }
 
     virtual ~UdpBaseSender() {
@@ -401,7 +409,7 @@ private:
     }
 
     void send_data_with_original_format(const AlignedVector& data) {
-        const size_t chunk_size = 60000; 
+        const size_t chunk_size = 1472; // Adjusted for macOS MTU (1500 - 28) 
         size_t total_chunks = (data.size() * sizeof(std::complex<float>) + chunk_size - 1) / chunk_size;
         // Packet Header: [Frame ID | Total Chunks | Current Chunk Index]
         static uint32_t frame_id = 0;
