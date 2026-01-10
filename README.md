@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/logo.svg" alt="OpenISAC Logo" width="400">
+</p>
+
 # OpenISAC
 
 [中文版本](README_zh.md)
