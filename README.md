@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/images/logo.svg" alt="OpenISAC Logo" width="400">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo_light.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/logo.svg">
+    <img src="docs/images/logo.svg" alt="OpenISAC Logo" width="400">
+  </picture>
 </p>
 
 # OpenISAC
