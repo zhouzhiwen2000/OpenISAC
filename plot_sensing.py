@@ -97,6 +97,8 @@ MAX_DOPPLER_BINS = 1000  # Max displayed Doppler bin
 RANGE_FFT_SIZE = 10240   # Points after zero padding in range dimension
 DOPPLER_FFT_SIZE = 1000  # Points after zero padding in Doppler dimension
 enable_mti = True  # Enable MTI (Moving Target Indication)
+enable_range_window = True  # Enable windowing in range (time delay) dimension
+enable_doppler_window = True  # Enable windowing in doppler dimension
 
 # ====== Thread-safe Data Structures ======
 RAW_QUEUE_SIZE = 20
@@ -358,11 +360,35 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
     """
     Range and Doppler FFT processing (Automatically select GPU/CUDA or CPU/NumPy)
     """
-    global range_time_data
+    global range_time_data, enable_range_window, enable_doppler_window
 
     # Use global MAX_RANGE_BIN if not specified
     if max_view_range_bins is None:
         max_view_range_bins = MAX_RANGE_BIN
+
+    # Select range window based on enable_range_window flag
+    if enable_range_window:
+        if USE_GPU:
+            range_win = range_window
+        else:
+            range_win = range_window
+    else:
+        if USE_GPU:
+            range_win = cp.ones((1, FFT_SIZE), dtype=cp.float32)
+        else:
+            range_win = np.ones((1, FFT_SIZE), dtype=np.float32)
+
+    # Select doppler window based on enable_doppler_window flag
+    if enable_doppler_window:
+        if USE_GPU:
+            doppler_win = doppler_window
+        else:
+            doppler_win = doppler_window
+    else:
+        if USE_GPU:
+            doppler_win = cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32)
+        else:
+            doppler_win = np.ones((NUM_SYMBOLS, 1), dtype=np.float32)
 
     if USE_GPU:
         # Transfer input data to GPU
@@ -370,7 +396,7 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
 
         # 1. Range dimension processing (GPU)
         shifted_data = cp.fft.fftshift(frame_data_gpu, axes=1)
-        windowed_data = shifted_data * range_window
+        windowed_data = shifted_data * range_win
         padded_data = cp.zeros((NUM_SYMBOLS, RANGE_FFT_SIZE), dtype=cp.complex64)
         padded_data[:, :FFT_SIZE] = windowed_data
         range_time = cp.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
@@ -386,8 +412,8 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
 
         # 2. Doppler dimension processing (GPU on reduced data)
         range_time_gpu = cp.array(range_time_cpu, dtype=cp.complex64)
-        # Note: doppler_window must match dimension 0 (NUM_SYMBOLS), which is unchanged
-        doppler_windowed = range_time_gpu * doppler_window
+        # Note: doppler_win must match dimension 0 (NUM_SYMBOLS), which is unchanged
+        doppler_windowed = range_time_gpu * doppler_win
         
         # Padded doppler size depends on cropped range bins
         view_width = range_time_view.shape[1]
@@ -409,7 +435,7 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
         # Optimized CPU path with Numba
         
         # 1. Range dimension prep (Shift -> Window -> Pad)
-        padded_data = cpu_prep_range_fft(frame_data, range_window, FFT_SIZE, RANGE_FFT_SIZE)
+        padded_data = cpu_prep_range_fft(frame_data, range_win, FFT_SIZE, RANGE_FFT_SIZE)
         
         # Range IFFT
         range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
@@ -425,7 +451,7 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
 
         # 2. Doppler dimension prep (Window -> Pad)
         # We pass the REDUCED view_width to the padding function
-        padded_doppler = cpu_prep_doppler_fft(range_time_view, doppler_window, NUM_SYMBOLS, DOPPLER_FFT_SIZE, view_width)
+        padded_doppler = cpu_prep_doppler_fft(range_time_view, doppler_win, NUM_SYMBOLS, DOPPLER_FFT_SIZE, view_width)
         
         # Doppler FFT
         doppler_fft = np.fft.fft(padded_doppler, axis=0)
@@ -442,7 +468,7 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
     else:
         # 1. Range dimension processing (CPU)
         shifted_data = np.fft.fftshift(frame_data, axes=1)
-        windowed_data = shifted_data * range_window
+        windowed_data = shifted_data * range_win
         padded_data = np.zeros((NUM_SYMBOLS, RANGE_FFT_SIZE), dtype=np.complex64)
         padded_data[:, :FFT_SIZE] = windowed_data
         range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
@@ -456,7 +482,7 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
         view_width = range_time_view.shape[1]
 
         # 2. Doppler dimension processing (CPU)
-        doppler_windowed = range_time_view * doppler_window
+        doppler_windowed = range_time_view * doppler_win
         padded_doppler = np.zeros((DOPPLER_FFT_SIZE, view_width), dtype=np.complex64)
         padded_doppler[:NUM_SYMBOLS, :] = doppler_windowed
         doppler_fft = np.fft.fft(padded_doppler, axis=0)
@@ -873,6 +899,30 @@ def toggle_mti(event):
     
 btn_mti.on_clicked(toggle_mti)
 
+# Range (time delay) window toggle button
+ax_range_window_btn = plt.axes([0.48, 0.1, 0.08, 0.03])
+btn_range_window = Button(ax_range_window_btn, 'Range Win', color='lightgreen' if enable_range_window else 'lightgray')
+
+def toggle_range_window(event):
+    global enable_range_window
+    enable_range_window = not enable_range_window
+    btn_range_window.color = 'lightgreen' if enable_range_window else 'lightgray'
+    print(f"Range windowing {'enabled' if enable_range_window else 'disabled'}")
+    
+btn_range_window.on_clicked(toggle_range_window)
+
+# Doppler window toggle button
+ax_doppler_window_btn = plt.axes([0.57, 0.1, 0.08, 0.03])
+btn_doppler_window = Button(ax_doppler_window_btn, 'Doppler Win', color='lightgreen' if enable_doppler_window else 'lightgray')
+
+def toggle_doppler_window(event):
+    global enable_doppler_window
+    enable_doppler_window = not enable_doppler_window
+    btn_doppler_window.color = 'lightgreen' if enable_doppler_window else 'lightgray'
+    print(f"Doppler windowing {'enabled' if enable_doppler_window else 'disabled'}")
+    
+btn_doppler_window.on_clicked(toggle_doppler_window)
+
 # ====== Save Functions ======
 def save_raw_frame(event):
     if 'raw' in current_display_data:
@@ -919,19 +969,19 @@ def save_md_map(event):
 # Save Buttons
 btn_width = 0.07
 btn_height = 0.03
-btn_y = 0.1
+btn_y = 0.14  # Move save buttons to higher row to avoid overlap
 
-ax_save_raw = plt.axes([0.55, btn_y, btn_width, btn_height])
+ax_save_raw = plt.axes([0.66, btn_y, btn_width, btn_height])
 btn_save_raw = Button(ax_save_raw, 'Save Raw')
 btn_save_raw.label.set_fontsize(8)
 btn_save_raw.on_clicked(save_raw_frame)
 
-ax_save_rd = plt.axes([0.63, btn_y, btn_width, btn_height])
+ax_save_rd = plt.axes([0.74, btn_y, btn_width, btn_height])
 btn_save_rd = Button(ax_save_rd, 'Save RD')
 btn_save_rd.label.set_fontsize(8)
 btn_save_rd.on_clicked(save_rd_map)
 
-ax_save_md = plt.axes([0.71, btn_y, btn_width, btn_height])
+ax_save_md = plt.axes([0.82, btn_y, btn_width, btn_height])
 btn_save_md = Button(ax_save_md, 'Save MD')
 btn_save_md.label.set_fontsize(8)
 btn_save_md.on_clicked(save_md_map)
