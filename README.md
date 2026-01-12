@@ -247,6 +247,16 @@ The system now supports YAML configuration for easier parameter management.
 ### Frontend (Python)
 
 It is recommended to use a `conda` or `venv` environment with **Python 3.13**.
+
+**Miniconda Installation Guide:**
+*   **Windows:** [Miniconda Installation for Windows](https://www.anaconda.com/docs/getting-started/miniconda/install#windows-powershell)
+*   **Linux:** [Miniconda Installation for Linux](https://www.anaconda.com/docs/getting-started/miniconda/install#linux-2)
+
+**Create a new conda environment:**
+```bash
+conda create -n OpenISAC python=3.13
+conda activate OpenISAC
+```
  
 #### Install Dependencies
  
@@ -352,12 +362,12 @@ ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 
 ### 5. Run monostatic frontend
 ```bash
-python3 ./plot_sensing_microDoppler_CPP_MTI.py
+python3 ./plot_sensing.py
 ```
 
 ### 6. Run bistatic frontend
 ```bash
-python3 ./plot_bi_sensing_microDoppler_CPP_MTI.py
+python3 ./plot_bi_sensing.py
 ```
 
 ### OFDM Modulator

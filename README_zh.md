@@ -244,6 +244,16 @@ sudo ./isolate_cpus.bash reset
 ### 前端 (Python)
 
 建议使用 **Python 3.13** 的 `conda` 或 `venv` 环境。
+
+**Miniconda 安装教程:**
+*   **Windows:** [Miniconda Windows 安装教程](https://www.anaconda.com/docs/getting-started/miniconda/install#windows-powershell)
+*   **Linux:** [Miniconda Linux 安装教程](https://www.anaconda.com/docs/getting-started/miniconda/install#linux-2)
+
+**新建 conda 环境:**
+```bash
+conda create -n OpenISAC python=3.13
+conda activate OpenISAC
+```
  
 #### 安装依赖项
  
@@ -349,12 +359,12 @@ ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 
 ### 5. 运行单站感知前端
 ```bash
-python3 ./plot_sensing_microDoppler_CPP_MTI.py
+python3 ./plot_sensing.py
 ```
 
 ### 6. 运行双站感知前端
 ```bash
-python3 ./plot_bi_sensing_microDoppler_CPP_MTI.py
+python3 ./plot_bi_sensing.py
 ```
 
 ### OFDM 调制器 (OFDMModulator)
