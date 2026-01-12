@@ -29,9 +29,7 @@
 namespace po = boost::program_options;
 namespace fs = std::filesystem;
 
-using AlignedVector = std::vector<std::complex<float>, AlignedAllocator<std::complex<float>>>;
-using AlignedIntVector = std::vector<int, AlignedAllocator<int>>;
-using SymbolVector = std::vector<AlignedVector>; 
+// Type aliases are now defined in Common.hpp
 
 /**
  * @brief OFDM ISAC (Integrated Sensing and Communication) Transmitter Engine.
@@ -64,8 +62,27 @@ public:
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         tx_data_file("tx_frame.bin", std::ios::binary),
         _sensing_sender(cfg.mono_sensing_ip, cfg.mono_sensing_port, cfg.fft_size * cfg.num_symbols),
-        _control_handler(9999)  // Initialize control handler
+        _control_handler(9999),  // Initialize control handler
+        // Initialize object pools for memory reuse
+        _frame_pool(16, [&cfg]() {
+            return AlignedVector(cfg.samples_per_frame());
+        }),
+        _symbols_pool(16, [&cfg]() {
+            SymbolVector sv;
+            sv.resize(cfg.num_symbols);
+            for (size_t i = 0; i < cfg.num_symbols; ++i) {
+                sv[i].resize(cfg.fft_size);
+            }
+            return sv;
+        }),
+        _rx_frame_pool(16, [&cfg]() {
+            return AlignedVector(cfg.samples_per_frame());
+        }),
+        _data_packet_pool(32, []() {
+            return AlignedIntVector();
+        })
     {
+
         // Initialize FFTW resources
         _init_fftw();
         
@@ -103,6 +120,11 @@ public:
 
     ~OFDMISACEngine() {
         stop();
+        
+        // Save wisdom before destroying plans
+        std::string wisdom_file = "fftw_wisdom_" + std::to_string(_cfg.fft_size) + ".dat";
+        _save_fftw_wisdom(wisdom_file);
+        
         fftwf_destroy_plan(_ifft_plan);
         fftwf_destroy_plan(_range_ifft_plan);
         fftwf_destroy_plan(_doppler_fft_plan);
@@ -235,7 +257,14 @@ private:
     int _udp_sock{-1};
     struct sockaddr_in _udp_addr{};
     
+    // Object pools for memory reuse (eliminates per-frame memory allocations)
+    ObjectPool<AlignedVector> _frame_pool;      // Pool for TX frame buffers
+    ObjectPool<SymbolVector> _symbols_pool;     // Pool for symbol vectors (frequency domain)
+    ObjectPool<AlignedVector> _rx_frame_pool;   // Pool for RX frame buffers
+    ObjectPool<AlignedIntVector> _data_packet_pool; // Pool for data packet buffers
+    
     void _register_commands() {
+
         // Register alignment command
         _control_handler.register_command("ALGN", [this](int32_t value) {
             int32_t adjusted_value = value;
@@ -303,13 +332,22 @@ private:
 
     void _init_fftw() {
         // fftwf_plan_with_nthreads(static_cast<int>(_cfg.fft_threads));
+        
+        // Try to load wisdom from file
+        std::string wisdom_file = "fftw_wisdom_" + std::to_string(_cfg.fft_size) + ".dat";
+        bool has_wisdom = _load_fftw_wisdom(wisdom_file);
+        
+        // If wisdom exists, use FFTW_ESTIMATE for fast planning
+        // Otherwise, use FFTW_MEASURE to create wisdom
+        unsigned plan_flags = has_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
+        
         // Create IFFT plan (for transmission)
         _ifft_plan = fftwf_plan_dft_1d(
             static_cast<int>(_cfg.fft_size),
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_fft_out.data()),
             FFTW_BACKWARD,
-            FFTW_MEASURE | FFTW_PATIENT
+            plan_flags
         );
         
         // Create demodulation FFT plan (for sensing)
@@ -318,7 +356,7 @@ private:
             reinterpret_cast<fftwf_complex*>(_demod_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_demod_fft_out.data()),
             FFTW_FORWARD,
-            FFTW_MEASURE
+            plan_flags
         );
         
         // Create batch Range IFFT plan (for sensing)
@@ -341,7 +379,7 @@ private:
             1,                         // ostride
             fft_size_int,              // odist
             FFTW_BACKWARD,             // sign (IFFT)
-            FFTW_MEASURE
+            plan_flags
         );
         
         // Create Doppler FFT plan (for sensing)
@@ -358,8 +396,37 @@ private:
             fft_size_int,              // ostride
             1,                         // odist
             FFTW_FORWARD,              // sign (FFT)
-            FFTW_MEASURE
+            plan_flags
         );
+        
+        // Save wisdom for future use if we just created it
+        if (!has_wisdom) {
+            _save_fftw_wisdom(wisdom_file);
+        }
+    }
+
+    // FFTW wisdom management
+    bool _load_fftw_wisdom(const std::string& wisdom_file) {
+        if (!fs::exists(wisdom_file)) return false;
+        FILE* f = fopen(wisdom_file.c_str(), "r");
+        if (!f) return false;
+        bool success = fftwf_import_wisdom_from_file(f) != 0;
+        fclose(f);
+        if (success) {
+            std::cout << "Loaded FFTW wisdom from: " << wisdom_file << std::endl;
+        }
+        return success;
+    }
+
+    void _save_fftw_wisdom(const std::string& wisdom_file) {
+        FILE* f = fopen(wisdom_file.c_str(), "w");
+        if (!f) {
+            std::cerr << "Failed to save FFTW wisdom to: " << wisdom_file << std::endl;
+            return;
+        }
+        fftwf_export_wisdom_to_file(f);
+        fclose(f);
+        std::cout << "Saved FFTW wisdom to: " << wisdom_file << std::endl;
     }
 
     // Initialize Hamming windows
@@ -553,7 +620,8 @@ private:
             double payload_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             // Construct final output: LDPC encoded header + encoded payload data
-            AlignedIntVector packet;
+            AlignedIntVector packet = _data_packet_pool.acquire();
+            packet.clear();
             packet.reserve(header_qpsk_ints.size() + qpsk_ints_all.size());
             packet.insert(packet.end(), header_qpsk_ints.begin(), header_qpsk_ints.end());
             packet.insert(packet.end(), qpsk_ints_all.begin(), qpsk_ints_all.end());
@@ -565,9 +633,10 @@ private:
                 std::unique_lock<std::mutex> lock(_data_mutex);
                 _data_not_full.wait(lock,[this]{return !_running.load() || !_data_packet_buffer.full();});
                 if (!_running.load()) break;
-                _data_packet_buffer.push_back(packet);
+                _data_packet_buffer.push_back(std::move(packet));
                 _data_not_empty.notify_one();
             }
+
             prof_step_end = ProfileClock::now();
             double enqueue_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
@@ -653,15 +722,30 @@ private:
                 const auto* __restrict__ tx_data = frame.tx_symbols[i].data();
                 
                 // Combined: channel estimation with multiplication + FFT shift
-                // Process first half -> write to second half position
-                #pragma omp simd
+                // Manual complex multiplication with conjugate for better vectorization
+                #pragma omp simd simdlen(16) aligned(ch_data, tx_data: 64)
                 for (size_t k = 0; k < half_size; ++k) {
-                    // Channel estimation: multiply by conjugate (for unit magnitude symbols)
-                    std::complex<float> tx_conj = std::conj(tx_data[k]);
-                    std::complex<float> est = ch_data[k] * tx_conj;
-                    // Store at shifted position (first half -> second half)
-                    ch_data[k] = ch_data[k + half_size] * std::conj(tx_data[k + half_size]);
-                    ch_data[k + half_size] = est;
+                    // First half: multiply by conjugate and store to second half position
+                    float ch_real = ch_data[k].real();
+                    float ch_imag = ch_data[k].imag();
+                    float tx_real = tx_data[k].real();
+                    float tx_imag = tx_data[k].imag();
+                    
+                    // Multiply by conjugate: (a+bi)*(c-di) = (ac+bd) + (bc-ad)i
+                    float est_real = ch_real * tx_real + ch_imag * tx_imag;
+                    float est_imag = ch_imag * tx_real - ch_real * tx_imag;
+                    
+                    // Second half: process and store to first half position
+                    float ch2_real = ch_data[k + half_size].real();
+                    float ch2_imag = ch_data[k + half_size].imag();
+                    float tx2_real = tx_data[k + half_size].real();
+                    float tx2_imag = tx_data[k + half_size].imag();
+                    
+                    ch_data[k] = std::complex<float>(
+                        ch2_real * tx2_real + ch2_imag * tx2_imag,
+                        ch2_imag * tx2_real - ch2_real * tx2_imag
+                    );
+                    ch_data[k + half_size] = std::complex<float>(est_real, est_imag);
                 }
             }
             prof_step_end = ProfileClock::now();
@@ -680,7 +764,7 @@ private:
                 prof_step_start = ProfileClock::now();
                 for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
                     auto* symbol_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                    #pragma omp simd
+                    #pragma omp simd simdlen(16) aligned(symbol_data: 64)
                     for (size_t j = 0; j < _cfg.fft_size; ++j) {
                         // Apply range window (Frequency domain windowing)
                         symbol_data[j] *= _range_window[j];
@@ -688,7 +772,7 @@ private:
                 }
 
                 for (size_t bin = 0; bin < _cfg.fft_size; ++bin) {
-                    #pragma omp simd
+                    #pragma omp simd simdlen(16)
                     for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
                         size_t idx = i * _cfg.range_fft_size + bin;
                         // Apply Doppler window (Time domain windowing)
@@ -794,9 +878,9 @@ private:
         while (_running.load()) {
             frame_start = Clock::now(); // Record frame start time
 
-            AlignedVector current_frame(_cfg.samples_per_frame());
-            SymbolVector current_symbols;  
-            current_symbols.reserve(_cfg.num_symbols);
+            // Acquire pre-allocated objects from pools (zero heap allocations)
+            AlignedVector current_frame = _frame_pool.acquire();
+            SymbolVector current_symbols = _symbols_pool.acquire();
             
             size_t frame_data_index = 0; // Entire frame data index
             // Pool of real data symbols available for this frame
@@ -809,12 +893,14 @@ private:
                 data_pool.reserve(total);
 
                 while (!_data_packet_buffer.empty()) {
-                    const auto &pkt = _data_packet_buffer.front();
-                    data_pool.insert(data_pool.end(), pkt.begin(), pkt.end());
+                    AlignedIntVector pkt = std::move(_data_packet_buffer.front());
                     _data_packet_buffer.pop_front();
+                    data_pool.insert(data_pool.end(), pkt.begin(), pkt.end());
+                    _data_packet_pool.release(std::move(pkt));
                 }
                 _data_not_full.notify_all();
             }
+
             size_t data_pool_pos = 0;
             prof_step_end = ProfileClock::now();
             prof_data_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -823,11 +909,7 @@ private:
             double ifft_time = 0.0;
             double cp_write_time = 0.0;
 
-            // Pre-allocate all symbols at once to avoid repeated allocations
-            current_symbols.resize(_cfg.num_symbols);
-            for (size_t i = 0; i < _cfg.num_symbols; ++i) {
-                current_symbols[i].resize(_cfg.fft_size);
-            }
+            // Objects from pool are already correctly sized - no need to resize
 
             for (size_t i = 0; i < _cfg.num_symbols; ++i) {
                 const size_t pos = _symbol_positions[i];
@@ -1003,6 +1085,8 @@ private:
                 if (sent < frame_to_send.size()) {
                     std::cerr << "TX Underflow: " << (frame_to_send.size() - sent) << " samples\n";
                 }
+                // Return frame to pool for reuse (instead of destroying)
+                _frame_pool.release(std::move(frame_to_send));
             } else {
                 _tx_stream->send(_blank_frame.data(), _blank_frame.size(), md);
                 // std::cout << "No frame to send, sending blank frame.\n";
@@ -1084,7 +1168,8 @@ private:
         if (!_running.load()) return;
         
         // Discard first _discard_samples samples, take one frame data
-        AlignedVector aligned_frame(_cfg.samples_per_frame());
+        // Acquire from pool instead of allocating new
+        AlignedVector aligned_frame = _rx_frame_pool.acquire();
         if(_discard_samples > 0)
         {
             std::copy(
@@ -1126,7 +1211,8 @@ private:
      * for sensing processing.
      */
     void _handle_normal_rx() {
-        AlignedVector rx_frame(_cfg.samples_per_frame());
+        // Acquire pre-allocated RX frame from pool (zero heap allocation)
+        AlignedVector rx_frame = _rx_frame_pool.acquire();
         uhd::rx_metadata_t md;
         size_t received = 0;
         
@@ -1241,7 +1327,8 @@ private:
                     
                     // Add current symbol to accumulation buffer
                     _accumulated_rx_symbols.push_back(std::move(rx_symbol));
-                    _accumulated_tx_symbols.push_back(std::move(tx_symbols[symbol_idx]));
+                    _accumulated_tx_symbols.push_back(tx_symbols[symbol_idx]);
+
                     _global_symbol_index += shadow_sensing_symbol_stride;
                     
                     // Check if processing threshold is reached
@@ -1288,6 +1375,11 @@ private:
                 }
                 // Frame processing complete, reset global index (subtract symbols in this frame)
                 _global_symbol_index -= symbols_in_this_frame;
+                
+
+                // Return objects to pools for reuse (instead of destroying)
+                _symbols_pool.release(std::move(tx_symbols));
+                _rx_frame_pool.release(std::move(rx_frame_data));
             }
         }
     }

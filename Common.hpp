@@ -98,10 +98,10 @@ private:
 /**
  * @brief STL-compliant Aligned Memory Allocator.
  * 
- * Ensures that allocated memory is aligned to specific boundaries (default 32 bytes).
+ * Ensures that allocated memory is aligned to specific boundaries (default 64 bytes).
  * This is critical for SIMD operations (AVX2/AVX-512) and other low-level optimizations.
  */
-template <typename T, size_t Alignment = 32>
+template <typename T, size_t Alignment = 64>
 class AlignedAllocator {
 public:
     using value_type = T;
@@ -131,10 +131,109 @@ public:
     void deallocate(pointer p, size_type) { std::free(p); }
 };
 
-// Type Definitions
-using AlignedVector = std::vector<std::complex<float>, AlignedAllocator<std::complex<float>, 32>>;
-using AlignedFloatVector = std::vector<float, AlignedAllocator<float, 32>>;
-using AlignedIntVector = std::vector<int, AlignedAllocator<int, 32>>;
+// Type Definitions (64-byte alignment for AVX-512 optimization)
+using AlignedVector = std::vector<std::complex<float>, AlignedAllocator<std::complex<float>, 64>>;
+using AlignedFloatVector = std::vector<float, AlignedAllocator<float, 64>>;
+using AlignedIntVector = std::vector<int, AlignedAllocator<int, 64>>;
+using SymbolVector = std::vector<AlignedVector>;
+
+/**
+ * @brief Thread-safe Object Pool for Memory Reuse.
+ * 
+ * Provides a pool of pre-allocated objects that can be acquired and released
+ * to avoid repeated heap allocations. Uses mutex-based synchronization for
+ * thread safety. Objects are created using a factory function that allows
+ * custom initialization (e.g., pre-sized vectors).
+ * 
+ * Usage pattern:
+ * - Producer thread: acquire() -> use object -> move to consumer
+ * - Consumer thread: use object -> release() to return to pool
+ * 
+ * If the pool is empty when acquire() is called, a new object is created
+ * using the factory function (graceful degradation).
+ * 
+ * @tparam T Type of objects to pool (must be movable)
+ */
+template<typename T>
+class ObjectPool {
+public:
+    using FactoryFunc = std::function<T()>;
+    
+    /**
+     * @brief Construct an object pool with initial capacity.
+     * 
+     * @param initial_size Number of objects to pre-allocate
+     * @param factory Function that creates a new properly-initialized object
+     */
+    ObjectPool(size_t initial_size, FactoryFunc factory)
+        : _factory(std::move(factory))
+    {
+        _pool.reserve(initial_size);
+        for (size_t i = 0; i < initial_size; ++i) {
+            _pool.push_back(_factory());
+        }
+    }
+    
+    /**
+     * @brief Acquire an object from the pool.
+     * 
+     * If the pool is empty, creates a new object using the factory function.
+     * The returned object is moved out of the pool.
+     * 
+     * @return T An object ready for use
+     */
+    T acquire() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_pool.empty()) {
+            // Pool exhausted, create new object
+            return _factory();
+        }
+        T obj = std::move(_pool.back());
+        _pool.pop_back();
+        return obj;
+    }
+    
+    /**
+     * @brief Return an object to the pool for reuse.
+     * 
+     * The object is moved into the pool. Caller should not use the
+     * object after calling release().
+     * 
+     * @param obj Object to return to the pool
+     */
+    void release(T&& obj) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _pool.push_back(std::move(obj));
+    }
+    
+    /**
+     * @brief Get the number of available objects in the pool.
+     * 
+     * @return size_t Number of objects currently in the pool
+     */
+    size_t available() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _pool.size();
+    }
+    
+    /**
+     * @brief Pre-allocate additional objects into the pool.
+     * 
+     * @param count Number of additional objects to create
+     */
+    void prefill(size_t count) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _pool.reserve(_pool.size() + count);
+        for (size_t i = 0; i < count; ++i) {
+            _pool.push_back(_factory());
+        }
+    }
+
+private:
+    FactoryFunc _factory;
+    std::vector<T> _pool;
+    mutable std::mutex _mutex;
+};
 
 /**
  * @brief System Configuration Structure.

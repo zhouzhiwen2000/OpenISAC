@@ -37,14 +37,23 @@ pkg_check_modules(YAMLCPP REQUIRED yaml-cpp)   # YAML configuration support
 include(CheckCXXCompilerFlag)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
     check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+    check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
+    check_cxx_compiler_flag("-mavx512dq" COMPILER_SUPPORTS_AVX512DQ)
     check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
     check_cxx_compiler_flag("-mfma" COMPILER_SUPPORTS_FMA)
 
     set(ARCH_OPTS "")
     if(COMPILER_SUPPORTS_MARCH_NATIVE)
+        # -march=native will automatically enable AVX512 if CPU supports it
         list(APPEND ARCH_OPTS "-march=native")
     else()
-        if(COMPILER_SUPPORTS_AVX2)
+        # Manual fallback: try AVX512 first, then AVX2
+        if(COMPILER_SUPPORTS_AVX512F)
+            list(APPEND ARCH_OPTS "-mavx512f")
+            if(COMPILER_SUPPORTS_AVX512DQ)
+                list(APPEND ARCH_OPTS "-mavx512dq")
+            endif()
+        elseif(COMPILER_SUPPORTS_AVX2)
             list(APPEND ARCH_OPTS "-mavx2")
         endif()
         if(COMPILER_SUPPORTS_FMA)
@@ -54,6 +63,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
 
     if(ARCH_OPTS)
         add_compile_options(${ARCH_OPTS})
+        message(STATUS "Enabled SIMD optimizations: ${ARCH_OPTS}")
     endif()
 endif()
 
@@ -63,6 +73,9 @@ set(COMMON_COMPILE_OPTIONS
     -Wall
     -Wextra
     -Wpedantic
+    -funroll-loops          # Loop unrolling helps vectorization
+    -ftree-vectorize        # Enable auto-vectorization
+    -fopt-info-vec-optimized # Report successful vectorizations (optional)
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

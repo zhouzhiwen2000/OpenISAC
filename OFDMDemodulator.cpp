@@ -53,7 +53,36 @@ public:
           }, std::chrono::milliseconds(50)),
           constellation_sender_(10, [this](const auto& data) { 
               constellation_udp_->send_container(data); 
-          }, std::chrono::milliseconds(50)) {
+          }, std::chrono::milliseconds(50)),
+          // Initialize object pools for memory reuse
+          _rx_frame_pool(16, [&cfg]() {
+              RxFrame frame;
+              frame.frame_data.resize(cfg.samples_per_frame());
+              frame.Alignment = 0;
+              return frame;
+          }),
+          _sync_data_pool(8, [&cfg]() {
+              return AlignedVector(cfg.sync_samples());
+          }),
+          _llr_pool(16, [&cfg]() {
+              const size_t data_subcarriers = cfg.fft_size - cfg.pilot_positions.size();
+              const size_t llr_size = (cfg.num_symbols - 1) * data_subcarriers * 2;
+              return AlignedFloatVector(llr_size);
+          }),
+          _sensing_frame_pool(4, [&cfg]() {
+              SensingFrame frame;
+              frame.rx_symbols.resize(cfg.num_symbols);
+              frame.tx_symbols.resize(cfg.num_symbols);
+              for (size_t i = 0; i < cfg.num_symbols; ++i) {
+                  frame.rx_symbols[i].resize(cfg.fft_size);
+                  frame.tx_symbols[i].resize(cfg.fft_size);
+              }
+              frame.CFO = 0.0f;
+              frame.SFO = 0.0f;
+              frame.delay_offset = 0.0f;
+              return frame;
+          }) {
+
         init_usrp();
         init_filter();
         prepare_tx_sync_sequence();
@@ -70,6 +99,14 @@ public:
 
     ~OFDMRxEngine() {
         stop();
+        
+        // Save wisdom before destroying plans
+        std::string wisdom_file = "fftw_wisdom_demod_" + std::to_string(cfg_.fft_size) + ".dat";
+        std::string sensing_wisdom_file = "fftw_wisdom_demod_sensing_" + 
+            std::to_string(cfg_.range_fft_size) + "x" + std::to_string(cfg_.doppler_fft_size) + ".dat";
+        _save_fftw_wisdom(wisdom_file);
+        _save_fftw_wisdom(sensing_wisdom_file);
+        
         fftwf_destroy_plan(fft_plan_);
         fftwf_destroy_plan(ifft_plan_);
         fftwf_destroy_plan(_range_ifft_plan);
@@ -152,7 +189,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread rx_thread_, process_thread_;
 
-    using AlignedAlloc = AlignedAllocator<std::complex<float>, 32>;
+    using AlignedAlloc = AlignedAllocator<std::complex<float>, 64>;
 
     // Various UDP senders
     std::unique_ptr<UdpSender> channel_udp_;
@@ -225,6 +262,13 @@ private:
     double _snr_linear{1.0};             // Es/N0 Linear value
     double _snr_db{0.0};                 // Es/N0 dB
     
+    // Object pools for memory reuse (eliminates per-frame memory allocations)
+    ObjectPool<RxFrame> _rx_frame_pool;           // Pool for RX frame buffers
+    ObjectPool<AlignedVector> _sync_data_pool;    // Pool for sync search data
+    ObjectPool<AlignedFloatVector> _llr_pool;     // Pool for LLR data
+    ObjectPool<SensingFrame> _sensing_frame_pool; // Pool for sensing frames
+    
+
     void init_filter() {
         const std::vector<float> filter_coeffs = {
             0.25f, 0.25f, 0.25f, 0.25f, 0.25f
@@ -291,7 +335,7 @@ private:
         _actual_subcarrier_indices.resize(cfg_.fft_size);
         _subcarrier_phases_unit_delay.resize(cfg_.fft_size);
         const size_t half_fft = static_cast<int>(cfg_.fft_size) / 2;
-        #pragma omp simd
+        #pragma omp simd simdlen(16)
         for (size_t i = 0; i < cfg_.fft_size; ++i) {
             // Calculate actual frequency index of subcarriers (negative to positive)
             // Range: [-fft_size/2, fft_size/2 - 1]
@@ -304,6 +348,12 @@ private:
         // Allocate memory
         _channel_response_buffer.resize(cfg_.range_fft_size * cfg_.doppler_fft_size);
         _mti_filter.resize(cfg_.range_fft_size);
+        
+        // Try to load wisdom for sensing FFT plans
+        std::string sensing_wisdom_file = "fftw_wisdom_demod_sensing_" + 
+            std::to_string(cfg_.range_fft_size) + "x" + std::to_string(cfg_.doppler_fft_size) + ".dat";
+        bool has_sensing_wisdom = _load_fftw_wisdom(sensing_wisdom_file);
+        unsigned sensing_plan_flags = has_sensing_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
         
         const int fft_size_int = static_cast<int>(cfg_.range_fft_size);
         const int doppler_fft_size_int = static_cast<int>(cfg_.doppler_fft_size);
@@ -321,7 +371,7 @@ private:
             1,                         // ostride
             fft_size_int,              // odist
             FFTW_BACKWARD,             // sign (IFFT)
-            FFTW_MEASURE
+            sensing_plan_flags
         );
         
         // Create Doppler FFT plan (for sensing)
@@ -338,21 +388,26 @@ private:
             fft_size_int,              // ostride
             1,                         // odist
             FFTW_FORWARD,              // sign (FFT)
-            FFTW_MEASURE
+            sensing_plan_flags
         );
+        
+        // Save sensing wisdom for future use if we just created it
+        if (!has_sensing_wisdom) {
+            _save_fftw_wisdom(sensing_wisdom_file);
+        }
         
         // Initialize window functions
         _range_window.resize(cfg_.fft_size);
         _doppler_window.resize(cfg_.num_symbols);
         
         // Hanning window - Range dimension
-        #pragma omp simd
+        #pragma omp simd simdlen(16)
         for (size_t i = 0; i < cfg_.fft_size; ++i) {
             _range_window[i] = 0.5f * (1 - std::cos(2 * M_PI * i / (cfg_.fft_size - 1)));
         }
         
         // Hanning window - Doppler dimension
-        #pragma omp simd
+        #pragma omp simd simdlen(16)
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             _doppler_window[i] = 0.5f * (1 - std::cos(2 * M_PI * i / (cfg_.num_symbols - 1)));
         }
@@ -390,6 +445,30 @@ private:
 
     }
 
+    // FFTW wisdom management
+    bool _load_fftw_wisdom(const std::string& wisdom_file) {
+        if (!fs::exists(wisdom_file)) return false;
+        FILE* f = fopen(wisdom_file.c_str(), "r");
+        if (!f) return false;
+        bool success = fftwf_import_wisdom_from_file(f) != 0;
+        fclose(f);
+        if (success) {
+            std::cout << "Loaded FFTW wisdom from: " << wisdom_file << std::endl;
+        }
+        return success;
+    }
+
+    void _save_fftw_wisdom(const std::string& wisdom_file) {
+        FILE* f = fopen(wisdom_file.c_str(), "w");
+        if (!f) {
+            std::cerr << "Failed to save FFTW wisdom to: " << wisdom_file << std::endl;
+            return;
+        }
+        fftwf_export_wisdom_to_file(f);
+        fclose(f);
+        std::cout << "Saved FFTW wisdom to: " << wisdom_file << std::endl;
+    }
+
     void prepare_tx_sync_sequence() {
         // Generate frequency domain ZC sequence (consistent with modulator)
         zc_freq_.resize(cfg_.fft_size);
@@ -401,7 +480,7 @@ private:
         // Pre-compute phase coefficients, use double to avoid precision loss
         const double base = -M_PI * static_cast<double>(q) / static_cast<double>(N);
 
-        #pragma omp simd
+        #pragma omp simd simdlen(16)
         for (int n = 0; n < N; ++n) {
             const double nd = static_cast<double>(n);
             const double arg = nd * (nd + static_cast<double>(delta)); // n*(n+delta)
@@ -431,7 +510,7 @@ private:
         sync_real_.resize(sync_symbol_len);
         sync_imag_.resize(sync_symbol_len);
 
-        #pragma omp simd
+        #pragma omp simd simdlen(16)
         for (size_t i = 0; i < sync_symbol_len; ++i) {
             sync_real_[i] = tx_sync_symbol_[i].real();
             sync_imag_[i] = tx_sync_symbol_[i].imag();
@@ -439,19 +518,32 @@ private:
     }
 
     void prepare_fftw() {
+        // Try to load wisdom from file
+        std::string wisdom_file = "fftw_wisdom_demod_" + std::to_string(cfg_.fft_size) + ".dat";
+        bool has_wisdom = _load_fftw_wisdom(wisdom_file);
+        
+        // If wisdom exists, use FFTW_ESTIMATE for fast planning
+        // Otherwise, use FFTW_MEASURE to create wisdom
+        unsigned plan_flags = has_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
+        
         fft_input_.resize(cfg_.fft_size);
         fft_output_.resize(cfg_.fft_size);
         fft_plan_ = fftwf_plan_dft_1d(cfg_.fft_size,
             reinterpret_cast<fftwf_complex*>(fft_input_.data()),
             reinterpret_cast<fftwf_complex*>(fft_output_.data()),
-            FFTW_FORWARD, FFTW_MEASURE);
+            FFTW_FORWARD, plan_flags);
 
         ifft_input_.resize(cfg_.fft_size);
         ifft_output_.resize(cfg_.fft_size);
         ifft_plan_ = fftwf_plan_dft_1d(cfg_.fft_size,
             reinterpret_cast<fftwf_complex*>(ifft_input_.data()),
             reinterpret_cast<fftwf_complex*>(ifft_output_.data()),
-            FFTW_BACKWARD, FFTW_MEASURE);
+            FFTW_BACKWARD, plan_flags);
+            
+        // Save wisdom for future use if we just created it
+        if (!has_wisdom) {
+            _save_fftw_wisdom(wisdom_file);
+        }
     }
 
     void init_udp() {
@@ -502,7 +594,8 @@ private:
      * Used to find the start of a frame.
      */
     void handle_sync_search(uhd::rx_metadata_t& md) {
-        AlignedVector sync_data(cfg_.sync_samples());
+        // Acquire pre-allocated sync data buffer from pool
+        AlignedVector sync_data = _sync_data_pool.acquire();
         size_t received = 0;
         while (received < cfg_.sync_samples() && running_.load()) {
             received += rx_stream_->recv(&sync_data[received], cfg_.sync_samples() - received, md);
@@ -530,8 +623,8 @@ private:
         while (received < total_read && running_.load()) {
             received += rx_stream_->recv(&temp_buf[received], total_read - received, md);
         }
-        RxFrame frame;
-        frame.frame_data.resize(cfg_.samples_per_frame());
+        // Acquire pre-allocated RX frame from pool
+        RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = discard_samples_;
         if(discard_samples_ > 0)
         {
@@ -563,8 +656,8 @@ private:
      * for processing.
      */
     void handle_normal_rx(uhd::rx_metadata_t& md) {
-        RxFrame frame;
-        frame.frame_data.resize(cfg_.samples_per_frame());
+        // Acquire pre-allocated RX frame from pool
+        RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = 0;
         size_t received = 0;
 
@@ -731,10 +824,14 @@ private:
                     sync_queue_.pop_front();
                 }
                 process_sync_data(sync_data);
+                // Return sync data to pool for reuse
+                _sync_data_pool.release(std::move(sync_data));
             } else {
                 RxFrame frame = wait_for_frame();
                 frame_start = Clock::now();
                 process_ofdm_frame(frame);
+                // Return frame to pool for reuse
+                _rx_frame_pool.release(std::move(frame));
                 frame_end = Clock::now();
                 double frame_time = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
                 total_processing_time += frame_time;
@@ -892,10 +989,13 @@ private:
         auto prof_step_end = prof_step_start;
         // =================================================
         
+        // Acquire sense_frame early to write directly to its members, avoiding later copies
+        SensingFrame sense_frame = _sensing_frame_pool.acquire();
+        sense_frame.rx_symbols.resize(cfg_.num_symbols);
+        sense_frame.tx_symbols.resize(cfg_.num_symbols);
+        
         std::vector<AlignedVector> symbols;
-        std::vector<AlignedVector> rx_symbols_raw;
         symbols.reserve(cfg_.num_symbols-1);
-        rx_symbols_raw.reserve(cfg_.num_symbols);
         // Pre-create pilot boolean mask
         static std::vector<uint8_t> pilot_mask;
         if (pilot_mask.size() != cfg_.fft_size) {
@@ -919,7 +1019,8 @@ private:
             for (size_t j = 0; j < cfg_.fft_size; ++j) {
                 symbol[j] = fft_output_[j] * scale;
             }
-            rx_symbols_raw.push_back(symbol);  // Save raw received symbols for sensing
+            // Write directly to sense_frame.rx_symbols to avoid later copy
+            sense_frame.rx_symbols[i] = symbol;
             
             if (i == cfg_.sync_pos) {
                 sync_symbol_freq = std::move(symbol);
@@ -935,10 +1036,21 @@ private:
         // Calculate initial channel response H_est
         prof_step_start = ProfileClock::now();
         AlignedVector H_est(cfg_.fft_size);
-        #pragma omp simd
+        // Manual complex division for better vectorization: (a+bi)/(c+di)
+        #pragma omp simd simdlen(16)
         for (size_t i = 0; i < cfg_.fft_size; ++i) {
-            H_est[i] = sync_symbol_freq[i] / zc_freq_[i];
+            float rx_real = sync_symbol_freq[i].real();
+            float rx_imag = sync_symbol_freq[i].imag();
+            float tx_real = zc_freq_[i].real();
+            float tx_imag = zc_freq_[i].imag();
+            float denom = tx_real * tx_real + tx_imag * tx_imag;
+            float inv_denom = 1.0f / denom;
+            H_est[i] = std::complex<float>(
+                (rx_real * tx_real + rx_imag * tx_imag) * inv_denom,
+                (rx_imag * tx_real - rx_real * tx_imag) * inv_denom
+            );
         }
+
         prof_step_end = ProfileClock::now();
         prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
@@ -1010,13 +1122,14 @@ private:
             H_inv.resize(cfg_.fft_size);
         }
         
-        #pragma omp simd
+        #pragma omp simd simdlen(16)
         for (size_t j = 0; j < cfg_.fft_size; ++j) {
-            const auto& h = H_est[j];
-            const float mag_sq = std::norm(h);
+            const float h_real = H_est[j].real();
+            const float h_imag = H_est[j].imag();
+            const float mag_sq = h_real * h_real + h_imag * h_imag;
             const float inv_mag_sq = 1.0f / mag_sq;
             // H_inv = conj(H_est) / |H_est|^2 = 1/H_est
-            H_inv[j] = std::complex<float>(h.real() * inv_mag_sq, -h.imag() * inv_mag_sq);
+            H_inv[j] = std::complex<float>(h_real * inv_mag_sq, -h_imag * inv_mag_sq);
         }
         
         for (size_t i = 0; i < symbols.size(); ++i) {
@@ -1029,15 +1142,19 @@ private:
             const float beta_rel = beta * relative_symbol_index;
 
             // Equalization: symbol = symbol * H_inv * exp(-j*phase)
-            // Phase rotation: exp(-j*phase) = cos(phase) - j*sin(phase)
-            #pragma omp simd
+            // Manual complex multiplication for better vectorization
+            #pragma omp simd simdlen(16)
             for (size_t j = 0; j < cfg_.fft_size; ++j) {
                 const float phase = beta_rel * _actual_subcarrier_indices[j] + phase_diff_CFO;
-                // First multiply by H_inv
-                const auto& hinv = H_inv[j];
-                const auto& sym = symbol[j];
-                const float eq_re = sym.real() * hinv.real() - sym.imag() * hinv.imag();
-                const float eq_im = sym.real() * hinv.imag() + sym.imag() * hinv.real();
+                
+                // First multiply by H_inv (complex multiplication)
+                const float hinv_real = H_inv[j].real();
+                const float hinv_imag = H_inv[j].imag();
+                const float sym_real = symbol[j].real();
+                const float sym_imag = symbol[j].imag();
+                const float eq_re = sym_real * hinv_real - sym_imag * hinv_imag;
+                const float eq_im = sym_real * hinv_imag + sym_imag * hinv_real;
+                
                 // Then rotate by -phase (derotate)
                 const float c = std::cos(phase);
                 const float s = std::sin(phase);
@@ -1082,7 +1199,7 @@ private:
 
         // Remodulate frequency domain symbols (as TX frequency domain symbol estimation)
         prof_step_start = ProfileClock::now();
-        std::vector<AlignedVector> tx_symbols_est(cfg_.num_symbols);
+        // Use sense_frame.tx_symbols directly instead of separate tx_symbols_est
         
         // Pre-compute QPSK constellation points
         constexpr float QPSK_POS = static_cast<float>(M_SQRT1_2);
@@ -1091,11 +1208,11 @@ private:
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             if (i == cfg_.sync_pos) {
                 // Sync symbol uses original ZC sequence
-                tx_symbols_est[i] = zc_freq_;
+                sense_frame.tx_symbols[i] = zc_freq_;
             } else {
                 // Data symbol - remodulate based on demodulation results
-                tx_symbols_est[i].resize(cfg_.fft_size);
-                auto* __restrict__ mod_ptr = tx_symbols_est[i].data();
+                sense_frame.tx_symbols[i].resize(cfg_.fft_size);
+                auto* __restrict__ mod_ptr = sense_frame.tx_symbols[i].data();
                 const size_t symbol_idx = (i < cfg_.sync_pos) ? i : i - 1;
                 const auto* __restrict__ sym_ptr = symbols[symbol_idx].data();
                 const auto* __restrict__ zc_ptr = zc_freq_.data();
@@ -1232,11 +1349,8 @@ private:
         prof_step_end = ProfileClock::now();
         prof_timing_sync_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-        // Add sensing data to queue
+        // Add sensing data to queue (sense_frame was already populated directly above)
         prof_step_start = ProfileClock::now();
-        SensingFrame sense_frame;
-        sense_frame.rx_symbols = std::move(rx_symbols_raw);
-        sense_frame.tx_symbols = std::move(tx_symbols_est);
         sense_frame.CFO = alpha;
         if (_sfo_per_frame != 0.0f) {
             sense_frame.SFO = -_sfo_per_frame * (2 * M_PI) / (cfg_.fft_size * cfg_.num_symbols); // Use it if more accurate SFO estimation is available
@@ -1251,8 +1365,11 @@ private:
             std::lock_guard<std::mutex> lock(sensing_mutex_);
             if (!sensing_queue_.full()) {
                 sensing_queue_.push_back(std::move(sense_frame));
+            } else {
+                _sensing_frame_pool.release(std::move(sense_frame));
             }
         }
+
         sensing_cv_.notify_one();
         prof_step_end = ProfileClock::now();
         prof_sensing_queue_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1275,7 +1392,8 @@ private:
         prof_step_start = ProfileClock::now();
         const size_t data_subcarriers_per_symbol = cfg_.fft_size - cfg_.pilot_positions.size();
         const size_t total_llr_count = symbols.size() * data_subcarriers_per_symbol * 2;
-        AlignedFloatVector frame_llr(total_llr_count);
+        // Acquire pre-allocated LLR buffer from pool
+        AlignedFloatVector frame_llr = _llr_pool.acquire();
         float scale_llr = std::min(static_cast<float>(_llr_scale * M_SQRT1_2), 500.0f);
         
         // Build data subcarrier index list (once, cached)
@@ -1297,7 +1415,7 @@ private:
             const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
             float* __restrict__ out_ptr = llr_ptr + sym_idx * num_data_sc * 2;
             
-            #pragma omp simd
+            #pragma omp simd simdlen(16)
             for (size_t i = 0; i < num_data_sc; ++i) {
                 const size_t k = data_indices[i];
                 out_ptr[i * 2]     = sym_ptr[k].real() * scale_llr;
@@ -1400,7 +1518,7 @@ private:
                     auto& rx_symbol = frame.rx_symbols[symbol_idx];
                     int relative_symbol_index = symbol_idx- cfg_.sync_pos;
                     auto phase_diff_CFO = alpha*relative_symbol_index;
-                    #pragma omp simd
+                    #pragma omp simd simdlen(16)
                     for (size_t j = 0; j < rx_symbol.size(); ++j) {
                         auto phase_diff_SFO = beta * _actual_subcarrier_indices[j] * relative_symbol_index;
                         float phase_diff_delay = _subcarrier_phases_unit_delay[j] * delay_offset;
@@ -1409,8 +1527,8 @@ private:
                         rx_symbol[j] = rx_symbol[j] * phase_diff;
                     }
                     // Add current symbol to accumulation buffer
-                    _accumulated_rx_symbols.push_back(std::move(rx_symbol));
-                    _accumulated_tx_symbols.push_back(std::move(frame.tx_symbols[symbol_idx]));
+                    _accumulated_rx_symbols.push_back(rx_symbol);
+                    _accumulated_tx_symbols.push_back(frame.tx_symbols[symbol_idx]);
                     _global_symbol_index += shadow_sensing_symbol_stride;
                     
                     // Check if processing threshold is reached
@@ -1431,9 +1549,11 @@ private:
                 }
                 // Frame processing complete, reset global index (subtract symbols in this frame)
                 _global_symbol_index -= symbols_in_this_frame;
+                _sensing_frame_pool.release(std::move(frame));
             }
         }
     }
+
 
     // Sensing processing function
     void _sensing_process(const SensingFrame& frame) {
@@ -1456,11 +1576,22 @@ private:
             }
             
             // 2. Channel estimation (Frequency domain division)
-            #pragma omp simd
+            // Manual complex division for better vectorization
             for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
+                auto* __restrict__ ch_data = _channel_response_buffer.data() + i * cfg_.range_fft_size;
+                const auto* __restrict__ tx_data = frame.tx_symbols[i].data();
+                #pragma omp simd simdlen(16) aligned(ch_data, tx_data: 64)
                 for (size_t k = 0; k < cfg_.fft_size; ++k) {
-                    size_t idx = i * cfg_.range_fft_size + k;
-                    _channel_response_buffer[idx] /= frame.tx_symbols[i][k];
+                    float rx_real = ch_data[k].real();
+                    float rx_imag = ch_data[k].imag();
+                    float tx_real = tx_data[k].real();
+                    float tx_imag = tx_data[k].imag();
+                    float denom = tx_real * tx_real + tx_imag * tx_imag;
+                    float inv_denom = 1.0f / denom;
+                    ch_data[k] = std::complex<float>(
+                        (rx_real * tx_real + rx_imag * tx_imag) * inv_denom,
+                        (rx_imag * tx_real - rx_real * tx_imag) * inv_denom
+                    );
                 }
             }
 
@@ -1468,10 +1599,12 @@ private:
                 auto* symbol_data = _channel_response_buffer.data() + i * cfg_.range_fft_size;
                 const size_t half_size = cfg_.fft_size / 2;
                 
-                // In-place FFT shift - swap front and back halves
-                #pragma omp simd
+                // In-place FFT shift using temporary variable for vectorization
+                #pragma omp simd simdlen(16) aligned(symbol_data: 64)
                 for (size_t j = 0; j < half_size; ++j) {
-                    std::swap(symbol_data[j], symbol_data[j + half_size]);
+                    std::complex<float> temp = symbol_data[j];
+                    symbol_data[j] = symbol_data[j + half_size];
+                    symbol_data[j + half_size] = temp;
                 }
             }
 
@@ -1483,7 +1616,7 @@ private:
 
                 for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
                     auto* symbol_data = _channel_response_buffer.data() + i * cfg_.range_fft_size;
-                    #pragma omp simd
+                    #pragma omp simd simdlen(16) aligned(symbol_data: 64)
                     for (size_t j = 0; j < cfg_.fft_size; ++j) {
                         // Apply range window (Frequency domain windowing)
                         symbol_data[j] *= _range_window[j];
@@ -1491,7 +1624,7 @@ private:
                 }
 
                 for (size_t bin = 0; bin < cfg_.fft_size; ++bin) {
-                    #pragma omp simd
+                    #pragma omp simd simdlen(16)
                     for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
                         size_t idx = i * cfg_.range_fft_size + bin;
                         // Apply Doppler window (Time domain windowing)
@@ -1666,6 +1799,8 @@ private:
                     }
                     }
             }
+            // Return LLR buffer to pool for reuse
+            _llr_pool.release(std::move(frame_llr));
         }
     }
 };
