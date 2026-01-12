@@ -75,7 +75,7 @@ set(COMMON_COMPILE_OPTIONS
     -Wpedantic
     -funroll-loops          # Loop unrolling helps vectorization
     -ftree-vectorize        # Enable auto-vectorization
-    -fopt-info-vec-optimized # Report successful vectorizations (optional)
+   #-fopt-info-vec-optimized # Report successful vectorizations (optional)
 )
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
