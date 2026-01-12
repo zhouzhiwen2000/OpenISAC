@@ -9,6 +9,7 @@ fi
 # Define paths
 ATOM_CPUS_PATH="/sys/devices/cpu_atom/cpus"
 CORE_CPUS_PATH="/sys/devices/cpu_core/cpus"
+APP_CPUS_CONFIG="/tmp/isolate_cpus_app.conf"
 
 # Get max CPU index (use --all to ignore current affinity limits)
 MAX_CPU=$(($(nproc --all) - 1))
@@ -51,14 +52,14 @@ show_help() {
     echo ""
     echo "Options (for isolation setup):"
     echo "  <number>           Reserve the first N cores for app (e.g., 8)"
-    echo "  <range>            Specify system CPU range directly (e.g., 8-15)"
+    echo "  <range>            Specify app CPU range (e.g., 8-15 means app uses 8-15)"
     echo "  <comma-list>       Specify app CPUs as comma-separated list (e.g., 0,1,2,3)"
     echo ""
     echo "Examples:"
     echo "  sudo $0                    # Use default (first $DEFAULT_RESERVED_COUNT cores for app)"
-    echo "  sudo $0 4                  # Reserve first 4 cores for app"
+    echo "  sudo $0 4                  # Reserve first 4 cores (0-3) for app"
+    echo "  sudo $0 8-15               # Reserve cores 8-15 for app"
     echo "  sudo $0 0,2,4,6            # Reserve cores 0,2,4,6 for app"
-    echo "  sudo $0 8-15               # Restrict system to cores 8-15"
     echo "  sudo $0 reset              # Reset to allow all CPUs for system"
     echo "  sudo $0 run ./my_app       # Run my_app on reserved cores"
     echo ""
@@ -99,6 +100,9 @@ if [ "$1" == "reset" ]; then
     # Reload systemd to pick up the changes
     systemctl daemon-reload
     
+    # Clear saved app CPU config
+    rm -f "$APP_CPUS_CONFIG" 2>/dev/null
+    
     echo "Reset complete. System can now use all CPUs ($ALL_CPUS)."
     echo ""
     echo "Note: You may need to restart your shell or re-login for changes to fully apply."
@@ -108,9 +112,18 @@ fi
 # 2. Run (Run command on reserved cores)
 if [ "$1" == "run" ]; then
     shift # Remove 'run'
-    RUN_CPUS="$DEFAULT_APP_CPUS"
     
-    # If default app cores is empty (e.g. not enough cores), try using detected P-Cores
+    # Priority 1: Read from saved config file
+    if [ -f "$APP_CPUS_CONFIG" ]; then
+        RUN_CPUS=$(cat "$APP_CPUS_CONFIG")
+        echo "Using saved app CPU config: $RUN_CPUS"
+    else
+        # Priority 2: Use default
+        RUN_CPUS="$DEFAULT_APP_CPUS"
+        echo "No saved config found, using default: $RUN_CPUS"
+    fi
+    
+    # Priority 3: If still empty, try using detected P-Cores
     if [ -z "$RUN_CPUS" ] && [ -n "$CORE_CPUS" ]; then
         RUN_CPUS="$CORE_CPUS"
     fi
@@ -185,11 +198,48 @@ if [ -n "$1" ]; then
         # Convert system CPUs array to comma-separated string
         ISOLATION_TARGET=$(IFS=','; echo "${SYSTEM_CPUS[*]}")
         FREE_CPUS="$APP_CPU_LIST"
+    elif [[ "$1" =~ ^[0-9]+-[0-9]+$ ]]; then
+        # Range specification for app CPUs (e.g., "8-15" means app uses 8-15)
+        APP_CPU_RANGE="$1"
+        echo "Manually specified app CPU range: $APP_CPU_RANGE"
+        
+        # Parse range
+        RANGE_START=$(echo "$APP_CPU_RANGE" | cut -d'-' -f1)
+        RANGE_END=$(echo "$APP_CPU_RANGE" | cut -d'-' -f2)
+        
+        # Boundary check
+        if [ "$RANGE_END" -gt "$MAX_CPU" ]; then
+            RANGE_END=$MAX_CPU
+            echo "Warning: Range end exceeds max CPU, adjusted to $RANGE_END"
+        fi
+        
+        # Build set of app CPUs
+        declare -A APP_CPU_SET
+        for ((i=RANGE_START; i<=RANGE_END; i++)); do
+            APP_CPU_SET[$i]=1
+        done
+        
+        # Calculate complement (system CPUs)
+        SYSTEM_CPUS=()
+        for ((i=0; i<=MAX_CPU; i++)); do
+            if [ -z "${APP_CPU_SET[$i]}" ]; then
+                SYSTEM_CPUS+=($i)
+            fi
+        done
+        
+        if [ ${#SYSTEM_CPUS[@]} -eq 0 ]; then
+            echo "Error: No CPUs left for system after reserving $APP_CPU_RANGE"
+            exit 1
+        fi
+        
+        # Convert system CPUs array to comma-separated string
+        ISOLATION_TARGET=$(IFS=','; echo "${SYSTEM_CPUS[*]}")
+        FREE_CPUS="$APP_CPU_RANGE"
     else
-        # Otherwise treat as direct system core range specification
-        ISOLATION_TARGET="$1"
-        echo "Manually specified system CPU range: $ISOLATION_TARGET"
-        FREE_CPUS="[CPUs not in $ISOLATION_TARGET]"
+        # Unknown format
+        echo "Error: Unrecognized format '$1'"
+        echo "Use: <number>, <start>-<end>, or <cpu1>,<cpu2>,..."
+        exit 1
     fi
 else
     # Use default policy
@@ -214,6 +264,12 @@ echo "------------------------------------------------"
 systemctl set-property --now system.slice AllowedCPUs=$ISOLATION_TARGET
 systemctl set-property --now user.slice   AllowedCPUs=$ISOLATION_TARGET
 systemctl set-property --now init.scope   AllowedCPUs=$ISOLATION_TARGET
+
+# Save app CPU config for 'run' command
+if [ "$FREE_CPUS" != "None" ] && [[ ! "$FREE_CPUS" =~ ^\[.*\]$ ]]; then
+    echo "$FREE_CPUS" > "$APP_CPUS_CONFIG"
+    echo "Saved app CPU config to $APP_CPUS_CONFIG"
+fi
 
 echo "Setup successful!"
 echo "Since the current Shell is also restricted to system cores, you cannot use taskset directly."
