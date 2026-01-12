@@ -307,6 +307,20 @@ sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <p>It is recommended to use a <code>conda</code> or <code>venv</code> environment with <strong>Python
                     3.13</strong>.</p>
 
+            <p><strong>Miniconda Installation Guide:</strong></p>
+            <ul>
+                <li><strong>Windows:</strong> <a
+                        href="https://www.anaconda.com/docs/getting-started/miniconda/install#windows-powershell"
+                        target="_blank">Miniconda Installation for Windows</a></li>
+                <li><strong>Linux:</strong> <a
+                        href="https://www.anaconda.com/docs/getting-started/miniconda/install#linux-2"
+                        target="_blank">Miniconda Installation for Linux</a></li>
+            </ul>
+
+            <p><strong>Create a new conda environment:</strong></p>
+            <pre><code class="language-bash">conda create -n OpenISAC python=3.13
+conda activate OpenISAC</code></pre>
+
             <h4>Install Dependencies</h4>
             <pre><code class="language-bash">pip install -r requirements.txt</code></pre>
 
@@ -348,8 +362,8 @@ sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]</code></pre>
 
             <h5>4. Usage Notes</h5>
-            <p>The OpenISAC frontend automatically detects available GPU backends. The priority order is: CUDA (Nvidia
-                GPU) → Intel iGPU (dpnp) → CPU (fallback). No code modifications are required; the system will
+            <p>The OpenISAC frontend automatically detects available GPU backends. The priority order is: Nvidia
+                GPU (CUDA) → Intel iGPU (dpnp) → CPU (fallback). No code modifications are required; the system will
                 automatically select the best available backend.</p>
         </section>
 

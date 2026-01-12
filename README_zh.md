@@ -308,7 +308,7 @@ python -c "import dpctl; print(dpctl.get_devices())"
 ##### 4. 使用说明
 
 OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：
-1. CUDA (Nvidia GPU)
+1. Nvidia GPU (CUDA)
 2. Intel iGPU (dpnp)
 3. CPU (回退选项)
 

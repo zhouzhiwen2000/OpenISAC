@@ -311,7 +311,7 @@ If the installation is successful, you should see output similar to:
 ##### 4. Usage Notes
 
 The OpenISAC frontend automatically detects available GPU backends. The priority order is:
-1. CUDA (Nvidia GPU)
+1. Nvidia GPU (CUDA)
 2. Intel iGPU (dpnp)
 3. CPU (fallback)
 

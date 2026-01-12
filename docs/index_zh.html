@@ -343,7 +343,7 @@ conda activate OpenISAC</code></pre>
             <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]</code></pre>
 
             <h5>4. 使用说明</h5>
-            <p>OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：CUDA (Nvidia GPU) → Intel iGPU (dpnp) → CPU
+            <p>OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：Nvidia GPU (CUDA) → Intel iGPU (dpnp) → CPU
                 (回退选项)。无需修改代码，系统会自动选择最佳可用后端。</p>
         </section>
 
