@@ -508,7 +508,7 @@ private:
     }
 
     void send_data_with_original_format(const AlignedVector& data) {
-        const size_t chunk_size = 1472; // Adjusted for macOS MTU (1500 - 28) 
+        const size_t chunk_size = 60000;
         size_t total_chunks = (data.size() * sizeof(std::complex<float>) + chunk_size - 1) / chunk_size;
         // Packet Header: [Frame ID | Total Chunks | Current Chunk Index]
         static uint32_t frame_id = 0;
