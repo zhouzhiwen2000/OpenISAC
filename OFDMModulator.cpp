@@ -64,10 +64,10 @@ public:
         _sensing_sender(cfg.mono_sensing_ip, cfg.mono_sensing_port, cfg.fft_size * cfg.num_symbols),
         _control_handler(9999),  // Initialize control handler
         // Initialize object pools for memory reuse
-        _frame_pool(16, [&cfg]() {
+        _frame_pool(32, [&cfg]() {
             return AlignedVector(cfg.samples_per_frame());
         }),
-        _symbols_pool(16, [&cfg]() {
+        _symbols_pool(32, [&cfg]() {
             SymbolVector sv;
             sv.resize(cfg.num_symbols);
             for (size_t i = 0; i < cfg.num_symbols; ++i) {
@@ -75,10 +75,10 @@ public:
             }
             return sv;
         }),
-        _rx_frame_pool(16, [&cfg]() {
+        _rx_frame_pool(32, [&cfg]() {
             return AlignedVector(cfg.samples_per_frame());
         }),
-        _data_packet_pool(32, []() {
+        _data_packet_pool(64, []() {
             return AlignedIntVector();
         })
     {

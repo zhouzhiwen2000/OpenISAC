@@ -55,21 +55,21 @@ public:
               constellation_udp_->send_container(data); 
           }, std::chrono::milliseconds(50)),
           // Initialize object pools for memory reuse
-          _rx_frame_pool(16, [&cfg]() {
+          _rx_frame_pool(32, [&cfg]() {
               RxFrame frame;
               frame.frame_data.resize(cfg.samples_per_frame());
               frame.Alignment = 0;
               return frame;
           }),
-          _sync_data_pool(8, [&cfg]() {
+          _sync_data_pool(32, [&cfg]() {
               return AlignedVector(cfg.sync_samples());
           }),
-          _llr_pool(16, [&cfg]() {
+          _llr_pool(32, [&cfg]() {
               const size_t data_subcarriers = cfg.fft_size - cfg.pilot_positions.size();
               const size_t llr_size = (cfg.num_symbols - 1) * data_subcarriers * 2;
               return AlignedFloatVector(llr_size);
           }),
-          _sensing_frame_pool(4, [&cfg]() {
+          _sensing_frame_pool(32, [&cfg]() {
               SensingFrame frame;
               frame.rx_symbols.resize(cfg.num_symbols);
               frame.tx_symbols.resize(cfg.num_symbols);
