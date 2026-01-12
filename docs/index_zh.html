@@ -303,6 +303,34 @@ sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <h4>启用 GPU 加速 (可选)</h4>
             <p>如果有 Nvidia GPU，请安装 <code>cupy-cuda12x</code>：</p>
             <pre><code class="language-bash">pip install cupy-cuda12x</code></pre>
+
+            <h4>启用 Intel 集成显卡加速 (可选)</h4>
+            <p>如果您的设备配备 Intel 集成显卡（如 Intel UHD Graphics、Intel Iris Xe 等），可以通过 <code>dpctl</code> 和 <code>dpnp</code> 启用
+                GPU 加速。这对于没有 Nvidia 独立显卡的笔记本电脑和台式机特别有用。</p>
+
+            <h5>1. 安装 Intel 显卡官方驱动</h5>
+            <p>首先确保您的系统已安装最新的 Intel 显卡驱动：</p>
+            <ul>
+                <li><strong>Windows:</strong> 从 <a
+                        href="https://www.intel.com/content/www/us/en/download-center/home.html" target="_blank">Intel
+                        官方下载中心</a> 下载并安装最新驱动</li>
+                <li><strong>Ubuntu:</strong> 安装 Intel compute-runtime:
+                    <pre><code class="language-bash">sudo apt install intel-opencl-icd libze-intel-gpu1 libze1 intel-media-va-driver-non-free</code></pre>
+                </li>
+            </ul>
+
+            <h5>2. 安装 Python 依赖</h5>
+            <pre><code class="language-bash">pip install dpctl dpnp</code></pre>
+
+            <h5>3. 验证安装</h5>
+            <p>运行以下命令检查 Intel GPU 是否被正确识别：</p>
+            <pre><code class="language-bash">python -c "import dpctl; print(dpctl.get_devices())"</code></pre>
+            <p>如果安装成功，您应该能看到类似以下的输出：</p>
+            <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]</code></pre>
+
+            <h5>4. 使用说明</h5>
+            <p>OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：CUDA (Nvidia GPU) → Intel iGPU (dpnp) → CPU
+                (回退选项)。无需修改代码，系统会自动选择最佳可用后端。</p>
         </section>
 
         <section id="typical-usage">

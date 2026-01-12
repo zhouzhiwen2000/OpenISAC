@@ -1,23 +1,90 @@
 import numpy as np
-# Try to import CuPy; fall back to CPU if unavailable or no CUDA device
-USE_GPU = False
-cp = None
-try:
-    import cupy as cp  # type: ignore
-    try:
-        _gpu_count = cp.cuda.runtime.getDeviceCount()
-        if _gpu_count > 0:
-            USE_GPU = True
-            print(f"Backend: Using GPU via CuPy (devices: {_gpu_count})")
-        else:
-            print("Backend: CuPy found but no CUDA device detected; using CPU (NumPy)")
-    except Exception as _e:
-        print(f"Backend: CuPy available but CUDA init failed: {_e}; using CPU (NumPy)")
-        USE_GPU = False
-except Exception:
-    print("Backend: CuPy not available; using CPU (NumPy)")
 
-# Try to import Numba for CPU acceleration
+# ====== Backend Detection ======
+# Priority: NVIDIA GPU (CuPy) > Intel GPU (dpnp) > CPU with Numba > Pure NumPy
+
+USE_NVIDIA_GPU = False
+USE_INTEL_GPU = False
+cp = None  # CuPy or dpnp array module
+xp = np    # Active array module (defaults to NumPy)
+
+# 1. Try NVIDIA GPU via CuPy
+try:
+    import cupy as _cp  # type: ignore
+    try:
+        _gpu_count = _cp.cuda.runtime.getDeviceCount()
+        if _gpu_count > 0:
+            USE_NVIDIA_GPU = True
+            cp = _cp
+            xp = _cp
+            print(f"Backend: Using NVIDIA GPU via CuPy (devices: {_gpu_count})")
+    except Exception as _e:
+        print(f"Backend: CuPy available but CUDA init failed: {_e}")
+except ImportError:
+    pass
+
+# 2. Try Intel GPU via dpnp (oneAPI) - with timeout protection
+if not USE_NVIDIA_GPU:
+    def _try_intel_gpu():
+        """Attempt Intel GPU initialization with timeout protection."""
+        global USE_INTEL_GPU, cp, xp
+        try:
+            import dpnp as _dpnp  # type: ignore
+            import dpctl  # type: ignore
+            
+            # Check for Intel GPU devices
+            try:
+                # Try newer dpctl API first
+                _intel_devices = [d for d in dpctl.get_devices() if d.is_gpu]
+            except:
+                # Fallback for older dpctl
+                _intel_devices = []
+            
+            if _intel_devices:
+                _intel_gpu = _intel_devices[0]
+                # Create a queue for the GPU device - this is how dpnp knows which device to use
+                try:
+                    # dpctl >= 0.14 style
+                    _queue = dpctl.SyclQueue(_intel_gpu)
+                    # dpnp will use this queue when we pass device argument
+                except:
+                    pass  # dpnp may still work with default device
+                return _dpnp, _intel_gpu.name
+            else:
+                print("Backend: dpnp available but no Intel GPU detected")
+                return None, None
+        except ImportError:
+            print("Backend: dpnp not available (install with: pip install dpnp dpctl)")
+            return None, None
+        except Exception as _e:
+            print(f"Backend: dpnp init failed: {_e}")
+            return None, None
+    
+    # Run with timeout to prevent freezing
+    import threading
+    _intel_result = [None, None]
+    def _intel_init_thread():
+        _intel_result[0], _intel_result[1] = _try_intel_gpu()
+    
+    _init_thread = threading.Thread(target=_intel_init_thread, daemon=True)
+    _init_thread.start()
+    _init_thread.join(timeout=5.0)  # 5 second timeout
+    
+    if _init_thread.is_alive():
+        print("Backend: Intel GPU detection timed out (driver issue?); using CPU")
+    elif _intel_result[0] is not None:
+        USE_INTEL_GPU = True
+        cp = _intel_result[0]
+        xp = _intel_result[0]
+        print(f"Backend: Using Intel GPU via dpnp ({_intel_result[1]})")
+
+# Combined GPU flag for code paths
+USE_GPU = USE_NVIDIA_GPU or USE_INTEL_GPU
+
+if not USE_GPU:
+    print("Backend: No GPU acceleration available; using CPU")
+
+# 3. Try Numba for CPU acceleration (used when no GPU)
 HAVE_NUMBA = False
 try:
     from numba import njit, prange
@@ -25,6 +92,17 @@ try:
     print("Backend: Numba available for CPU acceleration")
 except ImportError:
     print("Backend: Numba not available")
+
+# Helper function to convert GPU arrays to NumPy (works with CuPy and dpnp)
+def to_numpy(arr):
+    """Convert array to NumPy, handling both CuPy and dpnp arrays."""
+    if hasattr(arr, 'get'):  # CuPy style
+        return arr.get()
+    elif hasattr(arr, 'asnumpy'):  # dpnp style (also works for CuPy)
+        return arr.asnumpy()
+    elif hasattr(arr, '__array__'):
+        return np.asarray(arr)
+    return arr
 import socket
 import struct
 import matplotlib.pyplot as plt
@@ -408,7 +486,7 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
         else:
              range_time_view = range_time
 
-        range_time_cpu = cp.asnumpy(range_time_view)
+        range_time_cpu = to_numpy(range_time_view)
 
         # 2. Doppler dimension processing (GPU on reduced data)
         range_time_gpu = cp.array(range_time_cpu, dtype=cp.complex64)
@@ -422,14 +500,16 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
         
         doppler_fft = cp.fft.fft(padded_doppler, axis=0)
         doppler_shifted = cp.fft.fftshift(doppler_fft, axes=0)
-        magnitude = cp.abs(doppler_shifted) / cp.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        # Use np.sqrt for scalar to ensure dpnp compatibility
+        norm_factor = np.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        magnitude = cp.abs(doppler_shifted) / norm_factor
         magnitude_db = 20 * cp.log10(magnitude + 1e-12)
 
         # Store complex range-time spectrum (CPU) - using the cropped view
         with range_time_lock:
             range_time_data = range_time_cpu
 
-        return cp.asnumpy(magnitude_db)
+        return to_numpy(magnitude_db)
 
     elif HAVE_NUMBA:
         # Optimized CPU path with Numba
@@ -1036,7 +1116,7 @@ def update(frame_num):
         latest_result = None
         
         # Retrieve all available results, keep the latest one (Skip frames if drawing is slow)
-        while not display_queue.empty():
+        if not display_queue.empty():
             latest_result = display_queue.get()
             updated = True
         

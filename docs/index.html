@@ -321,6 +321,36 @@ sudo ../isolate_cpus.bash run ./OFDMModulator</code></pre>
             <h4>Enable GPU Acceleration (Optional)</h4>
             <p>If an Nvidia GPU is available, install <code>cupy-cuda12x</code> to enable GPU acceleration:</p>
             <pre><code class="language-bash">pip install cupy-cuda12x</code></pre>
+
+            <h4>Enable Intel Integrated GPU Acceleration (Optional)</h4>
+            <p>If your device has an Intel integrated GPU (e.g., Intel UHD Graphics, Intel Iris Xe, etc.), you can
+                enable GPU acceleration via <code>dpctl</code> and <code>dpnp</code>. This is especially useful for
+                laptops and desktops without a dedicated Nvidia GPU.</p>
+
+            <h5>1. Install Intel GPU Official Driver</h5>
+            <p>First, ensure your system has the latest Intel GPU driver installed:</p>
+            <ul>
+                <li><strong>Windows:</strong> Download and install the latest driver from <a
+                        href="https://www.intel.com/content/www/us/en/download-center/home.html" target="_blank">Intel
+                        Download Center</a></li>
+                <li><strong>Ubuntu:</strong> Install Intel compute-runtime:
+                    <pre><code class="language-bash">sudo apt install intel-opencl-icd libze-intel-gpu1 libze1 intel-media-va-driver-non-free</code></pre>
+                </li>
+            </ul>
+
+            <h5>2. Install Python Dependencies</h5>
+            <pre><code class="language-bash">pip install dpctl dpnp</code></pre>
+
+            <h5>3. Verify Installation</h5>
+            <p>Run the following command to check if the Intel GPU is correctly recognized:</p>
+            <pre><code class="language-bash">python -c "import dpctl; print(dpctl.get_devices())"</code></pre>
+            <p>If the installation is successful, you should see output similar to:</p>
+            <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]</code></pre>
+
+            <h5>4. Usage Notes</h5>
+            <p>The OpenISAC frontend automatically detects available GPU backends. The priority order is: CUDA (Nvidia
+                GPU) → Intel iGPU (dpnp) → CPU (fallback). No code modifications are required; the system will
+                automatically select the best available backend.</p>
         </section>
 
         <section id="usage">

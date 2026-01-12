@@ -263,6 +263,47 @@ pip install -r requirements.txt
 pip install cupy-cuda12x
 ```
 
+#### 启用 Intel 集成显卡加速 (可选)
+
+如果您的设备配备 Intel 集成显卡（如 Intel UHD Graphics、Intel Iris Xe 等），可以通过 `dpctl` 和 `dpnp` 启用 GPU 加速。这对于没有 Nvidia 独立显卡的笔记本电脑和台式机特别有用。
+
+##### 1. 安装 Intel 显卡官方驱动
+
+首先确保您的系统已安装最新的 Intel 显卡驱动：
+*   **Windows:** 从 Intel 官方下载中心下载并安装最新驱动: [https://www.intel.com/content/www/us/en/download-center/home.html](https://www.intel.com/content/www/us/en/download-center/home.html)
+*   **Ubuntu:** 安装 Intel compute-runtime:
+    ```bash
+    sudo apt install intel-opencl-icd libze-intel-gpu1 libze1 intel-media-va-driver-non-free
+    ```
+
+##### 2. 安装 Python 依赖
+
+```bash
+pip install dpctl dpnp
+```
+
+##### 3. 验证安装
+
+运行以下命令检查 Intel GPU 是否被正确识别：
+
+```bash
+python -c "import dpctl; print(dpctl.get_devices())"
+```
+
+如果安装成功，您应该能看到类似以下的输出：
+```
+[<dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...>]
+```
+
+##### 4. 使用说明
+
+OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：
+1. CUDA (Nvidia GPU)
+2. Intel iGPU (dpnp)
+3. CPU (回退选项)
+
+无需修改代码，系统会自动选择最佳可用后端。
+
 ## 典型使用示例
 
 ### 1. 启动 BS (基站)

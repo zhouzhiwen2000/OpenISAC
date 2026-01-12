@@ -266,6 +266,47 @@ If an Nvidia GPU is available, install `cupy-cuda12x` to enable GPU acceleration
 pip install cupy-cuda12x
 ```
 
+#### Enable Intel Integrated GPU Acceleration (Optional)
+
+If your device has an Intel integrated GPU (e.g., Intel UHD Graphics, Intel Iris Xe, etc.), you can enable GPU acceleration via `dpctl` and `dpnp`. This is especially useful for laptops and desktops without a dedicated Nvidia GPU.
+
+##### 1. Install Intel GPU Official Driver
+
+First, ensure your system has the latest Intel GPU driver installed:
+*   **Windows:** Download and install the latest driver from Intel Download Center: [https://www.intel.com/content/www/us/en/download-center/home.html](https://www.intel.com/content/www/us/en/download-center/home.html)
+*   **Ubuntu:** Install Intel compute-runtime:
+    ```bash
+    sudo apt install intel-opencl-icd libze-intel-gpu1 libze1 intel-media-va-driver-non-free
+    ```
+
+##### 2. Install Python Dependencies
+
+```bash
+pip install dpctl dpnp
+```
+
+##### 3. Verify Installation
+
+Run the following command to check if the Intel GPU is correctly recognized:
+
+```bash
+python -c "import dpctl; print(dpctl.get_devices())"
+```
+
+If the installation is successful, you should see output similar to:
+```
+[<dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...>]
+```
+
+##### 4. Usage Notes
+
+The OpenISAC frontend automatically detects available GPU backends. The priority order is:
+1. CUDA (Nvidia GPU)
+2. Intel iGPU (dpnp)
+3. CPU (fallback)
+
+No code modifications are required; the system will automatically select the best available backend.
+
 ## Typical Usage Example
 
 ### 1. Startup of the BS
