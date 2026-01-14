@@ -149,3 +149,38 @@ target_compile_options(OFDMDemodulator PRIVATE
 install(TARGETS OFDMModulator OFDMDemodulator
     RUNTIME DESTINATION bin
 )
+
+#===========================================================
+# Benchmark Executable
+#===========================================================
+add_executable(benchmark_cores
+    benchmark_cores.cpp
+)
+
+target_include_directories(benchmark_cores PRIVATE
+    ${UHD_INCLUDE_DIRS}
+    ${Boost_INCLUDE_DIRS}
+    ${FFTW3f_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(benchmark_cores PRIVATE
+    ${UHD_LIBRARIES}
+    Boost::system
+    ${FFTW3f_LIBRARIES}
+    Threads::Threads
+    OpenMP::OpenMP_CXX
+    ${Boost_LIBRARIES}
+    aff3ct::aff3ct-shared-lib
+    ${YAMLCPP_LIBRARIES}
+)
+
+target_compile_options(benchmark_cores PRIVATE
+    ${COMMON_COMPILE_OPTIONS}
+    -ffast-math
+)
+
+# Update existing targets to include the new include directory
+target_include_directories(OFDMModulator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(OFDMDemodulator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

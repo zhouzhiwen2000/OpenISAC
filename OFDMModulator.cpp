@@ -19,7 +19,11 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <unistd.h>
 #include <Common.hpp>
+#include <OFDMModulatorCore.hpp>
+#include <SensingCore.hpp>
+
 #include <functional>
 #include <unordered_map>
 #include <boost/program_options.hpp>
@@ -54,11 +58,6 @@ public:
         _data_packet_buffer(32),                // Initialize data packet buffer
         _accumulated_rx_symbols(),
         _accumulated_tx_symbols(),
-        _fft_in(cfg.fft_size),               
-        _fft_out(cfg.fft_size),
-        _demod_fft_in(cfg.fft_size),
-        _demod_fft_out(cfg.fft_size),
-        _channel_response_buffer(cfg.range_fft_size * cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f)),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         tx_data_file("tx_frame.bin", std::ios::binary),
         _sensing_sender(cfg.mono_sensing_ip, cfg.mono_sensing_port, cfg.fft_size * cfg.num_symbols),
@@ -83,18 +82,12 @@ public:
         })
     {
 
-        // Initialize FFTW resources
-        _init_fftw();
-        
-        // Prepare ZC sequence
-        _prepare_zc_sequence();
-        
         // Initialize USRP
         _init_usrp();
         
-        // Pre-calculate symbol positions
-        _precalc_positions();
-        
+        // Initialize Cores
+        _init_cores();
+
         // Pre-generate data
         size_t total_data_samples = (cfg.num_symbols - 1) * (cfg.fft_size- cfg.pilot_positions.size());
         _pregen_data.resize(total_data_samples);
@@ -186,30 +179,15 @@ private:
     std::condition_variable _buffer_not_empty;                
     std::condition_variable _symbols_not_empty;               
     std::condition_variable _symbols_not_full;                
-    std::condition_variable _rx_not_empty;                    
+    std::condition_variable _rx_not_empty;                  // Core Processing Engines
+    std::unique_ptr<Core::OFDMModulatorCore> _modulator_core;
+    std::unique_ptr<Core::SensingCore> _sensing_core;
     std::condition_variable _rx_not_full;                     
     std::condition_variable _data_not_empty;              // Data packet buffer condition variable (not empty)
     std::condition_variable _data_not_full;               // Data packet buffer condition variable (not full)
     
-    // FFTW resources
-    AlignedVector _fft_in;               // IFFT input
-    AlignedVector _fft_out;              // IFFT output
-    fftwf_plan _ifft_plan;               // IFFT plan
-    
-    AlignedVector _demod_fft_in;         // Range FFT input
-    AlignedVector _demod_fft_out;        // Range FFT output
-    AlignedVector _channel_response_buffer;  // Channel response buffer
-    fftwf_plan _demod_fft_plan = nullptr; // Demodulation FFT plan
-    fftwf_plan _range_ifft_plan = nullptr;   // Batch Range IFFT plan
-    fftwf_plan _doppler_fft_plan = nullptr;   // Doppler FFT plan
-    
-    // ZC序列
-    AlignedVector _zc_seq;               
     const AlignedVector _blank_frame;
 
-    // Pre-calculated symbol positions
-    std::vector<size_t> _symbol_positions; 
-    
     // Thread control
     std::atomic<bool> _running{false};
     std::thread _mod_thread;             // Modulation thread
@@ -240,18 +218,12 @@ private:
     size_t shadow_sensing_symbol_stride=20; // Shadow sensing symbol stride
     size_t sensing_symbol_count=0;
     size_t sensing_symbol_saved_count=0;
-    // Hamming windows
-    AlignedVector _range_window;    // Range processing window (Frequency domain)
-    AlignedVector _doppler_window;  // Doppler processing window (Time domain)
-    size_t _global_symbol_index = 0; // Global symbol index (for sensing processing)
+    // Global symbol index (for sensing processing)
+    size_t _global_symbol_index = 0; 
     
     // LDPC encoding and scrambling
     LDPCCodec _ldpc{LDPCCodec::LDPCConfig()};
     Scrambler scrambler{201600, 0x5A};
-    
-    // MTI Filter
-    MTIFilter _mti_filter;
-
     
     // UDP socket
     int _udp_sock{-1};
@@ -290,8 +262,9 @@ private:
 
         // Register MTI control command
         _control_handler.register_command("MTI ", [this](int32_t value) {
-            enable_mti.store(value != 0);
-            std::cout << "Received MTI command: " << (value ? "Enable" : "Disable") << std::endl;
+             enable_mti.store(value != 0);
+             if(_sensing_core) _sensing_core->toggle_mti(value != 0);
+             std::cout << "Received MTI command: " << (value ? "Enable" : "Disable") << std::endl;
         });
     }
 
@@ -312,7 +285,6 @@ private:
         _usrp->set_tx_bandwidth(_cfg.bandwidth, _cfg.tx_channel);
         _usrp->set_rx_bandwidth(_cfg.bandwidth, _cfg.rx_channel);
         _usrp->set_clock_source(_cfg.clocksource);
-        _discard_samples.store(_cfg.system_delay);
         // Configure TX stream
         uhd::stream_args_t tx_stream_args("fc32", _cfg.wire_format_tx);
         tx_stream_args.args["block_id"] = "radio";
@@ -330,148 +302,6 @@ private:
         _start_time = uhd::time_spec_t(1.0); // Start after 1 second
     }
 
-    void _init_fftw() {
-        // fftwf_plan_with_nthreads(static_cast<int>(_cfg.fft_threads));
-        
-        // Try to load wisdom from file
-        std::string wisdom_file = "fftw_wisdom_" + std::to_string(_cfg.fft_size) + ".dat";
-        bool has_wisdom = _load_fftw_wisdom(wisdom_file);
-        
-        // If wisdom exists, use FFTW_ESTIMATE for fast planning
-        // Otherwise, use FFTW_MEASURE to create wisdom
-        unsigned plan_flags = has_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
-        
-        // Create IFFT plan (for transmission)
-        _ifft_plan = fftwf_plan_dft_1d(
-            static_cast<int>(_cfg.fft_size),
-            reinterpret_cast<fftwf_complex*>(_fft_in.data()),
-            reinterpret_cast<fftwf_complex*>(_fft_out.data()),
-            FFTW_BACKWARD,
-            plan_flags
-        );
-        
-        // Create demodulation FFT plan (for sensing)
-        _demod_fft_plan = fftwf_plan_dft_1d(
-            static_cast<int>(_cfg.fft_size),
-            reinterpret_cast<fftwf_complex*>(_demod_fft_in.data()),
-            reinterpret_cast<fftwf_complex*>(_demod_fft_out.data()),
-            FFTW_FORWARD,
-            plan_flags
-        );
-        
-        // Create batch Range IFFT plan (for sensing)
-        _channel_response_buffer.resize(_cfg.range_fft_size * _cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f));
-        
-        // Convert size_t to int
-        const int fft_size_int = static_cast<int>(_cfg.range_fft_size);
-        const int doppler_fft_size_int = static_cast<int>(_cfg.doppler_fft_size);
-        
-        _range_ifft_plan = fftwf_plan_many_dft(
-            1,                         // rank
-            &fft_size_int,             // n (FFT size)
-            doppler_fft_size_int,           // howmany (number of symbols)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // inembed (contiguous)
-            1,                         // istride
-            fft_size_int,              // idist (distance between FFTs)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // onembed
-            1,                         // ostride
-            fft_size_int,              // odist
-            FFTW_BACKWARD,             // sign (IFFT)
-            plan_flags
-        );
-        
-        // Create Doppler FFT plan (for sensing)
-        _doppler_fft_plan = fftwf_plan_many_dft(
-            1,                         // rank
-            &doppler_fft_size_int,          // n (number of symbols)
-            fft_size_int,              // howmany (number of subcarriers)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // inembed
-            fft_size_int,              // istride (stride between symbols)
-            1,                         // idist (distance between subcarriers)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // onembed
-            fft_size_int,              // ostride
-            1,                         // odist
-            FFTW_FORWARD,              // sign (FFT)
-            plan_flags
-        );
-        
-        // Save wisdom for future use if we just created it
-        if (!has_wisdom) {
-            _save_fftw_wisdom(wisdom_file);
-        }
-    }
-
-    // FFTW wisdom management
-    bool _load_fftw_wisdom(const std::string& wisdom_file) {
-        if (!fs::exists(wisdom_file)) return false;
-        FILE* f = fopen(wisdom_file.c_str(), "r");
-        if (!f) return false;
-        bool success = fftwf_import_wisdom_from_file(f) != 0;
-        fclose(f);
-        if (success) {
-            std::cout << "Loaded FFTW wisdom from: " << wisdom_file << std::endl;
-        }
-        return success;
-    }
-
-    void _save_fftw_wisdom(const std::string& wisdom_file) {
-        FILE* f = fopen(wisdom_file.c_str(), "w");
-        if (!f) {
-            std::cerr << "Failed to save FFTW wisdom to: " << wisdom_file << std::endl;
-            return;
-        }
-        fftwf_export_wisdom_to_file(f);
-        fclose(f);
-        std::cout << "Saved FFTW wisdom to: " << wisdom_file << std::endl;
-    }
-
-    // Initialize Hamming windows
-    void _init_hamming_windows() {
-        // Range processing window (frequency domain, applied to each subcarrier)
-        _range_window.resize(_cfg.fft_size);
-        for (size_t i = 0; i < _cfg.fft_size; ++i) {
-            // Hamming window formula: w(n) = 0.54 - 0.46*cos(2πn/(N-1))
-            _range_window[i] = 0.54f - 0.46f * std::cos(2.0f * M_PI * i / (_cfg.fft_size - 1));
-        }
-        
-        // Doppler processing window (Time domain, applied to each symbol)
-        _doppler_window.resize(_cfg.sensing_symbol_num);
-        for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-            _doppler_window[i] = 0.54f - 0.46f * std::cos(2.0f * M_PI * i / (_cfg.sensing_symbol_num - 1));
-        }
-    }
-
-    void _prepare_zc_sequence() {
-        _zc_seq.resize(_cfg.fft_size);
-
-        const int N = _cfg.fft_size;
-        const int q = _cfg.zc_root;
-
-        // delta: even N -> 0, odd N -> 1
-        const int delta = (N & 1);
-
-        // Pre-calculate constant coefficients, use double for more stable phase calculation
-        const double base = -M_PI * static_cast<double>(q) / static_cast<double>(N);
-
-        #pragma omp simd
-        for (int n = 0; n < N; ++n) {
-            const double nd  = static_cast<double>(n);
-            const double arg = nd * (nd + static_cast<double>(delta)); // n*(n+delta)
-            const double phase = base * arg;                           // -π*q/N * n*(n+δ)
-            _zc_seq[n] = std::polar(1.0f, static_cast<float>(phase));  // unit-modulus complex
-        }
-    }
-
-    void _precalc_positions() {
-        _symbol_positions.reserve(_cfg.num_symbols);
-        for (size_t i = 0; i < _cfg.num_symbols; ++i) {
-            _symbol_positions.push_back(i * (_cfg.fft_size + _cfg.cp_length));
-        }
-    }
 
     // Pre-computed QPSK constellation lookup table
     static constexpr float SQRT_2_INV = 0.7071067811865476f; // 1/sqrt(2)
@@ -673,11 +503,7 @@ private:
     void _sensing_process(const SensingFrame& frame) {
         // ============== Profiling variables ==============
         using ProfileClock = std::chrono::high_resolution_clock;
-        static double prof_fft_total = 0.0;
-        static double prof_channel_est_total = 0.0;
-        static double prof_mti_total = 0.0;
-        static double prof_window_total = 0.0;
-        static double prof_range_doppler_total = 0.0;
+        static double prof_sensing_core_total = 0.0;
         static double prof_send_total = 0.0;
         static int prof_frame_count = 0;
         constexpr int PROF_REPORT_INTERVAL = 100;
@@ -694,141 +520,39 @@ private:
         }
 
         static auto next_send_time = std::chrono::steady_clock::now();
-        if (std::chrono::steady_clock::now() >= next_send_time) {
-            // 1. Perform OFDM demodulation on received frame
-            prof_step_start = ProfileClock::now();
-            std::vector<AlignedVector> rx_symbols;
-            rx_symbols.reserve(_cfg.sensing_symbol_num);
-            for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                std::copy(frame.rx_symbols[i].begin(), frame.rx_symbols[i].end(), _demod_fft_in.begin());
-                // Execute FFT
-                fftwf_execute(_demod_fft_plan);
-                // Copy to channel response buffer
-                auto* dest = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                std::copy(_demod_fft_out.begin(), _demod_fft_out.end(), dest);
-            }
-            prof_step_end = ProfileClock::now();
-            prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        if (std::chrono::steady_clock::now() >= next_send_time && !skip_sensing_fft.load()) {
             
-            // 2. Channel estimation (Frequency domain division) + FFT shift
-            // Optimization: Use complex multiplication instead of division
-            // H = Rx / Tx = Rx * conj(Tx) / |Tx|^2
-            // For unit-magnitude Tx symbols (QPSK/ZC), |Tx|^2 = 1, so H = Rx * conj(Tx)
+            // Core Processing
             prof_step_start = ProfileClock::now();
-            const size_t half_size = _cfg.fft_size / 2;
-            
-            for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                auto* __restrict__ ch_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                const auto* __restrict__ tx_data = frame.tx_symbols[i].data();
-                
-                // Combined: channel estimation with multiplication + FFT shift
-                // Manual complex multiplication with conjugate for better vectorization
-                #pragma omp simd simdlen(16) aligned(ch_data, tx_data: 64)
-                for (size_t k = 0; k < half_size; ++k) {
-                    // First half: multiply by conjugate and store to second half position
-                    float ch_real = ch_data[k].real();
-                    float ch_imag = ch_data[k].imag();
-                    float tx_real = tx_data[k].real();
-                    float tx_imag = tx_data[k].imag();
-                    
-                    // Multiply by conjugate: (a+bi)*(c-di) = (ac+bd) + (bc-ad)i
-                    float est_real = ch_real * tx_real + ch_imag * tx_imag;
-                    float est_imag = ch_imag * tx_real - ch_real * tx_imag;
-                    
-                    // Second half: process and store to first half position
-                    float ch2_real = ch_data[k + half_size].real();
-                    float ch2_imag = ch_data[k + half_size].imag();
-                    float tx2_real = tx_data[k + half_size].real();
-                    float tx2_imag = tx_data[k + half_size].imag();
-                    
-                    ch_data[k] = std::complex<float>(
-                        ch2_real * tx2_real + ch2_imag * tx2_imag,
-                        ch2_imag * tx2_real - ch2_real * tx2_imag
-                    );
-                    ch_data[k + half_size] = std::complex<float>(est_real, est_imag);
-                }
-            }
+            const auto& result_buffer = _sensing_core->process(frame.rx_symbols, frame.tx_symbols);
             prof_step_end = ProfileClock::now();
-            prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+            prof_sensing_core_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-            // Apply MTI Filter (Moving Target Indication)
-            // Applied after channel estimation and FFT shift, before windowing and IFFT
+            // Send Result
             prof_step_start = ProfileClock::now();
-            if (enable_mti.load()) {
-                _mti_filter.apply(_channel_response_buffer, _cfg.fft_size, _cfg.sensing_symbol_num);
-            }
-            prof_step_end = ProfileClock::now();
-            prof_mti_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-
-            if (!skip_sensing_fft.load()) {
-                prof_step_start = ProfileClock::now();
-                for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                    auto* symbol_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                    #pragma omp simd simdlen(16) aligned(symbol_data: 64)
-                    for (size_t j = 0; j < _cfg.fft_size; ++j) {
-                        // Apply range window (Frequency domain windowing)
-                        symbol_data[j] *= _range_window[j];
-                    }
-                }
-
-                for (size_t bin = 0; bin < _cfg.fft_size; ++bin) {
-                    #pragma omp simd simdlen(16)
-                    for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                        size_t idx = i * _cfg.range_fft_size + bin;
-                        // Apply Doppler window (Time domain windowing)
-                        _channel_response_buffer[idx] *= _doppler_window[i];
-                    }
-                }
-                prof_step_end = ProfileClock::now();
-                prof_window_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-
-                // 3. Batch process Range dimension (Process all symbols together)
-                prof_step_start = ProfileClock::now();
-                fftwf_execute(_range_ifft_plan);  // Range IFFT (Frequency to Time domain)
-                
-                // 4. Batch process Doppler dimension (Process all subcarriers together)
-                fftwf_execute(_doppler_fft_plan); // Doppler FFT (Time to Frequency domain)
-                prof_step_end = ProfileClock::now();
-                prof_range_doppler_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-            }
-
-            // 5. Send processing results
-            prof_step_start = ProfileClock::now();
-            _sensing_sender.push_data(_channel_response_buffer);
-            if(_cfg.range_fft_size != _cfg.fft_size || _cfg.doppler_fft_size != _cfg.fft_size) {
-                _channel_response_buffer.assign(_cfg.range_fft_size * _cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f));
-            }
+            _sensing_sender.push_data(result_buffer);
             prof_step_end = ProfileClock::now();
             prof_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+
+            next_send_time = next_send_time + std::chrono::milliseconds(33); // ~30 fps
             
             // ============== Profiling report ==============
             prof_frame_count++;
             if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("sensing_process")) {
                 std::cout << "\n========== _sensing_process Profiling (avg per frame, us) ==========" << std::endl;
-                std::cout << "FFT Demodulation:     " << prof_fft_total / prof_frame_count << " us" << std::endl;
-                std::cout << "Channel Estimation:   " << prof_channel_est_total / prof_frame_count << " us" << std::endl;
-                std::cout << "MTI Filter:           " << prof_mti_total / prof_frame_count << " us" << std::endl;
-                std::cout << "Windowing:            " << prof_window_total / prof_frame_count << " us" << std::endl;
-                std::cout << "Range-Doppler FFT:    " << prof_range_doppler_total / prof_frame_count << " us" << std::endl;
+                std::cout << "Sensing Core Process: " << prof_sensing_core_total / prof_frame_count << " us" << std::endl;
                 std::cout << "Send Data:            " << prof_send_total / prof_frame_count << " us" << std::endl;
-                double total = prof_fft_total + prof_channel_est_total + prof_mti_total + prof_window_total + prof_range_doppler_total + prof_send_total;
+                double total = prof_sensing_core_total + prof_send_total;
                 std::cout << "TOTAL:                " << total / prof_frame_count << " us" << std::endl;
                 std::cout << "====================================================================\n" << std::endl;
                 
                 // Reset counters
-                prof_fft_total = 0.0;
-                prof_channel_est_total = 0.0;
-                prof_mti_total = 0.0;
-                prof_window_total = 0.0;
-                prof_range_doppler_total = 0.0;
+                prof_sensing_core_total = 0.0;
                 prof_send_total = 0.0;
                 prof_frame_count = 0;
             }
-            
-            next_send_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
         }
-        
-    }
+    }    
 
     /**
      * @brief Modulation Thread.
@@ -857,11 +581,9 @@ private:
         // ============== Profiling variables ==============
         using ProfileClock = std::chrono::high_resolution_clock;
         static double prof_data_fetch_total = 0.0;
-        static double prof_symbol_gen_total = 0.0;
-        static double prof_ifft_total = 0.0;
-        static double prof_cp_write_total = 0.0;
+        static double prof_mod_core_total = 0.0;
         static int prof_frame_count = 0;
-        constexpr int PROF_REPORT_INTERVAL = 434;
+        constexpr int PROF_REPORT_INTERVAL = 434; // report every ~1s (434 frames * 2.3ms = ~1s)
         
         auto prof_step_start = ProfileClock::now();
         auto prof_step_end = prof_step_start;
@@ -911,72 +633,44 @@ private:
 
             // Objects from pool are already correctly sized - no need to resize
 
-            for (size_t i = 0; i < _cfg.num_symbols; ++i) {
-                const size_t pos = _symbol_positions[i];
-                auto* buf_ptr = current_frame.data() + pos;
+            // Prepare payload data
+            AlignedIntVector payload_data;
+            size_t total_data_symbols = (_cfg.num_symbols - 1) * (_cfg.fft_size - _cfg.pilot_positions.size()); // Assuming sync pos is always 1 symbol
+            payload_data.reserve(total_data_symbols);
 
-                prof_step_start = ProfileClock::now();
-                if (i == _cfg.sync_pos) {
-                    // Sync symbol: Use ZC sequence for the whole symbol
-                    std::memcpy(_fft_in.data(), _zc_seq.data(), _cfg.fft_size * sizeof(std::complex<float>));
-                } else {
-                    // Non-sync symbol: Use real data symbols from data_pool, fallback to pre-generated data if exhausted
-                    // Fill all pilots first (vectorization friendly)
-                    for (size_t idx = 0; idx < _cfg.pilot_positions.size(); ++idx) {
-                        size_t k = _cfg.pilot_positions[idx];
-                        _fft_in[k] = _zc_seq[k];
-                    }
-                    // Fill data subcarriers - use lookup table for QPSK
-                    const size_t ds_count = data_subcarriers.size();
-                    const int* __restrict__ ds_ptr = data_subcarriers.data();
-                    auto* __restrict__ fft_ptr = _fft_in.data();
-                    const auto* __restrict__ pool_ptr = data_pool.data();
-                    const auto* __restrict__ pregen_ptr = _pregen_data.data();
-                    const size_t pool_size = data_pool.size();
-                    
-                    #pragma omp simd
-                    for (size_t di = 0; di < ds_count; ++di) {
-                        const int k = ds_ptr[di];
-                        const int sym = (data_pool_pos + di < pool_size) ? 
-                            pool_ptr[data_pool_pos + di] : pregen_ptr[frame_data_index + di];
-                        fft_ptr[k] = _qpsk_table[sym & 3];
-                    }
-                    // Update indices after loop
-                    const size_t used_from_pool = std::min(ds_count, pool_size > data_pool_pos ? pool_size - data_pool_pos : 0);
-                    data_pool_pos += used_from_pool;
-                    frame_data_index += ds_count - used_from_pool;
+            {
+                std::unique_lock<std::mutex> lock(_data_mutex);
+                while (!_data_packet_buffer.empty() && payload_data.size() < total_data_symbols) {
+                    AlignedIntVector pkt = std::move(_data_packet_buffer.front());
+                    _data_packet_buffer.pop_front();
+                    payload_data.insert(payload_data.end(), pkt.begin(), pkt.end());
+                    _data_packet_pool.release(std::move(pkt));
                 }
-                
-                // Save frequency domain data of current symbol (for sensing) - direct memcpy
-                std::memcpy(current_symbols[i].data(), _fft_in.data(), _cfg.fft_size * sizeof(std::complex<float>));
-                prof_step_end = ProfileClock::now();
-                symbol_gen_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-
-                // IFFT transform
-                prof_step_start = ProfileClock::now();
-                fftwf_execute(_ifft_plan);
-                prof_step_end = ProfileClock::now();
-                ifft_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-
-                // Add Cyclic Prefix (CP)
-                prof_step_start = ProfileClock::now();
-                #pragma omp simd
-                for (size_t j = 0; j < _cfg.cp_length; ++j) {
-                    buf_ptr[j] = _fft_out[_cfg.fft_size - _cfg.cp_length + j] * scale;
-                }
-                
-                // Write symbol body
-                #pragma omp simd
-                for (size_t j = 0; j < _cfg.fft_size; ++j) {
-                    buf_ptr[_cfg.cp_length + j] = _fft_out[j] * scale;
-                }
-                prof_step_end = ProfileClock::now();
-                cp_write_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+                _data_not_full.notify_all();
             }
-            
-            prof_symbol_gen_total += symbol_gen_time;
-            prof_ifft_total += ifft_time;
-            prof_cp_write_total += cp_write_time;
+
+            // Fill remaining with pre-generated data if needed
+            if (payload_data.size() < total_data_symbols) {
+                size_t needed = total_data_symbols - payload_data.size();
+                size_t start_idx = frame_data_index % _pregen_data.size();
+                size_t end_idx = start_idx + needed;
+                
+                if (end_idx <= _pregen_data.size()) {
+                    payload_data.insert(payload_data.end(), _pregen_data.begin() + start_idx, _pregen_data.begin() + end_idx);
+                } else {
+                    // Wrap around
+                    size_t first_part = _pregen_data.size() - start_idx;
+                    payload_data.insert(payload_data.end(), _pregen_data.begin() + start_idx, _pregen_data.end());
+                    payload_data.insert(payload_data.end(), _pregen_data.begin(), _pregen_data.begin() + (needed - first_part));
+                }
+                frame_data_index = (frame_data_index + needed) % _pregen_data.size();
+            }
+
+            // Generate Frame
+            prof_step_start = ProfileClock::now();
+            _modulator_core->generate_frame(payload_data, current_frame, current_symbols);
+            prof_step_end = ProfileClock::now();
+            prof_mod_core_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             frame_end = Clock::now();// Record frame end time
             double frame_time = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
@@ -1025,18 +719,14 @@ private:
             if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("modulation")) {
                 std::cout << "\n========== _modulation_proc Profiling (avg per frame, us) ==========" << std::endl;
                 std::cout << "Data Fetch:           " << prof_data_fetch_total / prof_frame_count << " us" << std::endl;
-                std::cout << "Symbol Generation:    " << prof_symbol_gen_total / prof_frame_count << " us" << std::endl;
-                std::cout << "IFFT (all symbols):   " << prof_ifft_total / prof_frame_count << " us" << std::endl;
-                std::cout << "CP & Write:           " << prof_cp_write_total / prof_frame_count << " us" << std::endl;
-                double total = prof_data_fetch_total + prof_symbol_gen_total + prof_ifft_total + prof_cp_write_total;
+                std::cout << "Modulation Core:      " << prof_mod_core_total / prof_frame_count << " us" << std::endl;
+                double total = prof_data_fetch_total + prof_mod_core_total;
                 std::cout << "TOTAL:                " << total / prof_frame_count << " us" << std::endl;
                 std::cout << "===================================================================\n" << std::endl;
                 
                 // Reset counters
                 prof_data_fetch_total = 0.0;
-                prof_symbol_gen_total = 0.0;
-                prof_ifft_total = 0.0;
-                prof_cp_write_total = 0.0;
+                prof_mod_core_total = 0.0;
                 prof_frame_count = 0;
             }
         }
