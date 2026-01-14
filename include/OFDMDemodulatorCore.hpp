@@ -220,8 +220,7 @@ namespace Core {
         double _estimate_cfo_cp(const AlignedVector& samples, int start_pos) {
             // Simple CP correlation
             // angle(sum(x[i] * conj(x[i+N])))
-            // size_t cp_start = start_pos; // Start of CP (Unused)
-            // size_t sym_start = start_pos + _params.cp_length; // Start of Symbol (Unused)
+
             // But we compare CP (end of symbol) with CP (start of symbol)
             // Wait, standard CP CFO matches CP with end of symbol. 
             // x[i] is CP, x[i+N] is end of symbol.
@@ -304,8 +303,9 @@ namespace Core {
                 weights.push_back(std::norm(next_current_sum));
             }
             
-            unwrap(avg_phase_diff); // Defined in Common.hpp
-            return weightedlinearRegression(pilot_indices, avg_phase_diff, weights); // Defined in Common.hpp
+            unwrap(avg_phase_diff);
+            // Returns [beta, alpha] -> [slope, constant]
+            return weightedlinearRegression(pilot_indices, avg_phase_diff, weights);
         }
 
         void _equalize(const std::vector<AlignedVector>& rx_symbols, 

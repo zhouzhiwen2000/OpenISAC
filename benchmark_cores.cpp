@@ -33,34 +33,42 @@ int main() {
     mod_params.fft_size = fft_size;
     mod_params.cp_length = cp_length;
     mod_params.num_symbols = num_symbols;
-    mod_params.sample_rate = sample_rate;
-    mod_params.center_freq = 2.4e9;
     mod_params.pilot_positions = {100, 200, 300, 400, 500, 600, 700, 800}; // Example pilots
     mod_params.sync_pos = 1;
     mod_params.zc_root = 29;
+    mod_params.scaling_factor = 1.0f / sqrt(fft_size) / 4.0f; 
     
     auto modulator = std::make_unique<OFDMModulatorCore>(mod_params);
 
     // 2. Initialize Demodulator
-    OFDMDemodulatorCore::Params demod_params = mod_params; // Similar params
-    demod_params.sync_samples = fft_size + cp_length; // Just for init
+    OFDMDemodulatorCore::Params demod_params;
+    demod_params.fft_size = fft_size;
+    demod_params.cp_length = cp_length;
+    demod_params.num_symbols = num_symbols;
+    demod_params.sample_rate = sample_rate;
+    demod_params.center_freq = 2.4e9;
+    demod_params.pilot_positions = mod_params.pilot_positions;
+    demod_params.sync_pos = mod_params.sync_pos;
+    demod_params.zc_root = mod_params.zc_root;
+    demod_params.sync_samples = fft_size + cp_length;
     
     auto demodulator = std::make_unique<OFDMDemodulatorCore>(demod_params);
 
     // 3. Initialize Sensing Core
     SensingCore::Params sensing_params;
     sensing_params.fft_size = fft_size;
-    sensing_params.cp_length = cp_length;
     sensing_params.sensing_symbol_num = num_symbols;
     sensing_params.range_fft_size = fft_size;
     sensing_params.doppler_fft_size = 64;
-    sensing_params.frame_count_for_process = num_symbols;
+    sensing_params.enable_mti = true;
+    sensing_params.enable_windowing = true;
 
     auto sensing_core = std::make_unique<SensingCore>(sensing_params);
 
     // Prepare Data
-    size_t payload_size = 1000;
-    auto payload_data = generate_random_data(payload_size);
+    size_t payload_len = 1000;
+    AlignedIntVector payload_indices(payload_len); 
+    for(size_t k=0; k<payload_len; ++k) payload_indices[k] = rand() % 4;
 
     // Benchmark Loop
     int num_iterations = 100;
@@ -69,27 +77,26 @@ int main() {
     
     auto start_time = std::chrono::high_resolution_clock::now();
     
+    AlignedVector frame_buffer;
+    std::vector<AlignedVector> symbols_buffer;
+
     for(int i=0; i<num_iterations; ++i) {
         // Modulate
-        OFDMModulatorCore::ModResult mod_res;
-        modulator->modulate(payload_data, mod_res);
+        modulator->generate_frame(payload_indices, frame_buffer, symbols_buffer);
         
         // Channel Simulation (Identity)
-        std::vector<std::complex<float>> rx_data = mod_res.frame_data;
+        // frame_buffer is ready
         
         // Demodulate
         OFDMDemodulatorCore::DemodResult demod_res;
-        demodulator->process_frame(rx_data, demod_res);
+        demodulator->process_frame(frame_buffer, demod_res);
         
         // Sensing
-        // Feed RX and TX symbols to sensing core
-        // Note: SensingCore expects accumulated symbols or frame?
-        // It takes rx_symbols and tx_symbols vectors.
         std::vector<AlignedVector> sensing_rx = demod_res.rx_symbols;
-        // Mock TX symbols (using modulator's intermediate if available, or just use RX for perfect loopback)
-        std::vector<AlignedVector> sensing_tx = sensing_rx; 
+        // Since we have perfect loopback, RX symbols ~= TX symbols (phase rotated maybe)
+        // We use symbols_buffer (TX freq domain) as ref
         
-        sensing_core->process(sensing_rx, sensing_tx);
+        sensing_core->process(sensing_rx, symbols_buffer);
     }
     
     auto end_time = std::chrono::high_resolution_clock::now();

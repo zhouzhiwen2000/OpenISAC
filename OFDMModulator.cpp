@@ -34,8 +34,6 @@ namespace po = boost::program_options;
 namespace fs = std::filesystem;
 using namespace OpenISAC;
 using namespace OpenISAC::Core;
-using namespace OpenISAC;
-using namespace OpenISAC::Core;
 
 // Type aliases are now defined in Common.hpp
 
@@ -102,6 +100,9 @@ public:
         // UDP data sender initialization
         _sensing_sender.start();
 
+        // Register control command handler
+        _register_commands();
+
         _accumulated_rx_symbols.reserve(_cfg.sensing_symbol_num);
         _accumulated_tx_symbols.reserve(_cfg.sensing_symbol_num);
         
@@ -110,14 +111,6 @@ public:
     ~OFDMISACEngine() {
         _sensing_sender.stop();
         stop();
-        
-        // Save wisdom before destroying plans
-        std::string wisdom_file = "fftw_wisdom_" + std::to_string(_cfg.fft_size) + ".dat";
-        _save_fftw_wisdom(wisdom_file);
-        
-        fftwf_destroy_plan(_ifft_plan);
-        fftwf_destroy_plan(_range_ifft_plan);
-        fftwf_destroy_plan(_doppler_fft_plan);
     }
 
     void start() {
@@ -179,9 +172,6 @@ private:
     std::condition_variable _rx_not_empty;                  // Core Processing Engines
     std::unique_ptr<OFDMModulatorCore> _modulator_core;
     std::unique_ptr<SensingCore> _sensing_core;
-
-    void _init_cores();
-    void _init_usrp();
     std::condition_variable _rx_not_full;                     
     std::condition_variable _data_not_empty;              // Data packet buffer condition variable (not empty)
     std::condition_variable _data_not_full;               // Data packet buffer condition variable (not full)
@@ -260,7 +250,7 @@ private:
             std::cout << "Set sensing stride to: " << value << std::endl;
         });
 
-        // Register MTI control command
+         // Register MTI control command
         _control_handler.register_command("MTI ", [this](int32_t value) {
              enable_mti.store(value != 0);
              if(_sensing_core) _sensing_core->toggle_mti(value != 0);
@@ -268,6 +258,29 @@ private:
         });
     }
 
+    void _init_cores() {
+        // Modulator Core
+        Core::OFDMModulatorCore::Params mod_params;
+        mod_params.fft_size = _cfg.fft_size;
+        mod_params.cp_length = _cfg.cp_length;
+        mod_params.num_symbols = _cfg.num_symbols;
+        mod_params.pilot_positions = _cfg.pilot_positions;
+        mod_params.sync_pos = 1; // Sync symbol is always at index 1 (after blank)
+        mod_params.zc_root = _cfg.zc_root;
+        _modulator_core = std::make_unique<Core::OFDMModulatorCore>(mod_params);
+
+        // Sensing Core
+        Core::SensingCore::Params sensing_params;
+        sensing_params.fft_size = _cfg.fft_size;
+        sensing_params.sensing_symbol_num = _cfg.sensing_symbol_num;
+        sensing_params.range_fft_size = _cfg.range_fft_size;
+        sensing_params.doppler_fft_size = _cfg.doppler_fft_size;
+        sensing_params.enable_mti = true; // Default enable
+        sensing_params.enable_windowing = true;
+        
+        _sensing_core = std::make_unique<Core::SensingCore>(sensing_params);
+    }
+    
     void _init_usrp() {
         // Use device arguments from configuration
         _usrp = uhd::usrp::multi_usrp::make(_cfg.device_args);
@@ -589,7 +602,7 @@ private:
         auto prof_step_end = prof_step_start;
         // =================================================
 
-        const float scale = 1.0f / std::sqrt(_cfg.fft_size)/4; // Output digital signal power is 1/16
+
 
         // Pre-calculate pilot and data subcarrier indices to reduce branches inside loop
         std::vector<char> is_pilot(_cfg.fft_size, 0);
@@ -623,13 +636,7 @@ private:
                 _data_not_full.notify_all();
             }
 
-            size_t data_pool_pos = 0;
-            prof_step_end = ProfileClock::now();
             prof_data_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-
-            double symbol_gen_time = 0.0;
-            double ifft_time = 0.0;
-            double cp_write_time = 0.0;
 
             // Objects from pool are already correctly sized - no need to resize
 
