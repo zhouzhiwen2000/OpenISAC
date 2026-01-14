@@ -9,7 +9,8 @@
 #include "OFDMDemodulatorCore.hpp"
 #include "SensingCore.hpp"
 
-using namespace Core;
+using namespace OpenISAC;
+using namespace OpenISAC::Core;
 
 // Helper to generate random bytes
 std::vector<uint8_t> generate_random_data(size_t size) {

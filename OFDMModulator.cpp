@@ -32,6 +32,10 @@
 
 namespace po = boost::program_options;
 namespace fs = std::filesystem;
+using namespace OpenISAC;
+using namespace OpenISAC::Core;
+using namespace OpenISAC;
+using namespace OpenISAC::Core;
 
 // Type aliases are now defined in Common.hpp
 
@@ -98,20 +102,13 @@ public:
         // UDP data sender initialization
         _sensing_sender.start();
 
-        // Register control command handler
-        _register_commands();
-
-        // Initialize Hamming windows
-        _init_hamming_windows();
-
         _accumulated_rx_symbols.reserve(_cfg.sensing_symbol_num);
         _accumulated_tx_symbols.reserve(_cfg.sensing_symbol_num);
         
-        // Initialize MTI filter
-        _mti_filter.resize(_cfg.range_fft_size);
     }
 
     ~OFDMISACEngine() {
+        _sensing_sender.stop();
         stop();
         
         // Save wisdom before destroying plans
@@ -180,8 +177,11 @@ private:
     std::condition_variable _symbols_not_empty;               
     std::condition_variable _symbols_not_full;                
     std::condition_variable _rx_not_empty;                  // Core Processing Engines
-    std::unique_ptr<Core::OFDMModulatorCore> _modulator_core;
-    std::unique_ptr<Core::SensingCore> _sensing_core;
+    std::unique_ptr<OFDMModulatorCore> _modulator_core;
+    std::unique_ptr<SensingCore> _sensing_core;
+
+    void _init_cores();
+    void _init_usrp();
     std::condition_variable _rx_not_full;                     
     std::condition_variable _data_not_empty;              // Data packet buffer condition variable (not empty)
     std::condition_variable _data_not_full;               // Data packet buffer condition variable (not full)

@@ -26,8 +26,8 @@
 #include <OFDMDemodulatorCore.hpp>
 #include <SensingCore.hpp>
 
-namespace po = boost::program_options;
-namespace fs = std::filesystem;
+using namespace OpenISAC;
+using namespace OpenISAC::Core;
 
 /**
  * @brief OFDM Receiver Engine.
@@ -48,9 +48,9 @@ public:
           _accumulated_rx_symbols(),
           _accumulated_tx_symbols(),
           _blank_frame(cfg.samples_per_frame(), 0.0f),
-          channel_sender_(cfg.mono_sensing_ip, cfg.mono_sensing_port, cfg.fft_size), 
-          pdf_sender_(cfg.mono_sensing_ip, cfg.mono_sensing_port + 1, cfg.fft_size),
-          constellation_sender_(cfg.mono_sensing_ip, cfg.mono_sensing_port + 2, cfg.fft_size),
+          channel_sender_(16, [this](const std::vector<std::complex<float>, AlignedAlloc>& d){ if(channel_udp_) channel_udp_->send(reinterpret_cast<const char*>(d.data()), d.size()*sizeof(std::complex<float>)); }, std::chrono::milliseconds(10)),
+          pdf_sender_(16, [this](const std::vector<std::complex<float>, AlignedAlloc>& d){ if(pdf_udp_) pdf_udp_->send(reinterpret_cast<const char*>(d.data()), d.size()*sizeof(std::complex<float>)); }, std::chrono::milliseconds(10)),
+          constellation_sender_(16, [this](const std::vector<std::complex<float>, AlignedAlloc>& d){ if(constellation_udp_) constellation_udp_->send(reinterpret_cast<const char*>(d.data()), d.size()*sizeof(std::complex<float>)); }, std::chrono::milliseconds(10)),
           freq_offset_udp_(new UdpSender(cfg.mono_sensing_ip, cfg.mono_sensing_port + 3)),
           _control_handler(9998),
           // Initialize object pools
@@ -104,9 +104,6 @@ public:
                  std::cerr << "Failed to init hardware sync" << std::endl;
              }
         }
-        
-        // Initialize sensing processing
-        init_sensing();
         
         // Initialize data processing
         init_data_processing();
@@ -191,81 +188,7 @@ private:
 
     using AlignedAlloc = AlignedAllocator<std::complex<float>, 64>;
 
-    // Various UDP senders
-    std::unique_ptr<UdpSender> channel_udp_;
-    std::unique_ptr<UdpSender> pdf_udp_;
-    std::unique_ptr<UdpSender> constellation_udp_;
-    std::unique_ptr<UdpSender> freq_offset_udp_;
-    SensingDataSender _sensing_sender;
-    // Control handler
-    ControlCommandHandler _control_handler;
-    // Data sender management
-    DataSender<std::complex<float>, AlignedAlloc> channel_sender_;
-    DataSender<std::complex<float>, AlignedAlloc> pdf_sender_;
-    DataSender<std::complex<float>, AlignedAlloc> constellation_sender_;
-    uint32_t _reset_count = 0;
-    
-    // Sensing related variables
-    boost::circular_buffer<SensingFrame> sensing_queue_{4};
-    std::mutex sensing_mutex_;
-    std::condition_variable sensing_cv_;
-    std::thread sensing_thread_;
-    std::atomic<bool> sensing_running_{false};
 
-    // FFTW Plans
-    
-    AlignedFloatVector _range_window;    // Range window
-    AlignedFloatVector _doppler_window;  // Doppler window
-    std::atomic<bool> skip_sensing_fft{true};
-    std::vector<bool> is_pilot;
-    size_t _global_symbol_index = 0; // Global symbol index (for sensing processing)
-    std::atomic<size_t> sensing_sybmol_stride{20};
-    size_t shadow_sensing_symbol_stride=20; // Shadow sensing symbol stride
-
-    bool _saved = false; // Whether data has been saved
-    std::chrono::steady_clock::time_point _next_send_time = std::chrono::steady_clock::now();
-    double _freq_offset_sum = 0.0f; // Average frequency offset
-    size_t _freq_offset_count = 0; // Sensing symbol count
-    double _avg_freq_offset = 0.0;
-    std::vector<int> _actual_subcarrier_indices;
-    std::vector<float> _subcarrier_phases_unit_delay;
-    SFOEstimator sfo_estimator{1000};
-    bool _sync_in_progress = false; // Flag to indicate if sync is in progress in process_proc
-    int _last_adjusted_index = 0; // Last adjusted index
-    uint32_t _delay_adjustment_count = 0;
-    std::atomic<float> _user_delay_offset = 0.0f;
-    std::unique_ptr<HardwareSyncController> _hw_sync;
-    
-    // MTI Filter
-    MTIFilter _mti_filter;
-    std::atomic<bool> enable_mti{true};
-
-    // Data processing related member variables
-    boost::circular_buffer<AlignedFloatVector> _data_llr_buffer{128};  // LLR data buffer
-    std::mutex _data_llr_mutex;
-    std::condition_variable _data_llr_cv;
-    std::thread _bit_processing_thread;
-    std::atomic<bool> _bit_processing_running{false};
-    
-    LDPCCodec _ldpc_decoder{LDPCCodec::LDPCConfig()};
-    Scrambler _descrambler{201600, 0x5A};
-    std::unique_ptr<UdpSender> _udp_output_sender;
-
-    // Noise/LLR estimation related
-    double _noise_var{0.5};              // Complex noise power E[|n|^2] initial value (assume 0.25 per dimension)
-    double _llr_scale{2.0};              // LLR scaling factor (updated based on noise variance)
-    double _snr_linear{1.0};             // Es/N0 Linear value
-    double _snr_db{0.0};                 // Es/N0 dB
-    
-    // Object pools for memory reuse (eliminates per-frame memory allocations)
-    ObjectPool<RxFrame> _rx_frame_pool;           // Pool for RX frame buffers
-    ObjectPool<AlignedVector> _sync_data_pool;    // Pool for sync search data
-    ObjectPool<AlignedFloatVector> _llr_pool;     // Pool for LLR data
-    ObjectPool<SensingFrame> _sensing_frame_pool; // Pool for sensing frames
-    
-    // Core processing objects
-    std::unique_ptr<Core::OFDMDemodulatorCore> _demod_core;
-    std::unique_ptr<Core::SensingCore> _sensing_core;
 
     void init_filter() {
         const std::vector<float> filter_coeffs = {
@@ -352,20 +275,21 @@ private:
         });
     }
 
-    void init_sensing() {
-        is_pilot.resize(cfg_.fft_size, false);
-        for (auto pos : cfg_.pilot_positions) {
-            if (pos < cfg_.fft_size) {
-                is_pilot[pos] = true;
-            }
+    void init_data_processing() {
+        // Only if additional initialization is needed
+    }
+    
+    void adjust_rx_freq(double offset, bool abs_set = false) {
+        if (abs_set) {
+            current_rx_tune_.actual_dsp_freq = offset;
+        } else {
+            current_rx_tune_.actual_dsp_freq += offset;
         }
-        _actual_subcarrier_indices.resize(cfg_.fft_size);
-        _subcarrier_phases_unit_delay.resize(cfg_.fft_size);
-        const size_t half_fft = static_cast<int>(cfg_.fft_size) / 2;
-        #pragma omp simd simdlen(16)
-        for (size_t i = 0; i < cfg_.fft_size; ++i) {
-            // Calculate actual frequency index of subcarriers (negative to positive)
-            // Range: [-fft_size/2, fft_size/2 - 1]
+        
+        uhd::tune_request_t tune_req(current_rx_tune_.actual_rf_freq, current_rx_tune_.actual_dsp_freq);
+        tune_req.args = uhd::device_addr_t("mode_n=integer");
+        usrp_->set_rx_freq(tune_req);
+    }
 
 
     /**
@@ -1274,6 +1198,11 @@ private:
     std::unique_ptr<UdpSender> constellation_udp_;
     std::unique_ptr<UdpSender> freq_offset_udp_;
     std::unique_ptr<UdpSender> _udp_output_sender;
+
+    // Buffered Data Senders
+    DataSender<std::complex<float>, AlignedAlloc> channel_sender_;
+    DataSender<std::complex<float>, AlignedAlloc> pdf_sender_;
+    DataSender<std::complex<float>, AlignedAlloc> constellation_sender_;
     
     // Sync controller
     std::unique_ptr<HardwareSyncController> _hw_sync;
