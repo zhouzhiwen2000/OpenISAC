@@ -62,7 +62,7 @@ public:
         _accumulated_tx_symbols(),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         tx_data_file("tx_frame.bin", std::ios::binary),
-        _sensing_sender(cfg.mono_sensing_ip, cfg.mono_sensing_port, cfg.fft_size * cfg.num_symbols),
+        _sensing_sender(cfg.mono_sensing_ip, cfg.mono_sensing_port, cfg.range_fft_size * cfg.doppler_fft_size),
         _control_handler(9999),  // Initialize control handler
         // Initialize object pools for memory reuse
         _frame_pool(32, [&cfg]() {
