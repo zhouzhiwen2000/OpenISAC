@@ -43,7 +43,7 @@ public:
         : cfg_(cfg),
           _accumulated_rx_symbols(),
           _accumulated_tx_symbols(),
-          _sensing_sender(cfg.bi_sensing_ip, cfg.bi_sensing_port, cfg.fft_size * cfg.num_symbols),
+          _sensing_sender(cfg.bi_sensing_ip, cfg.bi_sensing_port),
           _control_handler(cfg.control_port),
           channel_sender_(2, [this](const auto& data) { 
               channel_udp_->send_container(data); 

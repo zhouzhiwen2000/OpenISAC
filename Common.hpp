@@ -432,9 +432,8 @@ public:
  */
 class SensingDataSender : public UdpBaseSender {
 public:
-    SensingDataSender(const std::string& ip, int port, int buffer_size) 
-        : UdpBaseSender(ip, port),
-          _buffer_size(buffer_size) 
+    SensingDataSender(const std::string& ip, int port) 
+        : UdpBaseSender(ip, port)
     {
         // Initialize data queue (capacity 64)
         _data_queue = std::make_unique<boost::circular_buffer<AlignedVector>>(64);
@@ -541,7 +540,6 @@ private:
         }
     }
     
-    int _buffer_size;
     std::atomic<bool> _running{false};
     std::unique_ptr<boost::circular_buffer<AlignedVector>> _data_queue;
     std::mutex _mutex;
