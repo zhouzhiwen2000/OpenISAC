@@ -40,6 +40,7 @@ namespace Core {
         }
 
         ~SensingCore() {
+            if (_demod_fft_plan) fftwf_destroy_plan(_demod_fft_plan);
             if (_range_ifft_plan) fftwf_destroy_plan(_range_ifft_plan);
             if (_doppler_fft_plan) fftwf_destroy_plan(_doppler_fft_plan);
         }
@@ -71,15 +72,18 @@ namespace Core {
         /**
          * @brief Process a full sensing frame
          * 
-         * @param rx_symbols Received frequency domain symbols
-         * @param tx_symbols Transmitted frequency domain symbols (reference)
+         * @param rx_symbols Received TIME-DOMAIN symbols (will be FFT'd internally)
+         * @param tx_symbols Transmitted FREQUENCY-DOMAIN symbols (reference)
          * @return const AlignedVector& Reference to the processing result (Range-Doppler Map)
          */
         const AlignedVector& process(const std::vector<AlignedVector>& rx_symbols, 
                                      const std::vector<AlignedVector>& tx_symbols) 
         {
-            // 1. Channel Estimation
-            _channel_estimation(rx_symbols, tx_symbols);
+            // 0. FFT Demodulation: Convert time-domain RX symbols to frequency domain
+            _fft_demodulation(rx_symbols);
+
+            // 1. Channel Estimation (now using _rx_freq_symbols which are in frequency domain)
+            _channel_estimation(_rx_freq_symbols, tx_symbols);
 
             // 2. MTI Filter
             if (_params.enable_mti) {
@@ -99,7 +103,13 @@ namespace Core {
         Params _params;
         AlignedVector _channel_response;
         
-        // FFTW
+        // FFT Demodulation (Time -> Frequency for RX symbols)
+        AlignedVector _fft_in;                  // FFT input buffer
+        AlignedVector _fft_out;                 // FFT output buffer
+        std::vector<AlignedVector> _rx_freq_symbols;  // Demodulated RX symbols (frequency domain)
+        fftwf_plan _demod_fft_plan = nullptr;   // Demodulation FFT plan
+        
+        // FFTW for Range-Doppler processing
         fftwf_plan _range_ifft_plan = nullptr;
         fftwf_plan _doppler_fft_plan = nullptr;
 
@@ -113,14 +123,32 @@ namespace Core {
         void _init_memory() {
             _channel_response.resize(_params.range_fft_size * _params.doppler_fft_size);
             std::fill(_channel_response.begin(), _channel_response.end(), std::complex<float>(0,0));
+            
+            // FFT demodulation buffers
+            _fft_in.resize(_params.fft_size);
+            _fft_out.resize(_params.fft_size);
+            _rx_freq_symbols.resize(_params.sensing_symbol_num);
+            for (auto& sym : _rx_freq_symbols) {
+                sym.resize(_params.fft_size);
+            }
         }
 
         void _init_fftw() {
+            if (_demod_fft_plan) fftwf_destroy_plan(_demod_fft_plan);
             if (_range_ifft_plan) fftwf_destroy_plan(_range_ifft_plan);
             if (_doppler_fft_plan) fftwf_destroy_plan(_doppler_fft_plan);
 
+            int demod_fft_size_int = static_cast<int>(_params.fft_size);
             int fft_size_int = static_cast<int>(_params.range_fft_size);
             int doppler_fft_size_int = static_cast<int>(_params.doppler_fft_size);
+
+            // Demodulation FFT (Time -> Frequency for RX symbols)
+            _demod_fft_plan = fftwf_plan_dft_1d(
+                demod_fft_size_int,
+                reinterpret_cast<fftwf_complex*>(_fft_in.data()),
+                reinterpret_cast<fftwf_complex*>(_fft_out.data()),
+                FFTW_FORWARD, FFTW_ESTIMATE
+            );
 
             // Batch Range IFFT (Frequency -> Time)
             // n=fft_size, howmany=num_symbols
@@ -148,6 +176,24 @@ namespace Core {
         void _init_windows() {
             _range_window = DSP::generate_hanning_window(_params.fft_size);
             _doppler_window = DSP::generate_hanning_window(_params.sensing_symbol_num);
+        }
+
+        /**
+         * @brief FFT Demodulation: Convert time-domain RX symbols to frequency domain
+         */
+        void _fft_demodulation(const std::vector<AlignedVector>& rx_time_symbols) {
+            const size_t num_sym = std::min(_params.sensing_symbol_num, rx_time_symbols.size());
+            
+            for (size_t i = 0; i < num_sym; ++i) {
+                // Copy time-domain symbol to FFT input buffer
+                std::copy(rx_time_symbols[i].begin(), rx_time_symbols[i].end(), _fft_in.begin());
+                
+                // Execute FFT (Time -> Frequency)
+                fftwf_execute(_demod_fft_plan);
+                
+                // Copy result to frequency-domain symbol storage
+                std::copy(_fft_out.begin(), _fft_out.end(), _rx_freq_symbols[i].begin());
+            }
         }
 
         void _channel_estimation(const std::vector<AlignedVector>& rx_symbols, 
