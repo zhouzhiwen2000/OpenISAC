@@ -19,6 +19,7 @@
 #include <memory>
 #include <utility>
 #include <Common.hpp>
+#include "OFDMCore.hpp"
 #include <boost/program_options.hpp>
 #include <yaml-cpp/yaml.h>
 #include <filesystem>
@@ -81,7 +82,8 @@ public:
               frame.SFO = 0.0f;
               frame.delay_offset = 0.0f;
               return frame;
-          }) {
+          }),
+          _sensing_core({cfg.fft_size, cfg.range_fft_size, cfg.doppler_fft_size, cfg.sensing_symbol_num}) {
 
         init_usrp();
         init_filter();
@@ -267,6 +269,9 @@ private:
     ObjectPool<AlignedVector> _sync_data_pool;    // Pool for sync search data
     ObjectPool<AlignedFloatVector> _llr_pool;     // Pool for LLR data
     ObjectPool<SensingFrame> _sensing_frame_pool; // Pool for sensing frames
+
+    // Core computation classes (hardware-independent)
+    SensingProcessor _sensing_core;
     
 
     void init_filter() {
@@ -337,8 +342,8 @@ private:
         const size_t half_fft = static_cast<int>(cfg_.fft_size) / 2;
         #pragma omp simd simdlen(16)
         for (size_t i = 0; i < cfg_.fft_size; ++i) {
-            // Calculate actual frequency index of subcarriers (negative to positive)
-            // Range: [-fft_size/2, fft_size/2 - 1]
+            // Calculate actual frequency index of subcarriers (FFT natural order)
+            // Index 0~N/2-1 -> freq 0~N/2-1 (positive), Index N/2~N-1 -> freq -N/2~-1 (negative)
             _actual_subcarrier_indices[i] = (i >= half_fft) ? 
                 (static_cast<int>(i) - cfg_.fft_size) : 
                 i;
@@ -680,36 +685,16 @@ private:
      */
     void process_sync_data(const AlignedVector& sync_data) {
         const size_t symbol_len = cfg_.fft_size + cfg_.cp_length;
-        size_t n_windows = sync_data.size() - symbol_len + 1;
-        float max_corr = 0.0f;
-        float average_corr = 0.0f;
-        int max_pos = 0;
         
-        // Sliding window to calculate sync symbol correlation
-        for (size_t i = 0; i < n_windows; ++i) {
-            float sum_real = 0.0f, sum_imag = 0.0f;
-
-            #pragma omp simd reduction(+:sum_real, sum_imag)
-            for (size_t j = 0; j < symbol_len; ++j) {
-                const float rx_real = sync_data[i + j].real();
-                const float rx_imag = sync_data[i + j].imag();
-
-                sum_real += rx_real * sync_real_[j] + rx_imag * sync_imag_[j];
-                sum_imag += rx_imag * sync_real_[j] - rx_real * sync_imag_[j];
-            }
-
-            const float corr = sum_real * sum_real + sum_imag * sum_imag;
-
-            if (corr > max_corr) {
-                max_corr = corr;
-                max_pos = i;
-            }
-            average_corr += corr;
-        }
-        average_corr /= n_windows;
+        // Use SyncProcessor for sync detection
+        int max_pos = 0;
+        float max_corr = 0.0f;
+        float avg_corr = 0.0f;
+        SyncProcessor::find_sync_position(sync_data, sync_real_, sync_imag_, symbol_len,
+                                          max_pos, max_corr, avg_corr);
         
         const float energy_threshold = 100.0f;
-        if (max_corr/average_corr > energy_threshold) {
+        if (max_corr/avg_corr > energy_threshold) {
             std::cout << "Sync found at pos: " << max_pos 
                     << " with value: " << max_corr 
                     << " Threshold: " << energy_threshold << std::endl;
@@ -720,52 +705,15 @@ private:
                 (sync_data.size() - symbol_offset) / symbol_len
             );
             
-            // Accumulate CP correlation of all symbols using complex numbers
-            double total_real = 0.0;
-            double total_imag = 0.0;
-            const size_t cp_length = cfg_.cp_length;
-            const size_t fft_size = cfg_.fft_size;
-            int valid_symbol_count = 0;
-            
-            // Iterate through all available symbols
-            for (size_t sym = 0; sym < available_symbols; ++sym) {
-                const size_t start_pos = symbol_offset + sym * symbol_len;
+            // Use SyncProcessor for CFO estimation
+            if (available_symbols > 0) {
+                double phase_diff = SyncProcessor::estimate_cfo_phase(
+                    sync_data, symbol_offset, available_symbols,
+                    symbol_len, cfg_.cp_length, cfg_.fft_size
+                );
+                double cfo = SyncProcessor::phase_to_cfo(phase_diff, cfg_.sample_rate, cfg_.fft_size);
                 
-                // Calculate real and imaginary parts separately
-                double sym_real = 0.0;
-                double sym_imag = 0.0;
-                
-                // Calculate CP correlation for this symbol
-                #pragma omp simd reduction(+:sym_real, sym_imag)
-                for (size_t i = 0; i < cp_length; ++i) {
-                    const auto& cp_sample = sync_data[start_pos + i];
-                    const auto& tail_sample = sync_data[start_pos + i + fft_size];
-                    
-                    // Manually calculate conj(cp_sample) * tail_sample
-                    sym_real += cp_sample.real() * tail_sample.real() + 
-                                cp_sample.imag() * tail_sample.imag();
-                    sym_imag += cp_sample.real() * tail_sample.imag() - 
-                                cp_sample.imag() * tail_sample.real();
-                }
-                
-                // Accumulate to total sum
-                total_real += sym_real;
-                total_imag += sym_imag;
-                valid_symbol_count++;
-            }
-            
-            std::complex<double> total_sum(total_real, total_imag);
-            
-            if (valid_symbol_count > 0) {
-                // Calculate overall phase difference
-                const double phase_diff = std::arg(total_sum);
-                
-                // Calculate CFO: Δf = phase_diff / (2π * T_symbol)
-                const double Ts = 1.0 / cfg_.sample_rate;          // Sampling period
-                const double T_symbol = fft_size * Ts;             // Effective symbol duration
-                const double cfo = phase_diff / (2.0 * M_PI * T_symbol); // CFO estimate (Hz)
-                
-                std::cout << "CFO estimate: " << cfo << " Hz (using " << valid_symbol_count 
+                std::cout << "CFO estimate: " << cfo << " Hz (using " << available_symbols 
                         << " symbols)" << std::endl;
                 
                 // Perform initial CFO correction
@@ -862,101 +810,6 @@ private:
         return frame;
     }
 
-    void fft_shift(const AlignedVector& data, AlignedVector& shifted) {
-        const size_t n = data.size();
-        const size_t half = n / 2;
-        shifted.resize(n);
-        
-        #pragma omp simd
-        for (size_t i = 0; i < half; ++i) {
-            shifted[i] = data[i + half];
-            shifted[i + half] = data[i];
-        }
-    }
-
-    int fftshift_index(int original_index, int N) {
-        return (original_index + N/2) % N;
-    }
-
-    // Use bit manipulation to detect NaN (compatible with -ffast-math)
-    inline bool isNaN(float x) {
-        uint32_t bits;
-        static_assert(sizeof(float) == sizeof(uint32_t), "Unexpected float size");
-        memcpy(&bits, &x, sizeof(float));
-        constexpr uint32_t exponent_mask = 0x7F800000;  // Exponent mask
-        constexpr uint32_t mantissa_mask = 0x007FFFFF;   // Mantissa mask
-        return ((bits & exponent_mask) == exponent_mask) && (bits & mantissa_mask);
-    }
-
-    // Quinn's algorithm for fractional delay estimation
-    /**
-     * @brief Quinn's Algorithm for Fractional Delay Estimation.
-     * 
-     * Refines the peak position in the delay spectrum to sub-sample precision.
-     * Used for accurate timing offset estimation.
-     */
-    float estimateFractionalDelay(const AlignedVector& spectrum, size_t max_index) {
-        const size_t N = spectrum.size();
-        if (N < 3) return 0.0f;
-        const auto& d0 = spectrum[max_index];
-        const auto& d_prev = spectrum[(max_index == 0) ? (N - 1) : (max_index - 1)];
-        const auto& d_next = spectrum[(max_index == N - 1) ? 0 : (max_index + 1)];
-        const auto magnitude = std::abs(d0);
-        constexpr float EPSILON = 1e-10f;
-        if (magnitude < EPSILON) {
-            return 0.0f;
-        }
-        float alpha1 = 0.0f, alpha2 = 0.0f;
-        {
-            const float denom = std::real(std::conj(d0) * d0);
-            const float num1 = std::real(std::conj(d_prev) * d0);
-            const float num2 = std::real(std::conj(d_next) * d0);
-            
-            // Bounded calculation
-            if (denom > EPSILON) {
-                alpha1 = num1 / denom;
-                alpha2 = num2 / denom;
-            } else {
-                // Use amplitude ratio for small denominator
-                alpha1 = std::abs(d_prev) / (magnitude + EPSILON);
-                alpha2 = std::abs(d_next) / (magnitude + EPSILON);
-                std::cout << "Warning: Small denominator in delay estimation, using amplitude ratio." << std::endl;
-            }
-            
-            // Limit ratio range [-0.99, 0.99] to avoid division close to 1 issues
-            alpha1 = std::max(-0.9999f, std::min(0.9999f, alpha1));
-            alpha2 = std::max(-0.9999f, std::min(0.9999f, alpha2));
-        }
-        
-        // Calculate delta using stable formula
-        const float delta1 = alpha1 / (1.0f - alpha1);
-        const float delta2 = -alpha2 / (1.0f - alpha2);
-        
-        // Use custom function to detect NaN (compatible with -ffast-math)
-        if (isNaN(delta1) || isNaN(delta2)) {
-            return 0.0f;
-        }
-        
-        // Improved selection logic
-        const float abs1 = std::abs(delta1);
-        const float abs2 = std::abs(delta2);
-        
-        // Selection logic
-        if (abs1 > 2.0f && abs2 > 2.0f) {
-            return 0.5f;
-        } else if (abs1 > 2.0f) {
-            return delta2;
-        } else if (abs2 > 2.0f) {
-            return delta1;
-        } else {
-            if(delta1 > 0.0f && delta2 > 0.0f) {
-                return delta2;
-            } else {
-                return delta1;
-            }
-        }
-    }
-
     /**
      * @brief Main OFDM Frame Processing Pipeline.
      * 
@@ -1033,59 +886,34 @@ private:
         prof_step_end = ProfileClock::now();
         prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-        // Calculate initial channel response H_est
+        // Calculate initial channel response H_est using ChannelEstimator
         prof_step_start = ProfileClock::now();
-        AlignedVector H_est(cfg_.fft_size);
-        // Manual complex division for better vectorization: (a+bi)/(c+di)
-        #pragma omp simd simdlen(16)
-        for (size_t i = 0; i < cfg_.fft_size; ++i) {
-            float rx_real = sync_symbol_freq[i].real();
-            float rx_imag = sync_symbol_freq[i].imag();
-            float tx_real = zc_freq_[i].real();
-            float tx_imag = zc_freq_[i].imag();
-            float denom = tx_real * tx_real + tx_imag * tx_imag;
-            float inv_denom = 1.0f / denom;
-            H_est[i] = std::complex<float>(
-                (rx_real * tx_real + rx_imag * tx_imag) * inv_denom,
-                (rx_imag * tx_real - rx_real * tx_imag) * inv_denom
-            );
-        }
+        AlignedVector H_est;
+        ChannelEstimator::estimate_from_sync(sync_symbol_freq, zc_freq_, H_est);
 
         prof_step_end = ProfileClock::now();
         prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-        // Estimate frequency offset
+        // Estimate frequency offset using FrequencyOffsetEstimator
         prof_step_start = ProfileClock::now();
-        const float T = (cfg_.fft_size + cfg_.cp_length) / cfg_.sample_rate;
-        std::vector<int> pilot_indices(cfg_.pilot_positions.size());
-        std::vector<float> weights(cfg_.pilot_positions.size(), 0.0f);
-        std::vector<float> avg_phase_diff(cfg_.pilot_positions.size(), 0.0f);
-        for (size_t j = 0; j < cfg_.pilot_positions.size(); j++) {
-            auto pilot_index = cfg_.pilot_positions[j];
-            std::complex<double> next_current_sum(0.0f, 0.0f);
-             #pragma omp simd
-             for (size_t i = cfg_.sync_pos; i < symbols.size() - 1; i++) {
-                std::complex<float> current_pilot = symbols[i][pilot_index];
-                std::complex<float> next_pilot = symbols[i+1][pilot_index];
-                next_current_sum += std::conj(current_pilot) * (next_pilot);
-            }
-            avg_phase_diff[j] = std::arg(next_current_sum);
-            int freq_index = static_cast<int>(pilot_index);
-            if (freq_index >= static_cast<int>(cfg_.fft_size)/2) {
-                freq_index -= cfg_.fft_size;
-            }
-            pilot_indices[j]=freq_index;
-            weights[j] = std::norm(next_current_sum);
-        }
+        std::vector<int> pilot_indices;
+        std::vector<float> avg_phase_diff;
+        std::vector<float> weights;
+        FrequencyOffsetEstimator::compute_pilot_phase_diff(
+            symbols, cfg_.pilot_positions, cfg_.fft_size, cfg_.sync_pos,
+            pilot_indices, avg_phase_diff, weights
+        );
         
         // Phase unwrapping with SIMD optimization
         unwrap(avg_phase_diff);
-        auto [beta, alpha] = weightedlinearRegression(pilot_indices, avg_phase_diff, weights);// Calculate fixed phase difference alpha between OFDM symbols caused by CFO, and phase slope beta varying with subcarriers caused by SFO
+        auto [beta, alpha] = weightedlinearRegression(pilot_indices, avg_phase_diff, weights);
         prof_step_end = ProfileClock::now();
         prof_cfo_sfo_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
-        // Process each data symbol (add phase compensation)
-        float detected_freq_offset = alpha / (2 * M_PI * T);
+        // Convert alpha to CFO
+        float detected_freq_offset = FrequencyOffsetEstimator::alpha_to_cfo(
+            alpha, cfg_.fft_size, cfg_.cp_length, cfg_.sample_rate
+        );
         // Frequency offset correction
         {
             _freq_offset_sum += detected_freq_offset;
@@ -1116,21 +944,9 @@ private:
         }
 
         prof_step_start = ProfileClock::now();
-        // Pre-compute H_est inverse (ZF equalizer base) - done once per frame
+        // Pre-compute H_est inverse (ZF equalizer base) using ChannelEstimator
         static thread_local AlignedVector H_inv;
-        if (H_inv.size() != cfg_.fft_size) {
-            H_inv.resize(cfg_.fft_size);
-        }
-        
-        #pragma omp simd simdlen(16)
-        for (size_t j = 0; j < cfg_.fft_size; ++j) {
-            const float h_real = H_est[j].real();
-            const float h_imag = H_est[j].imag();
-            const float mag_sq = h_real * h_real + h_imag * h_imag;
-            const float inv_mag_sq = 1.0f / mag_sq;
-            // H_inv = conj(H_est) / |H_est|^2 = 1/H_est
-            H_inv[j] = std::complex<float>(h_real * inv_mag_sq, -h_imag * inv_mag_sq);
-        }
+        ChannelEstimator::compute_zf_inverse(H_est, H_inv);
         
         for (size_t i = 0; i < symbols.size(); ++i) {
             auto& symbol = symbols[i];
@@ -1141,25 +957,8 @@ private:
             const float phase_diff_CFO = alpha * relative_symbol_index;
             const float beta_rel = beta * relative_symbol_index;
 
-            // Equalization: symbol = symbol * H_inv * exp(-j*phase)
-            // Manual complex multiplication for better vectorization
-            #pragma omp simd simdlen(16)
-            for (size_t j = 0; j < cfg_.fft_size; ++j) {
-                const float phase = beta_rel * _actual_subcarrier_indices[j] + phase_diff_CFO;
-                
-                // First multiply by H_inv (complex multiplication)
-                const float hinv_real = H_inv[j].real();
-                const float hinv_imag = H_inv[j].imag();
-                const float sym_real = symbol[j].real();
-                const float sym_imag = symbol[j].imag();
-                const float eq_re = sym_real * hinv_real - sym_imag * hinv_imag;
-                const float eq_im = sym_real * hinv_imag + sym_imag * hinv_real;
-                
-                // Then rotate by -phase (derotate)
-                const float c = std::cos(phase);
-                const float s = std::sin(phase);
-                symbol[j] = std::complex<float>(eq_re * c + eq_im * s, eq_im * c - eq_re * s);
-            }
+            // Equalization using ChannelEstimator
+            ChannelEstimator::equalize_symbol(symbol, H_inv, phase_diff_CFO, beta_rel, _actual_subcarrier_indices);
         }
         prof_step_end = ProfileClock::now();
         prof_equalization_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1197,82 +996,37 @@ private:
         prof_noise_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         // =====================================================================
 
-        // Remodulate frequency domain symbols (as TX frequency domain symbol estimation)
+        // Remodulate frequency domain symbols using QPSKModulator
         prof_step_start = ProfileClock::now();
-        // Use sense_frame.tx_symbols directly instead of separate tx_symbols_est
         
-        // Pre-compute QPSK constellation points
-        constexpr float QPSK_POS = static_cast<float>(M_SQRT1_2);
-        constexpr float QPSK_NEG = -static_cast<float>(M_SQRT1_2);
-
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             if (i == cfg_.sync_pos) {
                 // Sync symbol uses original ZC sequence
                 sense_frame.tx_symbols[i] = zc_freq_;
             } else {
                 // Data symbol - remodulate based on demodulation results
-                sense_frame.tx_symbols[i].resize(cfg_.fft_size);
-                auto* __restrict__ mod_ptr = sense_frame.tx_symbols[i].data();
                 const size_t symbol_idx = (i < cfg_.sync_pos) ? i : i - 1;
-                const auto* __restrict__ sym_ptr = symbols[symbol_idx].data();
-                const auto* __restrict__ zc_ptr = zc_freq_.data();
-                
-                // SIMD-friendly hard decision without branches
-                #pragma omp simd
-                for (size_t j = 0; j < cfg_.fft_size; ++j) {
-                    const float re = sym_ptr[j].real();
-                    const float im = sym_ptr[j].imag();
-                    // Use copysign for branchless QPSK mapping
-                    mod_ptr[j] = std::complex<float>(
-                        std::copysign(QPSK_POS, re),
-                        std::copysign(QPSK_POS, im)
-                    );
-                }
-
-                // Replace pilot positions with known pilots
-                for (auto pilot : cfg_.pilot_positions) {
-                    mod_ptr[pilot] = zc_ptr[pilot];
-                }
+                QPSKModulator::remodulate_symbol(symbols[symbol_idx], zc_freq_, cfg_.pilot_positions, sense_frame.tx_symbols[i]);
             }
         }
         prof_step_end = ProfileClock::now();
         prof_remodulate_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
+        // Compute delay spectrum using DelayProcessor
         prof_step_start = ProfileClock::now();
-        AlignedVector delay_spectrum(cfg_.fft_size);
-        fft_shift(H_est, ifft_input_);
-        fftwf_execute(ifft_plan_);
+        AlignedVector delay_spectrum;
+        DelayProcessor::compute_delay_spectrum(H_est, ifft_input_, ifft_output_, ifft_plan_, delay_spectrum);
         
-        const float scale = 1.0f / sqrtf(cfg_.fft_size);
-        #pragma omp simd
-        for (size_t i = 0; i < cfg_.fft_size; ++i) {
-            delay_spectrum[i] = ifft_output_[i] * scale;
-        }
-
+        // Find peak in delay spectrum
         size_t max_index = 0;
         float max_mag = 0.0f;
         float average_mag = 0.0f;
-        for (size_t i = 0; i < cfg_.fft_size; ++i) {
-            const float mag = std::abs(delay_spectrum[i]);
-            if (mag > max_mag) {
-                max_mag = mag;
-                max_index = i;
-            }
-            average_mag += mag;
-        }
-        average_mag /= cfg_.fft_size;
-        // Index adjustment (map 512-1023 to -512~-1)
-        int adjusted_index = static_cast<int>(max_index);
-        const int half_fft = cfg_.fft_size / 2;
-        if (adjusted_index >= half_fft) {
-            adjusted_index -= cfg_.fft_size;
-        }
-        // adjusted_index -= 2*cfg_.delay_adjust_step; // Extra offset of 4 samples to display the LoS more clearly
+        DelayProcessor::find_peak(delay_spectrum, max_index, max_mag, average_mag);
+        
+        // Adjust delay index to signed value
+        int adjusted_index = DelayProcessor::adjust_delay_index(max_index, cfg_.fft_size);
 
-        float fractional_delay = estimateFractionalDelay(delay_spectrum, max_index);
-        if (std::isnan(fractional_delay)) {
-            fractional_delay = 0.0f;
-        }
+        float fractional_delay = DelayProcessor::estimate_fractional_delay(delay_spectrum, max_index);
         float delay_offset_reading = adjusted_index + fractional_delay;
         prof_step_end = ProfileClock::now();
         prof_delay_spectrum_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1388,10 +1142,9 @@ private:
         prof_step_end = ProfileClock::now();
         prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
-        // Extract data symbols to generate LLR
+        // Extract data symbols to generate LLR using NoiseEstimator
         prof_step_start = ProfileClock::now();
         const size_t data_subcarriers_per_symbol = cfg_.fft_size - cfg_.pilot_positions.size();
-        const size_t total_llr_count = symbols.size() * data_subcarriers_per_symbol * 2;
         // Acquire pre-allocated LLR buffer from pool
         AlignedFloatVector frame_llr = _llr_pool.acquire();
         float scale_llr = std::min(static_cast<float>(_llr_scale * M_SQRT1_2), 500.0f);
@@ -1408,20 +1161,8 @@ private:
             }
         }
         
-        float* __restrict__ llr_ptr = frame_llr.data();
-        const size_t num_data_sc = data_indices.size();
-        
-        for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
-            const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
-            float* __restrict__ out_ptr = llr_ptr + sym_idx * num_data_sc * 2;
-            
-            #pragma omp simd simdlen(16)
-            for (size_t i = 0; i < num_data_sc; ++i) {
-                const size_t k = data_indices[i];
-                out_ptr[i * 2]     = sym_ptr[k].real() * scale_llr;
-                out_ptr[i * 2 + 1] = sym_ptr[k].imag() * scale_llr;
-            }
-        }
+        // Compute LLR using NoiseEstimator
+        NoiseEstimator::compute_llr_to_buffer(symbols, data_indices, scale_llr, frame_llr.data());
         
         // Put LLR data into circular buffer
         {
@@ -1472,15 +1213,6 @@ private:
         }
     }
 
-    void demodulate_symbol(const AlignedVector& symbol) {
-        std::vector<uint8_t> bits;
-        bits.reserve(cfg_.fft_size * 2);
-        
-        for (const auto& s : symbol) {
-            bits.push_back((s.real() > 0) ? 1 : 0);
-            bits.push_back((s.imag() > 0) ? 1 : 0);
-        }
-    }
     /**
      * @brief Sensing Processing Thread.
      * 
@@ -1575,68 +1307,23 @@ private:
                           dest);
             }
             
-            // 2. Channel estimation (Frequency domain division)
-            // Manual complex division for better vectorization
-            for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
-                auto* __restrict__ ch_data = _channel_response_buffer.data() + i * cfg_.range_fft_size;
-                const auto* __restrict__ tx_data = frame.tx_symbols[i].data();
-                #pragma omp simd simdlen(16) aligned(ch_data, tx_data: 64)
-                for (size_t k = 0; k < cfg_.fft_size; ++k) {
-                    float rx_real = ch_data[k].real();
-                    float rx_imag = ch_data[k].imag();
-                    float tx_real = tx_data[k].real();
-                    float tx_imag = tx_data[k].imag();
-                    float denom = tx_real * tx_real + tx_imag * tx_imag;
-                    float inv_denom = 1.0f / denom;
-                    ch_data[k] = std::complex<float>(
-                        (rx_real * tx_real + rx_imag * tx_imag) * inv_denom,
-                        (rx_imag * tx_real - rx_real * tx_imag) * inv_denom
-                    );
-                }
-            }
+            // 2. Channel estimation with division (for bi-static sensing) using SensingProcessor
+            _sensing_core.channel_estimate_with_division(_channel_response_buffer, frame.tx_symbols, cfg_.fft_size);
 
-            for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
-                auto* symbol_data = _channel_response_buffer.data() + i * cfg_.range_fft_size;
-                const size_t half_size = cfg_.fft_size / 2;
-                
-                // In-place FFT shift using temporary variable for vectorization
-                #pragma omp simd simdlen(16) aligned(symbol_data: 64)
-                for (size_t j = 0; j < half_size; ++j) {
-                    std::complex<float> temp = symbol_data[j];
-                    symbol_data[j] = symbol_data[j + half_size];
-                    symbol_data[j + half_size] = temp;
-                }
-            }
+            // FFT shift for each symbol using SensingProcessor
+            _sensing_core.fft_shift_symbols(_channel_response_buffer, cfg_.fft_size);
 
             if (enable_mti.load()) {
                 _mti_filter.apply(_channel_response_buffer, cfg_.fft_size, cfg_.sensing_symbol_num);
             }
 
             if (!skip_sensing_fft.load()) {
+                // Apply range and Doppler windows using SensingProcessor
+                _sensing_core.apply_windows(_channel_response_buffer, _range_window, _doppler_window);
 
-                for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
-                    auto* symbol_data = _channel_response_buffer.data() + i * cfg_.range_fft_size;
-                    #pragma omp simd simdlen(16) aligned(symbol_data: 64)
-                    for (size_t j = 0; j < cfg_.fft_size; ++j) {
-                        // Apply range window (Frequency domain windowing)
-                        symbol_data[j] *= _range_window[j];
-                    }
-                }
-
-                for (size_t bin = 0; bin < cfg_.fft_size; ++bin) {
-                    #pragma omp simd simdlen(16)
-                    for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
-                        size_t idx = i * cfg_.range_fft_size + bin;
-                        // Apply Doppler window (Time domain windowing)
-                        _channel_response_buffer[idx] *= _doppler_window[i];
-                    }
-                }
-
-                // 3. Batch process Range dimension (Process all symbols together)
-                fftwf_execute(_range_ifft_plan);  // Range IFFT (Frequency to Time domain)
-                
-                // 4. Batch process Doppler dimension (Process all subcarriers together)
-                fftwf_execute(_doppler_fft_plan); // Doppler FFT (Time to Frequency domain)
+                // Range-Doppler processing
+                fftwf_execute(_range_ifft_plan);  // Range IFFT
+                fftwf_execute(_doppler_fft_plan); // Doppler FFT
             }
 
             // 5. Send processing results

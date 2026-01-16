@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <Common.hpp>
+#include "OFDMCore.hpp"
 #include <functional>
 #include <unordered_map>
 #include <boost/program_options.hpp>
@@ -80,7 +81,8 @@ public:
         }),
         _data_packet_pool(64, []() {
             return AlignedIntVector();
-        })
+        }),
+        _sensing_core({cfg.fft_size, cfg.range_fft_size, cfg.doppler_fft_size, cfg.sensing_symbol_num})
     {
 
         // Initialize FFTW resources
@@ -240,9 +242,9 @@ private:
     size_t shadow_sensing_symbol_stride=20; // Shadow sensing symbol stride
     size_t sensing_symbol_count=0;
     size_t sensing_symbol_saved_count=0;
-    // Hamming windows
-    AlignedVector _range_window;    // Range processing window (Frequency domain)
-    AlignedVector _doppler_window;  // Doppler processing window (Time domain)
+    // Hamming windows (float, not complex)
+    AlignedFloatVector _range_window;    // Range processing window (Frequency domain)
+    AlignedFloatVector _doppler_window;  // Doppler processing window (Time domain)
     size_t _global_symbol_index = 0; // Global symbol index (for sensing processing)
     
     // LDPC encoding and scrambling
@@ -251,7 +253,6 @@ private:
     
     // MTI Filter
     MTIFilter _mti_filter;
-
     
     // UDP socket
     int _udp_sock{-1};
@@ -262,6 +263,9 @@ private:
     ObjectPool<SymbolVector> _symbols_pool;     // Pool for symbol vectors (frequency domain)
     ObjectPool<AlignedVector> _rx_frame_pool;   // Pool for RX frame buffers
     ObjectPool<AlignedIntVector> _data_packet_pool; // Pool for data packet buffers
+
+    // Core computation classes (hardware-independent)
+    SensingProcessor _sensing_core;
     
     void _register_commands() {
 
@@ -429,41 +433,20 @@ private:
         std::cout << "Saved FFTW wisdom to: " << wisdom_file << std::endl;
     }
 
-    // Initialize Hamming windows
+    // Initialize Hamming windows using WindowGenerator
     void _init_hamming_windows() {
         // Range processing window (frequency domain, applied to each subcarrier)
         _range_window.resize(_cfg.fft_size);
-        for (size_t i = 0; i < _cfg.fft_size; ++i) {
-            // Hamming window formula: w(n) = 0.54 - 0.46*cos(2πn/(N-1))
-            _range_window[i] = 0.54f - 0.46f * std::cos(2.0f * M_PI * i / (_cfg.fft_size - 1));
-        }
+        WindowGenerator::generate_hamming(_range_window, _cfg.fft_size);
         
         // Doppler processing window (Time domain, applied to each symbol)
         _doppler_window.resize(_cfg.sensing_symbol_num);
-        for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-            _doppler_window[i] = 0.54f - 0.46f * std::cos(2.0f * M_PI * i / (_cfg.sensing_symbol_num - 1));
-        }
+        WindowGenerator::generate_hamming(_doppler_window, _cfg.sensing_symbol_num);
     }
 
+    // Prepare ZC sequence using ZadoffChuGenerator
     void _prepare_zc_sequence() {
-        _zc_seq.resize(_cfg.fft_size);
-
-        const int N = _cfg.fft_size;
-        const int q = _cfg.zc_root;
-
-        // delta: even N -> 0, odd N -> 1
-        const int delta = (N & 1);
-
-        // Pre-calculate constant coefficients, use double for more stable phase calculation
-        const double base = -M_PI * static_cast<double>(q) / static_cast<double>(N);
-
-        #pragma omp simd
-        for (int n = 0; n < N; ++n) {
-            const double nd  = static_cast<double>(n);
-            const double arg = nd * (nd + static_cast<double>(delta)); // n*(n+delta)
-            const double phase = base * arg;                           // -π*q/N * n*(n+δ)
-            _zc_seq[n] = std::polar(1.0f, static_cast<float>(phase));  // unit-modulus complex
-        }
+        ZadoffChuGenerator::generate(_zc_seq, _cfg.fft_size, _cfg.zc_root);
     }
 
     void _precalc_positions() {
@@ -473,18 +456,8 @@ private:
         }
     }
 
-    // Pre-computed QPSK constellation lookup table
-    static constexpr float SQRT_2_INV = 0.7071067811865476f; // 1/sqrt(2)
-    const std::array<std::complex<float>, 4> _qpsk_table = {{
-        { SQRT_2_INV,  SQRT_2_INV},  // 00
-        { SQRT_2_INV, -SQRT_2_INV},  // 01
-        {-SQRT_2_INV,  SQRT_2_INV},  // 10
-        {-SQRT_2_INV, -SQRT_2_INV}   // 11
-    }};
-
-    inline std::complex<float> _qpsk_mod(int x) const {
-        return _qpsk_table[x & 3];
-    }
+    // Use QPSKModulator from OFDMCore.hpp for QPSK modulation
+    QPSKModulator _qpsk_modulator;
 
     /**
      * @brief Data Ingest and Encoding Thread.
@@ -593,7 +566,7 @@ private:
             
             // Convert to QPSK symbols
             LDPCCodec::AlignedIntVector header_qpsk_ints;
-            _pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
+            LDPCCodec::pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
             prof_step_end = ProfileClock::now();
             double header_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
@@ -615,7 +588,7 @@ private:
 
             // Convert to QPSK symbol integers
             LDPCCodec::AlignedIntVector qpsk_ints_all;
-            _pack_bits_qpsk(encoded_bits_all, qpsk_ints_all); // (#blocks*bytes_per_ldpc_block*8) ints
+            LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all); // (#blocks*bytes_per_ldpc_block*8) ints
             prof_step_end = ProfileClock::now();
             double payload_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
@@ -711,43 +684,9 @@ private:
             prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
             // 2. Channel estimation (Frequency domain division) + FFT shift
-            // Optimization: Use complex multiplication instead of division
-            // H = Rx / Tx = Rx * conj(Tx) / |Tx|^2
-            // For unit-magnitude Tx symbols (QPSK/ZC), |Tx|^2 = 1, so H = Rx * conj(Tx)
+            // Using SensingProcessor for combined channel estimation and FFT shift
             prof_step_start = ProfileClock::now();
-            const size_t half_size = _cfg.fft_size / 2;
-            
-            for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                auto* __restrict__ ch_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                const auto* __restrict__ tx_data = frame.tx_symbols[i].data();
-                
-                // Combined: channel estimation with multiplication + FFT shift
-                // Manual complex multiplication with conjugate for better vectorization
-                #pragma omp simd simdlen(16) aligned(ch_data, tx_data: 64)
-                for (size_t k = 0; k < half_size; ++k) {
-                    // First half: multiply by conjugate and store to second half position
-                    float ch_real = ch_data[k].real();
-                    float ch_imag = ch_data[k].imag();
-                    float tx_real = tx_data[k].real();
-                    float tx_imag = tx_data[k].imag();
-                    
-                    // Multiply by conjugate: (a+bi)*(c-di) = (ac+bd) + (bc-ad)i
-                    float est_real = ch_real * tx_real + ch_imag * tx_imag;
-                    float est_imag = ch_imag * tx_real - ch_real * tx_imag;
-                    
-                    // Second half: process and store to first half position
-                    float ch2_real = ch_data[k + half_size].real();
-                    float ch2_imag = ch_data[k + half_size].imag();
-                    float tx2_real = tx_data[k + half_size].real();
-                    float tx2_imag = tx_data[k + half_size].imag();
-                    
-                    ch_data[k] = std::complex<float>(
-                        ch2_real * tx2_real + ch2_imag * tx2_imag,
-                        ch2_imag * tx2_real - ch2_real * tx2_imag
-                    );
-                    ch_data[k + half_size] = std::complex<float>(est_real, est_imag);
-                }
-            }
+            _sensing_core.channel_estimate_with_shift(_channel_response_buffer, frame.tx_symbols, _cfg.fft_size);
             prof_step_end = ProfileClock::now();
             prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
@@ -761,33 +700,16 @@ private:
             prof_mti_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             if (!skip_sensing_fft.load()) {
+                // Apply range and Doppler windows using SensingProcessor
                 prof_step_start = ProfileClock::now();
-                for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                    auto* symbol_data = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                    #pragma omp simd simdlen(16) aligned(symbol_data: 64)
-                    for (size_t j = 0; j < _cfg.fft_size; ++j) {
-                        // Apply range window (Frequency domain windowing)
-                        symbol_data[j] *= _range_window[j];
-                    }
-                }
-
-                for (size_t bin = 0; bin < _cfg.fft_size; ++bin) {
-                    #pragma omp simd simdlen(16)
-                    for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
-                        size_t idx = i * _cfg.range_fft_size + bin;
-                        // Apply Doppler window (Time domain windowing)
-                        _channel_response_buffer[idx] *= _doppler_window[i];
-                    }
-                }
+                _sensing_core.apply_windows(_channel_response_buffer, _range_window, _doppler_window);
                 prof_step_end = ProfileClock::now();
                 prof_window_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-                // 3. Batch process Range dimension (Process all symbols together)
+                // Range-Doppler processing
                 prof_step_start = ProfileClock::now();
-                fftwf_execute(_range_ifft_plan);  // Range IFFT (Frequency to Time domain)
-                
-                // 4. Batch process Doppler dimension (Process all subcarriers together)
-                fftwf_execute(_doppler_fft_plan); // Doppler FFT (Time to Frequency domain)
+                fftwf_execute(_range_ifft_plan);  // Range IFFT
+                fftwf_execute(_doppler_fft_plan); // Doppler FFT
                 prof_step_end = ProfileClock::now();
                 prof_range_doppler_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             }
@@ -939,7 +861,12 @@ private:
                         const int k = ds_ptr[di];
                         const int sym = (data_pool_pos + di < pool_size) ? 
                             pool_ptr[data_pool_pos + di] : pregen_ptr[frame_data_index + di];
-                        fft_ptr[k] = _qpsk_table[sym & 3];
+                        // Use QPSKModulator static lookup table for SIMD compatibility
+                        const int idx = (sym & 3) * 2;
+                        fft_ptr[k] = std::complex<float>(
+                            QPSKModulator::QPSK_TABLE_FLAT[idx],
+                            QPSKModulator::QPSK_TABLE_FLAT[idx + 1]
+                        );
                     }
                     // Update indices after loop
                     const size_t used_from_pool = std::min(ds_count, pool_size > data_pool_pos ? pool_size - data_pool_pos : 0);

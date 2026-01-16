@@ -1,65 +1,12 @@
+#ifndef COMMON_HPP
+#define COMMON_HPP
+
 #include <cstdint>
 #include <vector>
 #include <algorithm>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-
-/**
- * @brief QPSK Scrambler/Descrambler.
- * 
- * Uses a Linear Feedback Shift Register (LFSR) to generate a pseudo-random sequence
- * for scrambling and descrambling bits. This helps in randomizing the data to avoid
- * long sequences of zeros or ones, which avoids high PAPRs in OFDM.
- */
-class Scrambler {
-public:
-    Scrambler(size_t max_bits, uint8_t init = 0x5A)
-        : scramble_seq_(max_bits)
-    {
-        uint8_t lfsr = init;
-        for (size_t i = 0; i < max_bits; ++i) {
-            scramble_seq_[i] = ((lfsr >> 7) ^ (lfsr >> 3) ^ (lfsr >> 2) ^ (lfsr >> 1)) & 1;
-            lfsr = ((lfsr << 1) | scramble_seq_[i]) & 0xFF;
-        }
-    }
-
-    // Scramble (in-place)
-    template<typename Vec>
-    void scramble(Vec& bits) const {
-        size_t n = bits.size();
-        size_t m = std::min(n, scramble_seq_.size());
-        #pragma omp simd
-        for (size_t i = 0; i < m; ++i) {
-            bits[i] ^= scramble_seq_[i];
-        }
-    }
-
-    // Descramble (in-place)
-    template<typename Vec>
-    void descramble(Vec& bits) const {
-        scramble(bits); // Same as scrambling
-    }
-
-    // Soft descramble (descramble LLR values)
-    template<typename FloatVec>
-    void soft_descramble(FloatVec& llr_values) const {
-        size_t n = llr_values.size();
-        size_t m = std::min(n, scramble_seq_.size());
-        #pragma omp simd
-        for (size_t i = 0; i < m; ++i) {
-            if (scramble_seq_[i] == 1) {
-                llr_values[i] = -llr_values[i]; // Flip LLR sign if scramble bit is 1
-            }
-            // Keep LLR as is if scramble bit is 0
-        }
-    }
-
-private:
-    std::vector<uint8_t> scramble_seq_;
-};
-#ifndef COMMON_HPP
-#define COMMON_HPP
 
 #include <vector>
 #include <complex>
@@ -93,6 +40,28 @@ private:
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+
+// ============== Common Utility Functions ==============
+
+/**
+ * @brief Check if a float is NaN using bit manipulation.
+ * Compatible with -ffast-math compiler flag.
+ */
+inline bool isNaN(float x) {
+    uint32_t bits;
+    static_assert(sizeof(float) == sizeof(uint32_t), "Unexpected float size");
+    std::memcpy(&bits, &x, sizeof(float));
+    constexpr uint32_t exponent_mask = 0x7F800000;
+    constexpr uint32_t mantissa_mask = 0x007FFFFF;
+    return ((bits & exponent_mask) == exponent_mask) && (bits & mantissa_mask);
+}
+
+/**
+ * @brief Convert FFT bin index to shifted index.
+ */
+inline int fftshift_index(int original_index, int N) {
+    return (original_index + N/2) % N;
+}
 
 
 /**
@@ -799,232 +768,6 @@ private:
 };
 
 /**
- * @brief Weighted Linear Regression.
- * 
- * Calculates the slope (beta) and intercept (alpha) of a line that best fits the
- * weighted input data points using the least squares method. 
- * Used for estimating SFO/SIO and CFO effects where some pilot subcarriers might have higher SNR (weight).
- * 
- * @return std::pair<float, float> {slope (beta), intercept (alpha)}
- */
-template <typename T>
-std::pair<float, float> weightedlinearRegression(const std::vector<T>& x_values,
-                                         const std::vector<float>& y_values,
-                                         const std::vector<float>& weights) {
-    // Validate input data size and weights match
-    if (x_values.size() != y_values.size() || 
-        x_values.size() != weights.size() || 
-        x_values.empty()) {
-        return std::make_pair(0.0f, 0.0f);
-    }
-    // Initialize weighted sum variables
-    float sum_w = 0.0f;
-    float sum_wx = 0.0f;
-    float sum_wy = 0.0f;
-    float sum_wxx = 0.0f;
-    float sum_wxy = 0.0f;
-    const int N = x_values.size();
-
-    // Calculate weighted sums
-    for (int i = 0; i < N; ++i) {
-        const float w = weights[i];
-        const float x = static_cast<float>(x_values[i]);
-        const float y = y_values[i];
-        
-        sum_w += w;
-        sum_wx += w * x;
-        sum_wy += w * y;
-        sum_wxx += w * x * x;
-        sum_wxy += w * x * y;
-    }
-
-    // Calculate weighted least squares slope and intercept
-    float beta = 0.0f, alpha = 0.0f;
-    float denom = sum_w * sum_wxx - sum_wx * sum_wx;
-    
-    if (std::abs(denom) > 1e-10f) {
-        beta = (sum_w * sum_wxy - sum_wx * sum_wy) / denom;
-        alpha = (sum_wy - beta * sum_wx) / sum_w;
-    }
-
-    return std::make_pair(beta, alpha);
-}
-
-/**
- * @brief Standard Linear Regression.
- * 
- * Calculates the slope (beta) and intercept (alpha) for unweighted data.
- * Used for estimating SFO/SIO across frames using timing offset estimates where all 
- * measurements are treated equally.
- * 
- * @return std::pair<float, float> {slope (beta), intercept (alpha)}
- */
-template <typename T>
-std::pair<float, float> linearRegression(const std::vector<T>& x_values,
-                                         const std::vector<float>& y_values) {
-    // Validate input data size size matches and not empty
-    if (x_values.size() != y_values.size() || x_values.empty()) {
-        return std::make_pair(0.0f, 0.0f);
-    }
-    // Initialize sum variables
-    float sum_x = 0.0f;
-    float sum_y = 0.0f;
-    float sum_xx = 0.0f;
-    float sum_xy = 0.0f;
-    const int N = x_values.size();
-
-    // Calculate sums
-    for (int i = 0; i < N; ++i) {
-        const float x = static_cast<float>(x_values[i]);
-        const float y = y_values[i];
-        sum_x += x;
-        sum_y += y;
-        sum_xx += x * x;
-        sum_xy += x * y;
-    }
-
-    // Calculate least squares slope and intercept
-    float beta = 0.0f, alpha = 0.0f;
-    float denom = N * sum_xx - sum_x * sum_x;  // Denominator = n*Σx² - (Σx)²
-    if (std::abs(denom) > 1e-10f) {
-        beta = (N * sum_xy - sum_x * sum_y) / denom;
-        alpha = (sum_y - beta * sum_x) / N;
-    }
-
-    return std::make_pair(beta, alpha);
-}
-
-/**
- * @brief Finite Impulse Response (FIR) Filter.
- * 
- * Implements a standard FIR filter with a circular buffer for efficiency.
- * Used for signal smoothing or filtering.
- */
-class FIRFilter {
-private:
-    std::vector<float> coeffs;  // Filter coefficients
-    std::vector<float> buffer;  // Data buffer
-    size_t order;               // Filter order
-    size_t index;               // Current write index
-
-public:
-    FIRFilter(const std::vector<float>& coefficients) 
-        : coeffs(coefficients), 
-          buffer(coefficients.size(), 0.0f),
-          order(coefficients.size()),
-          index(0) {}
-
-    float process(float input) {
-        buffer[index] = input;
-        index = (index + 1) % order;  // Update index
-
-        float output = 0.0f;
-        size_t i = index;  // Start from oldest data point
-
-        for (size_t j = 0; j < order; j++) {
-            output += coeffs[j] * buffer[i];
-            i = (i + 1) % order;  // Move to next newer sample
-        }
-
-        return output;
-    }
-    
-    // Warm up the buffer to avoid initial transients
-    void warm_up(float value, size_t samples = 50) {
-        for (size_t i = 0; i < samples; i++) {
-            process(value);
-        }
-    }
-};
-
-/**
- * @brief Sampling Frequency Offset (SFO) / Sampling Interval Offset (SIO) Estimator.
- * 
- * Estimates the SFO/SIO by tracking the drift of timing offsets over time.
- * Uses a estimation window of timing offset measurements and performs 
- * linear regression to determine the rate of change (SIO). Also 
- * incorporates a control loop to adjust synchronization.
- */
-class SFOEstimator {
-public:
-    explicit SFOEstimator(size_t window_size) 
-        : _window_size(window_size),
-          _delay_offsets(window_size, 0.0f),
-          _delay_offsets_indices(window_size) {
-        // Initialize index array
-        std::iota(_delay_offsets_indices.begin(), _delay_offsets_indices.end(), 0);
-        reset();
-    }
-
-    void reset() {
-        _count = 0;
-        _cumulative_delay_offset = 0.0f;
-        _sfo_per_frame = 0.0f;
-        std::fill(_delay_offsets.begin(), _delay_offsets.end(), 0.0f);
-    }
-
-    // Update delay offset estimation and calculate SFO/SIO
-    void update(float delay_offset_reading, float Alignment) {
-
-        if (!_first_delay_offset_reading) {
-            if (Alignment != 0.0f){
-                //std::cout << "Alignment: " << Alignment << std::endl;
-                _cumulative_delay_offset += Alignment;
-            }
-            _delay_offsets[_count] = delay_offset_reading + _cumulative_delay_offset;
-            // Perform linear regression when window is full
-            if (++_count >= _window_size) {
-                _sfo_per_frame = linearRegression(_delay_offsets_indices, _delay_offsets).first;
-                _count = 0;
-                //std::cout << "SFO per frame: " << _sfo_per_frame << std::endl;
-                _cumulative_delay_offset = 0.0f;
-            }
-            if (abs(_sfo_per_frame)>1.0f) {
-                _sfo_per_frame = 0.0f;
-            }
-            _cumulative_sensing_delay_offset += _sfo_per_frame;
-            _cumulative_sensing_delay_offset -= Alignment;
-            auto err = delay_offset_reading - _cumulative_sensing_delay_offset;
-            if (abs(err) > 0.1f) {
-                _err_large_count++;
-                if (_err_large_count > 100) {
-                    _pd = 1e-2; // Increase proportional gain
-                }
-            } else {
-                _err_large_count = 0;
-                _pd = 1e-5; // Restore default proportional gain
-            }
-            _cumulative_sensing_delay_offset += _pd * err;
-        }
-        if (_first_delay_offset_reading){
-            _count ++;
-            if (_count >= 10) {
-                _first_delay_offset_reading = false;
-                _count = 0;
-            }
-        }
-
-    }
-
-    float get_sfo_per_frame() const { return _sfo_per_frame; }
-    float get_sensing_delay_offset() const { return _cumulative_sensing_delay_offset; }
-
-private:
-    size_t _window_size;      // Regression window size
-    size_t _count = 0;        // Count of readings in current window
-    size_t _err_large_count = 0; // Large error counter
-    float _pd = 1e-5;         // Proportional gain, used to adjust sensing delay offset accumulation
-    
-    std::vector<float> _delay_offsets;
-    std::vector<int> _delay_offsets_indices;
-    
-    float _cumulative_delay_offset = 0.0f;
-    bool _first_delay_offset_reading = true;
-    float _sfo_per_frame = 0.0f;  // Delay offset per frame due to SFO
-    float _cumulative_sensing_delay_offset = 0.0f; // Accumulated sensing delay offset
-};
-
-/**
  * @brief Hardware Synchronization Controller.
  * 
  * Controls an external hardware oscillator (e.g., OCXO) via a serial interface.
@@ -1394,6 +1137,26 @@ public:
         return codec->get_encoder().get_N();
     }
 
+    /**
+     * @brief Pack bits into QPSK symbols (0-3).
+     * Each pair of bits corresponds to one QPSK symbol.
+     */
+    static void pack_bits_qpsk(const AlignedIntVector &bits, AlignedIntVector &qpsk_ints) {
+        const size_t bit_count = bits.size();
+        const size_t symbol_count = (bit_count + 1) / 2;
+        qpsk_ints.resize(symbol_count);
+        const size_t even_pairs = bit_count / 2;
+        #pragma omp simd
+        for (size_t k = 0; k < even_pairs; ++k) {
+            int b0 = bits[2*k] & 1;
+            int b1 = bits[2*k + 1] & 1;
+            qpsk_ints[k] = (b0 << 1) | b1;
+        }
+        if (bit_count & 1) {
+            qpsk_ints[even_pairs] = (bits[bit_count - 1] & 1) << 1;
+        }
+    }
+
 private:
     LDPCConfig cfg;
     std::unique_ptr<aff3ct::factory::Codec_LDPC> codec_factory;
@@ -1459,139 +1222,6 @@ private:
             output_data[byte_idx] = byte;
         }
     }
-};
-
-/**
- * @brief QC-LDPC Bit Packing for QPSK.
- * 
- * Packs a vector of bits into QPSK symbols (0-3).
- * Each pair of bits corresponds to one QPSK symbol.
- * Optimized with SIMD for performance.
- */
-inline void _pack_bits_qpsk(const LDPCCodec::AlignedIntVector &bits, LDPCCodec::AlignedIntVector &qpsk_ints) {
-    const size_t bit_count = bits.size();
-    const size_t symbol_count = (bit_count + 1) / 2; // Pad with 0 if odd
-    qpsk_ints.resize(symbol_count);
-    const size_t even_pairs = bit_count / 2; // Number of complete pairs
-    // Main loop: Process 2 bits -> 1 QPSK symbol each time
-    #pragma omp simd
-    for (size_t k = 0; k < even_pairs; ++k) {
-        int b0 = bits[2*k] & 1;
-        int b1 = bits[2*k + 1] & 1;
-        qpsk_ints[k] = (b0 << 1) | b1;
-    }
-    // Trailing bit if odd (Rarely triggered, not in SIMD loop)
-    if (bit_count & 1) {
-        qpsk_ints[even_pairs] = (bits[bit_count - 1] & 1) << 1;
-    }
-}
-
-/**
- * @brief Phase Unwrapping Function.
- * 
- * Unwraps the phase values in a vector to eliminate 2*pi jumps.
- * Essential for accurate frequency offset estimation from phase differences.
- * Uses SIMD-friendly implementation.
- */
-inline void unwrap(std::vector<float>& phase) {
-    if (phase.size() > 1) {
-        std::vector<float> diffs(phase.size());
-        
-        // 1. Calculate and wrap differences (SIMD-friendly)
-        #pragma omp simd
-        for (size_t i = 1; i < phase.size(); ++i) {
-            float d = phase[i] - phase[i - 1];
-            // Robust wrapping using round for SIMD compatibility
-            float k = std::round(d / (2 * (float)M_PI));
-            d -= k * 2 * (float)M_PI;
-            diffs[i] = d;
-        }
-
-        // 2. Integrate unwrapped phase (Sequential)
-        for (size_t i = 1; i < phase.size(); ++i) {
-            phase[i] = phase[i - 1] + diffs[i];
-        }
-    }
-}
-
-/**
- * @brief Moving Target Indication (MTI) Filter.
- * 
- * Implements an 8-stage IIR filter for clutter suppression in sensing applications.
- * Uses AVX/OpenMP SIMD for efficient processing of subcarriers.
- */
-class MTIFilter {
-public:
-    MTIFilter(size_t range_fft_size = 1024) {
-        resize(range_fft_size);
-    }
-
-    void resize(size_t range_fft_size) {
-        _range_fft_size = range_fft_size;
-        // 8 stages, 2 states per stage (s0, s1), x range_fft_size
-        _state.resize(8 * 2 * _range_fft_size, std::complex<float>(0.0f, 0.0f));
-        reset();
-    }
-
-    void reset() {
-        std::fill(_state.begin(), _state.end(), std::complex<float>(0.0f, 0.0f));
-    }
-
-    /**
-     * @brief Apply MTI filter to the buffer.
-     * 
-     * @param buffer Input/Output buffer (Channel Response)
-     * @param N_proc Number of start subcarriers to process (e.g., fft_size). Data beyond this (zero-padding) is skipped.
-     * @param num_symbols Number of symbols in the buffer.
-     */
-    void apply(AlignedVector& buffer, size_t N_proc, size_t num_symbols) {
-        static const float SOS[8][6] = {
-            {0.993542f, -1.987084f, 0.993542f, 1.000000f, -1.993112f, 0.993951f},
-            {0.981889f, -1.963778f, 0.981889f, 1.000000f, -1.981389f, 0.982224f},
-            {0.971190f, -1.942380f, 0.971190f, 1.000000f, -1.970564f, 0.971395f},
-            {0.961860f, -1.923721f, 0.961860f, 1.000000f, -1.961077f, 0.961903f},
-            {0.954245f, -1.908491f, 0.954245f, 1.000000f, -1.953298f, 0.954121f},
-            {0.948614f, -1.897228f, 0.948614f, 1.000000f, -1.947526f, 0.948346f},
-            {0.945158f, -1.890316f, 0.945158f, 1.000000f, -1.943975f, 0.944795f},
-            {0.971593f, -0.971593f, 0.000000f, 1.000000f, -0.971389f, 0.000000f}
-        };
-
-        const size_t N_alloc = _range_fft_size; // Stride
-
-        for (int stage = 0; stage < 8; ++stage) {
-            const float b0 = SOS[stage][0];
-            const float b1 = SOS[stage][1];
-            const float b2 = SOS[stage][2];
-            const float a1 = SOS[stage][4]; 
-            const float a2 = SOS[stage][5];
-
-            std::complex<float>* s0_arr = &_state[stage * 2 * N_alloc]; 
-            std::complex<float>* s1_arr = &_state[stage * 2 * N_alloc + N_alloc];
-
-            for (size_t i = 0; i < num_symbols; ++i) {
-                std::complex<float>* symbol_data = buffer.data() + i * N_alloc;
-
-                #pragma omp simd
-                for (size_t col = 0; col < N_proc; ++col) {
-                    std::complex<float> x = symbol_data[col];
-                    std::complex<float> s0 = s0_arr[col];
-                    std::complex<float> s1 = s1_arr[col];
-
-                    std::complex<float> y = x * b0 + s0;
-                    std::complex<float> new_s0 = x * b1 - y * a1 + s1;
-                    std::complex<float> new_s1 = x * b2 - y * a2;
-
-                    symbol_data[col] = y;
-                    s0_arr[col] = new_s0;
-                    s1_arr[col] = new_s1;
-                }
-            }
-        }
-    }
-
-private:
-    AlignedVector _state;
-    size_t _range_fft_size;
 };
 
 #endif // COMMON_HPP

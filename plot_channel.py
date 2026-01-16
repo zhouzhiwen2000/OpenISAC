@@ -1,4 +1,5 @@
 import socket
+from matplotlib.pylab import fftshift
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -18,7 +19,7 @@ plt.grid(True)
 x = np.arange(FFT_SIZE)
 line, = ax.plot(x, np.zeros(FFT_SIZE))
 ax.set_ylim(0, 1)
-ax.set_xlabel('Subcarrier Index')
+ax.set_xlabel('Frequency Bin')
 ax.set_ylabel('Power (dB)')
 ax.set_title('Channel Response')
 
@@ -28,6 +29,7 @@ def update(frame):
         if len(data) == FFT_SIZE * 8:
             # Data processing
             cdata = np.frombuffer(data, dtype=np.complex64)
+            cdata = fftshift(cdata)
             power = 10*np.log10(np.abs(cdata)**2 + 1e-60)  # Log power
             
             # Find maximum value
