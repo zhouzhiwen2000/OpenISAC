@@ -4,3 +4,5 @@ scipy
 optuna
 #cupy-cuda12x # Uncomment the line above if you want to use CuPy for GPU acceleration
 numba
+pyqtgraph>=0.14.0
+PyQt6>=6.0.0
