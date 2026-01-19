@@ -77,8 +77,8 @@ nav {
 
 /* Hero Section */
 .hero {
-    background: linear-gradient(135deg, #6b5b95, #3d8b8b);
-    color: white;
+    background: linear-gradient(90deg, #e3ffe7 0%, #d9e7ff 100%);
+    color: #333;
     padding: 4rem 2rem;
     text-align: center;
 }
@@ -86,6 +86,7 @@ nav {
 .hero h1 {
     font-size: 3rem;
     margin-bottom: 1rem;
+    color: #333;
 }
 
 .hero-logo {
@@ -102,14 +103,14 @@ nav {
     font-size: 1.25rem;
     max-width: 800px;
     margin: 0 auto 2rem;
-    opacity: 0.9;
+    color: #333;
 }
 
 .cta-button {
     display: inline-block;
     padding: 0.8rem 2rem;
-    background-color: white;
-    color: var(--primary-color);
+    background-color: #4d4d4d;
+    color: white;
     text-decoration: none;
     border-radius: 50px;
     font-weight: bold;
