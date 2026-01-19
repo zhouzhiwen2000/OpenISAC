@@ -387,9 +387,13 @@ sudo ../isolate_cpus.bash run ./OFDMDemodulator</code></pre>
 
             <h3>5. 运行单站感知前端</h3>
             <pre><code class="language-bash">python3 ./plot_sensing.py</code></pre>
+            <p>如果您的计算机配备了 NVIDIA 显卡，可以使用以下脚本以获得更好的实时显示性能：</p>
+            <pre><code class="language-bash">python3 ./plot_sensing_fast.py</code></pre>
 
             <h3>6. 运行双站感知前端</h3>
             <pre><code class="language-bash">python3 ./plot_bi_sensing.py</code></pre>
+            <p>如果您的计算机配备了 NVIDIA 显卡，可以使用以下脚本以获得更好的实时显示性能：</p>
+            <pre><code class="language-bash">python3 ./plot_bi_sensing_fast.py</code></pre>
 
             <h3>OFDM 调制器 (OFDMModulator)</h3>
             <p><code>OFDMModulator</code> (BS 节点) 可以使用以下命令行参数配置:</p>

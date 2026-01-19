@@ -206,7 +206,7 @@
                 <li><strong>Computer</strong>: 1x Computer (Windows or Linux). Can be one of the backend computers or a
                     separate machine.</li>
                 <li><strong>CPU</strong>: High performance CPU (i7 10700 or better) if no GPU is available.</li>
-                <li><strong>GPU</strong>: A Nvidia GPU is recommended for acceleration.</li>
+                <li><strong>GPU</strong>: An Nvidia GPU is recommended for acceleration.</li>
             </ul>
         </section>
 
@@ -409,9 +409,13 @@ sudo ../isolate_cpus.bash run ./OFDMDemodulator</code></pre>
 
             <h3>5. Run monostatic frontend</h3>
             <pre><code class="language-bash">python3 ./plot_sensing.py</code></pre>
+            <p>For better real-time performance (if an NVIDIA GPU is available):</p>
+            <pre><code class="language-bash">python3 ./plot_sensing_fast.py</code></pre>
 
             <h3>6. Run bistatic frontend</h3>
             <pre><code class="language-bash">python3 ./plot_bi_sensing.py</code></pre>
+            <p>For better real-time performance (if an NVIDIA GPU is available):</p>
+            <pre><code class="language-bash">python3 ./plot_bi_sensing_fast.py</code></pre>
 
             <h2>Arguments Table</h2>
 

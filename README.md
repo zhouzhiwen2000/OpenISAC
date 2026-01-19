@@ -105,7 +105,7 @@ To support high bandwidth and sample rates, ensure the connection between the Co
 *   **Computer**: 1x Computer (Windows or Linux).
     *   Can be one of the backend computers or a separate machine.
 *   **CPU**: High performance CPU (i7 10700 or better) if no GPU is available.
-*   **GPU**: A Nvidia GPU is recommended for acceleration.
+*   **GPU**: An Nvidia GPU is recommended for acceleration.
 
 
 ## Software Requirements
@@ -364,10 +364,18 @@ ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 ```bash
 python3 ./plot_sensing.py
 ```
+For better real-time performance (if an NVIDIA GPU is available):
+```bash
+python3 ./plot_sensing_fast.py
+```
 
 ### 6. Run bistatic frontend
 ```bash
 python3 ./plot_bi_sensing.py
+```
+For better real-time performance (if an NVIDIA GPU is available):
+```bash
+python3 ./plot_bi_sensing_fast.py
 ```
 
 ### OFDM Modulator

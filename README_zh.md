@@ -361,10 +361,18 @@ ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
 ```bash
 python3 ./plot_sensing.py
 ```
+如果您的计算机配备了 NVIDIA 显卡，可以使用以下脚本以获得更好的实时显示性能：
+```bash
+python3 ./plot_sensing_fast.py
+```
 
 ### 6. 运行双站感知前端
 ```bash
 python3 ./plot_bi_sensing.py
+```
+如果您的计算机配备了 NVIDIA 显卡，可以使用以下脚本以获得更好的实时显示性能：
+```bash
+python3 ./plot_bi_sensing_fast.py
 ```
 
 ### OFDM 调制器 (OFDMModulator)
