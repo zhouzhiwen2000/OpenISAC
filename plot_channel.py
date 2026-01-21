@@ -13,15 +13,34 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((UDP_IP, UDP_PORT))
 sock.settimeout(0.2)
 
-# Create plotting window
-fig, ax = plt.subplots()
-plt.grid(True)
+# Create plotting window with three subplots
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
+plt.subplots_adjust(hspace=0.3)
 x = np.arange(FFT_SIZE)
-line, = ax.plot(x, np.zeros(FFT_SIZE))
-ax.set_ylim(0, 1)
-ax.set_xlabel('Frequency Bin')
-ax.set_ylabel('Power (dB)')
-ax.set_title('Channel Response')
+
+# Real part subplot
+ax1.grid(True)
+line1, = ax1.plot(x, np.zeros(FFT_SIZE), 'b')
+ax1.set_ylim(-1, 1)
+ax1.set_xlabel('Frequency Bin')
+ax1.set_ylabel('Real Part')
+ax1.set_title('Channel Response - Real Part')
+
+# Imaginary part subplot
+ax2.grid(True)
+line2, = ax2.plot(x, np.zeros(FFT_SIZE), 'r')
+ax2.set_ylim(-1, 1)
+ax2.set_xlabel('Frequency Bin')
+ax2.set_ylabel('Imaginary Part')
+ax2.set_title('Channel Response - Imaginary Part')
+
+# Magnitude subplot
+ax3.grid(True)
+line3, = ax3.plot(x, np.zeros(FFT_SIZE), 'g')
+ax3.set_ylim(0, 1)
+ax3.set_xlabel('Frequency Bin')
+ax3.set_ylabel('Magnitude')
+ax3.set_title('Channel Response - Magnitude')
 
 def update(frame):
     try:
@@ -30,25 +49,32 @@ def update(frame):
             # Data processing
             cdata = np.frombuffer(data, dtype=np.complex64)
             cdata = fftshift(cdata)
-            power = 10*np.log10(np.abs(cdata)**2 + 1e-60)  # Log power
             
-            # Find maximum value
-            max_index = np.argmax(power)
-            max_value = power[max_index]
+            # Extract real and imaginary parts
+            real_part = np.real(cdata)
+            imag_part = np.imag(cdata)
+            magnitude = np.abs(cdata)
             
-            # Adjust index display range
-            adjusted_index = max_index if max_index < FFT_SIZE//2 else max_index - FFT_SIZE
+            # Update graphs
+            line1.set_ydata(real_part)
+            line2.set_ydata(imag_part)
+            line3.set_ydata(magnitude)
             
-            # Update graph
-            line.set_ydata(power)
+            # Auto-adjust Y axis for real part
+            real_max = np.max(np.abs(real_part))
+            ax1.set_ylim(-real_max * 1.1, real_max * 1.1)
             
-            # Auto-adjust Y axis
-            current_max = np.max(power)
-            ax.set_ylim(current_max - 60, current_max + 5)
+            # Auto-adjust Y axis for imaginary part
+            imag_max = np.max(np.abs(imag_part))
+            ax2.set_ylim(-imag_max * 1.1, imag_max * 1.1)
+            
+            # Auto-adjust Y axis for magnitude
+            mag_max = np.max(magnitude)
+            ax3.set_ylim(0, mag_max * 1.1)
             
     except socket.timeout:
         pass
-    return line,
+    return line1, line2, line3
 
 # Update every 50ms
 ani = FuncAnimation(fig, update, interval=50, blit=True)

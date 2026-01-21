@@ -219,7 +219,7 @@ struct Config {
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
     size_t sync_pos = 1;               // Synchronization symbol position
     int delay_adjust_step = 2;         // Delay adjustment step
-    
+    int desired_peak_pos = 20;         // Desired delay peak position to include non-causal components
     double sample_rate = 50e6;         // Sample rate
     double bandwidth = 50e6;           // Bandwidth
     double center_freq = 2.4e9;        // Center frequency
@@ -234,8 +234,7 @@ struct Config {
     bool software_sync = true;         // Software synchronization flag
     bool hardware_sync = false;        // Hardware synchronization flag
     std::string hardware_sync_tty = "/dev/ttyUSB0"; // Hardware sync TTY device
-    double ppm_adjust_factor = 0.01;
-    double delay_ppm_adjust_factor = 0.01;
+    double ppm_adjust_factor = 0.05;
 
     std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     std::string device_args = "";

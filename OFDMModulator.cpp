@@ -59,7 +59,6 @@ public:
         _fft_out(cfg.fft_size),
         _demod_fft_in(cfg.fft_size),
         _demod_fft_out(cfg.fft_size),
-        _channel_response_buffer(cfg.range_fft_size * cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f)),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         tx_data_file("tx_frame.bin", std::ios::binary),
         _sensing_sender(cfg.mono_sensing_ip, cfg.mono_sensing_port),
@@ -117,19 +116,16 @@ public:
         _accumulated_tx_symbols.reserve(_cfg.sensing_symbol_num);
         
         // Initialize MTI filter
-        _mti_filter.resize(_cfg.range_fft_size);
+
     }
 
     ~OFDMISACEngine() {
         stop();
         
-        // Save wisdom before destroying plans
-        std::string wisdom_file = "fftw_wisdom_" + std::to_string(_cfg.fft_size) + ".dat";
-        _save_fftw_wisdom(wisdom_file);
         
         fftwf_destroy_plan(_ifft_plan);
-        fftwf_destroy_plan(_range_ifft_plan);
-        fftwf_destroy_plan(_doppler_fft_plan);
+        fftwf_destroy_plan(_demod_fft_plan);
+        // Note: _sensing_core manages its own FFT plans and cleans them up in its destructor
     }
 
     void start() {
@@ -200,10 +196,8 @@ private:
     
     AlignedVector _demod_fft_in;         // Range FFT input
     AlignedVector _demod_fft_out;        // Range FFT output
-    AlignedVector _channel_response_buffer;  // Channel response buffer
     fftwf_plan _demod_fft_plan = nullptr; // Demodulation FFT plan
-    fftwf_plan _range_ifft_plan = nullptr;   // Batch Range IFFT plan
-    fftwf_plan _doppler_fft_plan = nullptr;   // Doppler FFT plan
+    // Note: Range IFFT and Doppler FFT plans are now managed by SensingProcessor internally
     
     // ZC序列
     AlignedVector _zc_seq;               
@@ -252,7 +246,7 @@ private:
     Scrambler scrambler{201600, 0x5A};
     
     // MTI Filter
-    MTIFilter _mti_filter;
+
     
     // UDP socket
     int _udp_sock{-1};
@@ -336,22 +330,14 @@ private:
 
     void _init_fftw() {
         // fftwf_plan_with_nthreads(static_cast<int>(_cfg.fft_threads));
-        
-        // Try to load wisdom from file
-        std::string wisdom_file = "fftw_wisdom_" + std::to_string(_cfg.fft_size) + ".dat";
-        bool has_wisdom = _load_fftw_wisdom(wisdom_file);
-        
-        // If wisdom exists, use FFTW_ESTIMATE for fast planning
-        // Otherwise, use FFTW_MEASURE to create wisdom
-        unsigned plan_flags = has_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
-        
+            
         // Create IFFT plan (for transmission)
         _ifft_plan = fftwf_plan_dft_1d(
             static_cast<int>(_cfg.fft_size),
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_fft_out.data()),
             FFTW_BACKWARD,
-            plan_flags
+            FFTW_MEASURE
         );
         
         // Create demodulation FFT plan (for sensing)
@@ -360,78 +346,15 @@ private:
             reinterpret_cast<fftwf_complex*>(_demod_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_demod_fft_out.data()),
             FFTW_FORWARD,
-            plan_flags
+            FFTW_MEASURE
         );
         
-        // Create batch Range IFFT plan (for sensing)
-        _channel_response_buffer.resize(_cfg.range_fft_size * _cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f));
+        // Note: SensingProcessor now manages its own Range IFFT and Doppler FFT plans internally
         
-        // Convert size_t to int
-        const int fft_size_int = static_cast<int>(_cfg.range_fft_size);
-        const int doppler_fft_size_int = static_cast<int>(_cfg.doppler_fft_size);
-        
-        _range_ifft_plan = fftwf_plan_many_dft(
-            1,                         // rank
-            &fft_size_int,             // n (FFT size)
-            doppler_fft_size_int,           // howmany (number of symbols)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // inembed (contiguous)
-            1,                         // istride
-            fft_size_int,              // idist (distance between FFTs)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // onembed
-            1,                         // ostride
-            fft_size_int,              // odist
-            FFTW_BACKWARD,             // sign (IFFT)
-            plan_flags
-        );
-        
-        // Create Doppler FFT plan (for sensing)
-        _doppler_fft_plan = fftwf_plan_many_dft(
-            1,                         // rank
-            &doppler_fft_size_int,          // n (number of symbols)
-            fft_size_int,              // howmany (number of subcarriers)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // inembed
-            fft_size_int,              // istride (stride between symbols)
-            1,                         // idist (distance between subcarriers)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // onembed
-            fft_size_int,              // ostride
-            1,                         // odist
-            FFTW_FORWARD,              // sign (FFT)
-            plan_flags
-        );
-        
-        // Save wisdom for future use if we just created it
-        if (!has_wisdom) {
-            _save_fftw_wisdom(wisdom_file);
-        }
+
     }
 
-    // FFTW wisdom management
-    bool _load_fftw_wisdom(const std::string& wisdom_file) {
-        if (!fs::exists(wisdom_file)) return false;
-        FILE* f = fopen(wisdom_file.c_str(), "r");
-        if (!f) return false;
-        bool success = fftwf_import_wisdom_from_file(f) != 0;
-        fclose(f);
-        if (success) {
-            std::cout << "Loaded FFTW wisdom from: " << wisdom_file << std::endl;
-        }
-        return success;
-    }
 
-    void _save_fftw_wisdom(const std::string& wisdom_file) {
-        FILE* f = fopen(wisdom_file.c_str(), "w");
-        if (!f) {
-            std::cerr << "Failed to save FFTW wisdom to: " << wisdom_file << std::endl;
-            return;
-        }
-        fftwf_export_wisdom_to_file(f);
-        fclose(f);
-        std::cout << "Saved FFTW wisdom to: " << wisdom_file << std::endl;
-    }
 
     // Initialize Hamming windows using WindowGenerator
     void _init_hamming_windows() {
@@ -668,57 +591,55 @@ private:
 
         static auto next_send_time = std::chrono::steady_clock::now();
         if (std::chrono::steady_clock::now() >= next_send_time) {
-            // 1. Perform OFDM demodulation on received frame
+            // 1. Perform OFDM demodulation on received frame and copy to internal buffer
             prof_step_start = ProfileClock::now();
-            std::vector<AlignedVector> rx_symbols;
-            rx_symbols.reserve(_cfg.sensing_symbol_num);
             for (size_t i = 0; i < _cfg.sensing_symbol_num; ++i) {
                 std::copy(frame.rx_symbols[i].begin(), frame.rx_symbols[i].end(), _demod_fft_in.begin());
                 // Execute FFT
                 fftwf_execute(_demod_fft_plan);
-                // Copy to channel response buffer
-                auto* dest = _channel_response_buffer.data() + i * _cfg.range_fft_size;
-                std::copy(_demod_fft_out.begin(), _demod_fft_out.end(), dest);
+                // Copy FFT result to SensingProcessor's internal buffer
+                _sensing_core.copy_fft_result_to_buffer(i, _demod_fft_out);
             }
             prof_step_end = ProfileClock::now();
             prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             
+            // Get reference to channel buffer for subsequent operations
+            auto& channel_buf = _sensing_core.channel_buffer();
+            
             // 2. Channel estimation (Frequency domain division) + FFT shift
             // Using SensingProcessor for combined channel estimation and FFT shift
             prof_step_start = ProfileClock::now();
-            _sensing_core.channel_estimate_with_shift(_channel_response_buffer, frame.tx_symbols, _cfg.fft_size);
+            _sensing_core.channel_estimate_with_shift(frame.tx_symbols);
             prof_step_end = ProfileClock::now();
             prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             // Apply MTI Filter (Moving Target Indication)
             // Applied after channel estimation and FFT shift, before windowing and IFFT
             prof_step_start = ProfileClock::now();
-            if (enable_mti.load()) {
-                _mti_filter.apply(_channel_response_buffer, _cfg.fft_size, _cfg.sensing_symbol_num);
-            }
+            _sensing_core.apply_mti(enable_mti.load());
             prof_step_end = ProfileClock::now();
             prof_mti_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
             if (!skip_sensing_fft.load()) {
                 // Apply range and Doppler windows using SensingProcessor
                 prof_step_start = ProfileClock::now();
-                _sensing_core.apply_windows(_channel_response_buffer, _range_window, _doppler_window);
+                _sensing_core.apply_windows(channel_buf, _range_window, _doppler_window);
                 prof_step_end = ProfileClock::now();
                 prof_window_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-                // Range-Doppler processing
+                // Range-Doppler processing using SensingProcessor's internal FFT plans
                 prof_step_start = ProfileClock::now();
-                fftwf_execute(_range_ifft_plan);  // Range IFFT
-                fftwf_execute(_doppler_fft_plan); // Doppler FFT
+                _sensing_core.execute_range_ifft();
+                _sensing_core.execute_doppler_fft();
                 prof_step_end = ProfileClock::now();
                 prof_range_doppler_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             }
 
             // 5. Send processing results
             prof_step_start = ProfileClock::now();
-            _sensing_sender.push_data(_channel_response_buffer);
+            _sensing_sender.push_data(channel_buf);
             if(_cfg.range_fft_size != _cfg.fft_size || _cfg.doppler_fft_size != _cfg.fft_size) {
-                _channel_response_buffer.assign(_cfg.range_fft_size * _cfg.doppler_fft_size, std::complex<float>(0.0f, 0.0f));
+                _sensing_core.clear_channel_buffer();
             }
             prof_step_end = ProfileClock::now();
             prof_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1523,6 +1444,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         uhd::set_thread_affinity(cpu_list);
     }
 
+    // Load FFTW wisdom
+    FFTWManager::import_wisdom();
+
     // Create and start engine
     OFDMISACEngine isac_engine(cfg);
     isac_engine.start();
@@ -1534,6 +1458,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
 
     // Stop processing
     isac_engine.stop();
+    
+    // Save FFTW wisdom
+    FFTWManager::export_wisdom();
     std::cout << "\nTransmission and sensing stopped.\n";
     return 0;
 }

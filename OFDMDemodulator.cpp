@@ -42,8 +42,12 @@ class OFDMRxEngine {
 public:
     explicit OFDMRxEngine(const Config& cfg) 
         : cfg_(cfg),
+          zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
           _accumulated_rx_symbols(),
           _accumulated_tx_symbols(),
+          _channel_estimator(cfg.fft_size),
+          _delay_processor(cfg.fft_size),
+          _sync_processor(cfg.sync_samples(), cfg.fft_size, cfg.cp_length, zc_freq_),
           _sensing_sender(cfg.bi_sensing_ip, cfg.bi_sensing_port),
           _control_handler(cfg.control_port),
           channel_sender_(2, [this](const auto& data) { 
@@ -87,7 +91,6 @@ public:
 
         init_usrp();
         init_filter();
-        prepare_tx_sync_sequence();
         prepare_fftw();
         init_udp();
         if (cfg_.hardware_sync) {
@@ -102,17 +105,10 @@ public:
     ~OFDMRxEngine() {
         stop();
         
-        // Save wisdom before destroying plans
-        std::string wisdom_file = "fftw_wisdom_demod_" + std::to_string(cfg_.fft_size) + ".dat";
-        std::string sensing_wisdom_file = "fftw_wisdom_demod_sensing_" + 
-            std::to_string(cfg_.range_fft_size) + "x" + std::to_string(cfg_.doppler_fft_size) + ".dat";
-        _save_fftw_wisdom(wisdom_file);
-        _save_fftw_wisdom(sensing_wisdom_file);
         
         fftwf_destroy_plan(fft_plan_);
-        fftwf_destroy_plan(ifft_plan_);
-        fftwf_destroy_plan(_range_ifft_plan);
-        fftwf_destroy_plan(_doppler_fft_plan);
+        // Note: _channel_estimator, _delay_processor, _sensing_core
+        // manage their own FFT plans and clean them up in their destructors
     }
 
     void start() {
@@ -152,6 +148,13 @@ public:
     }
 
 private:
+    // Static helper function to generate ZC sequence for initializer list
+    static AlignedVector generate_zc_freq(size_t fft_size, int zc_root) {
+        AlignedVector zc_freq;
+        ZadoffChuGenerator::generate(zc_freq, fft_size, zc_root);
+        return zc_freq;
+    }
+
     enum class RxState { SYNC_SEARCH, ALIGNMENT, NORMAL };
 
     Config cfg_;
@@ -179,15 +182,14 @@ private:
     AlignedVector fft_output_;
     fftwf_plan fft_plan_;
     
-    AlignedVector ifft_input_;
-    AlignedVector ifft_output_;
-    fftwf_plan ifft_plan_;
+    // Core computation instances (manage their own FFT plans)
+    ChannelEstimator _channel_estimator;
+    DelayProcessor _delay_processor;
+    SyncProcessor _sync_processor;
     
     std::unique_ptr<FIRFilter> freq_offset_filter_;
     uhd::tune_result_t current_rx_tune_;
     bool tune_initialized_ = false;
-    AlignedFloatVector sync_real_;
-    AlignedFloatVector sync_imag_;
     std::atomic<bool> running_{false};
     std::thread rx_thread_, process_thread_;
 
@@ -214,13 +216,7 @@ private:
     std::thread sensing_thread_;
     std::atomic<bool> sensing_running_{false};
 
-    // FFTW Plans
-    AlignedVector _channel_response_buffer;
-    AlignedVector _sensing_fft_in;
-    AlignedVector _sensing_fft_out;
-    fftwf_plan _range_ifft_plan;
-    fftwf_plan _doppler_fft_plan;
-    
+    // Sensing windows (still managed here for external control)
     AlignedFloatVector _range_window;    // Range window
     AlignedFloatVector _doppler_window;  // Doppler window
     std::atomic<bool> skip_sensing_fft{true};
@@ -238,13 +234,13 @@ private:
     std::vector<float> _subcarrier_phases_unit_delay;
     SFOEstimator sfo_estimator{1000};
     bool _sync_in_progress = false; // Flag to indicate if sync is in progress in process_proc
-    int _last_adjusted_index = 0; // Last adjusted index
+    int _last_delay_index_err = 0; // Last adjusted index
     uint32_t _delay_adjustment_count = 0;
     std::atomic<float> _user_delay_offset = 0.0f;
     std::unique_ptr<HardwareSyncController> _hw_sync;
     
     // MTI Filter
-    MTIFilter _mti_filter;
+
     std::atomic<bool> enable_mti{true};
 
     // Data processing related member variables
@@ -350,56 +346,10 @@ private:
             _subcarrier_phases_unit_delay[i] = 
                 -2 * M_PI * _actual_subcarrier_indices[i] / cfg_.fft_size;
         }
-        // Allocate memory
-        _channel_response_buffer.resize(cfg_.range_fft_size * cfg_.doppler_fft_size);
-        _mti_filter.resize(cfg_.range_fft_size);
+        // Initialize MTI filter
+
         
-        // Try to load wisdom for sensing FFT plans
-        std::string sensing_wisdom_file = "fftw_wisdom_demod_sensing_" + 
-            std::to_string(cfg_.range_fft_size) + "x" + std::to_string(cfg_.doppler_fft_size) + ".dat";
-        bool has_sensing_wisdom = _load_fftw_wisdom(sensing_wisdom_file);
-        unsigned sensing_plan_flags = has_sensing_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
-        
-        const int fft_size_int = static_cast<int>(cfg_.range_fft_size);
-        const int doppler_fft_size_int = static_cast<int>(cfg_.doppler_fft_size);
-        
-        _range_ifft_plan = fftwf_plan_many_dft(
-            1,                         // rank
-            &fft_size_int,             // n (FFT size)
-            doppler_fft_size_int,           // howmany (number of symbols)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // inembed (contiguous)
-            1,                         // istride
-            fft_size_int,              // idist (distance between FFTs)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // onembed
-            1,                         // ostride
-            fft_size_int,              // odist
-            FFTW_BACKWARD,             // sign (IFFT)
-            sensing_plan_flags
-        );
-        
-        // Create Doppler FFT plan (for sensing)
-        _doppler_fft_plan = fftwf_plan_many_dft(
-            1,                         // rank
-            &doppler_fft_size_int,          // n (number of symbols)
-            fft_size_int,              // howmany (number of subcarriers)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // inembed
-            fft_size_int,              // istride (stride between symbols)
-            1,                         // idist (distance between subcarriers)
-            reinterpret_cast<fftwf_complex*>(_channel_response_buffer.data()),
-            nullptr,                   // onembed
-            fft_size_int,              // ostride
-            1,                         // odist
-            FFTW_FORWARD,              // sign (FFT)
-            sensing_plan_flags
-        );
-        
-        // Save sensing wisdom for future use if we just created it
-        if (!has_sensing_wisdom) {
-            _save_fftw_wisdom(sensing_wisdom_file);
-        }
+        // Note: SensingProcessor now manages its own Range IFFT and Doppler FFT plans and channel buffer internally
         
         // Initialize window functions
         _range_window.resize(cfg_.fft_size);
@@ -450,105 +400,16 @@ private:
 
     }
 
-    // FFTW wisdom management
-    bool _load_fftw_wisdom(const std::string& wisdom_file) {
-        if (!fs::exists(wisdom_file)) return false;
-        FILE* f = fopen(wisdom_file.c_str(), "r");
-        if (!f) return false;
-        bool success = fftwf_import_wisdom_from_file(f) != 0;
-        fclose(f);
-        if (success) {
-            std::cout << "Loaded FFTW wisdom from: " << wisdom_file << std::endl;
-        }
-        return success;
-    }
-
-    void _save_fftw_wisdom(const std::string& wisdom_file) {
-        FILE* f = fopen(wisdom_file.c_str(), "w");
-        if (!f) {
-            std::cerr << "Failed to save FFTW wisdom to: " << wisdom_file << std::endl;
-            return;
-        }
-        fftwf_export_wisdom_to_file(f);
-        fclose(f);
-        std::cout << "Saved FFTW wisdom to: " << wisdom_file << std::endl;
-    }
-
-    void prepare_tx_sync_sequence() {
-        // Generate frequency domain ZC sequence (consistent with modulator)
-        zc_freq_.resize(cfg_.fft_size);
-        const int N = cfg_.fft_size;
-        const int q = cfg_.zc_root;
-        const int delta = (N & 1);  // even N -> 0, odd N -> 1
-        const float norm = 1.0f;
-
-        // Pre-compute phase coefficients, use double to avoid precision loss
-        const double base = -M_PI * static_cast<double>(q) / static_cast<double>(N);
-
-        #pragma omp simd simdlen(16)
-        for (int n = 0; n < N; ++n) {
-            const double nd = static_cast<double>(n);
-            const double arg = nd * (nd + static_cast<double>(delta)); // n*(n+delta)
-            const double phase = base * arg;                           // -π*q/N * n*(n+δ)
-            zc_freq_[n] = std::polar(norm, static_cast<float>(phase)); // unit-modulus complex
-        }
-
-        // Execute IFFT to generate time-domain sync symbol
-        AlignedVector ifft_out(N);
-        fftwf_plan plan = fftwf_plan_dft_1d(
-            N,
-            reinterpret_cast<fftwf_complex*>(zc_freq_.data()),
-            reinterpret_cast<fftwf_complex*>(ifft_out.data()),
-            FFTW_BACKWARD, FFTW_ESTIMATE
-        );
-        fftwf_execute(plan);
-        fftwf_destroy_plan(plan);
-
-        // Add cyclic prefix
-        tx_sync_symbol_.resize(N + cfg_.cp_length);
-        if (cfg_.cp_length > 0) {
-            std::copy(ifft_out.end() - cfg_.cp_length, ifft_out.end(), tx_sync_symbol_.begin());
-        }
-        std::copy(ifft_out.begin(), ifft_out.end(), tx_sync_symbol_.begin() + cfg_.cp_length);
-
-        const size_t sync_symbol_len = static_cast<size_t>(N) + static_cast<size_t>(cfg_.cp_length);
-        sync_real_.resize(sync_symbol_len);
-        sync_imag_.resize(sync_symbol_len);
-
-        #pragma omp simd simdlen(16)
-        for (size_t i = 0; i < sync_symbol_len; ++i) {
-            sync_real_[i] = tx_sync_symbol_[i].real();
-            sync_imag_[i] = tx_sync_symbol_[i].imag();
-        }
-    }
 
     void prepare_fftw() {
-        // Try to load wisdom from file
-        std::string wisdom_file = "fftw_wisdom_demod_" + std::to_string(cfg_.fft_size) + ".dat";
-        bool has_wisdom = _load_fftw_wisdom(wisdom_file);
-        
-        // If wisdom exists, use FFTW_ESTIMATE for fast planning
-        // Otherwise, use FFTW_MEASURE to create wisdom
-        unsigned plan_flags = has_wisdom ? FFTW_ESTIMATE : FFTW_MEASURE;
-        
         fft_input_.resize(cfg_.fft_size);
         fft_output_.resize(cfg_.fft_size);
         fft_plan_ = fftwf_plan_dft_1d(cfg_.fft_size,
             reinterpret_cast<fftwf_complex*>(fft_input_.data()),
             reinterpret_cast<fftwf_complex*>(fft_output_.data()),
-            FFTW_FORWARD, plan_flags);
+            FFTW_FORWARD, FFTW_MEASURE);
 
-        ifft_input_.resize(cfg_.fft_size);
-        ifft_output_.resize(cfg_.fft_size);
-        ifft_plan_ = fftwf_plan_dft_1d(cfg_.fft_size,
-            reinterpret_cast<fftwf_complex*>(ifft_input_.data()),
-            reinterpret_cast<fftwf_complex*>(ifft_output_.data()),
-            FFTW_BACKWARD, plan_flags);
-            
-        // Save wisdom for future use if we just created it
-        if (!has_wisdom) {
-            _save_fftw_wisdom(wisdom_file);
-        }
+        // Note: ChannelEstimator and DelayProcessor now manage their own FFT plans internally
     }
 
     void init_udp() {
@@ -690,8 +551,7 @@ private:
         int max_pos = 0;
         float max_corr = 0.0f;
         float avg_corr = 0.0f;
-        SyncProcessor::find_sync_position(sync_data, sync_real_, sync_imag_, symbol_len,
-                                          max_pos, max_corr, avg_corr);
+        _sync_processor.find_sync_position(sync_data, max_pos, max_corr, avg_corr);
         
         const float energy_threshold = 100.0f;
         if (max_corr/avg_corr > energy_threshold) {
@@ -889,7 +749,8 @@ private:
         // Calculate initial channel response H_est using ChannelEstimator
         prof_step_start = ProfileClock::now();
         AlignedVector H_est;
-        ChannelEstimator::estimate_from_sync(sync_symbol_freq, zc_freq_, H_est);
+        _channel_estimator.estimate_from_sync_lmmse(sync_symbol_freq, zc_freq_, H_est, cfg_.cp_length);
+        //_channel_estimator.estimate_from_sync_ls(sync_symbol_freq, zc_freq_, H_est);
 
         prof_step_end = ProfileClock::now();
         prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1015,13 +876,13 @@ private:
         // Compute delay spectrum using DelayProcessor
         prof_step_start = ProfileClock::now();
         AlignedVector delay_spectrum;
-        DelayProcessor::compute_delay_spectrum(H_est, ifft_input_, ifft_output_, ifft_plan_, delay_spectrum);
+        _delay_processor.compute_delay_spectrum(H_est, delay_spectrum);
         
-        // Find peak in delay spectrum
+        // Find peak in delay spectrum (search within CP range)
         size_t max_index = 0;
         float max_mag = 0.0f;
         float average_mag = 0.0f;
-        DelayProcessor::find_peak(delay_spectrum, max_index, max_mag, average_mag);
+        DelayProcessor::find_peak(delay_spectrum, max_index, max_mag, average_mag, cfg_.cp_length);
         
         // Adjust delay index to signed value
         int adjusted_index = DelayProcessor::adjust_delay_index(max_index, cfg_.fft_size);
@@ -1056,7 +917,8 @@ private:
         freq_packet[tail_start + 3] = 0x7f;
         freq_offset_udp_->send(freq_packet, packet_size);
         delete[] freq_packet;
-        if((max_mag/average_mag < 20.0f || (abs(adjusted_index) > cfg_.delay_adjust_step+5))&&(cfg_.software_sync || cfg_.hardware_sync)) {
+        int delay_index_err = adjusted_index - cfg_.desired_peak_pos;
+        if((max_mag/average_mag < 20.0f || (abs(delay_index_err) > cfg_.delay_adjust_step+5))&&(cfg_.software_sync || cfg_.hardware_sync)) {
             _reset_count++;
             if (_reset_count >= 217) { // Approx 0.5 seconds
                 _reset_count = 0;
@@ -1082,15 +944,15 @@ private:
         {
             _sync_in_progress = false;
         }
-        if(abs(adjusted_index) >= cfg_.delay_adjust_step && abs(adjusted_index) < cfg_.cp_length  && abs(detected_freq_offset) < 100.0f &&( cfg_.software_sync || cfg_.hardware_sync )&& !_sync_in_progress)
+        if(abs(delay_index_err) >= cfg_.delay_adjust_step && abs(delay_index_err) < cfg_.cp_length  && abs(detected_freq_offset) < 100.0f &&( cfg_.software_sync || cfg_.hardware_sync )&& !_sync_in_progress)
         {   
             if (_delay_adjustment_count++ >= 1) {
                 _delay_adjustment_count = 0;
-                discard_samples_.store(adjusted_index);
+                discard_samples_.store(delay_index_err);
                 state_ = RxState::ALIGNMENT; // Send sync command. May have delay due to FIFO
                 _sync_in_progress = true;
             }
-            if (adjusted_index * _last_adjusted_index < 0){
+            if (delay_index_err * _last_delay_index_err < 0){
                  // If symbol delay direction changes, it indicates jitter, reset counter
                 _delay_adjustment_count = 0;
             }
@@ -1099,7 +961,7 @@ private:
         {
             _delay_adjustment_count = 0;
         }
-        _last_adjusted_index = adjusted_index;
+        _last_delay_index_err = delay_index_err;
         prof_step_end = ProfileClock::now();
         prof_timing_sync_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
@@ -1142,7 +1004,7 @@ private:
         prof_step_end = ProfileClock::now();
         prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
-        // Extract data symbols to generate LLR using NoiseEstimator
+        // Extract data symbols to generate LLR using QPSK_LLR
         prof_step_start = ProfileClock::now();
         const size_t data_subcarriers_per_symbol = cfg_.fft_size - cfg_.pilot_positions.size();
         // Acquire pre-allocated LLR buffer from pool
@@ -1161,8 +1023,8 @@ private:
             }
         }
         
-        // Compute LLR using NoiseEstimator
-        NoiseEstimator::compute_llr_to_buffer(symbols, data_indices, scale_llr, frame_llr.data());
+        // Compute LLR using QPSK_LLR
+        QPSK_LLR::compute_llr_to_buffer(symbols, data_indices, scale_llr, frame_llr.data());
         
         // Put LLR data into circular buffer
         {
@@ -1298,38 +1160,30 @@ private:
         }
 
         if (std::chrono::steady_clock::now() >= _next_send_time) {
-            // 1. Perform OFDM demodulation on received frame
-            for (size_t i = 0; i < cfg_.sensing_symbol_num; ++i) {
-                // Copy to channel response buffer
-                auto* dest = _channel_response_buffer.data() + i * cfg_.range_fft_size;
-                std::copy(frame.rx_symbols[i].begin(),
-                          frame.rx_symbols[i].end(),
-                          dest);
-            }
+            // 1. Copy received symbols to SensingProcessor's internal buffer
+            _sensing_core.copy_symbols_to_buffer(frame.rx_symbols);
+            auto& channel_buf = _sensing_core.channel_buffer();
             
-            // 2. Channel estimation with division (for bi-static sensing) using SensingProcessor
-            _sensing_core.channel_estimate_with_division(_channel_response_buffer, frame.tx_symbols, cfg_.fft_size);
+            // 2. Channel estimation with conjugate multiplication (tx_symbols are remodulated QPSK with unit magnitude)
+            // Combined with FFT shift for efficiency
+            // Combined with FFT shift for efficiency
+            _sensing_core.channel_estimate_with_shift(frame.tx_symbols);
 
-            // FFT shift for each symbol using SensingProcessor
-            _sensing_core.fft_shift_symbols(_channel_response_buffer, cfg_.fft_size);
-
-            if (enable_mti.load()) {
-                _mti_filter.apply(_channel_response_buffer, cfg_.fft_size, cfg_.sensing_symbol_num);
-            }
+            _sensing_core.apply_mti(enable_mti.load());
 
             if (!skip_sensing_fft.load()) {
                 // Apply range and Doppler windows using SensingProcessor
-                _sensing_core.apply_windows(_channel_response_buffer, _range_window, _doppler_window);
+                _sensing_core.apply_windows(channel_buf, _range_window, _doppler_window);
 
-                // Range-Doppler processing
-                fftwf_execute(_range_ifft_plan);  // Range IFFT
-                fftwf_execute(_doppler_fft_plan); // Doppler FFT
+                // Range-Doppler processing using SensingProcessor's internal FFT plans
+                _sensing_core.execute_range_ifft();
+                _sensing_core.execute_doppler_fft();
             }
 
             // 5. Send processing results
-            _sensing_sender.push_data(_channel_response_buffer);
+            _sensing_sender.push_data(channel_buf);
             if(cfg_.range_fft_size != cfg_.fft_size || cfg_.doppler_fft_size != cfg_.fft_size) {
-                _channel_response_buffer.assign(cfg_.range_fft_size * cfg_.doppler_fft_size, std::complex<float>(0.0f, 0.0f));
+                _sensing_core.clear_channel_buffer();
             }
             if(!skip_sensing_fft.load()) {
                 _next_send_time = _next_send_time + std::chrono::milliseconds(33);
@@ -1542,6 +1396,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
         out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
         out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
         out << YAML::Key << "default_ip" << YAML::Value << cfg.default_ip;
+        out << YAML::Key << "ppm_adjust_factor" << YAML::Value << cfg.ppm_adjust_factor;
+        out << YAML::Key << "desired_peak_pos" << YAML::Value << cfg.desired_peak_pos;
         out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
         out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
         out << YAML::EndMap;
@@ -1597,6 +1453,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
             if (config["hardware_sync_tty"]) cfg.hardware_sync_tty = config["hardware_sync_tty"].as<std::string>();
             if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
             if (config["default_ip"]) cfg.default_ip = config["default_ip"].as<std::string>();
+            if (config["ppm_adjust_factor"]) cfg.ppm_adjust_factor = config["ppm_adjust_factor"].as<double>();
+            if (config["desired_peak_pos"]) cfg.desired_peak_pos = config["desired_peak_pos"].as<int>();
             if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
             if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
             return true;
@@ -1762,6 +1620,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
         uhd::set_thread_affinity(cpu_list);
     }
     
+    // Load FFTW wisdom
+    FFTWManager::import_wisdom();
+
     OFDMRxEngine receiver(cfg);
     receiver.start();
     
@@ -1770,5 +1631,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[]) {
     }
     
     receiver.stop();
+    
+    // Save FFTW wisdom
+    FFTWManager::export_wisdom();
+    
     return 0;
 }
