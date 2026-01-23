@@ -268,6 +268,8 @@ pip install -r requirements.txt
 #### 启用 GPU 加速 (可选)
  
 如果有 Nvidia GPU，请安装 `cupy-cuda12x` 以启用 GPU 加速：
+
+> **注意:** 安装 CuPy 之前，请务必先安装 CUDA Toolkit。
  
 ```bash
 pip install cupy-cuda12x

@@ -271,6 +271,8 @@ pip install -r requirements.txt
 #### Enable GPU Acceleration (Optional)
  
 If an Nvidia GPU is available, install `cupy-cuda12x` to enable GPU acceleration:
+
+> **Note:** Please ensure that the CUDA Toolkit is installed before installing CuPy.
  
 ```bash
 pip install cupy-cuda12x
