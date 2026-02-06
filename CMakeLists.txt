@@ -87,6 +87,7 @@ endif()
 #===========================================================
 add_executable(OFDMModulator
     OFDMModulator.cpp
+    LDPC5041008SIMD.cpp
 )
 
 target_include_directories(OFDMModulator PRIVATE
@@ -118,6 +119,7 @@ target_compile_options(OFDMModulator PRIVATE
 #===========================================================
 add_executable(OFDMDemodulator
     OFDMDemodulator.cpp
+    LDPC5041008SIMD.cpp
 )
 
 target_include_directories(OFDMDemodulator PRIVATE

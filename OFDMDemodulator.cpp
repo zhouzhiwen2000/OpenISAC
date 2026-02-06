@@ -148,6 +148,21 @@ public:
     }
 
 private:
+    static LDPCCodec::LDPCConfig make_ldpc_5041008_cfg() {
+        LDPCCodec::LDPCConfig c;
+        c.h_matrix_path = "../LDPC_504_1008.alist";
+        c.g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
+        c.decoder_iterations = 6;
+        c.n_frames = 16;
+        c.enc_type = "LDPC_H";
+        c.enc_g_method = "IDENTITY";
+        c.dec_type = "BP_HORIZONTAL_LAYERED";
+        c.dec_implem = "NMS";
+        c.dec_simd = "INTER";
+        c.use_custom_encoder = true;
+        return c;
+    }
+
     // Static helper function to generate ZC sequence for initializer list
     static AlignedVector generate_zc_freq(size_t fft_size, int zc_root) {
         AlignedVector zc_freq;
@@ -250,7 +265,7 @@ private:
     std::thread _bit_processing_thread;
     std::atomic<bool> _bit_processing_running{false};
     
-    LDPCCodec _ldpc_decoder{LDPCCodec::LDPCConfig()};
+    LDPCCodec _ldpc_decoder{make_ldpc_5041008_cfg()};
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_output_sender;
 

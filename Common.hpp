@@ -40,6 +40,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include "LDPC5041008SIMD.hpp"
 
 // ============== Common Utility Functions ==============
 
@@ -1072,10 +1074,10 @@ inline std::string get_executable_dir() {
 }
 
 /**
- * @brief LDPC Codec Wrapper (using aff3ct library).
+ * @brief LDPC Codec Wrapper (custom LDPC5041008 encoder + AFF3CT decoder).
  * 
- * Provides a simplified interface for LDPC encoding and decoding using the aff3ct library.
- * Handles bit packing/unpacking and interfacing with the aff3ct encoder/decoder objects.
+ * Provides a simplified interface for LDPC encoding/decoding.
+ * Uses LDPC5041008SIMD for encoding and AFF3CT for decoding.
  */
 class LDPCCodec {
 public:
@@ -1084,14 +1086,43 @@ public:
     using AlignedFloatVector = mipp::vector<float>;
     struct LDPCConfig {
         std::string h_matrix_path = "../LDPC_504_1008.alist";
-        int decoder_iterations = 10;
-        size_t n_frames = 1;
+        std::string g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
+        int decoder_iterations = 6;
+        size_t n_frames = 16;
+        std::string enc_type = "LDPC_H";
+        std::string enc_g_method = "IDENTITY";
+        std::string dec_type = "BP_HORIZONTAL_LAYERED";
+        std::string dec_implem = "NMS";
+        std::string dec_simd = "INTER";
+        bool use_custom_encoder = true;
     };
 
     LDPCCodec(const LDPCConfig& config) : cfg(config) {
+        namespace fs = std::filesystem;
+        auto path_exists = [](const std::string& p) {
+            std::error_code ec;
+            return fs::exists(fs::path(p), ec);
+        };
+
         // Resolve relative path against executable directory
         if (!cfg.h_matrix_path.empty() && cfg.h_matrix_path[0] != '/') {
             cfg.h_matrix_path = get_executable_dir() + "/" + cfg.h_matrix_path;
+        }
+        if (!cfg.g_matrix_path.empty() && cfg.g_matrix_path[0] != '/') {
+            cfg.g_matrix_path = get_executable_dir() + "/" + cfg.g_matrix_path;
+        }
+        if (!cfg.g_matrix_path.empty() && !path_exists(cfg.g_matrix_path)) {
+            const fs::path g_parent = fs::path(cfg.g_matrix_path).parent_path();
+            const std::string alt_g_1 = (g_parent / "LDPC_504_1008G.alist").string();
+            const std::string alt_g_2 = (g_parent / "PEGReg504x1008_Gen.alist").string();
+            if (path_exists(alt_g_1)) {
+                cfg.g_matrix_path = alt_g_1;
+            } else if (path_exists(alt_g_2)) {
+                cfg.g_matrix_path = alt_g_2;
+            }
+        }
+        if (cfg.use_custom_encoder) {
+            custom_encoder = std::make_unique<LDPC5041008SIMD>(cfg.h_matrix_path, cfg.g_matrix_path);
         }
         _init_aff3ct_params();
         codec = std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>>(codec_factory->build<int, float>());
@@ -1099,40 +1130,78 @@ public:
     }
 
     void encode_frame(const AlignedByteVector& input, AlignedIntVector& encoded_bits) {
+        if (input.empty()) {
+            encoded_bits.clear();
+            return;
+        }
+
+        if (custom_encoder) {
+            custom_encoder->encode_bytes(input, encoded_bits);
+            return;
+        }
+
         auto& encoder = codec->get_encoder();
         // Unpack input data
         AlignedIntVector unpacked_bits(input.size() * 8);
         _unpack_bits(input, unpacked_bits);
-        size_t N = encoder.get_N();
-        size_t K = encoder.get_K();
-        size_t n_frames_per_wave = encoder.get_n_frames_per_wave();
-        size_t encoded_bits_length = unpacked_bits.size()*N/K;
-        encoded_bits.resize(encoded_bits_length);
-        for (size_t i = 0; i < unpacked_bits.size()/K; i+=n_frames_per_wave) {
-            //encoder.encode(unpacked_bits.data()+i*K, encoded_bits.data()+i*N,i,false);
-            encoder.encode(unpacked_bits.data()+i*K, encoded_bits.data()+i*N,-1,false);
+        const size_t N = encoder.get_N();
+        const size_t K = encoder.get_K();
+        // frame_id=-1 processes get_n_frames() frames per call, NOT n_frames_per_wave
+        const size_t batch = encoder.get_n_frames();
+        const size_t total_frames = unpacked_bits.size() / K;
+
+        encoded_bits.resize(total_frames * N);
+
+        size_t i = 0;
+        for (; i + batch <= total_frames; i += batch) {
+            encoder.encode(unpacked_bits.data() + i * K, encoded_bits.data() + i * N, -1, false);
+        }
+
+        const size_t remaining = total_frames - i;
+        if (remaining > 0) {
+            AlignedIntVector tmp_in(batch * K, 0);
+            AlignedIntVector tmp_out(batch * N, 0);
+            std::memcpy(tmp_in.data(), unpacked_bits.data() + i * K, remaining * K * sizeof(int32_t));
+            encoder.encode(tmp_in.data(), tmp_out.data(), -1, false);
+            std::memcpy(encoded_bits.data() + i * N, tmp_out.data(), remaining * N * sizeof(int32_t));
         }
     }
 
     // Decode entire frame
     void decode_frame(const AlignedFloatVector& llr_input, AlignedByteVector& decoded_bytes) {
-        auto decoder = codec->get_decoder_siho();
-        size_t N = decoder.get_N();
-        size_t K = decoder.get_K();
-        size_t n_frames_per_wave = decoder.get_n_frames_per_wave();
-        AlignedIntVector decoded_bits(llr_input.size()* K/N);
-        for (size_t i = 0; i < llr_input.size()/N; i+=n_frames_per_wave) {
-            //decoder.decode_siho(llr_input.data()+i*N, decoded_bits.data()+i*K,i,false);
-            decoder.decode_siho(llr_input.data()+i*N, decoded_bits.data()+i*K,-1,false);
+        auto& decoder = codec->get_decoder_siho();
+        const size_t N = decoder.get_N();
+        const size_t K = decoder.get_K();
+        // frame_id=-1 processes get_n_frames() frames per call, NOT n_frames_per_wave
+        const size_t batch = decoder.get_n_frames();
+        const size_t total_frames = llr_input.size() / N;
+
+        AlignedIntVector decoded_bits(total_frames * K, 0);
+
+        size_t i = 0;
+        for (; i + batch <= total_frames; i += batch) {
+            decoder.decode_siho(llr_input.data() + i * N, decoded_bits.data() + i * K, -1, false);
         }
+
+        const size_t remaining = total_frames - i;
+        if (remaining > 0) {
+            AlignedFloatVector tmp_in(batch * N, 0.0f);
+            AlignedIntVector tmp_out(batch * K, 0);
+            std::memcpy(tmp_in.data(), llr_input.data() + i * N, remaining * N * sizeof(float));
+            decoder.decode_siho(tmp_in.data(), tmp_out.data(), -1, false);
+            std::memcpy(decoded_bits.data() + i * K, tmp_out.data(), remaining * K * sizeof(int32_t));
+        }
+
         decoded_bytes.resize(decoded_bits.size() / 8);
         _pack_bits(decoded_bits, decoded_bytes);
     }
     
     size_t get_K() const {
+        if (custom_encoder) return static_cast<size_t>(LDPC5041008SIMD::K);
         return codec->get_encoder().get_K();
     }
     size_t get_N() const {
+        if (custom_encoder) return static_cast<size_t>(LDPC5041008SIMD::N);
         return codec->get_encoder().get_N();
     }
 
@@ -1160,20 +1229,30 @@ private:
     LDPCConfig cfg;
     std::unique_ptr<aff3ct::factory::Codec_LDPC> codec_factory;
     std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>> codec;
+    std::unique_ptr<LDPC5041008SIMD> custom_encoder;
     void _init_aff3ct_params() {
-        // Use basic code configuration (504, 1008)
         std::vector<std::string> args = {
             "LDPCEncoder",
-            "--enc-type", "LDPC_H",
-            "--enc-g-method", "IDENTITY",
-            "--dec-type", "BP_FLOODING", // BP_FLOODING
-            "--dec-implem", "GALA", //OMS
+            "--enc-type", cfg.enc_type,
+            "--enc-g-method", cfg.enc_g_method,
+            "--dec-type", cfg.dec_type,
+            "--dec-implem", cfg.dec_implem,
             "--dec-ite", std::to_string(cfg.decoder_iterations),
             "--dec-synd-depth", "1",
             "--dec-h-path", cfg.h_matrix_path,
-//            "--dec-simd", "INTER",
-//            "--enc-g-path", "../PEGReg504x1008_Gen.alist",
         };
+        if (!cfg.dec_simd.empty()) {
+            args.push_back("--dec-simd");
+            args.push_back(cfg.dec_simd);
+        }
+        // Only pass G-matrix to AFF3CT when it handles encoding itself.
+        // When use_custom_encoder is true, LDPC5041008SIMD owns encoding and
+        // the G-matrix format may be incompatible with AFF3CT, causing
+        // internal corruption (double free).
+        if (!cfg.use_custom_encoder && !cfg.g_matrix_path.empty()) {
+            args.push_back("--enc-g-path");
+            args.push_back(cfg.g_matrix_path);
+        }
 
         codec_factory = std::make_unique<aff3ct::factory::Codec_LDPC>();
         

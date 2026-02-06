@@ -102,7 +102,6 @@ public:
         for (auto& x : _pregen_data) {
             x = _dist(_gen);
         }
-
         // UDP data sender initialization
         _sensing_sender.start();
 
@@ -159,6 +158,21 @@ public:
     }
 
 private:
+    static LDPCCodec::LDPCConfig make_ldpc_5041008_cfg() {
+        LDPCCodec::LDPCConfig c;
+        c.h_matrix_path = "../LDPC_504_1008.alist";
+        c.g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
+        c.decoder_iterations = 6;
+        c.n_frames = 16;
+        c.enc_type = "LDPC_H";
+        c.enc_g_method = "IDENTITY";
+        c.dec_type = "BP_HORIZONTAL_LAYERED";
+        c.dec_implem = "NMS";
+        c.dec_simd = "INTER";
+        c.use_custom_encoder = true;
+        return c;
+    }
+
     Config _cfg;
     uhd::usrp::multi_usrp::sptr _usrp;   
     uhd::tx_streamer::sptr _tx_stream;   
@@ -242,7 +256,7 @@ private:
     size_t _global_symbol_index = 0; // Global symbol index (for sensing processing)
     
     // LDPC encoding and scrambling
-    LDPCCodec _ldpc{LDPCCodec::LDPCConfig()};
+    LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
     Scrambler scrambler{201600, 0x5A};
     
     // MTI Filter
@@ -705,6 +719,7 @@ private:
         static double prof_cp_write_total = 0.0;
         static int prof_frame_count = 0;
         constexpr int PROF_REPORT_INTERVAL = 434;
+        static uint64_t oversize_head_warn_count = 0;
         
         auto prof_step_start = ProfileClock::now();
         auto prof_step_end = prof_step_start;
@@ -717,6 +732,9 @@ private:
         for (auto pos : _cfg.pilot_positions) if (pos < _cfg.fft_size) is_pilot[pos] = 1;
         std::vector<int> data_subcarriers; data_subcarriers.reserve(_cfg.fft_size - _cfg.pilot_positions.size());
         for (size_t k=0;k<_cfg.fft_size;++k) if (!is_pilot[k]) data_subcarriers.push_back((int)k);
+        const size_t max_data_syms_per_frame = (_cfg.num_symbols > 0)
+            ? (_cfg.num_symbols - 1) * data_subcarriers.size()
+            : 0;
 
         while (_running.load()) {
             frame_start = Clock::now(); // Record frame start time
@@ -729,13 +747,28 @@ private:
             // Pool of real data symbols available for this frame
             prof_step_start = ProfileClock::now();
             AlignedIntVector data_pool;
+            data_pool.reserve(max_data_syms_per_frame);
             {
                 std::unique_lock<std::mutex> lock(_data_mutex);
-                size_t total = 0;
-                for (auto &pkt : _data_packet_buffer) total += pkt.size();
-                data_pool.reserve(total);
-
-                while (!_data_packet_buffer.empty()) {
+                // Pull packets only when the *whole* packet fits in current frame room.
+                while (data_pool.size() < max_data_syms_per_frame && !_data_packet_buffer.empty()) {
+                    const size_t room = max_data_syms_per_frame - data_pool.size();
+                    const size_t pkt_size = _data_packet_buffer.front().size();
+                    if (pkt_size > room) {
+                        // Current frame has no room for the next complete packet: stop pulling.
+                        // Leave remaining subcarriers blank/pregen in this frame.
+                        if (pkt_size > max_data_syms_per_frame) {
+                            // Keep packet in queue (strict "do not fetch if it does not fit").
+                            // Warn periodically because this can stall queue progress.
+                            oversize_head_warn_count++;
+                            if (oversize_head_warn_count <= 20 || (oversize_head_warn_count % 100) == 0) {
+                                std::cerr << "[LDPC] Queue head packet exceeds per-frame capacity, not fetched: qpsk_syms="
+                                          << pkt_size << ", max_qpsk_per_frame=" << max_data_syms_per_frame
+                                          << ", warn_count=" << oversize_head_warn_count << std::endl;
+                            }
+                        }
+                        break;
+                    }
                     AlignedIntVector pkt = std::move(_data_packet_buffer.front());
                     _data_packet_buffer.pop_front();
                     data_pool.insert(data_pool.end(), pkt.begin(), pkt.end());
@@ -821,7 +854,7 @@ private:
                 prof_step_end = ProfileClock::now();
                 cp_write_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
             }
-            
+
             prof_symbol_gen_total += symbol_gen_time;
             prof_ifft_total += ifft_time;
             prof_cp_write_total += cp_write_time;
