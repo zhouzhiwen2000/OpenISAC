@@ -216,6 +216,9 @@ struct Config {
     size_t fft_size = 1024;
     size_t range_fft_size = 1024;      // Range FFT size
     size_t doppler_fft_size = 100;     // Doppler FFT size
+    size_t tx_frame_buffer_size = 8;   // TX frame ring buffer capacity
+    size_t tx_symbols_buffer_size = 8; // TX symbols ring buffer capacity
+    size_t rx_frame_buffer_size = 8;   // RX frame ring buffer capacity
     size_t cp_length = 128;            // Cyclic prefix length
     size_t num_symbols = 100;          // Number of symbols per frame
     size_t sensing_symbol_num = 100;   // Number of sensing symbols

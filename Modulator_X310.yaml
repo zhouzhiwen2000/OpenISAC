@@ -10,6 +10,9 @@ rx_gain: 30
 rx_channel: 1
 zc_root: 29
 num_symbols: 100
+tx_frame_buffer_size: 8
+tx_symbols_buffer_size: 8
+rx_frame_buffer_size: 8
 device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"
 clock_source: external
 system_delay: 63

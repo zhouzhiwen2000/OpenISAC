@@ -49,9 +49,9 @@ public:
       : _cfg(cfg),
         _gen(std::random_device{}()),        
         _dist(0, 3),                         
-        _circular_buffer(8),
-        _symbols_buffer(8),
-        _rx_frame_buffer(8),            
+        _circular_buffer(cfg.tx_frame_buffer_size),
+        _symbols_buffer(cfg.tx_symbols_buffer_size),
+        _rx_frame_buffer(cfg.rx_frame_buffer_size),            
         _data_packet_buffer(32),                // Initialize data packet buffer
         _accumulated_rx_symbols(),
         _accumulated_tx_symbols(),
@@ -970,7 +970,7 @@ private:
                 _frame_pool.release(std::move(frame_to_send));
             } else {
                 _tx_stream->send(_blank_frame.data(), _blank_frame.size(), md);
-                // std::cout << "No frame to send, sending blank frame.\n";
+                std::cerr.put('B');
             }
             //md.time_spec += uhd::time_spec_t(_cfg.samples_per_frame() / _cfg.sample_rate);
             md.start_of_burst = false;
@@ -1292,6 +1292,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         out << YAML::Key << "rx_channel" << YAML::Value << cfg.rx_channel;
         out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
         out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
+        out << YAML::Key << "tx_frame_buffer_size" << YAML::Value << cfg.tx_frame_buffer_size;
+        out << YAML::Key << "tx_symbols_buffer_size" << YAML::Value << cfg.tx_symbols_buffer_size;
+        out << YAML::Key << "rx_frame_buffer_size" << YAML::Value << cfg.rx_frame_buffer_size;
         out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
         out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
         out << YAML::Key << "system_delay" << YAML::Value << cfg.system_delay;
@@ -1335,6 +1338,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
             if (config["rx_channel"]) cfg.rx_channel = config["rx_channel"].as<size_t>();
             if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
             if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
+            if (config["tx_frame_buffer_size"]) cfg.tx_frame_buffer_size = config["tx_frame_buffer_size"].as<size_t>();
+            if (config["tx_symbols_buffer_size"]) cfg.tx_symbols_buffer_size = config["tx_symbols_buffer_size"].as<size_t>();
+            if (config["rx_frame_buffer_size"]) cfg.rx_frame_buffer_size = config["rx_frame_buffer_size"].as<size_t>();
             if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
             if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
             if (config["system_delay"]) cfg.system_delay = config["system_delay"].as<int32_t>();
@@ -1393,6 +1399,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
         ("rx-channel", po::value<size_t>(&cfg.rx_channel), "RX channel (default: 1)")
         ("zc-root", po::value<int>(&cfg.zc_root), "ZC root (default: 29)")
         ("num-symbols", po::value<size_t>(&cfg.num_symbols), "Number of symbols per frame (default: 100)")
+        ("tx-frame-buffer-size", po::value<size_t>(&cfg.tx_frame_buffer_size), "TX frame buffer size (default: 8)")
+        ("tx-symbols-buffer-size", po::value<size_t>(&cfg.tx_symbols_buffer_size), "TX symbols buffer size (default: 8)")
+        ("rx-frame-buffer-size", po::value<size_t>(&cfg.rx_frame_buffer_size), "RX frame buffer size (default: 8)")
         ("clock-source", po::value<std::string>(&cfg.clocksource), "Clock source (default: external)")
         ("system-delay",po::value<int32_t>(&cfg.system_delay), "System delay in samples (default: 63)")
         ("wire-format-tx", po::value<std::string>(&cfg.wire_format_tx), "TX wire format (default: sc16)")
@@ -1429,6 +1438,19 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     vm.clear(); // Clear to only contain CLI-specified options
     po::store(po::parse_command_line(argc, argv, desc), vm);
     po::notify(vm);
+
+    auto clamp_buffer_size = [](size_t& value, const char* name) {
+        constexpr size_t kDefaultBufferSize = 8;
+        if (value == 0) {
+            std::cerr << "Warning: " << name
+                      << " is 0; falling back to default value "
+                      << kDefaultBufferSize << "." << std::endl;
+            value = kDefaultBufferSize;
+        }
+    };
+    clamp_buffer_size(cfg.tx_frame_buffer_size, "tx_frame_buffer_size");
+    clamp_buffer_size(cfg.tx_symbols_buffer_size, "tx_symbols_buffer_size");
+    clamp_buffer_size(cfg.rx_frame_buffer_size, "rx_frame_buffer_size");
 
     // Handle --save-config option
     if (vm.count("save-config")) {

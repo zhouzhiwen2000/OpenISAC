@@ -10,9 +10,12 @@ rx_gain: 30
 rx_channel: 1
 zc_root: 29
 num_symbols: 100
+tx_frame_buffer_size: 32
+tx_symbols_buffer_size: 32
+rx_frame_buffer_size: 32
 device_args: "num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"
 clock_source: external
-system_delay: 63
+system_delay: 159
 wire_format_tx: sc8
 wire_format_rx: sc16
 profiling_modules: ""
