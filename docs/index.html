@@ -51,7 +51,7 @@
             </p>
             <p>
                 Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for
-                OFDM-ISAC with Over-the-Air Synchronization," submitted to <i>IEEE Trans. Wireless Commun.</i>, Jan.
+                OFDM-ISAC with Over-the-Air Synchronization," <i>arXiv preprint</i> arXiv:2601.03535, Jan.
                 2026.
             </p>
             <p>
@@ -182,7 +182,7 @@
         <!-- README_SYNC_START -->
 <section id="hardware">
 <!-- AUTO-GENERATED FROM README: DO NOT EDIT THIS SECTION DIRECTLY -->
-<h2>Hardware Requirements</h2>
+<h2>Hardware Setup</h2>
 <h3>Backend (C++)</h3>
 <p>To set up the complete system, you will need the following hardware:</p>
 <ul>
@@ -230,7 +230,7 @@
 <li><strong>CPU</strong>: High performance CPU (i7 10700 or better) if no GPU is available.</li>
 <li><strong>GPU</strong>: An Nvidia GPU is recommended for acceleration.</li>
 </ul>
-<h2>Software Requirements</h2>
+<h2>Software Installation</h2>
 <h3>Backend (C++)</h3>
 <h4>Operating System</h4>
 <ul>
@@ -407,10 +407,12 @@ conda activate OpenISAC
 cd build
 # For X310:
 cp ../config/Modulator_X310.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 
 # For B210:
 cp ../config/Modulator_B210.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 </code></pre>
 <p><em>If you are using a separate frontend computer, set <code>default_ip</code> in <code>Modulator.yaml</code> to that frontend IP.</em></p>
@@ -419,10 +421,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 cd build
 # For X310:
 cp ../config/Demodulator_X310.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 
 # For B210:
 cp ../config/Demodulator_B210.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </code></pre>
 <p><em>If you are using a separate frontend computer, set <code>default_ip</code> in <code>Demodulator.yaml</code> to that frontend IP.</em></p>

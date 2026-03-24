@@ -2,8 +2,8 @@
 """Sync docs/index*.html content from README*.md.
 
 Managed range:
-- English: from "## Hardware Requirements"
-- Chinese: from "## 硬件要求"
+- English: from "## Hardware Setup"
+- Chinese: from "## 硬件准备"
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SYNC_JOBS = (
     {
         "readme": ROOT / "README.md",
-        "start_heading": "## Hardware Requirements",
+        "start_heading": "## Hardware Setup",
         "html": ROOT / "docs" / "index.html",
         "section_id": "hardware",
         "range_start": "<!-- README_SYNC_START -->",
@@ -27,7 +27,7 @@ SYNC_JOBS = (
     },
     {
         "readme": ROOT / "README_zh.md",
-        "start_heading": "## 硬件要求",
+        "start_heading": "## 硬件准备",
         "html": ROOT / "docs" / "index_zh.html",
         "section_id": "hardware",
         "range_start": "<!-- README_SYNC_START -->",
@@ -122,7 +122,7 @@ def main() -> None:
             range_start=job["range_start"],
             range_end=job["range_end"],
         )
-    print("Synced docs index pages from README sections starting at hardware requirements.")
+    print("Synced docs index pages from README sections starting at Hardware Setup.")
 
 
 if __name__ == "__main__":

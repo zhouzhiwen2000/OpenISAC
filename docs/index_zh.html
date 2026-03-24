@@ -46,7 +46,7 @@
             </p>
             <p>
                 Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for
-                OFDM-ISAC with Over-the-Air Synchronization," submitted to <i>IEEE Trans. Wireless Commun.</i>, Jan.
+                OFDM-ISAC with Over-the-Air Synchronization," <i>arXiv preprint</i> arXiv:2601.03535, Jan.
                 2026.
             </p>
             <p>
@@ -170,7 +170,7 @@
         <!-- README_SYNC_START -->
 <section id="hardware">
 <!-- AUTO-GENERATED FROM README: DO NOT EDIT THIS SECTION DIRECTLY -->
-<h2>硬件要求</h2>
+<h2>硬件准备</h2>
 <h3>后端 (C++)</h3>
 <p>要设置完整的系统，您需要以下硬件：</p>
 <ul>
@@ -218,7 +218,7 @@
 <li><strong>CPU</strong>: 如果没有 GPU，建议使用高性能 CPU (i7 10700 或更高)。</li>
 <li><strong>GPU</strong>: 建议使用 Nvidia GPU 进行加速。</li>
 </ul>
-<h2>软件要求</h2>
+<h2>软件安装</h2>
 <h3>后端 (C++)</h3>
 <h4>操作系统</h4>
 <ul>
@@ -395,10 +395,12 @@ conda activate OpenISAC
 cd build
 # 对于 X310:
 cp ../config/Modulator_X310.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 
 # 对于 B210:
 cp ../config/Modulator_B210.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 </code></pre>
 <p><em>如果您使用单独的计算机作为前端，请在 <code>Modulator.yaml</code> 中将 <code>default_ip</code> 设置为前端 IP。</em></p>
@@ -407,10 +409,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 cd build
 # 对于 X310:
 cp ../config/Demodulator_X310.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 
 # 对于 B210:
 cp ../config/Demodulator_B210.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </code></pre>
 <p><em>如果您使用单独的计算机作为前端，请在 <code>Demodulator.yaml</code> 中将 <code>default_ip</code> 设置为前端 IP。</em></p>
