@@ -279,7 +279,7 @@ sudo ./scripts/isolate_cpus.bash 0,2,4,6    # 应用使用显式核心列表
 
 - 首先给主线程预留一个专用核心。
 - 其次优先保证 TX/RX 实时线程。
-- 最后再分配调制/解调线程和感知/信号处理线程，因为后两个计算线程通常对应更大的缓冲区，可以吸收一定的调度抖动。
+- 最后再分配调制/解调线程和感知/信号处理线程，因为这些计算线程通常对应更大的缓冲区，可以吸收一定的调度抖动。
 
 在网页 CPU 绑核编辑器里，通常意味着优先保证 `main thread affinity`，其次是 `_tx_proc` / `rx_proc` 和各通道 RX loop，最后再考虑调制、解调和感知处理相关线程。
 
@@ -469,7 +469,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 说明：
 * 默认命令分别是 `./OFDMModulator` 和 `./OFDMDemodulator`。
 * 编辑器当前直接面向 `build/` 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 `Modulator.yaml` / `Demodulator.yaml`。
-* 当 CPU 核心不足时，建议先给 `main thread affinity` 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；后两个计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。
+* 当 CPU 核心不足时，建议先给 `main thread affinity` 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。
 * 若开启 `Enable runtime CPU isolation`，控制台会根据当前 `cpu_cores` 计算默认 isolate CPU 列表，并在启动前调用 `scripts/isolate_cpus.bash`。
 * 若再开启 `Override CPU isolation list`，右侧文本框会先用默认 isolate 列表初始化，然后允许按本次启动需要手工修改。
 * 若关闭 `Enable runtime CPU isolation`，控制台仍会通过特权运行路径启动选中的命令，但不会调用 `scripts/isolate_cpus.bash`。

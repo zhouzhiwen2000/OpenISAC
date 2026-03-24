@@ -277,7 +277,7 @@ The selected app CPU set is saved to `/tmp/isolate_cpus_app.conf`.
 
 - Reserve one dedicated core for the main thread first.
 - Then prioritize the TX/RX real-time threads.
-- Finally allocate cores to modulation/demodulation and sensing/signal-processing threads, because those latter stages have larger buffers and can absorb moderate scheduling jitter.
+- Finally allocate cores to modulation/demodulation and sensing/signal-processing threads, because these compute-heavy stages typically have larger buffers and can absorb moderate scheduling jitter.
 
 In the web CPU-binding editor, this usually means prioritizing `main thread affinity` first, then `_tx_proc` / `rx_proc` and per-channel RX loops, and only after that the modulation/demodulation and sensing-processing workers.
 
@@ -469,7 +469,7 @@ What it does:
 Notes:
 * Default commands are `./OFDMModulator` and `./OFDMDemodulator`.
 * The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
-* If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; the latter stages have larger buffers and tolerate transient jitter better.
+* If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.
 * If `Enable runtime CPU isolation` is on, the console uses the current `cpu_cores` list to derive the default isolated CPU set and calls `scripts/isolate_cpus.bash` before launch.
 * If `Override CPU isolation list` is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.
 * If `Enable runtime CPU isolation` is off, the console still launches the selected command through the privileged runtime path, but it does not call `scripts/isolate_cpus.bash`.

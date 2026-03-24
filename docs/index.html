@@ -320,7 +320,7 @@ sudo ./scripts/isolate_cpus.bash 0,2,4,6    # App uses explicit core list
 <ul>
 <li>Reserve one dedicated core for the main thread first.</li>
 <li>Then prioritize the TX/RX real-time threads.</li>
-<li>Finally allocate cores to modulation/demodulation and sensing/signal-processing threads, because those latter stages have larger buffers and can absorb moderate scheduling jitter.</li>
+<li>Finally allocate cores to modulation/demodulation and sensing/signal-processing threads, because these compute-heavy stages typically have larger buffers and can absorb moderate scheduling jitter.</li>
 </ul>
 <p>In the web CPU-binding editor, this usually means prioritizing <code>main thread affinity</code> first, then <code>_tx_proc</code> / <code>rx_proc</code> and per-channel RX loops, and only after that the modulation/demodulation and sensing-processing workers.</p>
 <p><strong>Run application on reserved cores</strong></p>
@@ -469,7 +469,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <ul>
 <li>Default commands are <code>./OFDMModulator</code> and <code>./OFDMDemodulator</code>.</li>
 <li>The editor currently targets the runtime YAML files in <code>build/</code>, because the binaries read <code>Modulator.yaml</code> / <code>Demodulator.yaml</code> from their working directory.</li>
-<li>If CPU cores are limited, reserve a dedicated core for <code>main thread affinity</code> first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; the latter stages have larger buffers and tolerate transient jitter better.</li>
+<li>If CPU cores are limited, reserve a dedicated core for <code>main thread affinity</code> first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.</li>
 <li>If <code>Enable runtime CPU isolation</code> is on, the console uses the current <code>cpu_cores</code> list to derive the default isolated CPU set and calls <code>scripts/isolate_cpus.bash</code> before launch.</li>
 <li>If <code>Override CPU isolation list</code> is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.</li>
 <li>If <code>Enable runtime CPU isolation</code> is off, the console still launches the selected command through the privileged runtime path, but it does not call <code>scripts/isolate_cpus.bash</code>.</li>

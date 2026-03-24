@@ -310,7 +310,7 @@ sudo ./scripts/isolate_cpus.bash 0,2,4,6    # 应用使用显式核心列表
 <ul>
 <li>首先给主线程预留一个专用核心。</li>
 <li>其次优先保证 TX/RX 实时线程。</li>
-<li>最后再分配调制/解调线程和感知/信号处理线程，因为后两个计算线程通常对应更大的缓冲区，可以吸收一定的调度抖动。</li>
+<li>最后再分配调制/解调线程和感知/信号处理线程，因为这些计算线程通常对应更大的缓冲区，可以吸收一定的调度抖动。</li>
 </ul>
 <p>在网页 CPU 绑核编辑器里，通常意味着优先保证 <code>main thread affinity</code>，其次是 <code>_tx_proc</code> / <code>rx_proc</code> 和各通道 RX loop，最后再考虑调制、解调和感知处理相关线程。</p>
 <p><strong>在预留核心上运行应用</strong></p>
@@ -457,7 +457,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <ul>
 <li>默认命令分别是 <code>./OFDMModulator</code> 和 <code>./OFDMDemodulator</code>。</li>
 <li>编辑器当前直接面向 <code>build/</code> 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 <code>Modulator.yaml</code> / <code>Demodulator.yaml</code>。</li>
-<li>当 CPU 核心不足时，建议先给 <code>main thread affinity</code> 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；后两个计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。</li>
+<li>当 CPU 核心不足时，建议先给 <code>main thread affinity</code> 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。</li>
 <li>若开启 <code>Enable runtime CPU isolation</code>，控制台会根据当前 <code>cpu_cores</code> 计算默认 isolate CPU 列表，并在启动前调用 <code>scripts/isolate_cpus.bash</code>。</li>
 <li>若再开启 <code>Override CPU isolation list</code>，右侧文本框会先用默认 isolate 列表初始化，然后允许按本次启动需要手工修改。</li>
 <li>若关闭 <code>Enable runtime CPU isolation</code>，控制台仍会通过特权运行路径启动选中的命令，但不会调用 <code>scripts/isolate_cpus.bash</code>。</li>
