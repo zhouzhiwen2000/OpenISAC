@@ -236,6 +236,41 @@
       font-size: 14px;
     }
 
+    .checklist-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px 12px;
+      padding: 4px 0;
+    }
+
+    .checklist-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      min-height: 48px;
+      padding: 6px 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: white;
+      font-size: 13px;
+    }
+
+    .checklist-item code {
+      font-family: var(--code-font);
+      font-size: 12px;
+      color: var(--secondary-color);
+    }
+
+    .checklist-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .checklist-copy .hint {
+      margin-top: 0;
+    }
+
     .channel-card {
       margin-top: 10px;
       padding: 12px;
@@ -919,6 +954,65 @@
             continue;
           }
 
+          if (field.type === 'profiling_modules') {
+            const row = document.createElement('div');
+            row.className = 'kv-row';
+            row.innerHTML = `
+              <div class="key-col">
+                <code>${field.key}</code>
+                <div class="hint">${field.display_comment || field.comment || ''}</div>
+              </div>
+              <div class="value-col"></div>
+            `;
+            const controlHost = row.querySelector('.value-col');
+            const checklist = document.createElement('div');
+            checklist.className = 'checklist-grid';
+            const selected = new Set(Array.isArray(field.selected) ? field.selected : []);
+            for (const optionItem of (field.options || [])) {
+              const option = typeof optionItem === 'string' ? optionItem : optionItem.key;
+              const description = typeof optionItem === 'string' ? '' : (optionItem.description || '');
+              const label = document.createElement('label');
+              label.className = 'checklist-item';
+              const input = document.createElement('input');
+              input.type = 'checkbox';
+              input.checked = selected.has(option);
+              input.addEventListener('change', () => {
+                const current = new Set(Array.isArray(field.selected) ? field.selected : []);
+                if (option === 'all') {
+                  field.selected = input.checked ? ['all'] : [];
+                } else {
+                  current.delete('all');
+                  if (input.checked) {
+                    current.add(option);
+                  } else {
+                    current.delete(option);
+                  }
+                  field.selected = (field.options || [])
+                    .map((item) => (typeof item === 'string' ? item : item.key))
+                    .filter((item) => current.has(item) && item !== 'all');
+                }
+                renderSections();
+              });
+              label.appendChild(input);
+              const copy = document.createElement('div');
+              copy.className = 'checklist-copy';
+              const code = document.createElement('code');
+              code.textContent = option;
+              copy.appendChild(code);
+              if (description) {
+                const hint = document.createElement('div');
+                hint.className = 'hint';
+                hint.textContent = description;
+                copy.appendChild(hint);
+              }
+              label.appendChild(copy);
+              checklist.appendChild(label);
+            }
+            controlHost.appendChild(checklist);
+            kv.appendChild(row);
+            continue;
+          }
+
           const row = document.createElement('div');
           row.className = 'kv-row';
           row.innerHTML = `
@@ -983,6 +1077,8 @@
           if (field.type === 'cpu_cores') continue;
           if (field.type === 'mapping_list') {
             mappingLists[field.key] = field.items;
+          } else if (field.type === 'profiling_modules') {
+            scalars[field.key] = Array.isArray(field.selected) ? field.selected : [];
           } else if (field.kind === 'bool') {
             scalars[field.key] = field.value;
           } else {

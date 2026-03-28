@@ -34,6 +34,9 @@
 struct QueuedTxFrame {
     AlignedVector samples;
     std::shared_ptr<const SymbolVector> symbols;
+    int64_t ingest_time_ns{0};
+    int64_t encoded_time_ns{0};
+    int64_t mod_done_time_ns{0};
 };
 
 /**
@@ -73,7 +76,8 @@ public:
             return AlignedIntVector();
         }),
         _circular_buffer(cfg.tx_circular_buffer_size),
-        _data_packet_buffer(cfg.data_packet_buffer_size)
+        _data_packet_buffer(cfg.data_packet_buffer_size),
+        _data_packet_ingest_ts(cfg.data_packet_buffer_size)
     {
         _shared_sensing_cfg.sensing_symbol_stride = cfg.sensing_symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
@@ -234,9 +238,36 @@ private:
     // hold shared_ptr deleters that return objects back into these pools.
     SPSCRingBuffer<QueuedTxFrame> _circular_buffer;
     SPSCRingBuffer<AlignedIntVector> _data_packet_buffer; // Data packet buffer
+    struct PktTimestamps { int64_t ingest_ns{0}; int64_t encoded_ns{0}; };
+    struct LatencyAccumulator {
+        std::atomic<int64_t> ldpc_total_ns{0};
+        std::atomic<int64_t> mod_total_ns{0};
+        std::atomic<int64_t> tx_wait_total_ns{0};
+        std::atomic<int64_t> e2e_total_ns{0};
+        std::atomic<int> count{0};
+    };
+    struct LatencySnapshot {
+        int64_t ldpc_total_ns{0};
+        int64_t mod_total_ns{0};
+        int64_t tx_wait_total_ns{0};
+        int64_t e2e_total_ns{0};
+        int count{0};
+    };
+    SPSCRingBuffer<PktTimestamps> _data_packet_ingest_ts; // Timestamps paired with _data_packet_buffer
+    LatencyAccumulator _latency_accumulator;
     std::vector<std::unique_ptr<SensingChannel>> _sensing_channels;
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
+
+    LatencySnapshot _take_latency_snapshot_and_reset() {
+        LatencySnapshot snapshot;
+        snapshot.count = _latency_accumulator.count.exchange(0, std::memory_order_acq_rel);
+        snapshot.ldpc_total_ns = _latency_accumulator.ldpc_total_ns.exchange(0, std::memory_order_acq_rel);
+        snapshot.mod_total_ns = _latency_accumulator.mod_total_ns.exchange(0, std::memory_order_acq_rel);
+        snapshot.tx_wait_total_ns = _latency_accumulator.tx_wait_total_ns.exchange(0, std::memory_order_acq_rel);
+        snapshot.e2e_total_ns = _latency_accumulator.e2e_total_ns.exchange(0, std::memory_order_acq_rel);
+        return snapshot;
+    }
 
     std::shared_ptr<SymbolVector> _acquire_symbol_frame() {
         auto* raw = new SymbolVector(_symbols_pool.acquire());
@@ -520,6 +551,8 @@ private:
         std::vector<size_t> cpu_list = {core_from_hint(_cfg, 2)};
         uhd::set_thread_affinity(cpu_list);
         prefault_thread_stack();
+        const bool do_latency_profile =
+            _cfg.should_profile("modulation") && _cfg.should_profile("latency");
         
         // ============== Profiling variables ==============
         using ProfileClock = std::chrono::high_resolution_clock;
@@ -564,6 +597,10 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
+            const int64_t pkt_ingest_ns = do_latency_profile
+                ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::high_resolution_clock::now().time_since_epoch()).count()
+                : 0;
 
             size_t payload_len = static_cast<size_t>(recv_len); // Raw UDP payload bytes
             // Each LDPC input block represents information bits in bytes: bytes_per_ldpc_block = ceil(K/8)
@@ -656,6 +693,11 @@ private:
                 if (_data_packet_buffer.try_push(std::move(packet))) {
                     enqueue_backoff.reset();
                     enqueued = true;
+                    if (do_latency_profile) {
+                        const int64_t encoded_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+                        _data_packet_ingest_ts.try_push(PktTimestamps{pkt_ingest_ns, encoded_ns});
+                    }
                     break;
                 }
                 enqueue_backoff.pause();
@@ -711,6 +753,8 @@ private:
         std::vector<size_t> cpu_list = {core_from_hint(_cfg, 1)};
         uhd::set_thread_affinity(cpu_list);
         prefault_thread_stack();
+        const bool do_latency_profile =
+            _cfg.should_profile("modulation") && _cfg.should_profile("latency");
         // Frame processing time statistics
         using Clock = std::chrono::high_resolution_clock;
         Clock::time_point frame_start, frame_end;
@@ -756,6 +800,8 @@ private:
             prof_step_start = ProfileClock::now();
             AlignedIntVector data_pool;
             data_pool.reserve(max_data_syms_per_frame);
+            int64_t frame_ingest_ns = 0;
+            int64_t frame_encoded_ns = 0;
             // Pull packets only when the *whole* packet fits in current frame room.
             while (data_pool.size() < max_data_syms_per_frame) {
                 AlignedIntVector* pkt_slot = _data_packet_buffer.consumer_slot();
@@ -781,6 +827,14 @@ private:
                 }
                 AlignedIntVector pkt = std::move(*pkt_slot);
                 _data_packet_buffer.consumer_pop();
+                if (do_latency_profile) {
+                    PktTimestamps pts{};
+                    _data_packet_ingest_ts.try_pop(pts);
+                    if (frame_ingest_ns == 0) {
+                        frame_ingest_ns = pts.ingest_ns;
+                        frame_encoded_ns = pts.encoded_ns;
+                    }
+                }
                 data_pool.insert(data_pool.end(), pkt.begin(), pkt.end());
                 _data_packet_pool.release(std::move(pkt));
             }
@@ -891,6 +945,12 @@ private:
                 bool queued = false;
                 queued_frame.samples = std::move(current_frame);
                 queued_frame.symbols = current_symbols;
+                queued_frame.ingest_time_ns = frame_ingest_ns;
+                queued_frame.encoded_time_ns = frame_encoded_ns;
+                queued_frame.mod_done_time_ns = do_latency_profile
+                    ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch()).count()
+                    : 0;
                 while (_running.load(std::memory_order_relaxed)) {
                     if (_circular_buffer.try_push(std::move(queued_frame))) {
                         queue_backoff.reset();
@@ -914,8 +974,23 @@ private:
                     << "Symbol Generation:    " << prof_symbol_gen_total / prof_frame_count << " us\n"
                     << "IFFT (all symbols):   " << prof_ifft_total / prof_frame_count << " us\n"
                     << "CP & Write:           " << prof_cp_write_total / prof_frame_count << " us\n"
-                    << "TOTAL:                " << total / prof_frame_count << " us\n"
-                    << "===================================================================\n";
+                    << "TOTAL:                " << total / prof_frame_count << " us\n";
+                if (do_latency_profile) {
+                    const LatencySnapshot latency = _take_latency_snapshot_and_reset();
+                    if (latency.count > 0) {
+                        const double n = static_cast<double>(latency.count);
+                        oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
+                            << "LDPC encode + ingest queue:   " << (latency.ldpc_total_ns / n) * 1e-6 << " ms\n"
+                            << "Dequeue + IFFT/CP + mod queue:" << (latency.mod_total_ns / n) * 1e-6 << " ms\n"
+                            << "TX circular buffer wait:      " << (latency.tx_wait_total_ns / n) * 1e-6 << " ms\n"
+                            << "TOTAL E2E (excl. TX wait):    " << (latency.e2e_total_ns / n) * 1e-6 << " ms\n"
+                            << "Latency sample count:         " << latency.count << "\n";
+                    } else {
+                        oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
+                            << "No valid latency samples in this interval.\n";
+                    }
+                }
+                oss << "===================================================================\n";
                 LOG_RT_INFO() << oss.str();
                 
                 // Reset counters
@@ -941,6 +1016,8 @@ private:
         std::vector<size_t> cpu_list = {core_from_hint(_cfg, 0)};
         uhd::set_thread_affinity(cpu_list);
         prefault_thread_stack();
+        const bool do_latency_profile =
+            _cfg.should_profile("modulation") && _cfg.should_profile("latency");
         
         uhd::tx_metadata_t md;
         md.start_of_burst = true;
@@ -948,6 +1025,7 @@ private:
         md.has_time_spec = true;
         md.time_spec = _start_time;
         std::this_thread::sleep_for(std::chrono::milliseconds(500)); // wait for prefill
+
         while (_running.load(std::memory_order_relaxed)) {
             QueuedTxFrame frame_to_send;
             const bool has_frame = _circular_buffer.try_pop(frame_to_send);
@@ -955,6 +1033,18 @@ private:
             const uint64_t frame_start_symbol = _next_frame_start_symbol.load(std::memory_order_relaxed);
 
             if (has_frame) {
+                if (do_latency_profile && frame_to_send.ingest_time_ns != 0) {
+                    const int64_t t4_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+                    const int64_t t1 = frame_to_send.ingest_time_ns;
+                    const int64_t t2 = frame_to_send.encoded_time_ns;
+                    const int64_t t3 = frame_to_send.mod_done_time_ns;
+                    _latency_accumulator.ldpc_total_ns.fetch_add(t2 - t1, std::memory_order_relaxed);
+                    _latency_accumulator.mod_total_ns.fetch_add(t3 - t2, std::memory_order_relaxed);
+                    _latency_accumulator.tx_wait_total_ns.fetch_add(t4_ns - t3, std::memory_order_relaxed);
+                    _latency_accumulator.e2e_total_ns.fetch_add(t3 - t1, std::memory_order_relaxed);
+                    _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
+                }
                 const size_t sent = _send_frame_chunked(
                     frame_to_send.samples.data(),
                     frame_to_send.samples.size(),

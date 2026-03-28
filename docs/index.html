@@ -674,7 +674,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>data_ingest</code>, <code>sensing_proc</code>, and <code>sensing_process</code>; <code>all</code> enables every module.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>data_ingest</code>, <code>sensing_proc</code>, and <code>sensing_process</code>; <code>all</code> enables every module. Modulator end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cpu_cores</code></td>

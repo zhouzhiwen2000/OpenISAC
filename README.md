@@ -515,7 +515,7 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `sensing_rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for outputs that are not explicitly set. |
 | `control_port` | `int` | `9999` | UDP port for control commands (heartbeat/MTI/etc.). |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `data_ingest`, `sensing_proc`, and `sensing_process`; `all` enables every module. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `data_ingest`, `sensing_proc`, and `sensing_process`; `all` enables every module. Modulator end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. Size this list for the TX thread, modulation thread, data-ingest thread, each enabled sensing channel's RX/sensing threads, and the main thread. If cores are limited, keep one dedicated core for the main thread first, then prioritize the TX and sensing RX threads, and only after that the modulation/data-ingest/sensing-processing threads because the latter stages have deeper buffers. |
 
 `sensing_rx_channels` object fields:

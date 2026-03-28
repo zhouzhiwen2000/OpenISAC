@@ -4,3 +4,5 @@ capture/plot_results
 *.log
 _*
 /.claude
+
+measurement/

@@ -51,13 +51,13 @@ public:
           _control_handler(cfg.control_port),
           channel_sender_(2, [this](const auto& data) { 
               channel_udp_->send_container(data); 
-          }, std::chrono::milliseconds(50)),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           pdf_sender_(2, [this](const auto& data) { 
               pdf_udp_->send_container(data); 
-          }, std::chrono::milliseconds(50)),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           constellation_sender_(10, [this](const auto& data) { 
               constellation_udp_->send_container(data); 
-          }, std::chrono::milliseconds(50)),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           // Initialize object pools for memory reuse
           _rx_frame_pool(32, [&cfg]() {
               RxFrame frame;
@@ -293,6 +293,7 @@ private:
     void init_usrp() {
         // Use device arguments from configuration
         usrp_ = uhd::usrp::multi_usrp::make(cfg_.device_args);
+        usrp_->set_clock_source(cfg_.clocksource);
         usrp_->set_rx_rate(cfg_.sample_rate);
         usrp_->set_rx_bandwidth(cfg_.bandwidth, cfg_.rx_channel);
         current_rx_tune_ = usrp_->set_rx_freq(uhd::tune_request_t(cfg_.center_freq), cfg_.rx_channel);
@@ -315,9 +316,9 @@ private:
         _sync_search_gain_sweep.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
         LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
                      << "] dB, initial gain: " << initial_rx_gain_db << " dB";
-        usrp_->set_clock_source(cfg_.clocksource);
 
         uhd::stream_args_t args("fc32", cfg_.wire_format_rx);
+        args.args["block_id"] = "radio";
         args.channels = {cfg_.rx_channel};
         rx_stream_ = usrp_->get_rx_stream(args);
     }

@@ -515,7 +515,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `sensing_rx_channels` | `object[]` | `[]` | 感知 RX 每通道详细配置，字段见下表。 |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | 默认目标 IP；未单独配置的输出 IP 使用该值。 |
 | `control_port` | `int` | `9999` | 控制命令 UDP 端口（心跳/MTI 等）。 |
-| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `modulation`、`data_ingest`、`sensing_proc`、`sensing_process`；`all` 表示全部。 |
+| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `modulation`、`latency`、`data_ingest`、`sensing_proc`、`sensing_process`；`all` 表示全部。调制器端到端时延统计只有在同时包含 `modulation` 和 `latency` 时才启用。 |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | 允许使用的 CPU 核列表。建议按 TX 线程、调制线程、数据输入线程、每个已启用感知通道的 RX/感知线程，以及主线程来预留。若核心数量有限，应先给主线程保留一个专用核心，其次优先 TX 和感知 RX 线程，最后再考虑调制、数据输入和感知处理线程，因为后者有更深的缓冲区。 |
 
 `sensing_rx_channels` 子项字段：

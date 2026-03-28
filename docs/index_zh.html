@@ -662,7 +662,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>data_ingest</code>、<code>sensing_proc</code>、<code>sensing_process</code>；<code>all</code> 表示全部。</td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>data_ingest</code>、<code>sensing_proc</code>、<code>sensing_process</code>；<code>all</code> 表示全部。调制器端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cpu_cores</code></td>

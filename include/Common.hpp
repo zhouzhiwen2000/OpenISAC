@@ -559,7 +559,7 @@ struct Config {
     size_t data_packet_buffer_size = 32;   // Capacity of modulator encoded packet buffer
     size_t paired_frame_queue_size = 8;    // Capacity of per-channel RX/TX pairing queues
     std::vector<size_t> available_cores = {0, 1, 2, 3, 4, 5};
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, or "all"
     
     // Check if a specific module should be profiled
     bool should_profile(const std::string& module) const {
@@ -656,6 +656,8 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     YAML::Emitter out;
     out << YAML::BeginMap;
     out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
+    out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
+    out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
     out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
     out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
     out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
@@ -665,6 +667,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "tx_channel" << YAML::Value << cfg.tx_channel;
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
+    out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
     out << YAML::Key << "rx_device_args" << YAML::Value << cfg.rx_device_args;
@@ -725,12 +728,15 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
     }
     try {
         YAML::Node config = YAML::LoadFile(filepath);
+        const bool has_range_fft_size = static_cast<bool>(config["range_fft_size"]);
         if (!config_detail::reject_legacy_key(config, "mod_udp_ip", "udp_input_ip")) return false;
         if (!config_detail::reject_legacy_key(config, "mod_udp_port", "udp_input_port")) return false;
         if (!config_detail::reject_legacy_key(config, "sensing_ip", "mono_sensing_ip")) return false;
         if (!config_detail::reject_legacy_key(config, "sensing_port", "mono_sensing_port")) return false;
 
         if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
+        if (has_range_fft_size) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
+        if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
         if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
         if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
         if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
@@ -740,6 +746,7 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["tx_channel"]) cfg.tx_channel = config["tx_channel"].as<uint32_t>();
         if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
         if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
+        if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["tx_device_args"]) cfg.tx_device_args = config["tx_device_args"].as<std::string>();
         if (config["rx_device_args"]) cfg.rx_device_args = config["rx_device_args"].as<std::string>();
@@ -803,6 +810,24 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
 inline void normalize_modulator_sensing_channels(Config& cfg) {
     if (cfg.default_ip.empty()) {
         cfg.default_ip = "127.0.0.1";
+    }
+    if (cfg.range_fft_size == 0) {
+        LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to fft_size=" << cfg.fft_size << '.';
+        cfg.range_fft_size = cfg.fft_size;
+    }
+    if (cfg.doppler_fft_size == 0) {
+        LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
+        cfg.doppler_fft_size = 1;
+    }
+    if (cfg.sensing_symbol_num == 0) {
+        LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
+        cfg.sensing_symbol_num = 1;
+    }
+    if (cfg.doppler_fft_size < cfg.sensing_symbol_num) {
+        LOG_G_WARN() << "doppler_fft_size=" << cfg.doppler_fft_size
+                     << " is smaller than sensing_symbol_num=" << cfg.sensing_symbol_num
+                     << ". Expanding doppler_fft_size to sensing_symbol_num to keep sensing buffers consistent.";
+        cfg.doppler_fft_size = cfg.sensing_symbol_num;
     }
     if (cfg.tx_circular_buffer_size == 0) {
         LOG_G_WARN() << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
@@ -1109,6 +1134,24 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
 }
 
 inline void finalize_demodulator_network_defaults(Config& cfg) {
+    if (cfg.range_fft_size == 0) {
+        LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to fft_size=" << cfg.fft_size << '.';
+        cfg.range_fft_size = cfg.fft_size;
+    }
+    if (cfg.doppler_fft_size == 0) {
+        LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
+        cfg.doppler_fft_size = 1;
+    }
+    if (cfg.sensing_symbol_num == 0) {
+        LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
+        cfg.sensing_symbol_num = 1;
+    }
+    if (cfg.doppler_fft_size < cfg.sensing_symbol_num) {
+        LOG_G_WARN() << "doppler_fft_size=" << cfg.doppler_fft_size
+                     << " is smaller than sensing_symbol_num=" << cfg.sensing_symbol_num
+                     << ". Expanding doppler_fft_size to sensing_symbol_num to keep sensing buffers consistent.";
+        cfg.doppler_fft_size = cfg.sensing_symbol_num;
+    }
     if (cfg.frame_queue_size == 0) {
         LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.frame_queue_size = 1;
@@ -1912,11 +1955,21 @@ class DataSender {
 public:
     using DataPackage = std::vector<DataType, Allocator>;
     using SendFunction = std::function<void(const DataPackage&)>;
+    enum class DeliveryMode {
+        QueuedBlocking,
+        LatestOnly
+    };
 
-    DataSender(size_t queue_size, SendFunction send_func, std::chrono::milliseconds interval)
+    DataSender(
+        size_t queue_size,
+        SendFunction send_func,
+        std::chrono::milliseconds interval,
+        DeliveryMode mode = DeliveryMode::QueuedBlocking
+    )
         : queue_(queue_size),
           send_func_(std::move(send_func)),
           send_interval_(interval),
+          delivery_mode_(mode),
           running_(false) {}
 
     ~DataSender() {
@@ -1925,6 +1978,10 @@ public:
 
     void add_data(DataPackage&& data) {
         if (!running_.load(std::memory_order_acquire)) return;
+        if (delivery_mode_ == DeliveryMode::LatestOnly) {
+            queue_.try_push(std::move(data));
+            return;
+        }
         spsc_wait_push(queue_, std::move(data), [this]() {
             return !running_.load(std::memory_order_acquire);
         });
@@ -1948,6 +2005,28 @@ private:
         auto next_send = std::chrono::steady_clock::now();
 
         while (running_.load()) {
+            if (delivery_mode_ == DeliveryMode::LatestOnly) {
+                std::this_thread::sleep_until(next_send);
+                next_send += send_interval_;
+
+                DataPackage latest;
+                if (!queue_.try_pop(latest)) {
+                    continue;
+                }
+
+                DataPackage newer;
+                while (queue_.try_pop(newer)) {
+                    latest = std::move(newer);
+                }
+
+                try {
+                    send_func_(latest);
+                } catch (const std::exception& e) {
+                    LOG_G_WARN() << "DataSender error: " << e.what();
+                }
+                continue;
+            }
+
             DataPackage data;
 
             if (!spsc_wait_pop(queue_, data, [this]() {
@@ -1976,6 +2055,7 @@ private:
     SPSCRingBuffer<DataPackage> queue_;
     SendFunction send_func_;
     std::chrono::milliseconds send_interval_;
+    DeliveryMode delivery_mode_;
     std::thread thread_;
     std::atomic<bool> running_;
 };

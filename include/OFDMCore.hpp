@@ -1721,16 +1721,37 @@ public:
         // Range: [0, cp_length) and [fft_size - cp_length, fft_size)
         if (cp_length > 0 && cp_length < fft_size) {
             size_t count = 0;
-            
-            // Search in [0, cp_length)
-            for (size_t i = 0; i < cp_length; ++i) {
-                const float mag = std::abs(delay_spectrum[i]);
-                if (mag > max_mag) {
-                    max_mag = mag;
-                    max_index = i;
+
+            if (cp_length * 2 >= fft_size) {
+                for (size_t i = 0; i < fft_size; ++i) {
+                    const float mag = std::abs(delay_spectrum[i]);
+                    if (mag > max_mag) {
+                        max_mag = mag;
+                        max_index = i;
+                    }
+                    avg_mag += mag;
+                    count++;
                 }
-                avg_mag += mag;
-                count++;
+            } else {
+                for (size_t i = 0; i < cp_length; ++i) {
+                    const float mag = std::abs(delay_spectrum[i]);
+                    if (mag > max_mag) {
+                        max_mag = mag;
+                        max_index = i;
+                    }
+                    avg_mag += mag;
+                    count++;
+                }
+
+                for (size_t i = fft_size - cp_length; i < fft_size; ++i) {
+                    const float mag = std::abs(delay_spectrum[i]);
+                    if (mag > max_mag) {
+                        max_mag = mag;
+                        max_index = i;
+                    }
+                    avg_mag += mag;
+                    count++;
+                }
             }
             avg_mag /= static_cast<float>(count);
         } else {

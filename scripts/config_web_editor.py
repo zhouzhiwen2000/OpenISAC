@@ -23,6 +23,67 @@ import yaml
 
 HTML_TEMPLATE_PATH = Path(__file__).with_suffix(".html")
 
+PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
+    "modulator": ("all", "modulation", "latency", "data_ingest", "sensing_proc", "sensing_process"),
+    "demodulator": ("all", "demodulation", "agc", "align"),
+}
+
+PROFILING_DESCRIPTIONS: dict[str, str] = {
+    "all": "Enable every profiling and diagnostic module for this tab.",
+    "modulation": "Show modulator frame processing breakdown and load statistics.",
+    "latency": "Enable modulator end-to-end latency tracking. Requires modulation too.",
+    "data_ingest": "Profile UDP ingest, LDPC encode, and enqueue cost in the modulator.",
+    "sensing_proc": "Profile per-channel sensing RX-side processing in the modulator path.",
+    "sensing_process": "Profile sensing output/aggregation work in the modulator path.",
+    "demodulation": "Show demodulator per-frame processing breakdown and load statistics.",
+    "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",
+    "align": "Enable runtime alignment diagnostics, including ALGN logs.",
+}
+
+FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
+    "sensing_rx_channels": {
+        "title": "Sensing RX Channels",
+        "field": {
+            "type": "mapping_list",
+            "key": "sensing_rx_channels",
+            "comment": "",
+            "item_fields": [],
+        },
+    },
+    "sensing_symbol_num": {
+        "title": "OFDM Frame",
+        "field": {
+            "type": "scalar",
+            "key": "sensing_symbol_num",
+            "comment": "Number of symbols used in sensing processing",
+        },
+    },
+    "range_fft_size": {
+        "title": "Sensing FFT",
+        "field": {
+            "type": "scalar",
+            "key": "range_fft_size",
+            "comment": "Range FFT size",
+        },
+    },
+    "doppler_fft_size": {
+        "title": "Sensing FFT",
+        "field": {
+            "type": "scalar",
+            "key": "doppler_fft_size",
+            "comment": "Doppler FFT size",
+        },
+    },
+    "profiling_modules": {
+        "title": "Runtime / Debug",
+        "field": {
+            "type": "scalar",
+            "key": "profiling_modules",
+            "comment": 'Comma-separated modules to profile, or "all"',
+        },
+    },
+}
+
 
 def load_html_page() -> str:
     return HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -117,6 +178,53 @@ def int_or_zero(value: Any) -> int:
         return int(value)
     except Exception:
         return 0
+
+
+def profiling_options_for_tab(tab_name: str, value: Any) -> list[str]:
+    options = list(PROFILING_OPTIONS.get(tab_name, ()))
+    extra_tokens = []
+    if isinstance(value, str):
+        extra_tokens = [token.strip() for token in value.split(",") if token.strip()]
+    for token in extra_tokens:
+        if token not in options:
+            options.append(token)
+    return options
+
+
+def parse_profiling_modules(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    tokens = [token.strip() for token in value.split(",") if token.strip()]
+    if "all" in tokens:
+        return ["all"]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def encode_profiling_modules(tokens: Any, tab_name: str, fallback: Any) -> str:
+    if not isinstance(tokens, list):
+        return str(fallback or "")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        text = str(token).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    if "all" in cleaned:
+        return "all"
+    option_order = profiling_options_for_tab(tab_name, fallback)
+    ordered = [token for token in option_order if token in cleaned and token != "all"]
+    extras = [token for token in cleaned if token not in ordered and token != "all"]
+    ordered.extend(extras)
+    return ",".join(ordered)
 
 
 def parse_layout(text: str) -> list[dict[str, Any]]:
@@ -318,8 +426,6 @@ def append_missing_layout_fields(
         if candidate.exists():
             sample_layout = parse_layout(candidate.read_text(encoding="utf-8"))
             break
-    if not sample_layout:
-        return layout
 
     layout_copy = copy.deepcopy(layout)
     for key in missing:
@@ -342,6 +448,21 @@ def append_missing_layout_fields(
                 break
             if inserted:
                 break
+        if inserted:
+            continue
+        fallback = FALLBACK_LAYOUT_FIELDS.get(key)
+        if fallback is None:
+            continue
+        for target_section in layout_copy:
+            if target_section["title"] == fallback["title"]:
+                target_section["fields"].append(copy.deepcopy(fallback["field"]))
+                inserted = True
+                break
+        if not inserted:
+            layout_copy.append({
+                "title": fallback["title"],
+                "fields": [copy.deepcopy(fallback["field"])],
+            })
     return layout_copy
 
 
@@ -357,7 +478,11 @@ def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple
         data["sensing_rx_channels"] = []
     if "cpu_cores" in data and not isinstance(data["cpu_cores"], list):
         data["cpu_cores"] = []
-    layout = append_missing_layout_fields(layout, fallback_paths, ("sensing_rx_channels",))
+    layout = append_missing_layout_fields(
+        layout,
+        fallback_paths,
+        ("sensing_rx_channels", "range_fft_size", "doppler_fft_size", "sensing_symbol_num", "profiling_modules"),
+    )
     known_keys = {field["key"] for section in layout for field in section["fields"]}
     extra_keys = [key for key in data.keys() if key not in known_keys]
     if extra_keys:
@@ -374,6 +499,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
         section_payload = {"title": section["title"], "fields": []}
         for field in section["fields"]:
             key = field["key"]
+            value = data.get(key)
             if field["type"] == "cpu_cores":
                 section_payload["fields"].append({
                     "type": "cpu_cores",
@@ -408,7 +534,22 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 })
                 continue
 
-            value = data.get(key)
+            if key == "profiling_modules":
+                section_payload["fields"].append({
+                    "type": "profiling_modules",
+                    "key": key,
+                    "comment": field.get("comment", ""),
+                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "options": [
+                        {
+                            "key": option,
+                            "description": PROFILING_DESCRIPTIONS.get(option, ""),
+                        }
+                        for option in profiling_options_for_tab(tab_name, value)
+                    ],
+                    "selected": parse_profiling_modules(value),
+                })
+                continue
             if field["type"] == "flow_list":
                 item_kind = detect_kind(value[0], "int") if isinstance(value, list) and value else "int"
                 section_payload["fields"].append({
@@ -516,6 +657,8 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
         for field in section["fields"]:
             if field["type"] == "mapping_list":
                 mapping_layouts[field["key"]] = field["item_fields"]
+            elif field["key"] == "profiling_modules":
+                kind_map[field["key"]] = ("profiling_modules", "")
             elif field["type"] == "flow_list":
                 existing = current_data.get(field["key"], [])
                 item_kind = detect_kind(existing[0], "int") if isinstance(existing, list) and existing else "int"
@@ -525,7 +668,9 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
 
     for key, raw in scalars.items():
         field_kind, extra = kind_map.get(key, ("string", ""))
-        if field_kind == "flow_list":
+        if field_kind == "profiling_modules":
+            result[key] = encode_profiling_modules(raw, tab_name, current_data.get(key, ""))
+        elif field_kind == "flow_list":
             result[key] = coerce_flow_list(str(raw), extra)
         elif field_kind == "bool":
             result[key] = bool(raw)
