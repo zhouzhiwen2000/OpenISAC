@@ -1,0 +1,16 @@
+name: openisac-plot
+channels:
+  - defaults
+dependencies:
+  - python=3.13
+  - pip
+  - pip:
+      - matplotlib==3.10.8
+      - mlx==0.31.1; platform_system == "Darwin" and platform_machine == "arm64"
+      - numba==0.65.0
+      - numpy==2.4.4
+      - optuna==4.8.0
+      - PyQt6==6.11.0
+      - pyqtgraph==0.14.0
+      - PyYAML==6.0.3
+      - scipy==1.17.1

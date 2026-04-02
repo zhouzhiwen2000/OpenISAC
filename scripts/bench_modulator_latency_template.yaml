@@ -40,7 +40,7 @@ default_ip: 192.168.2.178  # Default destination IP when per-output IP is empty
 
 # ===== Sensing RX Channels =====
 sensing_rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
-sensing_rx_channels: []
+sensing_rx_channels:
 range_fft_size: 1024
 doppler_fft_size: 100
 sensing_symbol_num: 100
@@ -50,7 +50,7 @@ sensing_symbol_stride: 20  # Default STRD applied at startup before runtime comm
 tx_circular_buffer_size: 32  # Modulator frame circular buffer capacity
 data_packet_buffer_size: 32  # Encoded packet buffer capacity
 paired_frame_queue_size: 32  # Per-channel RX/TX pairing queue capacity
-profiling_modules: modulation,latency  # Enable latency reports in the modulation profiling output
+profiling_modules: modulation,latency  # Enable latency reports in _tx_proc
 cpu_cores:
   - 5  # idx0 (hint 0): _tx_proc
   - 7  # idx1 (hint 1): _modulation_proc

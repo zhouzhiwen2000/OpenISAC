@@ -40,6 +40,7 @@ def configure_measurement(
     output_dir: Path,
     payload_bytes: int,
     prbs_seed: int,
+    packets_per_point: int,
 ) -> None:
     cfg["measurement_enable"] = True
     cfg["measurement_mode"] = "internal_prbs"
@@ -47,6 +48,30 @@ def configure_measurement(
     cfg["measurement_output_dir"] = str(output_dir)
     cfg["measurement_payload_bytes"] = int(payload_bytes)
     cfg["measurement_prbs_seed"] = int(prbs_seed)
+    cfg["measurement_packets_per_point"] = int(packets_per_point)
+
+
+def ensure_distinct_control_ports(mod_cfg: dict, demod_cfg: dict) -> None:
+    mod_port = int(mod_cfg.get("control_port", 9999))
+    demod_port = int(demod_cfg.get("control_port", 9999))
+    if mod_port == demod_port:
+        demod_cfg["control_port"] = mod_port + 1
+
+
+def estimate_single_frame_payload_limit(cfg: dict) -> int:
+    # Matches the fixed CPU LDPC path in OFDMModulator/OFDMDemodulator:
+    # make_ldpc_5041008_cfg() => K=504 information bits, N=1008 coded bits.
+    ldpc_k_bits = 504
+    ldpc_n_bits = 1008
+    bytes_per_ldpc_block = (ldpc_k_bits + 7) // 8
+    fft_size = int(cfg.get("fft_size", 1024))
+    num_symbols = int(cfg.get("num_symbols", 100))
+    pilot_positions = cfg.get("pilot_positions", [])
+    data_subcarriers = max(0, fft_size - len(pilot_positions))
+    frame_coded_bits = max(0, num_symbols - 1) * data_subcarriers * 2
+    usable_payload_bits = max(0, frame_coded_bits - ldpc_n_bits)
+    payload_blocks = usable_payload_bits // ldpc_n_bits
+    return payload_blocks * bytes_per_ldpc_block
 
 
 def apply_fft_sample_rate_sweep(

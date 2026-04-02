@@ -66,6 +66,21 @@ FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
             ],
         },
     },
+    "data_resource_blocks": {
+        "title": "Resource Planner",
+        "field": {
+            "type": "mapping_list",
+            "key": "data_resource_blocks",
+            "comment": "Optional payload RE rectangles",
+            "allow_omit": True,
+            "item_fields": [
+                {"key": "symbol_start", "comment": "0-based absolute frame symbol index", "kind": "int"},
+                {"key": "symbol_count", "comment": "Number of OFDM symbols in this block", "kind": "int"},
+                {"key": "subcarrier_start", "comment": "0-based FFT-bin start index", "kind": "int"},
+                {"key": "subcarrier_count", "comment": "Number of contiguous subcarriers in this block", "kind": "int"},
+            ],
+        },
+    },
     "sensing_symbol_num": {
         "title": "OFDM Frame",
         "field": {
@@ -319,7 +334,30 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
             i = j
             continue
 
-        if key == "cpu_cores" and not value_part:
+        if key == "cpu_cores":
+            j = i + 1
+            if not value_part:
+                while j < len(lines):
+                    sub_raw = lines[j]
+                    sub_stripped = sub_raw.strip()
+                    if not sub_stripped:
+                        j += 1
+                        continue
+                    if not sub_raw.startswith(" "):
+                        break
+                    j += 1
+            current["fields"].append({
+                "type": "cpu_cores",
+                "key": key,
+                "comment": comment,
+            })
+            i = j if not value_part else i + 1
+            continue
+
+        if not value_part:
+            item_fields = []
+            seen_item_keys: set[str] = set()
+            saw_mapping_list = False
             j = i + 1
             while j < len(lines):
                 sub_raw = lines[j]
@@ -329,14 +367,32 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
                     continue
                 if not sub_raw.startswith(" "):
                     break
+                if sub_stripped.startswith("#"):
+                    j += 1
+                    continue
+                trimmed = sub_stripped[2:].strip() if sub_stripped.startswith("- ") else sub_stripped
+                if ":" in trimmed:
+                    item_key, item_rest = trimmed.split(":", 1)
+                    item_key = item_key.strip()
+                    _, item_comment = split_inline_comment(item_rest)
+                    if item_key not in seen_item_keys:
+                        item_fields.append({
+                            "key": item_key,
+                            "comment": item_comment,
+                        })
+                        seen_item_keys.add(item_key)
+                    saw_mapping_list = True
                 j += 1
-            current["fields"].append({
-                "type": "cpu_cores",
-                "key": key,
-                "comment": comment,
-            })
-            i = j
-            continue
+            if saw_mapping_list:
+                current["fields"].append({
+                    "type": "mapping_list",
+                    "key": key,
+                    "comment": comment,
+                    "item_fields": item_fields,
+                    "allow_omit": key == "data_resource_blocks",
+                })
+                i = j
+                continue
 
         current["fields"].append({
             "type": "flow_list" if value_part.startswith("[") else "scalar",
@@ -491,14 +547,20 @@ def append_missing_layout_fields(
 
 def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, Any]]:
     layout_copy = copy.deepcopy(layout)
-    fallback_item_fields = {
-        field["key"]: field
-        for field in FALLBACK_LAYOUT_FIELDS["sensing_rx_channels"]["field"]["item_fields"]
+    fallback_item_fields_by_key = {
+        field_key: {
+            item_field["key"]: item_field
+            for item_field in fallback["field"].get("item_fields", [])
+        }
+        for field_key, fallback in FALLBACK_LAYOUT_FIELDS.items()
+        if fallback["field"].get("type") == "mapping_list"
     }
     for section in layout_copy:
         for field in section["fields"]:
-            if field.get("type") != "mapping_list" or field.get("key") != "sensing_rx_channels":
+            if field.get("type") != "mapping_list":
                 continue
+            field_key = field.get("key")
+            fallback_item_fields = fallback_item_fields_by_key.get(field_key, {})
             merged_item_fields: list[dict[str, Any]] = []
             seen_keys: set[str] = set()
             for item_field in field.get("item_fields", []):
@@ -513,6 +575,8 @@ def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, 
                 if item_key in seen_keys:
                     continue
                 merged_item_fields.append(copy.deepcopy(fallback_field))
+            if field_key == "data_resource_blocks":
+                field["allow_omit"] = True
             field["item_fields"] = merged_item_fields
     return layout_copy
 
@@ -567,6 +631,22 @@ def default_sensing_channel_item(
     }
 
 
+def default_data_resource_block_item(data: dict[str, Any]) -> dict[str, int]:
+    fft_size = max(1, int_or_default(data.get("fft_size"), 1024))
+    num_symbols = max(1, int_or_default(data.get("num_symbols"), 100))
+    sync_pos = int_or_default(data.get("sync_pos"), 0)
+    data_symbol_candidates = [idx for idx in range(num_symbols) if idx != sync_pos]
+    symbol_start = data_symbol_candidates[0] if data_symbol_candidates else 0
+    symbol_count = min(4, len(data_symbol_candidates)) if data_symbol_candidates else 1
+    subcarrier_count = min(128, fft_size)
+    return {
+        "symbol_start": symbol_start,
+        "symbol_count": max(1, symbol_count),
+        "subcarrier_start": 0,
+        "subcarrier_count": max(1, subcarrier_count),
+    }
+
+
 def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> list[dict[str, Any]]:
     count = max(0, int_or_zero(data.get("sensing_rx_channel_count", 0)))
     dict_items = [item for item in items if isinstance(item, dict)]
@@ -597,12 +677,21 @@ def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple
     layout = parse_layout(text)
     if "sensing_rx_channels" in data and not isinstance(data["sensing_rx_channels"], list):
         data["sensing_rx_channels"] = []
+    if "data_resource_blocks" in data and not isinstance(data["data_resource_blocks"], list):
+        data["data_resource_blocks"] = []
     if "cpu_cores" in data and not isinstance(data["cpu_cores"], list):
         data["cpu_cores"] = []
     layout = append_missing_layout_fields(
         layout,
         fallback_paths,
-        ("sensing_rx_channels", "range_fft_size", "doppler_fft_size", "sensing_symbol_num", "profiling_modules"),
+        (
+            "sensing_rx_channels",
+            "data_resource_blocks",
+            "range_fft_size",
+            "doppler_fft_size",
+            "sensing_symbol_num",
+            "profiling_modules",
+        ),
     )
     layout = enrich_mapping_list_layouts(layout)
     known_keys = {field["key"] for section in layout for field in section["fields"]}
@@ -655,6 +744,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                     "display_comment": display_comment_override(key, field.get("comment", "")),
                     "item_fields": item_fields,
                     "items": items,
+                    "allow_omit": bool(field.get("allow_omit", False)),
                 }
                 if key == "sensing_rx_channels":
                     base_item = items[0] if items else None
@@ -664,6 +754,14 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                         base_item,
                         preserve_usrp_channel=True,
                     )
+                if key == "data_resource_blocks":
+                    field_payload["default_item"] = default_data_resource_block_item(data)
+                    if key not in data:
+                        field_payload["mode"] = "legacy"
+                    elif items:
+                        field_payload["mode"] = "custom"
+                    else:
+                        field_payload["mode"] = "disabled"
                 section_payload["fields"].append(field_payload)
                 continue
 
@@ -744,6 +842,8 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                 continue
 
             if field["type"] == "mapping_list":
+                if field.get("allow_omit") and key not in data:
+                    continue
                 items = data.get(key, []) or []
                 if not items:
                     lines.append(f"{key}: []{suffix}")
@@ -810,8 +910,14 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
         else:
             result[key] = parse_display_value(key, str(raw), field_kind)
 
-    for key, items in mapping_lists.items():
+    for key, raw_mapping in mapping_lists.items():
         item_layout = mapping_layouts.get(key, [])
+        mode = "custom"
+        items = raw_mapping
+        if isinstance(raw_mapping, dict):
+            mode_raw = raw_mapping.get("mode", "custom")
+            mode = str(mode_raw)
+            items = raw_mapping.get("items", [])
         if not isinstance(items, list):
             raise RuntimeError(f"Invalid mapping list for {key}.")
         normalized_items: list[dict[str, Any]] = []
@@ -828,6 +934,14 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
                 else:
                     normalized_item[item_key] = coerce_scalar(str(raw), kind)
             normalized_items.append(normalized_item)
+        if key == "data_resource_blocks":
+            if mode == "legacy":
+                result.pop(key, None)
+            elif mode == "disabled":
+                result[key] = []
+            else:
+                result[key] = normalized_items
+            continue
         result[key] = normalized_items
 
     if not isinstance(cpu_values, list):

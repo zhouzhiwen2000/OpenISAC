@@ -239,6 +239,11 @@
 <li>Download: <a href="http://www.ubuntu.com/download/desktop">http://www.ubuntu.com/download/desktop</a></li>
 </ul>
 </li>
+<li><strong>macOS (Apple Silicon, local development / demo only)</strong>
+<ul>
+<li>Guide: <a href="https://github.com/zhouzhiwen2000/UHD_OFDM/blob/OpenISAC_MultiChannel/docs/macos_build.md">Separate macOS build guide</a></li>
+</ul>
+</li>
 </ul>
 <h4>Dependencies &amp; Installation</h4>
 <h4>1. UHD (USRP Hardware Driver)</h4>
@@ -367,12 +372,7 @@ conda activate OpenISAC
 <li><strong>Windows:</strong> Download from <a href="https://ffmpeg.org/download.html">ffmpeg.org</a> and add to PATH, or place executable in the working directory.</li>
 </ul>
 <h4>Enable GPU Acceleration (Optional)</h4>
-<p>If an Nvidia GPU is available, install <code>cupy-cuda12x</code> to enable GPU acceleration:</p>
-<blockquote>
-<p><strong>Note:</strong> Please ensure that the CUDA Toolkit is installed before installing CuPy.</p>
-</blockquote>
-<pre><code class="language-bash">pip install cupy-cuda12x
-</code></pre>
+<p>Some fast plotting scripts can use an optional GPU array backend when it is available in the active Python environment. If no optional backend is installed, the scripts automatically fall back to CPU execution.</p>
 <h4>Enable Intel Integrated GPU Acceleration (Optional)</h4>
 <p>If your device has an Intel integrated GPU (e.g., Intel UHD Graphics, Intel Iris Xe, etc.), you can enable GPU acceleration via <code>dpctl</code> and <code>dpnp</code>. This is especially useful for laptops and desktops without a dedicated Nvidia GPU.</p>
 <h5>1. Install Intel GPU Official Driver</h5>
@@ -394,10 +394,10 @@ conda activate OpenISAC
 <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]
 </code></pre>
 <h5>4. Usage Notes</h5>
-<p>The OpenISAC frontend automatically detects available GPU backends. The priority order is:</p>
+<p>The OpenISAC frontend automatically detects available array backends. The priority order is:</p>
 <ol>
-<li>Nvidia GPU (CUDA)</li>
-<li>Intel iGPU (dpnp)</li>
+<li>CuPy backend</li>
+<li>dpnp backend</li>
 <li>CPU (fallback)</li>
 </ol>
 <p>No code modifications are required; the system will automatically select the best available backend.</p>
@@ -458,17 +458,21 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <p>Then open <code>http://&lt;your-host&gt;:8765</code> in a browser.</p>
 <p>What it does:</p>
 <ul>
-<li>Provides separate Modulator / Demodulator tabs.</li>
+<li>Provides separate Modulator / Demodulator tabs, plus a dedicated <code>Resource Planner</code> tab for <code>data_resource_blocks</code>.</li>
 <li>Edits <code>build/Modulator.yaml</code> and <code>build/Demodulator.yaml</code> as parameter/value forms instead of a raw YAML text area.</li>
 <li>Provides a dedicated CPU-binding editor for <code>cpu_cores</code>, with thread names, generated comments, and per-thread CPU selection.</li>
 <li>Saves the current form back to YAML and starts/stops modulator and demodulator processes from the <code>build/</code> directory.</li>
 <li>Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.</li>
-<li>Includes CPU command presets and a custom command field for each tab.</li>
+<li>Includes command presets and a custom command field for each tab.</li>
+<li>Lets you draw payload rectangles on a large time-frequency planner canvas, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.</li>
+<li>Includes a <code>Guard Band Grid</code> preset that follows <code>scripts/plot_const.py</code>, i.e. it keeps only subcarriers <code>1..489</code> and <code>535..N-1</code> before the normal sync/pilot stripping rules are applied.</li>
 </ul>
 <p>Notes:</p>
 <ul>
 <li>Default commands are <code>./OFDMModulator</code> and <code>./OFDMDemodulator</code>.</li>
 <li>The editor currently targets the runtime YAML files in <code>build/</code>, because the binaries read <code>Modulator.yaml</code> / <code>Demodulator.yaml</code> from their working directory.</li>
+<li>The <code>Resource Planner</code> tab edits <code>data_resource_blocks</code> only. Use <code>Apply to Transmitter</code> to write the current planner state into <code>build/Modulator.yaml</code>, and <code>Apply to Receiver</code> to write it into <code>build/Demodulator.yaml</code>.</li>
+<li>The planner intentionally allows TX and RX to differ while you are experimenting, but normal operation still expects matching <code>data_resource_blocks</code> on both sides.</li>
 <li>If CPU cores are limited, reserve a dedicated core for <code>main thread affinity</code> first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.</li>
 <li>If <code>Enable runtime CPU isolation</code> is on, the console uses the current <code>cpu_cores</code> list to derive the default isolated CPU set and calls <code>scripts/isolate_cpus.bash</code> before launch.</li>
 <li>If <code>Override CPU isolation list</code> is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.</li>
@@ -555,6 +559,12 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[571,...,451]</code></td>
 <td style="text-align:left">Pilot subcarrier indices.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">omitted</td>
+<td style="text-align:left">Optional payload resource rectangles. Omit the key to keep legacy full-grid payload mapping; set <code>[]</code> to disable payload RE entirely. Each block uses <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>; only selected non-sync, non-pilot RE carry real payload, and all other non-sync, non-pilot RE transmit pre-generated QPSK.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -671,6 +681,48 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left">UDP port for control commands (heartbeat/MTI/etc.).</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable CPU internal measurement mode. When enabled, <code>OFDMModulator</code> generates deterministic PRBS payloads instead of listening on <code>udp_input_*</code>, and <code>OFDMDemodulator</code> switches decoded measurement payloads into BER/BLER/EVM accounting.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">Measurement mode selector. Only <code>internal_prbs</code> is supported. Unsupported values disable measurement mode during config normalization.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Run identifier written into measurement CSV summaries.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Output directory used by the CPU measurement summaries.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">Bytes per internally generated measurement payload. Values below the internal header size are clamped up.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">Base seed used to derive deterministic PRBS payload contents.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Number of measurement payloads sent for each online <code>MRST</code> epoch. Values below <code>1</code> are clamped to <code>1</code>.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
@@ -684,6 +736,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 </tr>
 </tbody>
 </table>
+<p>If <code>data_resource_blocks</code> is enabled, copy the same rectangles into <code>Demodulator.yaml</code>; <code>sync_pos</code> and <code>pilot_positions</code> still take precedence over overlapping payload rectangles.</p>
 <p><code>sensing_rx_channels</code> object fields:</p>
 <table>
 <thead>
@@ -747,7 +800,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left"><code>enable_system_delay_estimation</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">If <code>true</code>, this channel performs a one-shot ZC-based system delay estimation at startup and keeps the sensing pipeline disabled while continuing to drain frames.</td>
+<td style="text-align:left">If <code>true</code>, this channel performs a ZC-based system delay estimation at startup and then once every 434 frames, while keeping the sensing pipeline disabled and continuing to drain frames.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>sensing_ip</code></td>
@@ -767,7 +820,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <ul>
 <li>If <code>sensing_rx_channels</code> is empty and <code>sensing_rx_channel_count &gt; 0</code>, default channels <code>0..N-1</code> are generated automatically.</li>
 <li>If the count and list size differ, the list is resized to match <code>sensing_rx_channel_count</code>.</li>
-<li>When <code>enable_system_delay_estimation=true</code> for a channel, that channel performs one system delay estimation near startup, then skips further delay-estimation compute while continuing to drain frames. Normal sensing processing and sensing UDP output remain disabled.</li>
+<li>When <code>enable_system_delay_estimation=true</code> for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing UDP output remain disabled.</li>
 <li>In practice, keep hardware-specific fields such as <code>device_args</code>, <code>wire_format_*</code>, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.</li>
 </ul>
 <h3>OFDM Demodulator</h3>
@@ -917,6 +970,12 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left">Pilot subcarrier indices.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">omitted</td>
+<td style="text-align:left">Optional payload resource rectangles. Omit the key to keep legacy full-grid payload extraction; set <code>[]</code> to extract no payload LLR. Each block uses <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>, and the effective payload RE are the selected rectangles after removing <code>sync_pos</code> and <code>pilot_positions</code>. This setting must match <code>Modulator.yaml</code> when enabled.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>device_args</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
@@ -1058,7 +1117,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left"><code>enable_bi_sensing</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable the bistatic sensing pipeline and UDP output. When set to <code>false</code>, <code>OFDMDemodulator</code> skips bistatic sensing channel startup.</td>
+<td style="text-align:left">Enable the bistatic sensing pipeline and UDP output. When set to <code>false</code>, the demodulator skips bistatic sensing channel startup.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_ip</code></td>
@@ -1145,10 +1204,52 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left">UDP port for control commands.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to <code>udp_output_*</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">Measurement mode selector. Only <code>internal_prbs</code> is supported. Unsupported values disable measurement mode during config normalization.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Run identifier written into measurement CSV summaries.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Output directory used by the CPU measurement summaries.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">Expected bytes per measurement payload. Values below the internal header size are clamped up.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">Base seed used to rebuild deterministic PRBS measurement payloads.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Expected measurement payload count for each online <code>MRST</code> epoch. Values below <code>1</code> are clamped to <code>1</code>.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>agc</code>, and <code>align</code>; <code>all</code> enables every module. <code>agc</code> gates AGC logs, while <code>align</code> gates runtime <code>ALGN:</code> logs.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>agc</code>, <code>align</code>, and <code>snr</code>; <code>all</code> enables every module. <code>agc</code> gates AGC logs, <code>align</code> gates runtime <code>ALGN:</code> logs, and <code>snr</code> prints periodic <code>_snr_db / _noise_var / _llr_scale</code> updates from the active demodulator path.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cpu_cores</code></td>

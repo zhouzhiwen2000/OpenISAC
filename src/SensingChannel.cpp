@@ -19,10 +19,33 @@ inline bool should_profile_sensing(const Config& cfg) {
     return sensing_enabled && cfg.should_profile("latency");
 }
 
+int64_t round_divide_nearest_away_from_zero(int64_t numerator, int64_t denominator) {
+    if (denominator <= 0) {
+        return 0;
+    }
+
+    const uint64_t denom_u = static_cast<uint64_t>(denominator);
+    const uint64_t half_u = denom_u / 2;
+    const uint64_t magnitude_u = (numerator < 0)
+        ? static_cast<uint64_t>(-(numerator + 1)) + 1u
+        : static_cast<uint64_t>(numerator);
+    const uint64_t rounded_u = (magnitude_u + half_u) / denom_u;
+
+    if (rounded_u > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        return (numerator < 0)
+            ? std::numeric_limits<int64_t>::min()
+            : std::numeric_limits<int64_t>::max();
+    }
+
+    const int64_t rounded = static_cast<int64_t>(rounded_u);
+    return (numerator < 0) ? -rounded : rounded;
+}
+
 uint64_t compute_rx_frame_seq_from_time(
     const uhd::time_spec_t& raw_start_time,
     const uhd::time_spec_t& stream_start_time,
     int32_t discard_samples,
+    int32_t target_alignment_samples,
     const Config& cfg
 ) {
     if (cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0) {
@@ -39,9 +62,11 @@ uint64_t compute_rx_frame_seq_from_time(
         return 0;
     }
 
+    const int64_t pairing_samples =
+        rounded_samples - static_cast<int64_t>(target_alignment_samples);
+    // Only round once when converting UHD time to integer samples; keep frame indexing in integer math.
     const int64_t rounded_frame_seq =
-        static_cast<int64_t>(std::llround(static_cast<double>(rounded_samples) /
-                                          static_cast<double>(frame_samples)));
+        round_divide_nearest_away_from_zero(pairing_samples, frame_samples);
     return rounded_frame_seq > 0 ? static_cast<uint64_t>(rounded_frame_seq) : 0;
 }
 
@@ -83,8 +108,7 @@ int32_t compute_rx_frame_boundary_error_samples(
     }
 
     const int64_t nearest_frame_seq =
-        static_cast<int64_t>(std::llround(static_cast<double>(rounded_samples) /
-                                          static_cast<double>(frame_samples)));
+        round_divide_nearest_away_from_zero(rounded_samples, frame_samples);
     const int64_t residual = rounded_samples - nearest_frame_seq * frame_samples;
     return normalize_alignment_samples(residual, frame_samples);
 }
@@ -290,9 +314,8 @@ SensingChannel::SensingComputeContext::SensingComputeContext(const Config& cfg, 
   : demod_fft_in(cfg.fft_size),
     demod_fft_out(cfg.fft_size),
     sensing_core({cfg.fft_size, cfg.range_fft_size, cfg.doppler_fft_size, cfg.sensing_symbol_num}),
-    sensing_sender(c.sensing_ip, c.sensing_port),
-    next_hb_time(std::chrono::steady_clock::now()),
-    next_send_time(std::chrono::steady_clock::now()) {
+    sensing_sender(c.sensing_ip, c.sensing_port, c.enable_sensing_output),
+    next_hb_time(std::chrono::steady_clock::now()) {
     accumulated_rx_symbols.reserve(cfg.sensing_symbol_num);
     accumulated_tx_symbols.reserve(cfg.sensing_symbol_num);
     range_window.resize(cfg.fft_size);
@@ -414,7 +437,6 @@ void SensingChannel::join() {
 void SensingChannel::start_bistatic() {
     _compute.bistatic_active = true;
     _compute.next_hb_time = std::chrono::steady_clock::now();
-    _compute.next_send_time = std::chrono::steady_clock::now();
     _compute.sensing_sender.start();
 }
 
@@ -867,6 +889,7 @@ void SensingChannel::_handle_alignment() {
             first_time_spec,
             _rx_io.stream_start_time,
             discard,
+            _rx_io.target_alignment.load(std::memory_order_relaxed),
             _cfg)
         : _rx_io.next_rx_frame_seq;
     RxSymbolsFrame rx_item;
@@ -949,6 +972,7 @@ void SensingChannel::_handle_normal_rx() {
             first_time_spec,
             _rx_io.stream_start_time,
             0,
+            _rx_io.target_alignment.load(std::memory_order_relaxed),
             _cfg)
         : _rx_io.next_rx_frame_seq;
     RxSymbolsFrame rx_item;
@@ -1044,6 +1068,9 @@ void SensingChannel::_sensing_loop() {
 }
 
 void SensingChannel::_send_heartbeat_if_due(const std::chrono::steady_clock::time_point& now) {
+    if (!_rx_io.channel_cfg.enable_sensing_output) {
+        return;
+    }
     if (now < _compute.next_hb_time) {
         return;
     }
@@ -1103,11 +1130,6 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
 
 void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
     using ProfileClock = std::chrono::steady_clock;
-    auto now = std::chrono::steady_clock::now();
-    if (now < _compute.next_send_time) {
-        return;
-    }
-
     auto& channel_buf = _compute.sensing_core.channel_buffer();
     const auto& sensing_params = _compute.sensing_core.params();
     const size_t range_stride = sensing_params.range_fft_size;
@@ -1157,11 +1179,6 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
 
 void SensingChannel::_sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
     using ProfileClock = std::chrono::steady_clock;
-    auto now = std::chrono::steady_clock::now();
-    if (now < _compute.next_send_time) {
-        return;
-    }
-
     const auto prep_start = ProfileClock::now();
     _compute.sensing_core.copy_symbols_to_buffer(frame.rx_symbols);
     const double prep_us = std::chrono::duration<double, std::micro>(
@@ -1244,8 +1261,6 @@ void SensingChannel::_sensing_process_finalize(
             _compute.prof_batch_count = 0;
         }
     }
-
-    _compute.next_send_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
 }
 
 void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
@@ -1253,11 +1268,11 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
     bool should_apply = false;
     {
         std::lock_guard<std::mutex> lock(_shared_cfg_mutex);
-        if (_has_pending_shared_cfg &&
-            _pending_shared_cfg.generation > _compute.applied_generation &&
-            symbol_index >= _pending_shared_cfg.apply_symbol_index) {
+        if (_has_pending_shared_cfg && _pending_shared_cfg.generation > _compute.applied_generation) {
             snapshot = _pending_shared_cfg;
-            should_apply = true;
+            if (symbol_index >= _pending_shared_cfg.apply_symbol_index) {
+                should_apply = true;
+            }
         }
     }
     if (!should_apply) {

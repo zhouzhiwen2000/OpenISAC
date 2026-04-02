@@ -6,3 +6,7 @@ _*
 /.claude
 
 measurement/
+.vscode/
+.DS_Store
+*.pyc
+__pycache__/

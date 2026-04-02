@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <utility>
+#include <filesystem>
 #include <Common.hpp>
 #include "LDPCCodec.hpp"
 #include "OFDMCore.hpp"
@@ -26,6 +27,60 @@ namespace {
 inline int64_t host_now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+}
+
+std::string csv_escape(const std::string& value) {
+    if (value.find_first_of(",\"\n") == std::string::npos) {
+        return value;
+    }
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (char ch : value) {
+        if (ch == '"') {
+            escaped.push_back('"');
+        }
+        escaped.push_back(ch);
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+bool append_csv_row(
+    const std::string& path,
+    const std::vector<std::string>& header,
+    const std::vector<std::string>& row)
+{
+    if (path.empty() || header.size() != row.size()) {
+        return false;
+    }
+    try {
+        const std::filesystem::path csv_path(path);
+        if (csv_path.has_parent_path()) {
+            std::filesystem::create_directories(csv_path.parent_path());
+        }
+        const bool write_header = !std::filesystem::exists(csv_path);
+        std::ofstream out(path, std::ios::app);
+        if (!out) {
+            return false;
+        }
+        auto write_line = [&out](const std::vector<std::string>& cols) {
+            for (size_t i = 0; i < cols.size(); ++i) {
+                if (i > 0) {
+                    out << ',';
+                }
+                out << csv_escape(cols[i]);
+            }
+            out << '\n';
+        };
+        if (write_header) {
+            write_line(header);
+        }
+        write_line(row);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 } // namespace
 
@@ -44,6 +99,8 @@ class OFDMRxEngine {
 public:
     explicit OFDMRxEngine(const Config& cfg) 
         : cfg_(cfg),
+          _measurement_enabled(measurement_mode_enabled(cfg)),
+          _data_resource_layout(build_data_resource_grid_layout(cfg)),
           zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
           _sync_scratch_buffer(cfg.sync_samples()),
           frame_queue_(cfg.frame_queue_size),
@@ -74,9 +131,8 @@ public:
               return frame;
           }),
           _llr_pool(32, [&cfg]() {
-              const size_t data_subcarriers = cfg.fft_size - cfg.pilot_positions.size();
-              const size_t llr_size = (cfg.num_symbols - 1) * data_subcarriers * 2;
-              return AlignedFloatVector(llr_size);
+              const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg);
+              return AlignedFloatVector(layout.payload_re_count * 2);
           }),
           _sensing_frame_pool(32, [&cfg]() {
               SensingFrame frame;
@@ -95,6 +151,15 @@ public:
           _sync_search_gain_sweep(cfg),
           _reset_hold_frames(reset_hold_frames_from_cfg(cfg)),
           _akf(make_akf_params(cfg), frame_duration_from_cfg(cfg)) {
+        _measurement_active_epoch_id.store(0, std::memory_order_relaxed);
+        if (_measurement_enabled && !cfg_.measurement_output_dir.empty()) {
+            _measurement_summary_path = cfg_.measurement_output_dir + "/demodulator_measurement_summary.csv";
+        }
+        _build_compact_payload_indices();
+        LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
+                     << " payload RE out of " << _data_resource_layout.non_pilot_re_count
+                     << " non-sync/non-pilot RE per frame"
+                     << (cfg_.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
 
         init_usrp();
         init_filter();
@@ -117,6 +182,7 @@ public:
         init_sensing();
         // Initialize data processing
         init_data_processing();
+        _register_commands();
     }
 
     ~OFDMRxEngine() {
@@ -157,6 +223,9 @@ public:
         // Stop data processing thread
         _bit_processing_running.store(false);
         if (_bit_processing_thread.joinable()) _bit_processing_thread.join();
+        if (_measurement_enabled) {
+            _switch_measurement_epoch(0);
+        }
         
         // Stop all senders
         channel_sender_.stop();
@@ -189,6 +258,9 @@ private:
     enum class RxState { SYNC_SEARCH, ALIGNMENT, NORMAL };
 
     Config cfg_;
+    const bool _measurement_enabled;
+    const DataResourceGridLayout _data_resource_layout;
+    std::vector<int> _payload_subcarrier_indices_flat;
     uhd::usrp::multi_usrp::sptr usrp_;
     uhd::rx_streamer::sptr rx_stream_;
     
@@ -291,6 +363,8 @@ private:
     double _llr_scale{2.0};              // LLR scaling factor (updated based on noise variance)
     double _snr_linear{1.0};             // Es/N0 Linear value
     double _snr_db{0.0};                 // Es/N0 dB
+    double _llr_snr_linear_filtered{1.0};
+    bool _llr_snr_filter_initialized{false};
     
     // Object pools for memory reuse (eliminates per-frame memory allocations)
     ObjectPool<RxFrame> _rx_frame_pool;           // Pool for RX frame buffers
@@ -306,6 +380,16 @@ private:
     AdaptiveCFOAKF _akf;
     size_t _ocxo_update_counter = 0;
     DemodControlTimeGates _control_time_gates;
+    std::string _measurement_summary_path;
+    std::atomic<uint32_t> _measurement_active_epoch_id{0};
+    std::atomic<uint64_t> _measurement_successful_packets{0};
+    std::atomic<uint64_t> _measurement_compared_bits{0};
+    std::atomic<uint64_t> _measurement_bit_errors{0};
+    std::atomic<uint64_t> _measurement_frame_count{0};
+    std::atomic<int64_t> _measurement_snr_db_sum_milli{0};
+    std::atomic<int64_t> _measurement_evm_rms_sum_micro{0};
+    std::atomic<int64_t> _measurement_evm_db_sum_milli{0};
+    std::atomic<int32_t> _measurement_epoch_tx_gain_x10{std::numeric_limits<int32_t>::min()};
 
     LatencySnapshot _take_latency_snapshot_and_reset() {
         LatencySnapshot snapshot;
@@ -315,6 +399,195 @@ private:
         snapshot.bit_total_ns = _latency_accumulator.bit_total_ns.exchange(0, std::memory_order_acq_rel);
         snapshot.e2e_total_ns = _latency_accumulator.e2e_total_ns.exchange(0, std::memory_order_acq_rel);
         return snapshot;
+    }
+
+    void _record_measurement_frame(double evm_rms) {
+        if (!_measurement_enabled) {
+            return;
+        }
+        const uint32_t epoch_id = _measurement_active_epoch_id.load(std::memory_order_relaxed);
+        if (epoch_id == 0 || !std::isfinite(evm_rms) || evm_rms < 0.0) {
+            return;
+        }
+        const double snr_db = _snr_db;
+        const double evm_db = 20.0 * std::log10(std::max(evm_rms, 1e-12));
+        _measurement_frame_count.fetch_add(1, std::memory_order_relaxed);
+        _measurement_snr_db_sum_milli.fetch_add(
+            static_cast<int64_t>(std::llround(snr_db * 1000.0)), std::memory_order_relaxed);
+        _measurement_evm_rms_sum_micro.fetch_add(
+            static_cast<int64_t>(std::llround(evm_rms * 1.0e6)), std::memory_order_relaxed);
+        _measurement_evm_db_sum_milli.fetch_add(
+            static_cast<int64_t>(std::llround(evm_db * 1000.0)), std::memory_order_relaxed);
+    }
+
+    double _update_llr_snr_filter(double raw_snr_linear) {
+        constexpr double kLlrSnrEwmaAlpha = 0.2;
+        const double clamped_raw = std::max(raw_snr_linear, 1e-6);
+        if (!_llr_snr_filter_initialized) {
+            _llr_snr_linear_filtered = clamped_raw;
+            _llr_snr_filter_initialized = true;
+        } else {
+            _llr_snr_linear_filtered =
+                (1.0 - kLlrSnrEwmaAlpha) * _llr_snr_linear_filtered +
+                kLlrSnrEwmaAlpha * clamped_raw;
+        }
+        return _llr_snr_linear_filtered;
+    }
+
+    void _build_compact_payload_indices() {
+        _payload_subcarrier_indices_flat.clear();
+        _payload_subcarrier_indices_flat.reserve(_data_resource_layout.payload_re_count);
+
+        for (size_t sym_idx = 0; sym_idx < _data_resource_layout.data_symbol_count; ++sym_idx) {
+            const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[sym_idx];
+            for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
+                if (_data_resource_layout.payload_rank[non_pilot_base + di] < 0) {
+                    continue;
+                }
+                const int k = _data_resource_layout.non_pilot_subcarrier_indices[di];
+                _payload_subcarrier_indices_flat.push_back(k);
+            }
+            if (_payload_subcarrier_indices_flat.size() != _data_resource_layout.payload_offsets[sym_idx + 1]) {
+                throw std::runtime_error("Failed to compact payload subcarrier indices for CPU RX.");
+            }
+        }
+    }
+
+    double _compute_frame_evm_rms(const std::vector<AlignedVector>& symbols) const
+    {
+        if (symbols.empty() || _payload_subcarrier_indices_flat.empty()) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        const size_t evm_symbol_count = std::min<size_t>(3, symbols.size());
+        double err_power_acc = 0.0;
+        uint64_t err_count = 0;
+        for (size_t sym_idx = 0; sym_idx < evm_symbol_count; ++sym_idx) {
+            const auto& symbol = symbols[sym_idx];
+            const auto* __restrict__ sym_ptr = symbol.data();
+            const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
+            const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+            #pragma omp simd reduction(+:err_power_acc, err_count)
+            for (size_t idx = payload_begin; idx < payload_end; ++idx) {
+                const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                const float ref_re = std::copysign(QPSKModulator::SQRT_2_INV, sym_ptr[k].real());
+                const float ref_im = std::copysign(QPSKModulator::SQRT_2_INV, sym_ptr[k].imag());
+                const float err_re = sym_ptr[k].real() - ref_re;
+                const float err_im = sym_ptr[k].imag() - ref_im;
+                err_power_acc += static_cast<double>(err_re * err_re + err_im * err_im);
+                err_count += 1;
+            }
+            for (size_t i = 0; i < cfg_.pilot_positions.size(); ++i) {
+                const size_t k = cfg_.pilot_positions[i];
+                if (k >= symbol.size()) {
+                    continue;
+                }
+                const float err_re = sym_ptr[k].real() - zc_freq_[k].real();
+                const float err_im = sym_ptr[k].imag() - zc_freq_[k].imag();
+                err_power_acc += static_cast<double>(err_re * err_re + err_im * err_im);
+                err_count += 1;
+            }
+        }
+        if (err_count == 0) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return std::sqrt(err_power_acc / static_cast<double>(err_count));
+    }
+
+    void _finalize_measurement_epoch(uint32_t epoch_id) {
+        if (!_measurement_enabled || epoch_id == 0) {
+            return;
+        }
+        const uint64_t successful_packets =
+            _measurement_successful_packets.exchange(0, std::memory_order_acq_rel);
+        const uint64_t compared_bits =
+            _measurement_compared_bits.exchange(0, std::memory_order_acq_rel);
+        const uint64_t bit_errors =
+            _measurement_bit_errors.exchange(0, std::memory_order_acq_rel);
+        const uint64_t frame_count =
+            _measurement_frame_count.exchange(0, std::memory_order_acq_rel);
+        const int64_t snr_db_sum_milli =
+            _measurement_snr_db_sum_milli.exchange(0, std::memory_order_acq_rel);
+        const int64_t evm_rms_sum_micro =
+            _measurement_evm_rms_sum_micro.exchange(0, std::memory_order_acq_rel);
+        const int64_t evm_db_sum_milli =
+            _measurement_evm_db_sum_milli.exchange(0, std::memory_order_acq_rel);
+        const int32_t tx_gain_x10 =
+            _measurement_epoch_tx_gain_x10.exchange(std::numeric_limits<int32_t>::min(),
+                                                    std::memory_order_acq_rel);
+
+        const uint64_t packets_expected = cfg_.measurement_packets_per_point;
+        const uint64_t packets_failed =
+            (successful_packets >= packets_expected) ? 0 : (packets_expected - successful_packets);
+        const double ber_decoded = (compared_bits > 0)
+            ? static_cast<double>(bit_errors) / static_cast<double>(compared_bits)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double bler = (packets_expected > 0)
+            ? static_cast<double>(packets_failed) / static_cast<double>(packets_expected)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double snr_mean = (frame_count > 0)
+            ? (static_cast<double>(snr_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double evm_rms_mean = (frame_count > 0)
+            ? (static_cast<double>(evm_rms_sum_micro) / 1.0e6 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double evm_db_mean = (frame_count > 0)
+            ? (static_cast<double>(evm_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double tx_gain_db = (tx_gain_x10 == std::numeric_limits<int32_t>::min())
+            ? std::numeric_limits<double>::quiet_NaN()
+            : static_cast<double>(tx_gain_x10) / 10.0;
+
+        if (_measurement_summary_path.empty()) {
+            return;
+        }
+        const std::vector<std::string> header{
+            "run_id",
+            "epoch_id",
+            "tx_gain_db",
+            "packets_expected",
+            "packets_successful",
+            "packets_failed",
+            "compared_bits",
+            "bit_errors",
+            "ber_decoded",
+            "bler",
+            "frame_count",
+            "estimated_snr_db_mean",
+            "evm_rms_mean",
+            "evm_db_mean",
+        };
+        const std::vector<std::string> row{
+            cfg_.measurement_run_id,
+            std::to_string(epoch_id),
+            std::to_string(tx_gain_db),
+            std::to_string(packets_expected),
+            std::to_string(successful_packets),
+            std::to_string(packets_failed),
+            std::to_string(compared_bits),
+            std::to_string(bit_errors),
+            std::to_string(ber_decoded),
+            std::to_string(bler),
+            std::to_string(frame_count),
+            std::to_string(snr_mean),
+            std::to_string(evm_rms_mean),
+            std::to_string(evm_db_mean),
+        };
+        if (!append_csv_row(_measurement_summary_path, header, row)) {
+            LOG_G_WARN() << "Failed to append demodulator measurement row to "
+                         << _measurement_summary_path;
+        }
+    }
+
+    void _switch_measurement_epoch(uint32_t next_epoch_id) {
+        if (!_measurement_enabled) {
+            return;
+        }
+        const uint32_t previous_epoch =
+            _measurement_active_epoch_id.exchange(0, std::memory_order_acq_rel);
+        _finalize_measurement_epoch(previous_epoch);
+        if (next_epoch_id > 0) {
+            _measurement_active_epoch_id.store(next_epoch_id, std::memory_order_release);
+        }
     }
     
     void init_filter() {
@@ -418,6 +691,19 @@ private:
             });
             LOG_G_INFO() << "MTI " << (enable ? "Enabled" : "Disabled");
         });
+
+        _control_handler.register_command("MRST", [this](int32_t value) {
+            if (!_measurement_enabled) {
+                LOG_G_WARN() << "MRST ignored: measurement mode disabled";
+                return;
+            }
+            if (value <= 0) {
+                LOG_G_WARN() << "MRST ignored: invalid epoch id " << value;
+                return;
+            }
+            _switch_measurement_epoch(static_cast<uint32_t>(value));
+            LOG_G_INFO() << "Measurement epoch reset to " << value;
+        });
     }
 
     void init_sensing() {
@@ -463,7 +749,6 @@ private:
 
         sensing_running_.store(true);
         sensing_thread_ = std::thread(&OFDMRxEngine::sensing_process_proc, this);
-        _register_commands();
     }
 
     void init_data_processing() {
@@ -534,6 +819,8 @@ private:
         _sync_in_progress = false;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
+        _llr_snr_linear_filtered = 1.0;
+        _llr_snr_filter_initialized = false;
         const bool log_agc = cfg_.should_profile("agc");
         double search_gain_db = 0.0;
         const bool reset_search_gain = _sync_search_gain_sweep.reset_to_default(
@@ -1005,7 +1292,13 @@ private:
         // Calculate initial channel response H_est using ChannelEstimator
         prof_step_start = ProfileClock::now();
         AlignedVector H_est;
-        _channel_estimator.estimate_from_sync_lmmse(sync_symbol_freq, zc_freq_, H_est, cfg_.cp_length);
+        float corrected_impulse_snr_linear_est = 1.0f;
+        _channel_estimator.estimate_from_sync_lmmse(
+            sync_symbol_freq,
+            zc_freq_,
+            H_est,
+            cfg_.cp_length,
+            &corrected_impulse_snr_linear_est);
         //_channel_estimator.estimate_from_sync_ls(sync_symbol_freq, zc_freq_, H_est);
 
         prof_step_end = ProfileClock::now();
@@ -1120,35 +1413,13 @@ private:
         prof_step_end = ProfileClock::now();
         prof_equalization_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-        // ================= Noise Variance Estimation (Based on equalized pilot error) =================
+        // ================= SNR / LLR Scale Estimation (Corrected impulse-response SNR) =================
         prof_step_start = ProfileClock::now();
-        // Theoretical constellation points of pilots after equalization: corresponding positions in zc_freq_ (amplitude ~1). Error = y_eq_pilot - x_pilot
-        // Estimate complex noise power E[|n|^2] = mean(|e|^2). Under BPSK/QPSK, LLR = 2*Re{y*x*}/sigma2 (Gray mapping splits per bit)
-        if (!cfg_.pilot_positions.empty()) {
-            double err_power_acc = 0.0;
-            size_t err_count = 0;
-            for (const auto &sym : symbols) {
-                for (auto p : cfg_.pilot_positions) {
-                    if (p < sym.size()) {
-                        std::complex<float> y_eq = sym[p];
-                        std::complex<float> x_ref = zc_freq_[p];
-                        auto e = y_eq - x_ref; // Error
-                        err_power_acc += std::norm(e);
-                        err_count++;
-                    }
-                }
-            }
-            if (err_count > 8) { // Sufficient samples
-                _noise_var = err_power_acc / err_count; // Complex noise power
-                if (_noise_var < 1e-6) _noise_var = 1e-6;
-                // QPSK energy per symbol ~1 (normalized), Es/N0 = 1 / noise_var
-                _snr_linear = 1.0 / _noise_var;
-                _snr_db = 10.0 * std::log10(_snr_linear);
-                // LLR scaling: For QPSK Gray, bit LLR ≈ 2 * component / (sigma^2), where sigma^2 = noise variance per dimension = noise_var/2
-                double sigma2_dim = _noise_var / 2.0;
-                _llr_scale = 2.0 / sigma2_dim; // = 4 / noise_var
-            }
-        }
+        _snr_linear = std::max<double>(corrected_impulse_snr_linear_est, 1e-6);
+        _snr_db = 10.0 * std::log10(_snr_linear);
+        const double llr_snr_linear = _update_llr_snr_filter(_snr_linear);
+        _noise_var = std::max(noise_variance_from_snr_linear(llr_snr_linear), 1e-6);
+        _llr_scale = 4.0 / _noise_var;
         prof_step_end = ProfileClock::now();
         prof_noise_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         // =====================================================================
@@ -1342,40 +1613,44 @@ private:
         prof_step_end = ProfileClock::now();
         prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
-        // Extract data symbols to generate LLR using QPSK_LLR
+        // Extract selected payload RE to generate compact LLR.
         prof_step_start = ProfileClock::now();
-        const size_t data_subcarriers_per_symbol = cfg_.fft_size - cfg_.pilot_positions.size();
-        // Acquire pre-allocated LLR buffer from pool
-        AlignedFloatVector frame_llr = _llr_pool.acquire();
         float scale_llr = std::min(static_cast<float>(_llr_scale * M_SQRT1_2), 500.0f);
-        
-        // Build data subcarrier index list (once, cached)
-        static std::vector<size_t> data_indices;
-        if (data_indices.empty() || data_indices.size() != data_subcarriers_per_symbol) {
-            data_indices.clear();
-            data_indices.reserve(data_subcarriers_per_symbol);
-            for (size_t k = 0; k < cfg_.fft_size; ++k) {
-                if (!pilot_mask[k]) {
-                    data_indices.push_back(k);
+
+        if (_measurement_enabled &&
+            _measurement_active_epoch_id.load(std::memory_order_relaxed) != 0) {
+            const double evm_rms = _compute_frame_evm_rms(symbols);
+            _record_measurement_frame(evm_rms);
+        }
+
+        if (_data_resource_layout.payload_re_count > 0) {
+            AlignedFloatVector frame_llr = _llr_pool.acquire();
+            float* __restrict__ llr_ptr = frame_llr.data();
+            for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
+                const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
+                const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
+                const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+                size_t llr_offset = payload_begin * 2;
+                for (size_t idx = payload_begin; idx < payload_end; ++idx) {
+                    const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                    llr_ptr[llr_offset++] = sym_ptr[k].real() * scale_llr;
+                    llr_ptr[llr_offset++] = sym_ptr[k].imag() * scale_llr;
                 }
             }
-        }
-        
-        // Compute LLR using QPSK_LLR
-        QPSK_LLR::compute_llr_to_buffer(symbols, data_indices, scale_llr, frame_llr.data());
-        
-        // Put LLR data into circular buffer
-        const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
-        if (!spsc_wait_push(_data_llr_buffer, LlrFrame{
-                std::move(frame_llr),
-                frame.generation,
-                frame.host_enqueue_time_ns,
-                frame_dequeue_time_ns,
-                demod_done_time_ns,
-            }, [this]() {
-                return !_bit_processing_running.load(std::memory_order_acquire);
-            })) {
-            _llr_pool.release(std::move(frame_llr));
+
+            // Put LLR data into circular buffer
+            const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
+            if (!spsc_wait_push(_data_llr_buffer, LlrFrame{
+                    std::move(frame_llr),
+                    frame.generation,
+                    frame.host_enqueue_time_ns,
+                    frame_dequeue_time_ns,
+                    demod_done_time_ns,
+                }, [this]() {
+                    return !_bit_processing_running.load(std::memory_order_acquire);
+                })) {
+                _llr_pool.release(std::move(frame_llr));
+            }
         }
         prof_step_end = ProfileClock::now();
         prof_llr_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1475,6 +1750,9 @@ private:
         SPSCBackoff llr_backoff;
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+        const bool log_snr = cfg_.should_profile("snr");
+        std::vector<uint8_t> expected_measurement_payload;
+        size_t snr_print_counter = 0;
         
         while (_bit_processing_running.load()) {
             LlrFrame frame_llr;
@@ -1491,11 +1769,13 @@ private:
                 continue;
             }
 
-            // Debug: Periodically print current SNR
-            // static size_t snr_print_counter = 0;
-            // if ((snr_print_counter++ & 0x3F) == 0) { // Every 64 frames
-            //     LOG_G_INFO() << "[LLR] SNR(dB): " << _snr_db << " noise_var: " << _noise_var << " llr_scale: " << _llr_scale << std::endl;
-            // }
+            if (log_snr && ((snr_print_counter++ & 0x3F) == 0)) {
+                const double llr_snr_db = 10.0 * std::log10(std::max(1.0 / _noise_var, 1e-6));
+                LOG_G_INFO() << "[LLR] SNR(dB): " << _snr_db
+                             << " llr_snr(dB): " << llr_snr_db
+                             << " noise_var: " << _noise_var
+                             << " llr_scale: " << _llr_scale;
+            }
             
             // Process frame data, block by block according to decoder N (bits)
             size_t bits_per_block = _ldpc_decoder.get_N();
@@ -1586,29 +1866,64 @@ private:
                             
                             // 11. Send decoded UDP data directly (padding removed)
                             std::vector<uint8_t> udp_data(decoded_payload.begin(), decoded_payload.begin() + payload_len);
-                            
-                            // 12. Send UDP data
-                            _udp_output_sender->send(udp_data.data(), udp_data.size());
-                            if (!latency_recorded &&
-                                do_latency_profile &&
-                                frame_llr.rx_enqueue_time_ns > 0 &&
-                                frame_llr.process_dequeue_time_ns > 0 &&
-                                frame_llr.demod_done_time_ns > 0) {
-                                const int64_t udp_done_time_ns = host_now_ns();
-                                _latency_accumulator.rx_queue_total_ns.fetch_add(
-                                    frame_llr.process_dequeue_time_ns - frame_llr.rx_enqueue_time_ns,
-                                    std::memory_order_relaxed);
-                                _latency_accumulator.demod_total_ns.fetch_add(
-                                    frame_llr.demod_done_time_ns - frame_llr.process_dequeue_time_ns,
-                                    std::memory_order_relaxed);
-                                _latency_accumulator.bit_total_ns.fetch_add(
-                                    udp_done_time_ns - frame_llr.demod_done_time_ns,
-                                    std::memory_order_relaxed);
-                                _latency_accumulator.e2e_total_ns.fetch_add(
-                                    udp_done_time_ns - frame_llr.process_dequeue_time_ns,
-                                    std::memory_order_relaxed);
-                                _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
-                                latency_recorded = true;
+
+                            bool handled_measurement_payload = false;
+                            if (_measurement_enabled) {
+                                MeasurementPayloadMetadata meta;
+                                if (parse_measurement_payload(udp_data.data(), udp_data.size(), meta)) {
+                                    handled_measurement_payload = true;
+                                    if (meta.epoch_id != 0) {
+                                        const uint32_t active_epoch =
+                                            _measurement_active_epoch_id.load(std::memory_order_relaxed);
+                                        if (active_epoch != 0 && meta.epoch_id == active_epoch) {
+                                            if (build_measurement_payload(expected_measurement_payload, meta)) {
+                                                const auto compare = compare_measurement_payload(
+                                                    expected_measurement_payload,
+                                                    udp_data.data(),
+                                                    udp_data.size());
+                                                _measurement_compared_bits.fetch_add(
+                                                    compare.compared_bits, std::memory_order_relaxed);
+                                                _measurement_bit_errors.fetch_add(
+                                                    compare.bit_errors, std::memory_order_relaxed);
+                                                if (compare.exact_match) {
+                                                    _measurement_successful_packets.fetch_add(
+                                                        1, std::memory_order_relaxed);
+                                                }
+                                                _measurement_epoch_tx_gain_x10.store(
+                                                    meta.tx_gain_x10, std::memory_order_relaxed);
+                                            } else {
+                                                LOG_G_WARN() << "[Demod] Failed to rebuild expected measurement payload"
+                                                             << " for epoch " << meta.epoch_id
+                                                             << " seq " << meta.seq_in_epoch;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (!handled_measurement_payload) {
+                                _udp_output_sender->send(udp_data.data(), udp_data.size());
+                                if (!latency_recorded &&
+                                    do_latency_profile &&
+                                    frame_llr.rx_enqueue_time_ns > 0 &&
+                                    frame_llr.process_dequeue_time_ns > 0 &&
+                                    frame_llr.demod_done_time_ns > 0) {
+                                    const int64_t udp_done_time_ns = host_now_ns();
+                                    _latency_accumulator.rx_queue_total_ns.fetch_add(
+                                        frame_llr.process_dequeue_time_ns - frame_llr.rx_enqueue_time_ns,
+                                        std::memory_order_relaxed);
+                                    _latency_accumulator.demod_total_ns.fetch_add(
+                                        frame_llr.demod_done_time_ns - frame_llr.process_dequeue_time_ns,
+                                        std::memory_order_relaxed);
+                                    _latency_accumulator.bit_total_ns.fetch_add(
+                                        udp_done_time_ns - frame_llr.demod_done_time_ns,
+                                        std::memory_order_relaxed);
+                                    _latency_accumulator.e2e_total_ns.fetch_add(
+                                        udp_done_time_ns - frame_llr.process_dequeue_time_ns,
+                                        std::memory_order_relaxed);
+                                    _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
+                                    latency_recorded = true;
+                                }
                             }
                             // LOG_G_INFO() << "[Demod] Successfully reconstructed and sent UDP packet, size: " << udp_data.size() << " bytes" << std::endl;
 

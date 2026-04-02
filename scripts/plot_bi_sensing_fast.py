@@ -2,6 +2,8 @@
 import numpy as np
 import sys
 import os
+import platform
+import subprocess
 import time
 import threading
 from queue import Queue
@@ -17,25 +19,93 @@ import pyqtgraph as pg
 
 # ====== Backend Detection ======
 USE_NVIDIA_GPU = False
+USE_APPLE_GPU = False
 USE_INTEL_GPU = False
 cp = None
 xp = np
+mx = None
+BACKEND_NAME = "CPU"
+FORCED_BACKEND = os.environ.get("OPENISAC_BACKEND", "auto").strip().lower()
 
-try:
-    import cupy as _cp
+if FORCED_BACKEND not in {"auto", "cpu", "cuda", "apple", "mlx", "intel"}:
+    print(f"Backend: Unknown OPENISAC_BACKEND={FORCED_BACKEND!r}; falling back to auto")
+    FORCED_BACKEND = "auto"
+
+
+def _backend_allowed(name):
+    if name == "mlx":
+        return FORCED_BACKEND in ("auto", "apple", "mlx")
+    return FORCED_BACKEND in ("auto", name)
+
+
+def _probe_mlx_backend(timeout_s=5.0):
+    if sys.platform != "darwin" or platform.machine().lower() != "arm64":
+        return False, "MLX backend requires Apple Silicon macOS"
+
+    probe_code = (
+        "import mlx.core as mx\n"
+        "x = mx.array([1.0], dtype=mx.float32)\n"
+        "y = mx.fft.fftshift(mx.array([[1+0j, 2+0j]], dtype=mx.complex64), axes=(1,))\n"
+        "z = mx.fft.ifft(y, axis=1)\n"
+        "_ = float(mx.abs(z).sum().item())\n"
+        "print('mlx-ok')\n"
+    )
     try:
-        _gpu_count = _cp.cuda.runtime.getDeviceCount()
-        if _gpu_count > 0:
-            USE_NVIDIA_GPU = True
-            cp = _cp
-            xp = _cp
-            print(f"Backend: Using NVIDIA GPU via CuPy (devices: {_gpu_count})")
-    except Exception as _e:
-        print(f"Backend: CuPy available but CUDA init failed: {_e}")
-except ImportError:
-    pass
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_s,
+            env=dict(os.environ, PYTHONNOUSERSITE="1"),
+        )
+    except Exception as exc:
+        return False, f"MLX probe failed: {exc}"
 
-if not USE_NVIDIA_GPU:
+    if result.returncode == 0 and "mlx-ok" in result.stdout:
+        return True, "Apple GPU via MLX"
+
+    stderr = (result.stderr or "").strip().splitlines()
+    if stderr:
+        detail = stderr[-1]
+    else:
+        detail = f"probe exited with code {result.returncode}"
+    return False, f"MLX probe failed: {detail}"
+
+if _backend_allowed("cuda"):
+    try:
+        import cupy as _cp
+        try:
+            _gpu_count = _cp.cuda.runtime.getDeviceCount()
+            if _gpu_count > 0:
+                USE_NVIDIA_GPU = True
+                cp = _cp
+                xp = _cp
+                BACKEND_NAME = f"NVIDIA GPU via CuPy (devices: {_gpu_count})"
+                print(f"Backend: Using {BACKEND_NAME}")
+        except Exception as _e:
+            print(f"Backend: CuPy available but CUDA init failed: {_e}")
+    except ImportError:
+        if FORCED_BACKEND == "cuda":
+            print("Backend: Forced CUDA backend requested but CuPy is not installed")
+
+if not USE_NVIDIA_GPU and _backend_allowed("mlx"):
+    _mlx_ok, _mlx_msg = _probe_mlx_backend()
+    if _mlx_ok:
+        import mlx.core as _mx
+
+        if not hasattr(_mx, "fft") or not hasattr(_mx.fft, "fftshift"):
+            _mlx_msg = "MLX import succeeded but required FFT APIs are missing"
+        else:
+            USE_APPLE_GPU = True
+            mx = _mx
+            BACKEND_NAME = _mlx_msg
+            print(f"Backend: Using {BACKEND_NAME}")
+
+    if not USE_APPLE_GPU and FORCED_BACKEND in {"apple", "mlx"}:
+        print(f"Backend: Forced MLX backend unavailable: {_mlx_msg}")
+
+if not USE_NVIDIA_GPU and not USE_APPLE_GPU and _backend_allowed("intel"):
     def _try_intel_gpu():
         global USE_INTEL_GPU, cp, xp
         try:
@@ -43,30 +113,31 @@ if not USE_NVIDIA_GPU:
             import dpctl
             try:
                 _intel_devices = [d for d in dpctl.get_devices() if d.is_gpu]
-            except:
+            except Exception:
                 _intel_devices = []
             if _intel_devices:
                 return _dpnp, _intel_devices[0].name
             return None, None
-        except:
+        except Exception:
             return None, None
-    
-    import threading
+
     _intel_result = [None, None]
+
     def _intel_init_thread():
         _intel_result[0], _intel_result[1] = _try_intel_gpu()
-    
+
     _init_thread = threading.Thread(target=_intel_init_thread, daemon=True)
     _init_thread.start()
     _init_thread.join(timeout=5.0)
-    
+
     if not _init_thread.is_alive() and _intel_result[0] is not None:
         USE_INTEL_GPU = True
         cp = _intel_result[0]
         xp = _intel_result[0]
-        print(f"Backend: Using Intel GPU via dpnp ({_intel_result[1]})")
+        BACKEND_NAME = f"Intel GPU via dpnp ({_intel_result[1]})"
+        print(f"Backend: Using {BACKEND_NAME}")
 
-USE_GPU = USE_NVIDIA_GPU or USE_INTEL_GPU
+USE_GPU = USE_NVIDIA_GPU or USE_APPLE_GPU or USE_INTEL_GPU
 if not USE_GPU:
     print("Backend: No GPU acceleration available; using CPU")
 
@@ -248,9 +319,12 @@ receiver_thread = threading.Thread(target=udp_receiver, daemon=True)
 receiver_thread.start()
 
 # FFT Processing
-if USE_GPU:
+if USE_NVIDIA_GPU or USE_INTEL_GPU:
     range_window = cp.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE), dtype=cp.float32)
     doppler_window = cp.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1), dtype=cp.float32)
+elif USE_APPLE_GPU:
+    range_window = mx.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32))
+    doppler_window = mx.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32))
 else:
     range_window = np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32)
     doppler_window = np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32)
@@ -295,10 +369,17 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
     if max_view_range_bins is None:
         max_view_range_bins = MAX_RANGE_BIN
 
-    range_win = range_window if enable_range_window else (cp.ones((1, FFT_SIZE), dtype=cp.float32) if USE_GPU else np.ones((1, FFT_SIZE), dtype=np.float32))
-    doppler_win = doppler_window if enable_doppler_window else (cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32) if USE_GPU else np.ones((NUM_SYMBOLS, 1), dtype=np.float32))
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
+        range_win = range_window if enable_range_window else cp.ones((1, FFT_SIZE), dtype=cp.float32)
+        doppler_win = doppler_window if enable_doppler_window else cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32)
+    elif USE_APPLE_GPU:
+        range_win = range_window if enable_range_window else mx.ones((1, FFT_SIZE), dtype=mx.float32)
+        doppler_win = doppler_window if enable_doppler_window else mx.ones((NUM_SYMBOLS, 1), dtype=mx.float32)
+    else:
+        range_win = range_window if enable_range_window else np.ones((1, FFT_SIZE), dtype=np.float32)
+        doppler_win = doppler_window if enable_doppler_window else np.ones((NUM_SYMBOLS, 1), dtype=np.float32)
 
-    if USE_GPU:
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
         frame_data_gpu = cp.array(frame_data)
         shifted_data = cp.fft.fftshift(frame_data_gpu, axes=1)
         windowed_data = shifted_data * range_win
@@ -319,6 +400,21 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
         with range_time_lock:
             range_time_data = range_time_cpu
         return to_numpy(magnitude_db)
+    elif USE_APPLE_GPU:
+        frame_data_gpu = mx.array(frame_data, dtype=mx.complex64)
+        shifted_data = mx.fft.fftshift(frame_data_gpu, axes=(1,))
+        windowed_data = shifted_data * range_win
+        range_time = mx.fft.ifft(windowed_data, n=RANGE_FFT_SIZE, axis=1) * RANGE_FFT_SIZE
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        doppler_windowed = range_time_view * doppler_win
+        doppler_fft = mx.fft.fft(doppler_windowed, n=DOPPLER_FFT_SIZE, axis=0)
+        doppler_shifted = mx.fft.fftshift(doppler_fft, axes=(0,))
+        magnitude = mx.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        magnitude_db = 20.0 * mx.log10(magnitude + 1e-12)
+        range_time_cpu = np.array(range_time_view, copy=False)
+        with range_time_lock:
+            range_time_data = range_time_cpu
+        return np.array(magnitude_db, copy=False).astype(np.float32, copy=False)
     elif HAVE_NUMBA:
         padded_data = cpu_prep_range_fft(frame_data, range_win, FFT_SIZE, RANGE_FFT_SIZE)
         range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
@@ -457,6 +553,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("OpenISAC Bi-Sensing - PyQtGraph")
         self.resize(1600, 900)
+        self._control_panel_width = 420
+        self._status_label_text_width = self._control_panel_width - 24
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -494,6 +592,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Control Panel
         control_panel = QtWidgets.QWidget()
+        control_panel.setFixedWidth(self._control_panel_width)
         control_layout = QtWidgets.QVBoxLayout(control_panel)
         control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         main_layout.addWidget(control_panel, stretch=1)
@@ -504,7 +603,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_sender = QtWidgets.QLabel("Sender: Detecting...")
         self.lbl_buffer = QtWidgets.QLabel("MD Buffer: 0/5000")
         for lbl in [self.lbl_fps, self.lbl_queue, self.lbl_sender, self.lbl_buffer]:
+            lbl.setWordWrap(False)
+            lbl.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            lbl.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
             control_layout.addWidget(lbl)
+
+        fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        for lbl in [self.lbl_fps, self.lbl_queue, self.lbl_sender, self.lbl_buffer]:
+            lbl.setFont(fixed_font)
+            lbl.setFixedWidth(self._status_label_text_width)
+            self._set_status_label_text(lbl, lbl.text())
         control_layout.addSpacing(20)
 
         # Range Bin
@@ -591,6 +699,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.frame_count = 0
         self.total_dsp_time = 0.0
 
+    def _set_status_label_text(self, label, text):
+        elided = label.fontMetrics().elidedText(
+            text,
+            QtCore.Qt.TextElideMode.ElideRight,
+            self._status_label_text_width
+        )
+        label.setText(elided)
+        label.setToolTip(text)
+
     def update_toggle_style(self, btn, state):
         btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
 
@@ -661,7 +778,9 @@ class MainWindow(QtWidgets.QMainWindow):
         global current_display_data, sender_ip
         with sender_lock:
             if sender_ip:
-                self.lbl_sender.setText(f"Sender: {sender_ip}")
+                self._set_status_label_text(self.lbl_sender, f"Sender: {sender_ip}")
+            else:
+                self._set_status_label_text(self.lbl_sender, "Sender: Detecting...")
 
         latest = None
         while not display_queue.empty():
@@ -678,15 +797,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if 'dsp_time' in latest:
                 self.total_dsp_time += latest['dsp_time']
             self.frame_count += 1
-            self.lbl_buffer.setText(f"MD Buffer: {len(micro_doppler_buffer)}/{BUFFER_LENGTH}")
+            self._set_status_label_text(self.lbl_buffer, f"MD Buffer: {len(micro_doppler_buffer)}/{BUFFER_LENGTH}")
 
         current_time = time.time()
         elapsed = current_time - self.last_update_time
         if elapsed > 0.5:
             fps = self.frame_count / elapsed
             avg_dsp = (self.total_dsp_time / self.frame_count * 1000) if self.frame_count > 0 else 0
-            self.lbl_fps.setText(f"FPS: {fps:.1f} | DSP: {avg_dsp:.1f}ms")
-            self.lbl_queue.setText(f"RawQ: {raw_frame_queue.qsize()} | DispQ: {display_queue.qsize()}")
+            self._set_status_label_text(self.lbl_fps, f"FPS: {fps:.1f} | DSP: {avg_dsp:.1f}ms")
+            self._set_status_label_text(self.lbl_queue, f"RawQ: {raw_frame_queue.qsize()} | DispQ: {display_queue.qsize()}")
             self.frame_count = 0
             self.total_dsp_time = 0
             self.last_update_time = current_time

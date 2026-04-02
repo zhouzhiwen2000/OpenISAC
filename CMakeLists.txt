@@ -1,6 +1,20 @@
 cmake_minimum_required(VERSION 3.18)
 project(OFDM_Modulator CXX)
 
+if(POLICY CMP0167)
+    cmake_policy(SET CMP0167 OLD)
+endif()
+
+if(APPLE)
+    # Help CMake discover common Homebrew/MacPorts prefixes on macOS.
+    list(PREPEND CMAKE_PREFIX_PATH
+        /opt/homebrew
+        /opt/homebrew/opt/libomp
+        /opt/local
+        /usr/local
+    )
+endif()
+
 # Optional CUDA support for GPU-accelerated builds
 include(CheckLanguage)
 check_language(CUDA)
@@ -27,12 +41,62 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find required libraries
 find_package(UHD REQUIRED)
-find_package(Boost 1.66 REQUIRED COMPONENTS system)
+
+set(Boost_NO_BOOST_CMAKE ON)
+find_package(Boost 1.66 REQUIRED)
+
 find_package(Threads REQUIRED)
-find_package(OpenMP REQUIRED)  # Require OpenMP support
-find_package(PkgConfig REQUIRED)
-set (AFF3CT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/")
-find_package(AFF3CT CONFIG 3.0.2 REQUIRED)
+find_package(OpenMP QUIET)
+if(NOT OpenMP_CXX_FOUND AND APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    find_path(OPENMP_INCLUDE_DIR
+        NAMES omp.h
+        HINTS
+            /opt/homebrew/opt/libomp/include
+            /opt/local/include
+            /opt/local/include/libomp
+            /usr/local/include
+    )
+    find_library(OPENMP_LIBRARY
+        NAMES omp libomp
+        HINTS
+            /opt/homebrew/opt/libomp/lib
+            /opt/local/lib
+            /usr/local/lib
+    )
+    if(OPENMP_INCLUDE_DIR AND OPENMP_LIBRARY)
+        add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
+        set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+            INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
+            INTERFACE_INCLUDE_DIRECTORIES "${OPENMP_INCLUDE_DIR}"
+            INTERFACE_LINK_LIBRARIES "${OPENMP_LIBRARY}"
+        )
+        set(OpenMP_CXX_FOUND TRUE)
+    endif()
+endif()
+if(NOT OpenMP_CXX_FOUND)
+    message(FATAL_ERROR "OpenMP support is required. Install libomp and re-run CMake.")
+endif()
+
+find_package(PkgConfig QUIET)
+
+set(AFF3CT_SEARCH_ROOTS
+    ${AFF3CT_ROOT}
+    $ENV{AFF3CT_ROOT}
+    $ENV{AFF3CT_DIR}
+    /opt/homebrew
+    /opt/local
+    /usr/local
+)
+find_package(AFF3CT CONFIG 3.0.2 QUIET
+    PATHS ${AFF3CT_SEARCH_ROOTS}
+    PATH_SUFFIXES lib/cmake/AFF3CT share/cmake/AFF3CT
+)
+if(NOT AFF3CT_FOUND)
+    message(FATAL_ERROR
+        "AFF3CT >= 3.0.2 not found. Install it and re-run CMake with "
+        "-DAFF3CT_ROOT=<install-prefix> or -DAFF3CT_DIR=<cmake-config-dir>."
+    )
+endif()
 # Get original header file paths
 get_target_property(AFF3CT_INCLUDES aff3ct::aff3ct-shared-lib INTERFACE_INCLUDE_DIRECTORIES)
 
@@ -48,10 +112,86 @@ endforeach()
 set_target_properties(aff3ct::aff3ct-shared-lib PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${AFF3CT_INCLUDES}"
 )
+
 # Find third-party libraries
-pkg_check_modules(LIBDPDK QUIET libdpdk)
-pkg_check_modules(FFTW3f REQUIRED fftw3f)
-pkg_check_modules(YAMLCPP REQUIRED yaml-cpp)   # YAML configuration support
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(LIBDPDK QUIET libdpdk)
+endif()
+
+find_package(FFTW3f CONFIG QUIET)
+if(NOT FFTW3f_FOUND AND PKG_CONFIG_FOUND)
+    pkg_check_modules(FFTW3f QUIET fftw3f)
+endif()
+if(FFTW3f_FOUND)
+    find_library(FFTW3f_LIBRARY
+        NAMES fftw3f
+        HINTS ${FFTW3f_LIBRARY_DIRS} /opt/homebrew/lib /opt/local/lib /usr/local/lib
+    )
+    if(FFTW3f_LIBRARY)
+        set(FFTW3f_LIBRARIES "${FFTW3f_LIBRARY}")
+    endif()
+endif()
+if(NOT FFTW3f_FOUND)
+    find_path(FFTW3f_INCLUDE_DIRS
+        NAMES fftw3.h
+        HINTS /opt/homebrew/include /opt/local/include /usr/local/include
+    )
+    find_library(FFTW3f_LIBRARY
+        NAMES fftw3f
+        HINTS /opt/homebrew/lib /opt/local/lib /usr/local/lib
+    )
+    if(FFTW3f_INCLUDE_DIRS AND FFTW3f_LIBRARY)
+        set(FFTW3f_LIBRARIES "${FFTW3f_LIBRARY}")
+        set(FFTW3f_FOUND TRUE)
+    endif()
+endif()
+find_library(FFTW3f_THREADS_LIBRARY
+    NAMES fftw3f_threads
+    HINTS /opt/homebrew/lib /opt/local/lib /usr/local/lib
+)
+if(NOT FFTW3f_FOUND OR NOT FFTW3f_THREADS_LIBRARY)
+    message(FATAL_ERROR "FFTW3f and fftw3f_threads are required.")
+endif()
+
+find_package(yaml-cpp CONFIG QUIET)
+if(yaml-cpp_FOUND)
+    if(TARGET yaml-cpp::yaml-cpp)
+        set(OPENISAC_YAMLCPP_TARGET yaml-cpp::yaml-cpp)
+    elseif(TARGET yaml-cpp)
+        set(OPENISAC_YAMLCPP_TARGET yaml-cpp)
+    endif()
+    if(DEFINED YAML_CPP_INCLUDE_DIR)
+        set(YAMLCPP_INCLUDE_DIRS "${YAML_CPP_INCLUDE_DIR}")
+    endif()
+endif()
+if(NOT yaml-cpp_FOUND AND PKG_CONFIG_FOUND)
+    pkg_check_modules(YAMLCPP QUIET yaml-cpp)
+endif()
+if(NOT yaml-cpp_FOUND AND NOT YAMLCPP_FOUND)
+    find_path(YAMLCPP_INCLUDE_DIRS
+        NAMES yaml-cpp/yaml.h
+        HINTS
+            /opt/homebrew/include
+            /opt/local/include
+            /usr/local/include
+            /opt/homebrew/Cellar/yaml-cpp/0.8.0/include
+    )
+    find_library(YAMLCPP_LIBRARY
+        NAMES yaml-cpp
+        HINTS
+            /opt/homebrew/lib
+            /opt/local/lib
+            /usr/local/lib
+            /opt/homebrew/Cellar/yaml-cpp/0.8.0/lib
+    )
+    if(YAMLCPP_INCLUDE_DIRS AND YAMLCPP_LIBRARY)
+        set(YAMLCPP_LIBRARIES "${YAMLCPP_LIBRARY}")
+        set(YAMLCPP_FOUND TRUE)
+    endif()
+endif()
+if(NOT OPENISAC_YAMLCPP_TARGET AND NOT YAMLCPP_FOUND)
+    message(FATAL_ERROR "yaml-cpp is required.")
+endif()
 # Check SIMD instruction set support (common optimization)
 include(CheckCXXCompilerFlag)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
@@ -119,6 +259,7 @@ target_include_directories(OFDMModulator PRIVATE
     ${UHD_INCLUDE_DIRS}
     ${LIBDPDK_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
+    ${YAMLCPP_INCLUDE_DIRS}
     ${OPENISAC_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${Boost_INCLUDE_DIRS}
@@ -130,9 +271,9 @@ target_link_libraries(OFDMModulator PRIVATE
     OpenMP::OpenMP_CXX
     ${LIBDPDK_LIBRARIES}
     ${FFTW3f_LIBRARIES}
-    fftw3f_threads
-    ${Boost_LIBRARIES}
+    ${FFTW3f_THREADS_LIBRARY}
     aff3ct::aff3ct-shared-lib
+    ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
 )
 
@@ -155,18 +296,19 @@ target_include_directories(OFDMDemodulator PRIVATE
     ${UHD_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
+    ${YAMLCPP_INCLUDE_DIRS}
     ${OPENISAC_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(OFDMDemodulator PRIVATE 
     ${UHD_LIBRARIES}
-    Boost::system
     ${FFTW3f_LIBRARIES}
+    ${FFTW3f_THREADS_LIBRARY}
     Threads::Threads
     OpenMP::OpenMP_CXX
-    ${Boost_LIBRARIES}
     aff3ct::aff3ct-shared-lib
+    ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
 )
 
@@ -178,6 +320,8 @@ target_compile_options(OFDMDemodulator PRIVATE
 #===========================================================
 # Installation Rules
 #===========================================================
-install(TARGETS OFDMModulator OFDMDemodulator
+set(INSTALL_TARGETS OFDMModulator OFDMDemodulator)
+
+install(TARGETS ${INSTALL_TARGETS}
     RUNTIME DESTINATION bin
 )

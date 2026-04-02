@@ -414,7 +414,8 @@ public:
         const AlignedVector& rx_symbol,
         const AlignedVector& tx_zc,
         AlignedVector& H_est,
-        size_t cp_length
+        size_t cp_length,
+        float* corrected_snr_linear_out = nullptr
     ) {
         H_est.resize(_fft_size);
 
@@ -449,6 +450,10 @@ public:
 
         float snr_est = estimate_snr_from_impulse_response(_scratch_buf2, cp_length);
         if (snr_est < 1e-4f) snr_est = 1e-4f;
+        if (corrected_snr_linear_out != nullptr) {
+            *corrected_snr_linear_out =
+                corrected_impulse_snr_linear(snr_est, _fft_size, cp_length);
+        }
 
         // Wiener coefficient: w = SNR / (SNR + 1)
         float w_pass = snr_est / (snr_est + 1.0f);
@@ -1753,6 +1758,7 @@ public:
                     count++;
                 }
             }
+
             avg_mag /= static_cast<float>(count);
         } else {
             // Original behavior: search entire range

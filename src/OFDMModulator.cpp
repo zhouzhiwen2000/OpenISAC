@@ -29,6 +29,7 @@
 #include <functional>
 #include <unordered_map>
 #include <memory>
+#include <filesystem>
 
 // Type aliases are now defined in Common.hpp
 
@@ -53,6 +54,61 @@ const char* tx_async_event_code_to_string(uhd::async_metadata_t::event_code_t ev
         return "USER_PAYLOAD";
     default:
         return "UNKNOWN";
+    }
+}
+
+std::string csv_escape(const std::string& value)
+{
+    if (value.find_first_of(",\"\n") == std::string::npos) {
+        return value;
+    }
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (char ch : value) {
+        if (ch == '"') {
+            escaped.push_back('"');
+        }
+        escaped.push_back(ch);
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+bool append_csv_row(
+    const std::string& path,
+    const std::vector<std::string>& header,
+    const std::vector<std::string>& row)
+{
+    if (path.empty() || header.size() != row.size()) {
+        return false;
+    }
+    try {
+        const std::filesystem::path csv_path(path);
+        if (csv_path.has_parent_path()) {
+            std::filesystem::create_directories(csv_path.parent_path());
+        }
+        const bool write_header = !std::filesystem::exists(csv_path);
+        std::ofstream out(path, std::ios::app);
+        if (!out) {
+            return false;
+        }
+        auto write_line = [&out](const std::vector<std::string>& cols) {
+            for (size_t i = 0; i < cols.size(); ++i) {
+                if (i > 0) {
+                    out << ',';
+                }
+                out << csv_escape(cols[i]);
+            }
+            out << '\n';
+        };
+        if (write_header) {
+            write_line(header);
+        }
+        write_line(row);
+        return true;
+    } catch (const std::exception&) {
+        return false;
     }
 }
 
@@ -86,8 +142,10 @@ public:
         _fft_in(cfg.fft_size),
         _fft_out(cfg.fft_size),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
+        _data_resource_layout(build_data_resource_grid_layout(cfg)),
         tx_data_file("tx_frame.bin", std::ios::binary),
         _control_handler(cfg.control_port),
+        _measurement_enabled(measurement_mode_enabled(cfg)),
         _frame_pool(32, [&cfg]() {
             return AlignedVector(cfg.samples_per_frame());
         }),
@@ -106,6 +164,15 @@ public:
         _data_packet_buffer(cfg.data_packet_buffer_size),
         _data_packet_ingest_ts(cfg.data_packet_buffer_size)
     {
+        _measurement_tx_gain_x10.store(
+            static_cast<int32_t>(std::llround(cfg.tx_gain * 10.0)),
+            std::memory_order_relaxed);
+        if (_measurement_enabled && !_cfg.measurement_output_dir.empty()) {
+            _measurement_summary_path =
+                (_cfg.measurement_output_dir.empty()
+                    ? std::string()
+                    : (_cfg.measurement_output_dir + "/modulator_measurement_summary.csv"));
+        }
         _shared_sensing_cfg.sensing_symbol_stride = cfg.sensing_symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
@@ -118,10 +185,18 @@ public:
         _init_usrp();
         _precalc_positions();
 
-        size_t total_data_samples = (cfg.num_symbols - 1) * (cfg.fft_size - cfg.pilot_positions.size());
-        _pregen_data.resize(total_data_samples);
-        for (auto& x : _pregen_data) {
-            x = _dist(_gen);
+        const size_t total_data_samples = _data_resource_layout.non_pilot_re_count;
+        _pregen_symbols.resize(total_data_samples);
+        for (auto& x : _pregen_symbols) {
+            x = _qpsk_symbol_from_int(_dist(_gen));
+        }
+        _build_symbol_templates();
+        LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
+                     << " payload RE out of " << _data_resource_layout.non_pilot_re_count
+                     << " non-sync/non-pilot RE per frame"
+                     << (_cfg.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
+        if (!_measurement_enabled && _data_resource_layout.payload_re_count == 0) {
+            LOG_G_WARN() << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
         }
 
         _register_commands();
@@ -232,6 +307,9 @@ private:
     // Zadoff-Chu sequence
     AlignedVector _zc_seq;               
     const AlignedVector _blank_frame;
+    const DataResourceGridLayout _data_resource_layout;
+    SymbolVector _symbol_templates;
+    std::vector<int> _payload_subcarrier_indices_flat;
 
     // Pre-calculated symbol positions
     std::vector<size_t> _symbol_positions; 
@@ -251,7 +329,7 @@ private:
     // Pre-generated data and file
     std::ofstream tx_data_file;
     std::atomic<bool> data_saved{false};
-    AlignedIntVector _pregen_data;
+    AlignedVector _pregen_symbols;
     // Data ingest/encoding related
     std::thread _data_thread;
     
@@ -260,6 +338,10 @@ private:
     std::atomic<int64_t> _align_target_channel{-1}; // -1 means all channels
     SharedSensingRuntime _shared_sensing_cfg;
     std::mutex _shared_sensing_cfg_mutex;
+    const bool _measurement_enabled;
+    std::atomic<uint32_t> _measurement_requested_epoch{0};
+    std::atomic<int32_t> _measurement_tx_gain_x10{0};
+    std::string _measurement_summary_path;
     
     // LDPC encoding and scrambling
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
@@ -301,6 +383,12 @@ private:
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
 
+    struct EncodePacketProfile {
+        double header_encode_us{0.0};
+        double payload_encode_us{0.0};
+        double enqueue_us{0.0};
+    };
+
     LatencySnapshot _take_latency_snapshot_and_reset() {
         LatencySnapshot snapshot;
         snapshot.count = _latency_accumulator.count.exchange(0, std::memory_order_acq_rel);
@@ -341,20 +429,37 @@ private:
     }
 
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
+        auto same_runtime_values = [](const SharedSensingRuntime& lhs, const SharedSensingRuntime& rhs) {
+            return lhs.sensing_symbol_stride == rhs.sensing_symbol_stride &&
+                   lhs.enable_mti == rhs.enable_mti &&
+                   lhs.skip_sensing_fft == rhs.skip_sensing_fft;
+        };
         SharedSensingRuntime snapshot;
+        uint64_t next_symbol = 0;
+        bool duplicate = false;
         {
             std::lock_guard<std::mutex> lock(_shared_sensing_cfg_mutex);
-            updater(_shared_sensing_cfg);
-            _shared_sensing_cfg.generation++;
-            const uint64_t next_symbol = _next_frame_start_symbol.load(std::memory_order_relaxed);
-            if (_cfg.num_symbols == 0) {
-                _shared_sensing_cfg.apply_symbol_index = next_symbol;
+            SharedSensingRuntime updated = _shared_sensing_cfg;
+            updater(updated);
+            if (same_runtime_values(updated, _shared_sensing_cfg)) {
+                snapshot = _shared_sensing_cfg;
+                duplicate = true;
             } else {
-                const uint64_t frame_len = static_cast<uint64_t>(_cfg.num_symbols);
-                const uint64_t boundary = ((next_symbol + frame_len - 1) / frame_len) * frame_len;
-                _shared_sensing_cfg.apply_symbol_index = boundary;
+                _shared_sensing_cfg = updated;
+                _shared_sensing_cfg.generation++;
+                next_symbol = _next_frame_start_symbol.load(std::memory_order_relaxed);
+                if (_cfg.num_symbols == 0) {
+                    _shared_sensing_cfg.apply_symbol_index = next_symbol;
+                } else {
+                    const uint64_t frame_len = static_cast<uint64_t>(_cfg.num_symbols);
+                    const uint64_t boundary = ((next_symbol + frame_len - 1) / frame_len) * frame_len;
+                    _shared_sensing_cfg.apply_symbol_index = boundary;
+                }
+                snapshot = _shared_sensing_cfg;
             }
-            snapshot = _shared_sensing_cfg;
+        }
+        if (duplicate) {
+            return;
         }
         for (auto& ch : _sensing_channels) {
             ch->apply_shared_cfg(snapshot);
@@ -458,8 +563,25 @@ private:
             const double clamped_gain = std::clamp(requested_gain, gain_range.start(), gain_range.stop());
             _cfg.tx_gain = clamped_gain;
             _tx_usrp->set_tx_gain(clamped_gain, _cfg.tx_channel);
+            _measurement_tx_gain_x10.store(
+                static_cast<int32_t>(std::llround(clamped_gain * 10.0)),
+                std::memory_order_relaxed);
             LOG_G_INFO() << "Received TXGN command: " << requested_gain
                          << " dB (applied " << clamped_gain << " dB)";
+        });
+
+        _control_handler.register_command("MRST", [this](int32_t value) {
+            if (!_measurement_enabled) {
+                LOG_G_WARN() << "MRST ignored: measurement mode disabled";
+                return;
+            }
+            if (value <= 0) {
+                LOG_G_WARN() << "MRST ignored: invalid epoch id " << value;
+                return;
+            }
+            _measurement_requested_epoch.store(
+                static_cast<uint32_t>(value), std::memory_order_release);
+            LOG_G_INFO() << "Received MRST command: epoch=" << value;
         });
 
         _control_handler.register_command("RXGN", [this](int32_t value) {
@@ -644,6 +766,59 @@ private:
         _zc_seq = generate_zc_freq(_cfg.fft_size, _cfg.zc_root);
     }
 
+    static std::complex<float> _qpsk_symbol_from_int(int sym) {
+        const int idx = (sym & 3) * 2;
+        return std::complex<float>(
+            QPSKModulator::QPSK_TABLE_FLAT[idx],
+            QPSKModulator::QPSK_TABLE_FLAT[idx + 1]
+        );
+    }
+
+    void _build_symbol_templates() {
+        _symbol_templates.resize(_cfg.num_symbols);
+        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+            _symbol_templates[sym].resize(_cfg.fft_size);
+        }
+
+        _payload_subcarrier_indices_flat.clear();
+        _payload_subcarrier_indices_flat.reserve(_data_resource_layout.payload_re_count);
+
+        size_t data_symbol_idx = 0;
+        size_t pregen_offset = 0;
+        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+            auto& template_symbol = _symbol_templates[sym];
+            if (sym == _cfg.sync_pos) {
+                std::memcpy(template_symbol.data(), _zc_seq.data(),
+                            _cfg.fft_size * sizeof(std::complex<float>));
+                continue;
+            }
+
+            const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[data_symbol_idx];
+            for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
+                const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
+                template_symbol[k] = _pregen_symbols[pregen_offset + di];
+                const int payload_rank = _data_resource_layout.payload_rank[non_pilot_base + di];
+                if (payload_rank >= 0) {
+                    _payload_subcarrier_indices_flat.push_back(static_cast<int>(k));
+                }
+            }
+            for (size_t idx = 0; idx < _cfg.pilot_positions.size(); ++idx) {
+                const size_t k = _cfg.pilot_positions[idx];
+                if (k < _cfg.fft_size) {
+                    template_symbol[k] = _zc_seq[k];
+                }
+            }
+            pregen_offset += _data_resource_layout.num_non_pilot_subcarriers;
+            ++data_symbol_idx;
+        }
+
+        if (data_symbol_idx != _data_resource_layout.data_symbol_count ||
+            pregen_offset != _data_resource_layout.non_pilot_re_count ||
+            _payload_subcarrier_indices_flat.size() != _data_resource_layout.payload_re_count) {
+            throw std::runtime_error("Failed to build symbol templates for data_resource_layout.");
+        }
+    }
+
     void _precalc_positions() {
         _symbol_positions.reserve(_cfg.num_symbols);
         for (size_t i = 0; i < _cfg.num_symbols; ++i) {
@@ -653,6 +828,123 @@ private:
 
     // Use QPSKModulator from OFDMCore.hpp for QPSK modulation
     QPSKModulator _qpsk_modulator;
+
+    void _append_measurement_epoch_row(uint32_t epoch_id, double tx_gain_db, uint32_t packets_sent) {
+        if (_measurement_summary_path.empty()) {
+            return;
+        }
+        const std::vector<std::string> header{
+            "run_id",
+            "epoch_id",
+            "tx_gain_db",
+            "packets_sent",
+            "payload_bytes",
+            "prbs_seed",
+        };
+        const std::vector<std::string> row{
+            _cfg.measurement_run_id,
+            std::to_string(epoch_id),
+            std::to_string(tx_gain_db),
+            std::to_string(packets_sent),
+            std::to_string(_cfg.measurement_payload_bytes),
+            std::to_string(_cfg.measurement_prbs_seed),
+        };
+        if (!append_csv_row(_measurement_summary_path, header, row)) {
+            LOG_G_WARN() << "Failed to append measurement epoch row to "
+                         << _measurement_summary_path;
+        }
+    }
+
+    bool _encode_and_enqueue_payload(
+        const uint8_t* payload_data,
+        size_t payload_len,
+        int64_t pkt_ingest_ns,
+        bool do_latency_profile,
+        EncodePacketProfile& profile
+    ) {
+        using ProfileClock = std::chrono::high_resolution_clock;
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+
+        const size_t K_bits_local = _ldpc.get_K();
+        const size_t bytes_per_ldpc_block = (K_bits_local + 7) / 8;
+        const size_t padded_len =
+            ((payload_len + bytes_per_ldpc_block - 1) / bytes_per_ldpc_block) * bytes_per_ldpc_block;
+        const size_t header_len = K_bits_local ? (K_bits_local + 7) / 8 : 0;
+
+        LDPCCodec::AlignedByteVector header_bytes(header_len, 0x00);
+        size_t half1 = (header_len + 1) / 2;
+        size_t half2 = header_len - half1;
+        if ((half2 % 2) != 0 && half2 > 0) {
+            half1 += 1;
+            half2 -= 1;
+        }
+        for (size_t i = 0; i < half1; ++i) {
+            header_bytes[i] = static_cast<uint8_t>((i + 1) & 0xFF);
+        }
+        const uint16_t payload16 =
+            payload_len > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(payload_len & 0xFFFF);
+        for (size_t i = 0; i < half2; ++i) {
+            const size_t idx = half1 + i;
+            header_bytes[idx] = ((i % 2) == 0)
+                ? static_cast<uint8_t>((payload16 >> 8) & 0xFF)
+                : static_cast<uint8_t>(payload16 & 0xFF);
+        }
+
+        LDPCCodec::AlignedIntVector header_coded_bits;
+        _ldpc.encode_frame(header_bytes, header_coded_bits);
+        scrambler.scramble(header_coded_bits);
+        LDPCCodec::AlignedIntVector header_qpsk_ints;
+        LDPCCodec::pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
+        prof_step_end = ProfileClock::now();
+        profile.header_encode_us =
+            std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+
+        LDPCCodec::AlignedByteVector input_bytes(padded_len, 0x00);
+        if (payload_len > 0 && payload_data != nullptr) {
+            std::memcpy(input_bytes.data(), payload_data, payload_len);
+        }
+
+        prof_step_start = ProfileClock::now();
+        LDPCCodec::AlignedIntVector encoded_bits_all;
+        _ldpc.encode_frame(input_bytes, encoded_bits_all);
+        scrambler.scramble(encoded_bits_all);
+        LDPCCodec::AlignedIntVector qpsk_ints_all;
+        LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all);
+        prof_step_end = ProfileClock::now();
+        profile.payload_encode_us =
+            std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+
+        AlignedIntVector packet = _data_packet_pool.acquire();
+        packet.clear();
+        packet.reserve(header_qpsk_ints.size() + qpsk_ints_all.size());
+        packet.insert(packet.end(), header_qpsk_ints.begin(), header_qpsk_ints.end());
+        packet.insert(packet.end(), qpsk_ints_all.begin(), qpsk_ints_all.end());
+
+        prof_step_start = ProfileClock::now();
+        bool enqueued = false;
+        SPSCBackoff enqueue_backoff;
+        while (_running.load(std::memory_order_relaxed)) {
+            if (_data_packet_buffer.try_push(std::move(packet))) {
+                enqueued = true;
+                if (do_latency_profile) {
+                    const int64_t encoded_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+                    _data_packet_ingest_ts.try_push(PktTimestamps{pkt_ingest_ns, encoded_ns});
+                }
+                break;
+            }
+            enqueue_backoff.pause();
+        }
+        if (!enqueued) {
+            _data_packet_pool.release(std::move(packet));
+            return false;
+        }
+        prof_step_end = ProfileClock::now();
+        profile.enqueue_us =
+            std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        return true;
+    }
 
     /**
      * @brief Data Ingest and Encoding Thread.
@@ -673,171 +965,21 @@ private:
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
-        
-        // ============== Profiling variables ==============
-        using ProfileClock = std::chrono::high_resolution_clock;
+
         static double prof_header_encode_total = 0.0;
         static double prof_payload_encode_total = 0.0;
         static double prof_enqueue_total = 0.0;
         static int prof_packet_count = 0;
         constexpr int PROF_REPORT_INTERVAL = 100;
-        auto prof_step_start = ProfileClock::now();
-        auto prof_step_end = prof_step_start;
-        // =================================================
-        
-        // Initialize UDP
-        _udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (_udp_sock < 0) {
-            LOG_G_ERROR() << "UDP socket create failed";
-            return;
-        }
-        int enable=1; setsockopt(_udp_sock,SOL_SOCKET,SO_REUSEADDR,&enable,sizeof(enable));
-        memset(&_udp_addr,0,sizeof(_udp_addr));
-        _udp_addr.sin_family = AF_INET;
-        _udp_addr.sin_port = htons(static_cast<uint16_t>(_cfg.udp_input_port));
-        if (_cfg.udp_input_ip == "0.0.0.0") {
-            _udp_addr.sin_addr.s_addr = INADDR_ANY;
-        } else {
-            if (inet_pton(AF_INET, _cfg.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
-                LOG_G_ERROR() << "Invalid modulator UDP bind IP: " << _cfg.udp_input_ip;
-                close(_udp_sock); _udp_sock = -1; return;
-            }
-        }
-        if (bind(_udp_sock,(sockaddr*)&_udp_addr,sizeof(_udp_addr))<0) {
-            LOG_G_ERROR() << "UDP bind failed";
-            close(_udp_sock); _udp_sock=-1; return;
-        }
-        // Non-blocking
-        fcntl(_udp_sock,F_SETFL, O_NONBLOCK);
 
-        std::vector<uint8_t> udp_buf(25200); // Max packet size: 1008*2*100/8 bytes per frame
-        while (_running.load()) {
-            ssize_t recv_len = recv(_udp_sock, udp_buf.data(), udp_buf.size(), 0);
-            if (recv_len <= 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            const int64_t pkt_ingest_ns = do_latency_profile
-                ? std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::high_resolution_clock::now().time_since_epoch()).count()
-                : 0;
-
-            size_t payload_len = static_cast<size_t>(recv_len); // Raw UDP payload bytes
-            // Each LDPC input block represents information bits in bytes: bytes_per_ldpc_block = ceil(K/8)
-            size_t K_bits_local = _ldpc.get_K();
-            size_t bytes_per_ldpc_block = (K_bits_local + 7) / 8; // Information bytes per LDPC block
-            size_t padded_len = ((payload_len + bytes_per_ldpc_block-1) / bytes_per_ldpc_block) * bytes_per_ldpc_block; // Payload bytes after zero padding
-            // size_t num_blocks = padded_len / bytes_per_ldpc_block; // Number of LDPC blocks (unused)
-            // Construct LDPC header: Determine header bytes dynamically based on LDPC K (K/8), split header into two halves.
-            // First half fills with counts starting from 1 (byte-wise), second half repeats payload_len (truncated to 16 bits) in big-endian 2-byte chunks.
-            // header_len already calculated based on K_bits_local (info bit bytes)
-            size_t header_len = K_bits_local ? (K_bits_local + 7) / 8 : 0; // Bytes
-            LDPCCodec::AlignedByteVector header_bytes(header_len, 0x00);
-            // Split into two halves: Prioritize extra bytes to first half, ensure second half has even byte count
-            // Initially put extra byte to first half
-            size_t half1 = (header_len + 1) / 2; // First half gets extra byte priority
-            size_t half2 = header_len - half1;
-            // If second half is odd and adjustable, move one byte to first half to ensure second half is even
-            if ((half2 % 2) != 0 && half2 > 0) {
-                // Move one byte from second half to first half
-                half1 += 1;
-                half2 -= 1;
-            }
-
-            // First half: count from 1 (byte), wraps around to low 8 bits if exceeding 255
-            for (size_t i = 0; i < half1; ++i) {
-                header_bytes[i] = static_cast<uint8_t>((i + 1) & 0xFF);
-            }
-
-            // Second half: Repeat payload_len (write 2 bytes each time, big-endian). If second half bytes is odd, last byte writes half of low byte.
-            uint16_t payload16 = payload_len > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(payload_len & 0xFFFF);
-            for (size_t i = 0; i < half2; ++i) {
-                size_t idx = half1 + i;
-                // Even pos writes high byte, odd pos writes low byte (relative to start of second half)
-                if ((i % 2) == 0) {
-                    header_bytes[idx] = static_cast<uint8_t>((payload16 >> 8) & 0xFF);
-                } else {
-                    header_bytes[idx] = static_cast<uint8_t>(payload16 & 0xFF);
-                }
-            }
-
-            // LDPC encode header
-            prof_step_start = ProfileClock::now();
-            LDPCCodec::AlignedIntVector header_coded_bits;
-            _ldpc.encode_frame(header_bytes, header_coded_bits);
-            
-            // Scramble header
-            scrambler.scramble(header_coded_bits);
-            
-            // Convert to QPSK symbols
-            LDPCCodec::AlignedIntVector header_qpsk_ints;
-            LDPCCodec::pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
-            prof_step_end = ProfileClock::now();
-            double header_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-            
-            // Process payload data
-            // Construct: Pure UDP data + padding(0x00) to make length a multiple of bytes_per_ldpc_block
-            LDPCCodec::AlignedByteVector input_bytes(padded_len, 0x00);
-            // Direct copy UDP payload
-            std::memcpy(input_bytes.data(), udp_buf.data(), std::min<size_t>(recv_len, udp_buf.size()));
-            // Remaining padding stays 0x00
-
-
-            // LDPC encode whole packet (may contain multiple LDPC blocks)
-            prof_step_start = ProfileClock::now();
-            LDPCCodec::AlignedIntVector encoded_bits_all;
-            _ldpc.encode_frame(input_bytes, encoded_bits_all); // bits: (#blocks*bytes_per_ldpc_block*8)
-
-            // Batch scramble using QPSKScrambler
-            scrambler.scramble(encoded_bits_all);
-
-            // Convert to QPSK symbol integers
-            LDPCCodec::AlignedIntVector qpsk_ints_all;
-            LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all); // (#blocks*bytes_per_ldpc_block*8) ints
-            prof_step_end = ProfileClock::now();
-            double payload_encode_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-
-            // Construct final output: LDPC encoded header + encoded payload data
-            AlignedIntVector packet = _data_packet_pool.acquire();
-            packet.clear();
-            packet.reserve(header_qpsk_ints.size() + qpsk_ints_all.size());
-            packet.insert(packet.end(), header_qpsk_ints.begin(), header_qpsk_ints.end());
-            packet.insert(packet.end(), qpsk_ints_all.begin(), qpsk_ints_all.end());
-            // Print debug info
-            // LOG_G_INFO() << "Packet constructed with size: " << packet.size() << std::endl;
-            // Enqueue
-            prof_step_start = ProfileClock::now();
-            bool enqueued = false;
-            SPSCBackoff enqueue_backoff;
-            while (_running.load(std::memory_order_relaxed)) {
-                if (_data_packet_buffer.try_push(std::move(packet))) {
-                    enqueue_backoff.reset();
-                    enqueued = true;
-                    if (do_latency_profile) {
-                        const int64_t encoded_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-                        _data_packet_ingest_ts.try_push(PktTimestamps{pkt_ingest_ns, encoded_ns});
-                    }
-                    break;
-                }
-                enqueue_backoff.pause();
-            }
-            if (!enqueued) {
-                _data_packet_pool.release(std::move(packet));
-                break;
-            }
-
-            prof_step_end = ProfileClock::now();
-            double enqueue_time = std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-            
-            // ============== Profiling accumulation ==============
-            prof_header_encode_total += header_encode_time;
-            prof_payload_encode_total += payload_encode_time;
-            prof_enqueue_total += enqueue_time;
-            prof_packet_count++;
-            
+        auto accumulate_profile = [&](const EncodePacketProfile& profile) {
+            prof_header_encode_total += profile.header_encode_us;
+            prof_payload_encode_total += profile.payload_encode_us;
+            prof_enqueue_total += profile.enqueue_us;
+            ++prof_packet_count;
             if (prof_packet_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("data_ingest")) {
-                double total = prof_header_encode_total + prof_payload_encode_total + prof_enqueue_total;
+                const double total =
+                    prof_header_encode_total + prof_payload_encode_total + prof_enqueue_total;
                 std::ostringstream oss;
                 oss << "\n========== _data_ingest_proc Profiling (avg per packet, us) ==========\n"
                     << "Header Encode:        " << prof_header_encode_total / prof_packet_count << " us\n"
@@ -846,15 +988,144 @@ private:
                     << "TOTAL:                " << total / prof_packet_count << " us\n"
                     << "======================================================================\n";
                 LOG_G_INFO() << oss.str();
-                
-                // Reset counters
                 prof_header_encode_total = 0.0;
                 prof_payload_encode_total = 0.0;
                 prof_enqueue_total = 0.0;
                 prof_packet_count = 0;
             }
+        };
+
+        if (_measurement_enabled) {
+            std::vector<uint8_t> payload;
+            payload.reserve(_cfg.measurement_payload_bytes);
+            uint32_t active_epoch_id = 0;
+            uint32_t seq_in_epoch = 0;
+            uint32_t packets_sent_in_epoch = 0;
+
+            while (_running.load(std::memory_order_relaxed)) {
+                const uint32_t requested_epoch = _measurement_requested_epoch.exchange(
+                    0, std::memory_order_acq_rel);
+                if (requested_epoch > 0) {
+                    if (active_epoch_id > 0 && packets_sent_in_epoch < _cfg.measurement_packets_per_point) {
+                        LOG_G_WARN() << "Interrupting measurement epoch " << active_epoch_id
+                                     << " after " << packets_sent_in_epoch << " packets.";
+                    }
+                    active_epoch_id = requested_epoch;
+                    seq_in_epoch = 0;
+                    packets_sent_in_epoch = 0;
+                }
+
+                if (active_epoch_id == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+
+                MeasurementPayloadMetadata meta;
+                meta.epoch_id = active_epoch_id;
+                meta.seq_in_epoch = seq_in_epoch;
+                meta.packets_per_point = _cfg.measurement_packets_per_point;
+                meta.payload_bytes = static_cast<uint32_t>(_cfg.measurement_payload_bytes);
+                meta.prbs_seed = _cfg.measurement_prbs_seed;
+                meta.tx_gain_x10 = _measurement_tx_gain_x10.load(std::memory_order_relaxed);
+                if (!build_measurement_payload(payload, meta)) {
+                    LOG_G_ERROR() << "Failed to build measurement payload.";
+                    break;
+                }
+
+                const int64_t pkt_ingest_ns = do_latency_profile
+                    ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch()).count()
+                    : 0;
+                EncodePacketProfile profile;
+                if (!_encode_and_enqueue_payload(
+                        payload.data(), payload.size(), pkt_ingest_ns, do_latency_profile, profile)) {
+                    break;
+                }
+                accumulate_profile(profile);
+
+                if (active_epoch_id > 0) {
+                    ++seq_in_epoch;
+                    ++packets_sent_in_epoch;
+                    if (packets_sent_in_epoch >= _cfg.measurement_packets_per_point) {
+                        const double tx_gain_db =
+                            static_cast<double>(_measurement_tx_gain_x10.load(std::memory_order_relaxed)) / 10.0;
+                        _append_measurement_epoch_row(active_epoch_id, tx_gain_db, packets_sent_in_epoch);
+                        active_epoch_id = 0;
+                        seq_in_epoch = 0;
+                        packets_sent_in_epoch = 0;
+                    }
+                }
+            }
+
+            if (active_epoch_id > 0 && packets_sent_in_epoch > 0) {
+                const double tx_gain_db =
+                    static_cast<double>(_measurement_tx_gain_x10.load(std::memory_order_relaxed)) / 10.0;
+                _append_measurement_epoch_row(active_epoch_id, tx_gain_db, packets_sent_in_epoch);
+            }
+            return;
         }
-        if (_udp_sock>=0) close(_udp_sock);
+
+        _udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (_udp_sock < 0) {
+            LOG_G_ERROR() << "UDP socket create failed";
+            return;
+        }
+        int enable = 1;
+        setsockopt(_udp_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+        memset(&_udp_addr, 0, sizeof(_udp_addr));
+        _udp_addr.sin_family = AF_INET;
+        _udp_addr.sin_port = htons(static_cast<uint16_t>(_cfg.udp_input_port));
+        if (_cfg.udp_input_ip == "0.0.0.0") {
+            _udp_addr.sin_addr.s_addr = INADDR_ANY;
+        } else if (inet_pton(AF_INET, _cfg.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
+            LOG_G_ERROR() << "Invalid modulator UDP bind IP: " << _cfg.udp_input_ip;
+            close(_udp_sock);
+            _udp_sock = -1;
+            return;
+        }
+        if (bind(_udp_sock, (sockaddr*)&_udp_addr, sizeof(_udp_addr)) < 0) {
+            LOG_G_ERROR() << "UDP bind failed";
+            close(_udp_sock);
+            _udp_sock = -1;
+            return;
+        }
+        fcntl(_udp_sock, F_SETFL, O_NONBLOCK);
+
+        std::vector<uint8_t> udp_buf(25200);
+        uint64_t dropped_payload_warn_count = 0;
+        while (_running.load(std::memory_order_relaxed)) {
+            const ssize_t recv_len = recv(_udp_sock, udp_buf.data(), udp_buf.size(), 0);
+            if (recv_len <= 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (_data_resource_layout.payload_re_count == 0) {
+                ++dropped_payload_warn_count;
+                if (dropped_payload_warn_count <= 20 || (dropped_payload_warn_count % 100) == 0) {
+                    LOG_G_WARN() << "Dropping UDP payload because data_resource_blocks select 0 payload RE per frame. "
+                                 << "dropped_packets=" << dropped_payload_warn_count;
+                }
+                continue;
+            }
+            const int64_t pkt_ingest_ns = do_latency_profile
+                ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::high_resolution_clock::now().time_since_epoch()).count()
+                : 0;
+            EncodePacketProfile profile;
+            if (!_encode_and_enqueue_payload(
+                    udp_buf.data(),
+                    static_cast<size_t>(recv_len),
+                    pkt_ingest_ns,
+                    do_latency_profile,
+                    profile)) {
+                break;
+            }
+            accumulate_profile(profile);
+        }
+        if (_udp_sock >= 0) {
+            close(_udp_sock);
+            _udp_sock = -1;
+        }
     }
     /**
      * @brief Modulation Thread.
@@ -897,15 +1168,13 @@ private:
         // =================================================
 
         const float scale = 1.0f / std::sqrt(_cfg.fft_size)/4; // Output digital signal power is 1/16
-
-        // Pre-calculate pilot and data subcarrier indices to reduce branches inside loop
-        std::vector<char> is_pilot(_cfg.fft_size, 0);
-        for (auto pos : _cfg.pilot_positions) if (pos < _cfg.fft_size) is_pilot[pos] = 1;
-        std::vector<int> data_subcarriers; data_subcarriers.reserve(_cfg.fft_size - _cfg.pilot_positions.size());
-        for (size_t k=0;k<_cfg.fft_size;++k) if (!is_pilot[k]) data_subcarriers.push_back((int)k);
-        const size_t max_data_syms_per_frame = (_cfg.num_symbols > 0)
-            ? (_cfg.num_symbols - 1) * data_subcarriers.size()
-            : 0;
+        const size_t max_data_syms_per_frame = _data_resource_layout.payload_re_count;
+        const size_t measurement_packet_limit_per_frame =
+            (_measurement_enabled && _cfg.measurement_max_packets_per_frame > 0)
+                ? _cfg.measurement_max_packets_per_frame
+                : std::numeric_limits<size_t>::max();
+        AlignedVector modulated_data_pool;
+        modulated_data_pool.reserve(max_data_syms_per_frame);
 
         while (_running.load()) {
             frame_start = Clock::now(); // Record frame start time
@@ -914,16 +1183,19 @@ private:
             AlignedVector current_frame = _frame_pool.acquire();
             auto current_symbols = _acquire_symbol_frame();
             SymbolVector& current_symbols_ref = *current_symbols;
-            
-            size_t frame_data_index = 0; // Entire frame data index
+
             // Pool of real data symbols available for this frame
             prof_step_start = ProfileClock::now();
             AlignedIntVector data_pool;
             data_pool.reserve(max_data_syms_per_frame);
             int64_t frame_ingest_ns = 0;  // T1: UDP recv time of first real packet
             int64_t frame_encoded_ns = 0; // T2: LDPC encode done time of first real packet
+            size_t packets_pulled = 0;
             // Pull packets only when the *whole* packet fits in current frame room.
             while (data_pool.size() < max_data_syms_per_frame) {
+                if (packets_pulled >= measurement_packet_limit_per_frame) {
+                    break;
+                }
                 AlignedIntVector* pkt_slot = _data_packet_buffer.consumer_slot();
                 if (pkt_slot == nullptr) {
                     break;
@@ -958,11 +1230,18 @@ private:
                 }
                 data_pool.insert(data_pool.end(), pkt.begin(), pkt.end());
                 _data_packet_pool.release(std::move(pkt));
+                ++packets_pulled;
             }
-
-            size_t data_pool_pos = 0;
             prof_step_end = ProfileClock::now();
             prof_data_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+
+            modulated_data_pool.resize(data_pool.size());
+            auto* __restrict__ mod_ptr = modulated_data_pool.data();
+            const auto* __restrict__ data_pool_ptr = data_pool.data();
+            #pragma omp simd
+            for (size_t payload_idx = 0; payload_idx < data_pool.size(); ++payload_idx) {
+                mod_ptr[payload_idx] = _qpsk_symbol_from_int(data_pool_ptr[payload_idx]);
+            }
 
             double symbol_gen_time = 0.0;
             double ifft_time = 0.0;
@@ -975,40 +1254,29 @@ private:
                 auto* buf_ptr = current_frame.data() + pos;
 
                 prof_step_start = ProfileClock::now();
-                if (i == _cfg.sync_pos) {
-                    // Sync symbol: Use ZC sequence for the whole symbol
-                    std::memcpy(_fft_in.data(), _zc_seq.data(), _cfg.fft_size * sizeof(std::complex<float>));
-                } else {
-                    // Non-sync symbol: Use real data symbols from data_pool, fallback to pre-generated data if exhausted
-                    // Fill all pilots first (vectorization friendly)
-                    for (size_t idx = 0; idx < _cfg.pilot_positions.size(); ++idx) {
-                        size_t k = _cfg.pilot_positions[idx];
-                        _fft_in[k] = _zc_seq[k];
+                std::memcpy(_fft_in.data(), _symbol_templates[i].data(),
+                            _cfg.fft_size * sizeof(std::complex<float>));
+                if (i != _cfg.sync_pos) {
+                    const int data_symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
+                    if (data_symbol_idx_int < 0) {
+                        throw std::runtime_error("Invalid payload resource layout for non-sync symbol.");
                     }
-                    // Fill data subcarriers - use lookup table for QPSK
-                    const size_t ds_count = data_subcarriers.size();
-                    const int* __restrict__ ds_ptr = data_subcarriers.data();
+                    const size_t data_symbol_idx = static_cast<size_t>(data_symbol_idx_int);
+                    const size_t payload_begin = _data_resource_layout.payload_offsets[data_symbol_idx];
+                    const size_t payload_end = _data_resource_layout.payload_offsets[data_symbol_idx + 1];
+                    const size_t payload_count = payload_end - payload_begin;
+                    const size_t payload_available = (payload_begin < data_pool.size())
+                        ? std::min(payload_count, data_pool.size() - payload_begin)
+                        : 0;
                     auto* __restrict__ fft_ptr = _fft_in.data();
-                    const auto* __restrict__ pool_ptr = data_pool.data();
-                    const auto* __restrict__ pregen_ptr = _pregen_data.data();
-                    const size_t pool_size = data_pool.size();
-                    
-                    #pragma omp simd
-                    for (size_t di = 0; di < ds_count; ++di) {
-                        const int k = ds_ptr[di];
-                        const int sym = (data_pool_pos + di < pool_size) ? 
-                            pool_ptr[data_pool_pos + di] : pregen_ptr[frame_data_index + di];
-                        // Use QPSKModulator static lookup table for SIMD compatibility
-                        const int idx = (sym & 3) * 2;
-                        fft_ptr[k] = std::complex<float>(
-                            QPSKModulator::QPSK_TABLE_FLAT[idx],
-                            QPSKModulator::QPSK_TABLE_FLAT[idx + 1]
-                        );
+                    const auto* __restrict__ payload_ptr = modulated_data_pool.data();
+                    const int* __restrict__ payload_sc_ptr =
+                        _payload_subcarrier_indices_flat.data() + payload_begin;
+
+                    for (size_t payload_idx = 0; payload_idx < payload_available; ++payload_idx) {
+                        const int k = payload_sc_ptr[payload_idx];
+                        fft_ptr[k] = payload_ptr[payload_begin + payload_idx];
                     }
-                    // Update indices after loop
-                    const size_t used_from_pool = std::min(ds_count, pool_size > data_pool_pos ? pool_size - data_pool_pos : 0);
-                    data_pool_pos += used_from_pool;
-                    frame_data_index += ds_count - used_from_pool;
                 }
                 
                 // Save frequency domain data of current symbol (for sensing) - direct memcpy
@@ -1311,11 +1579,15 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     async_logger::AsyncLoggerGuard async_logger_guard;
     std::signal(SIGINT, &signal_handler);
     uhd::set_thread_priority_safe();
+#if defined(__linux__)
     if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
         LOG_G_INFO() << "Locked current and future process memory with mlockall().";
     } else {
         LOG_G_WARN() << "mlockall() failed: " << std::strerror(errno);
     }
+#else
+    LOG_G_INFO() << "Skipping mlockall(): unsupported on this platform.";
+#endif
     const std::string default_config_file = "Modulator.yaml";
     Config cfg = make_default_modulator_config();
 

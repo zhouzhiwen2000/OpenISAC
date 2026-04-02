@@ -166,6 +166,8 @@ To support high bandwidth and sample rates, ensure the connection between the Co
 #### Operating System
 *   **Ubuntu 24.04 LTS**
     *   Download: [http://www.ubuntu.com/download/desktop](http://www.ubuntu.com/download/desktop)
+*   **macOS (Apple Silicon, local development / demo only)**
+    *   Guide: [Separate macOS build guide](https://github.com/zhouzhiwen2000/UHD_OFDM/blob/OpenISAC_MultiChannel/docs/macos_build.md)
  
 #### Dependencies & Installation
  
@@ -336,13 +338,7 @@ pip install -r requirements.txt
  
 #### Enable GPU Acceleration (Optional)
  
-If an Nvidia GPU is available, install `cupy-cuda12x` to enable GPU acceleration:
-
-> **Note:** Please ensure that the CUDA Toolkit is installed before installing CuPy.
- 
-```bash
-pip install cupy-cuda12x
-```
+Some fast plotting scripts can use an optional GPU array backend when it is available in the active Python environment. If no optional backend is installed, the scripts automatically fall back to CPU execution.
 
 #### Enable Intel Integrated GPU Acceleration (Optional)
 
@@ -378,9 +374,9 @@ If the installation is successful, you should see output similar to:
 
 ##### 4. Usage Notes
 
-The OpenISAC frontend automatically detects available GPU backends. The priority order is:
-1. Nvidia GPU (CUDA)
-2. Intel iGPU (dpnp)
+The OpenISAC frontend automatically detects available array backends. The priority order is:
+1. CuPy backend
+2. dpnp backend
 3. CPU (fallback)
 
 No code modifications are required; the system will automatically select the best available backend.
@@ -459,16 +455,20 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 Then open `http://<your-host>:8765` in a browser.
 
 What it does:
-* Provides separate Modulator / Demodulator tabs.
+* Provides separate Modulator / Demodulator tabs, plus a dedicated `Resource Planner` tab for `data_resource_blocks`.
 * Edits `build/Modulator.yaml` and `build/Demodulator.yaml` as parameter/value forms instead of a raw YAML text area.
 * Provides a dedicated CPU-binding editor for `cpu_cores`, with thread names, generated comments, and per-thread CPU selection.
 * Saves the current form back to YAML and starts/stops modulator and demodulator processes from the `build/` directory.
 * Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
-* Includes CPU command presets and a custom command field for each tab.
+* Includes command presets and a custom command field for each tab.
+* Lets you draw payload rectangles on a large time-frequency planner canvas, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
+* Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
 Notes:
 * Default commands are `./OFDMModulator` and `./OFDMDemodulator`.
 * The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
+* The `Resource Planner` tab edits `data_resource_blocks` only. Use `Apply to Transmitter` to write the current planner state into `build/Modulator.yaml`, and `Apply to Receiver` to write it into `build/Demodulator.yaml`.
+* The planner intentionally allows TX and RX to differ while you are experimenting, but normal operation still expects matching `data_resource_blocks` on both sides.
 * If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.
 * If `Enable runtime CPU isolation` is on, the console uses the current `cpu_cores` list to derive the default isolated CPU set and calls `scripts/isolate_cpus.bash` before launch.
 * If `Override CPU isolation list` is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.
@@ -496,6 +496,7 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `zc_root` | `int` | `29` | Zadoff-Chu root index. |
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
+| `data_resource_blocks` | `object[]` | omitted | Optional payload resource rectangles. Omit the key to keep legacy full-grid payload mapping; set `[]` to disable payload RE entirely. Each block uses `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`; only selected non-sync, non-pilot RE carry real payload, and all other non-sync, non-pilot RE transmit pre-generated QPSK. |
 | `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
 | `tx_device_args` | `string` | `""` | TX-specific USRP args. |
 | `rx_device_args` | `string` | `""` | Default sensing RX USRP args. |
@@ -515,8 +516,17 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `sensing_rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for outputs that are not explicitly set. |
 | `control_port` | `int` | `9999` | UDP port for control commands (heartbeat/MTI/etc.). |
+| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. When enabled, `OFDMModulator` generates deterministic PRBS payloads instead of listening on `udp_input_*`, and `OFDMDemodulator` switches decoded measurement payloads into BER/BLER/EVM accounting. |
+| `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
+| `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
+| `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
+| `measurement_payload_bytes` | `int` | `1024` | Bytes per internally generated measurement payload. Values below the internal header size are clamped up. |
+| `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to derive deterministic PRBS payload contents. |
+| `measurement_packets_per_point` | `int` | `1` | Number of measurement payloads sent for each online `MRST` epoch. Values below `1` are clamped to `1`. |
 | `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `data_ingest`, `sensing_proc`, and `sensing_process`; `all` enables every module. Modulator end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. Size this list for the TX thread, modulation thread, data-ingest thread, each enabled sensing channel's RX/sensing threads, and the main thread. If cores are limited, keep one dedicated core for the main thread first, then prioritize the TX and sensing RX threads, and only after that the modulation/data-ingest/sensing-processing threads because the latter stages have deeper buffers. |
+
+If `data_resource_blocks` is enabled, copy the same rectangles into `Demodulator.yaml`; `sync_pos` and `pilot_positions` still take precedence over overlapping payload rectangles.
 
 `sensing_rx_channels` object fields:
 
@@ -530,14 +540,14 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `rx_gain` | `float` | `30` | RX gain for this channel. |
 | `alignment` | `int` | `63` | Per-channel alignment offset (samples). |
 | `rx_antenna` | `string` | `""` | RX antenna name, e.g. `TX/RX`, `RX1`. |
-| `enable_system_delay_estimation` | `bool` | `false` | If `true`, this channel performs a one-shot ZC-based system delay estimation at startup and keeps the sensing pipeline disabled while continuing to drain frames. |
+| `enable_system_delay_estimation` | `bool` | `false` | If `true`, this channel performs a ZC-based system delay estimation at startup and then once every 434 frames, while keeping the sensing pipeline disabled and continuing to drain frames. |
 | `sensing_ip` | `string` | `127.0.0.1` | Per-channel sensing destination IP. |
 | `sensing_port` | `int` | `8888` | Per-channel sensing destination port. |
 
 Notes:
 * If `sensing_rx_channels` is empty and `sensing_rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
 * If the count and list size differ, the list is resized to match `sensing_rx_channel_count`.
-* When `enable_system_delay_estimation=true` for a channel, that channel performs one system delay estimation near startup, then skips further delay-estimation compute while continuing to drain frames. Normal sensing processing and sensing UDP output remain disabled.
+* When `enable_system_delay_estimation=true` for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing UDP output remain disabled.
 * In practice, keep hardware-specific fields such as `device_args`, `wire_format_*`, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.
 
 ### OFDM Demodulator
@@ -571,6 +581,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `range_fft_size` | `int` | `1024` | Range FFT size. |
 | `doppler_fft_size` | `int` | `100` | Doppler FFT size. |
 | `pilot_positions` | `int[]` | `[571,...,451]` | Pilot subcarrier indices. |
+| `data_resource_blocks` | `object[]` | omitted | Optional payload resource rectangles. Omit the key to keep legacy full-grid payload extraction; set `[]` to extract no payload LLR. Each block uses `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`, and the effective payload RE are the selected rectangles after removing `sync_pos` and `pilot_positions`. This setting must match `Modulator.yaml` when enabled. |
 | `device_args` | `string` | `""` | USRP device args. |
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
 | `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
@@ -594,7 +605,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `akf_r_max` | `float` | `1e3` | Upper bound of observation-noise variance `R`. |
 | `ppm_adjust_factor` | `float` | `0.05` | Frequency offset compensation factor. |
 | `desired_peak_pos` | `int` | `20` | Target delay-peak position used by alignment logic. |
-| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and UDP output. When set to `false`, `OFDMDemodulator` skips bistatic sensing channel startup. |
+| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and UDP output. When set to `false`, the demodulator skips bistatic sensing channel startup. |
 | `bi_sensing_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for bistatic sensing output. |
 | `bi_sensing_port` | `int` | `8889` | Destination port for bistatic sensing output. |
 | `channel_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for channel-estimation output. |
@@ -609,7 +620,14 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP used when output IP fields are empty. |
 | `control_port` | `int` | `9999` | UDP port for control commands. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `agc`, and `align`; `all` enables every module. `agc` gates AGC logs, while `align` gates runtime `ALGN:` logs. |
+| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. |
+| `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
+| `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
+| `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
+| `measurement_payload_bytes` | `int` | `1024` | Expected bytes per measurement payload. Values below the internal header size are clamped up. |
+| `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to rebuild deterministic PRBS measurement payloads. |
+| `measurement_packets_per_point` | `int` | `1` | Expected measurement payload count for each online `MRST` epoch. Values below `1` are clamped to `1`. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `agc`, `align`, and `snr`; `all` enables every module. `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, and `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates from the active demodulator path. |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. If cores are limited, keep one dedicated core for the main thread first, then prioritize `rx_proc`, and only after that `process_proc`, `sensing_process_proc`, and `bit_processing_proc`, because those later stages have larger buffers and can better tolerate short scheduling jitter. |
 
 Notes:

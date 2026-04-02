@@ -145,7 +145,6 @@ private:
         std::vector<int> actual_subcarrier_indices;
         std::vector<float> subcarrier_phases_unit_delay;
         std::chrono::steady_clock::time_point next_hb_time;
-        std::chrono::steady_clock::time_point next_send_time;
         double pending_batch_gather_us = 0.0;
         double prof_gather_total_us = 0.0;
         double prof_prep_total_us = 0.0;

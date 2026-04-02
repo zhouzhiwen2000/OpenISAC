@@ -165,8 +165,56 @@ struct SensingRxChannelConfig {
     int32_t alignment = 63;             // Per-channel alignment offset (samples)
     std::string rx_antenna = "";        // RX antenna for this channel (e.g., TX/RX, RX1)
     bool enable_system_delay_estimation = false; // Enable per-channel system delay estimation mode
+    bool enable_sensing_output = true;  // Enable UDP output for this sensing channel
     std::string sensing_ip = "127.0.0.1";
     int sensing_port = 8888;
+};
+
+/**
+ * @brief Rectangular payload resource block in the OFDM time-frequency grid.
+ *
+ * Coordinates use absolute 0-based frame indices:
+ * - symbol_start / symbol_count refer to OFDM symbols within one frame
+ * - subcarrier_start / subcarrier_count refer to FFT-bin indices
+ */
+struct DataResourceBlock {
+    size_t symbol_start = 0;
+    size_t symbol_count = 0;
+    size_t subcarrier_start = 0;
+    size_t subcarrier_count = 0;
+};
+
+/**
+ * @brief Shared payload-resource layout derived from Config.
+ *
+ * The flattened non-pilot order is:
+ *   1. OFDM symbols in ascending absolute frame order, skipping sync_pos
+ *   2. Within each data symbol, non-pilot subcarriers in ascending order
+ *
+ * payload_mask / payload_rank are indexed in that flattened order.
+ */
+struct DataResourceGridLayout {
+    size_t num_symbols = 0;
+    size_t fft_size = 0;
+    size_t sync_pos = 0;
+    size_t data_symbol_count = 0;
+    size_t num_non_pilot_subcarriers = 0;
+    size_t non_pilot_re_count = 0;
+    size_t payload_re_count = 0;
+
+    std::vector<int> data_symbol_to_actual_symbol;
+    std::vector<int> actual_symbol_to_data_symbol;
+    std::vector<int> non_pilot_subcarrier_indices;
+    std::vector<int> subcarrier_to_non_pilot_index;
+    std::vector<uint8_t> pilot_mask;
+    std::vector<uint8_t> payload_mask;
+    std::vector<int> payload_rank;
+    std::vector<size_t> payload_offsets;
+    std::vector<size_t> non_pilot_offsets;
+
+    size_t flat_non_pilot_index(size_t data_symbol_idx, size_t non_pilot_idx) const {
+        return non_pilot_offsets[data_symbol_idx] + non_pilot_idx;
+    }
 };
 
 /**
@@ -521,10 +569,15 @@ struct Config {
     double akf_r_max = 1e3;           // Upper bound of observation noise variance R
 
     std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    bool data_resource_blocks_configured = false;
+    std::vector<DataResourceBlock> data_resource_blocks;
+    size_t payload_re_count = 0;
+    size_t non_pilot_re_count = 0;
     std::string device_args = "";
     std::string tx_device_args = "";
     std::string rx_device_args = "";
     std::string default_ip = "127.0.0.1";
+    bool mono_sensing_output_enabled = true;
     std::string mono_sensing_ip = "127.0.0.1";
     int mono_sensing_port = 8888;
     bool enable_bi_sensing = true;
@@ -560,7 +613,15 @@ struct Config {
     size_t data_packet_buffer_size = 32;   // Capacity of modulator encoded packet buffer
     size_t paired_frame_queue_size = 8;    // Capacity of per-channel RX/TX pairing queues
     std::vector<size_t> available_cores = {0, 1, 2, 3, 4, 5};
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, snr, or "all"
+    bool measurement_enable = false;
+    std::string measurement_mode = "";
+    std::string measurement_run_id = "";
+    std::string measurement_output_dir = "";
+    size_t measurement_payload_bytes = 1024;
+    uint32_t measurement_prbs_seed = 0x5A;
+    uint32_t measurement_packets_per_point = 1;
+    size_t measurement_max_packets_per_frame = 1; // 0 = unlimited
     
     // Check if a specific module should be profiled
     bool should_profile(const std::string& module) const {
@@ -601,6 +662,314 @@ struct Config {
         return 2 * samples_per_frame(); 
     }
 };
+
+inline DataResourceGridLayout build_data_resource_grid_layout(
+    const Config& cfg,
+    bool log_warnings = false)
+{
+    if (cfg.num_symbols == 0) {
+        throw std::runtime_error("num_symbols=0 is invalid for data-resource layout.");
+    }
+    if (cfg.sync_pos >= cfg.num_symbols) {
+        throw std::runtime_error(
+            "sync_pos=" + std::to_string(cfg.sync_pos) +
+            " is out of range for num_symbols=" + std::to_string(cfg.num_symbols) + '.');
+    }
+
+    DataResourceGridLayout layout;
+    layout.num_symbols = cfg.num_symbols;
+    layout.fft_size = cfg.fft_size;
+    layout.sync_pos = cfg.sync_pos;
+    layout.data_symbol_count = cfg.num_symbols - 1;
+
+    layout.pilot_mask.assign(cfg.fft_size, 0);
+    for (auto pos : cfg.pilot_positions) {
+        if (pos < cfg.fft_size) {
+            layout.pilot_mask[pos] = 1;
+        }
+    }
+
+    layout.subcarrier_to_non_pilot_index.assign(cfg.fft_size, -1);
+    layout.non_pilot_subcarrier_indices.reserve(cfg.fft_size);
+    for (size_t k = 0; k < cfg.fft_size; ++k) {
+        if (layout.pilot_mask[k] != 0) {
+            continue;
+        }
+        layout.subcarrier_to_non_pilot_index[k] =
+            static_cast<int>(layout.non_pilot_subcarrier_indices.size());
+        layout.non_pilot_subcarrier_indices.push_back(static_cast<int>(k));
+    }
+    layout.num_non_pilot_subcarriers = layout.non_pilot_subcarrier_indices.size();
+    layout.non_pilot_re_count = layout.data_symbol_count * layout.num_non_pilot_subcarriers;
+
+    layout.data_symbol_to_actual_symbol.reserve(layout.data_symbol_count);
+    layout.actual_symbol_to_data_symbol.assign(cfg.num_symbols, -1);
+    for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
+        if (sym == cfg.sync_pos) {
+            continue;
+        }
+        layout.actual_symbol_to_data_symbol[sym] =
+            static_cast<int>(layout.data_symbol_to_actual_symbol.size());
+        layout.data_symbol_to_actual_symbol.push_back(static_cast<int>(sym));
+    }
+    if (layout.data_symbol_to_actual_symbol.size() != layout.data_symbol_count) {
+        throw std::runtime_error("Failed to derive data-symbol index mapping from sync_pos.");
+    }
+
+    layout.payload_mask.assign(layout.non_pilot_re_count, cfg.data_resource_blocks_configured ? 0 : 1);
+    layout.payload_rank.assign(layout.non_pilot_re_count, -1);
+    layout.non_pilot_offsets.resize(layout.data_symbol_count + 1, 0);
+    layout.payload_offsets.resize(layout.data_symbol_count + 1, 0);
+    for (size_t data_sym = 0; data_sym <= layout.data_symbol_count; ++data_sym) {
+        layout.non_pilot_offsets[data_sym] = data_sym * layout.num_non_pilot_subcarriers;
+    }
+
+    size_t stripped_sync_re = 0;
+    size_t stripped_pilot_re = 0;
+    if (cfg.data_resource_blocks_configured) {
+        for (size_t block_idx = 0; block_idx < cfg.data_resource_blocks.size(); ++block_idx) {
+            const auto& block = cfg.data_resource_blocks[block_idx];
+            if (block.symbol_count == 0) {
+                throw std::runtime_error(
+                    "data_resource_blocks[" + std::to_string(block_idx) +
+                    "].symbol_count must be greater than 0.");
+            }
+            if (block.subcarrier_count == 0) {
+                throw std::runtime_error(
+                    "data_resource_blocks[" + std::to_string(block_idx) +
+                    "].subcarrier_count must be greater than 0.");
+            }
+            if (block.symbol_start >= cfg.num_symbols ||
+                block.symbol_start + block.symbol_count > cfg.num_symbols) {
+                throw std::runtime_error(
+                    "data_resource_blocks[" + std::to_string(block_idx) +
+                    "] exceeds the configured symbol range.");
+            }
+            if (block.subcarrier_start >= cfg.fft_size ||
+                block.subcarrier_start + block.subcarrier_count > cfg.fft_size) {
+                throw std::runtime_error(
+                    "data_resource_blocks[" + std::to_string(block_idx) +
+                    "] exceeds the configured subcarrier range.");
+            }
+
+            for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
+                if (sym == cfg.sync_pos) {
+                    stripped_sync_re += block.subcarrier_count;
+                    continue;
+                }
+                const int data_sym = layout.actual_symbol_to_data_symbol[sym];
+                if (data_sym < 0) {
+                    throw std::runtime_error("Invalid internal data-symbol mapping while building layout.");
+                }
+                const size_t base = layout.non_pilot_offsets[static_cast<size_t>(data_sym)];
+                for (size_t sc = block.subcarrier_start;
+                     sc < block.subcarrier_start + block.subcarrier_count;
+                     ++sc) {
+                    if (layout.pilot_mask[sc] != 0) {
+                        ++stripped_pilot_re;
+                        continue;
+                    }
+                    const int non_pilot_idx = layout.subcarrier_to_non_pilot_index[sc];
+                    if (non_pilot_idx < 0) {
+                        continue;
+                    }
+                    layout.payload_mask[base + static_cast<size_t>(non_pilot_idx)] = 1;
+                }
+            }
+        }
+    }
+
+    size_t payload_rank = 0;
+    for (size_t data_sym = 0; data_sym < layout.data_symbol_count; ++data_sym) {
+        const size_t base = layout.non_pilot_offsets[data_sym];
+        for (size_t sc_idx = 0; sc_idx < layout.num_non_pilot_subcarriers; ++sc_idx) {
+            const size_t flat_idx = base + sc_idx;
+            if (layout.payload_mask[flat_idx] == 0) {
+                continue;
+            }
+            layout.payload_rank[flat_idx] = static_cast<int>(payload_rank++);
+        }
+        layout.payload_offsets[data_sym + 1] = payload_rank;
+    }
+    layout.payload_re_count = payload_rank;
+
+    if (log_warnings && cfg.data_resource_blocks_configured &&
+        (stripped_sync_re > 0 || stripped_pilot_re > 0)) {
+        LOG_G_WARN() << "data_resource_blocks overlap stripped " << stripped_sync_re
+                     << " sync RE and " << stripped_pilot_re
+                     << " pilot RE. sync_pos and pilot_positions take precedence.";
+    }
+
+    return layout;
+}
+
+inline void finalize_data_resource_grid_config(Config& cfg, const char* role_name) {
+    const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg, true);
+    cfg.payload_re_count = layout.payload_re_count;
+    cfg.non_pilot_re_count = layout.non_pilot_re_count;
+    if (cfg.measurement_enable && cfg.payload_re_count == 0) {
+        throw std::runtime_error(
+            std::string(role_name) +
+            " measurement_enable requires at least one payload RE. "
+            "Omit data_resource_blocks for full payload coverage or configure a non-empty payload grid.");
+    }
+}
+
+struct MeasurementPayloadMetadata {
+    uint32_t epoch_id = 0;
+    uint32_t seq_in_epoch = 0;
+    uint32_t packets_per_point = 0;
+    uint32_t payload_bytes = 0;
+    uint32_t prbs_seed = 0;
+    int32_t tx_gain_x10 = 0;
+};
+
+struct MeasurementCompareResult {
+    uint64_t compared_bits = 0;
+    uint64_t bit_errors = 0;
+    bool exact_match = false;
+};
+
+inline constexpr size_t measurement_payload_header_size() {
+    return 32;
+}
+
+inline bool measurement_mode_enabled(const Config& cfg) {
+    return cfg.measurement_enable && cfg.measurement_mode == "internal_prbs";
+}
+
+inline uint32_t measurement_effective_prbs_seed(
+    uint32_t base_seed,
+    uint32_t epoch_id,
+    uint32_t seq_in_epoch
+) {
+    uint32_t state = base_seed ^ 0x9E3779B9u;
+    state ^= epoch_id * 0x85EBCA6Bu;
+    state ^= seq_in_epoch * 0xC2B2AE35u;
+    if (state == 0) {
+        state = 0xA341316Cu;
+    }
+    return state;
+}
+
+inline uint32_t measurement_prbs_next(uint32_t state) {
+    if (state == 0) {
+        state = 0xA341316Cu;
+    }
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state ? state : 0xA341316Cu;
+}
+
+inline void measurement_store_u32_le(uint8_t* dst, uint32_t value) {
+    dst[0] = static_cast<uint8_t>(value & 0xFFu);
+    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    dst[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    dst[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+}
+
+inline uint32_t measurement_load_u32_le(const uint8_t* src) {
+    return static_cast<uint32_t>(src[0]) |
+           (static_cast<uint32_t>(src[1]) << 8) |
+           (static_cast<uint32_t>(src[2]) << 16) |
+           (static_cast<uint32_t>(src[3]) << 24);
+}
+
+inline bool build_measurement_payload(
+    std::vector<uint8_t>& payload,
+    const MeasurementPayloadMetadata& meta
+) {
+    constexpr size_t kHeaderSize = measurement_payload_header_size();
+    constexpr uint8_t kVersion = 1;
+    if (meta.payload_bytes < kHeaderSize) {
+        return false;
+    }
+
+    payload.resize(meta.payload_bytes, 0);
+    payload[0] = 'M';
+    payload[1] = 'S';
+    payload[2] = 'M';
+    payload[3] = 'T';
+    payload[4] = kVersion;
+    payload[5] = 0;
+    payload[6] = 0;
+    payload[7] = 0;
+    measurement_store_u32_le(payload.data() + 8, meta.epoch_id);
+    measurement_store_u32_le(payload.data() + 12, meta.seq_in_epoch);
+    measurement_store_u32_le(payload.data() + 16, meta.packets_per_point);
+    measurement_store_u32_le(payload.data() + 20, meta.payload_bytes);
+    measurement_store_u32_le(payload.data() + 24, meta.prbs_seed);
+    measurement_store_u32_le(payload.data() + 28, static_cast<uint32_t>(meta.tx_gain_x10));
+
+    uint32_t prbs_state = measurement_effective_prbs_seed(
+        meta.prbs_seed, meta.epoch_id, meta.seq_in_epoch);
+    for (size_t i = kHeaderSize; i < payload.size(); ++i) {
+        prbs_state = measurement_prbs_next(prbs_state);
+        payload[i] = static_cast<uint8_t>(prbs_state & 0xFFu);
+    }
+    return true;
+}
+
+inline bool parse_measurement_payload(
+    const uint8_t* payload,
+    size_t payload_size,
+    MeasurementPayloadMetadata& meta
+) {
+    constexpr size_t kHeaderSize = measurement_payload_header_size();
+    constexpr uint8_t kVersion = 1;
+    if (payload == nullptr || payload_size < kHeaderSize) {
+        return false;
+    }
+    if (payload[0] != 'M' || payload[1] != 'S' || payload[2] != 'M' || payload[3] != 'T') {
+        return false;
+    }
+    if (payload[4] != kVersion) {
+        return false;
+    }
+
+    meta.epoch_id = measurement_load_u32_le(payload + 8);
+    meta.seq_in_epoch = measurement_load_u32_le(payload + 12);
+    meta.packets_per_point = measurement_load_u32_le(payload + 16);
+    meta.payload_bytes = measurement_load_u32_le(payload + 20);
+    meta.prbs_seed = measurement_load_u32_le(payload + 24);
+    meta.tx_gain_x10 = static_cast<int32_t>(measurement_load_u32_le(payload + 28));
+    if (meta.payload_bytes != payload_size || meta.payload_bytes < kHeaderSize) {
+        return false;
+    }
+    return true;
+}
+
+inline MeasurementCompareResult compare_measurement_payload(
+    const std::vector<uint8_t>& expected,
+    const uint8_t* actual,
+    size_t payload_size
+) {
+    MeasurementCompareResult result;
+    if (actual == nullptr || expected.size() != payload_size) {
+        return result;
+    }
+    result.compared_bits = static_cast<uint64_t>(payload_size) * 8u;
+    uint64_t bit_errors = 0;
+    for (size_t i = 0; i < payload_size; ++i) {
+        const uint8_t diff = static_cast<uint8_t>(expected[i] ^ actual[i]);
+        bit_errors += static_cast<uint64_t>(__builtin_popcount(static_cast<unsigned int>(diff)));
+    }
+    result.bit_errors = bit_errors;
+    result.exact_match = (bit_errors == 0);
+    return result;
+}
+
+inline float corrected_impulse_snr_linear(float raw_impulse_snr_linear, size_t fft_size, size_t cp_length) {
+    if (fft_size == 0 || cp_length == 0) {
+        return raw_impulse_snr_linear;
+    }
+    return raw_impulse_snr_linear * static_cast<float>(cp_length) / static_cast<float>(fft_size);
+}
+
+inline double noise_variance_from_snr_linear(double snr_linear) {
+    return (snr_linear > 1e-12) ? (1.0 / snr_linear) : 1e12;
+}
 
 inline double frame_duration_from_cfg(const Config& cfg) {
     if (cfg.sample_rate <= 0.0) return 1.0;
@@ -651,6 +1020,62 @@ inline bool reject_legacy_key(const YAML::Node& config, const char* old_key, con
     }
     return true;
 }
+
+inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
+    if (!cfg.data_resource_blocks_configured) {
+        return;
+    }
+
+    out << YAML::Key << "data_resource_blocks" << YAML::Value << YAML::BeginSeq;
+    for (const auto& block : cfg.data_resource_blocks) {
+        out << YAML::BeginMap;
+        out << YAML::Key << "symbol_start" << YAML::Value << block.symbol_start;
+        out << YAML::Key << "symbol_count" << YAML::Value << block.symbol_count;
+        out << YAML::Key << "subcarrier_start" << YAML::Value << block.subcarrier_start;
+        out << YAML::Key << "subcarrier_count" << YAML::Value << block.subcarrier_count;
+        out << YAML::EndMap;
+    }
+    out << YAML::EndSeq;
+}
+
+inline bool load_data_resource_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
+    const YAML::Node blocks = config["data_resource_blocks"];
+    if (!blocks) {
+        cfg.data_resource_blocks_configured = false;
+        cfg.data_resource_blocks.clear();
+        return true;
+    }
+    if (!blocks.IsSequence()) {
+        LOG_G_ERROR() << context_name << " key 'data_resource_blocks' must be a YAML sequence.";
+        return false;
+    }
+
+    cfg.data_resource_blocks_configured = true;
+    cfg.data_resource_blocks.clear();
+    cfg.data_resource_blocks.reserve(blocks.size());
+    for (size_t idx = 0; idx < blocks.size(); ++idx) {
+        const YAML::Node& node = blocks[idx];
+        if (!node.IsMap()) {
+            LOG_G_ERROR() << context_name << " data_resource_blocks[" << idx
+                          << "] must be a YAML map.";
+            return false;
+        }
+        if (!node["symbol_start"] || !node["symbol_count"] ||
+            !node["subcarrier_start"] || !node["subcarrier_count"]) {
+            LOG_G_ERROR() << context_name << " data_resource_blocks[" << idx
+                          << "] must define symbol_start, symbol_count, subcarrier_start, and subcarrier_count.";
+            return false;
+        }
+
+        DataResourceBlock block;
+        block.symbol_start = node["symbol_start"].as<size_t>();
+        block.symbol_count = node["symbol_count"].as<size_t>();
+        block.subcarrier_start = node["subcarrier_start"].as<size_t>();
+        block.subcarrier_count = node["subcarrier_count"].as<size_t>();
+        cfg.data_resource_blocks.push_back(block);
+    }
+    return true;
+}
 } // namespace config_detail
 
 inline Config make_default_modulator_config() {
@@ -667,6 +1092,7 @@ inline Config make_default_modulator_config() {
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     cfg.num_symbols = 100;
     cfg.cuda_mod_pipeline_slots = 2;
+    cfg.mono_sensing_output_enabled = true;
     cfg.mono_sensing_ip = "";
     cfg.mono_sensing_port = 8888;
     cfg.control_port = 9999;
@@ -677,6 +1103,14 @@ inline Config make_default_modulator_config() {
     cfg.paired_frame_queue_size = 8;
     cfg.udp_input_ip = "0.0.0.0";
     cfg.udp_input_port = 50000;
+    cfg.measurement_enable = false;
+    cfg.measurement_mode = "";
+    cfg.measurement_run_id = "";
+    cfg.measurement_output_dir = "";
+    cfg.measurement_payload_bytes = 1024;
+    cfg.measurement_prbs_seed = 0x5A;
+    cfg.measurement_packets_per_point = 1;
+    cfg.measurement_max_packets_per_frame = 1;
     return cfg;
 }
 
@@ -696,7 +1130,6 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
-    out << YAML::Key << "cuda_mod_pipeline_slots" << YAML::Value << cfg.cuda_mod_pipeline_slots;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
     out << YAML::Key << "rx_device_args" << YAML::Value << cfg.rx_device_args;
@@ -711,6 +1144,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
     out << YAML::Key << "udp_input_ip" << YAML::Value << cfg.udp_input_ip;
     out << YAML::Key << "udp_input_port" << YAML::Value << cfg.udp_input_port;
+    out << YAML::Key << "mono_sensing_output_enabled" << YAML::Value << cfg.mono_sensing_output_enabled;
     out << YAML::Key << "mono_sensing_ip" << YAML::Value << cfg.mono_sensing_ip;
     out << YAML::Key << "mono_sensing_port" << YAML::Value << cfg.mono_sensing_port;
     out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
@@ -727,17 +1161,27 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
         out << YAML::Key << "alignment" << YAML::Value << ch.alignment;
         out << YAML::Key << "rx_antenna" << YAML::Value << ch.rx_antenna;
         out << YAML::Key << "enable_system_delay_estimation" << YAML::Value << ch.enable_system_delay_estimation;
+        out << YAML::Key << "enable_sensing_output" << YAML::Value << ch.enable_sensing_output;
         out << YAML::Key << "sensing_ip" << YAML::Value << ch.sensing_ip;
         out << YAML::Key << "sensing_port" << YAML::Value << ch.sensing_port;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;
     out << YAML::Key << "default_ip" << YAML::Value << cfg.default_ip;
+    out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
+    out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
+    out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
+    out << YAML::Key << "measurement_output_dir" << YAML::Value << cfg.measurement_output_dir;
+    out << YAML::Key << "measurement_payload_bytes" << YAML::Value << cfg.measurement_payload_bytes;
+    out << YAML::Key << "measurement_prbs_seed" << YAML::Value << cfg.measurement_prbs_seed;
+    out << YAML::Key << "measurement_packets_per_point" << YAML::Value << cfg.measurement_packets_per_point;
+    out << YAML::Key << "measurement_max_packets_per_frame" << YAML::Value << cfg.measurement_max_packets_per_frame;
     out << YAML::Key << "tx_circular_buffer_size" << YAML::Value << cfg.tx_circular_buffer_size;
     out << YAML::Key << "data_packet_buffer_size" << YAML::Value << cfg.data_packet_buffer_size;
     out << YAML::Key << "paired_frame_queue_size" << YAML::Value << cfg.paired_frame_queue_size;
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
+    config_detail::emit_data_resource_blocks_yaml(out, cfg);
     out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
     out << YAML::EndMap;
 
@@ -793,6 +1237,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
         if (config["udp_input_ip"]) cfg.udp_input_ip = config["udp_input_ip"].as<std::string>();
         if (config["udp_input_port"]) cfg.udp_input_port = config["udp_input_port"].as<int>();
+        if (config["mono_sensing_output_enabled"]) {
+            cfg.mono_sensing_output_enabled = config["mono_sensing_output_enabled"].as<bool>();
+        }
         if (config["mono_sensing_ip"]) cfg.mono_sensing_ip = config["mono_sensing_ip"].as<std::string>();
         if (config["mono_sensing_port"]) cfg.mono_sensing_port = config["mono_sensing_port"].as<int>();
         if (config["sensing_symbol_stride"]) {
@@ -820,6 +1267,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
                 if (node["enable_system_delay_estimation"]) {
                     ch.enable_system_delay_estimation = node["enable_system_delay_estimation"].as<bool>();
                 }
+                if (node["enable_sensing_output"]) {
+                    ch.enable_sensing_output = node["enable_sensing_output"].as<bool>();
+                }
                 if (node["sensing_ip"]) ch.sensing_ip = node["sensing_ip"].as<std::string>();
                 if (node["sensing_port"]) ch.sensing_port = node["sensing_port"].as<int>();
                 cfg.sensing_rx_channels.push_back(ch);
@@ -829,8 +1279,21 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
             }
         }
         if (config["default_ip"]) cfg.default_ip = config["default_ip"].as<std::string>();
+        if (config["measurement_enable"]) cfg.measurement_enable = config["measurement_enable"].as<bool>();
+        if (config["measurement_mode"]) cfg.measurement_mode = config["measurement_mode"].as<std::string>();
+        if (config["measurement_run_id"]) cfg.measurement_run_id = config["measurement_run_id"].as<std::string>();
+        if (config["measurement_output_dir"]) cfg.measurement_output_dir = config["measurement_output_dir"].as<std::string>();
+        if (config["measurement_payload_bytes"]) cfg.measurement_payload_bytes = config["measurement_payload_bytes"].as<size_t>();
+        if (config["measurement_prbs_seed"]) cfg.measurement_prbs_seed = config["measurement_prbs_seed"].as<uint32_t>();
+        if (config["measurement_packets_per_point"]) cfg.measurement_packets_per_point = config["measurement_packets_per_point"].as<uint32_t>();
+        if (config["measurement_max_packets_per_frame"]) {
+            cfg.measurement_max_packets_per_frame = config["measurement_max_packets_per_frame"].as<size_t>();
+        }
         if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
         if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
+        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Modulator config")) {
+            return false;
+        }
         if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
         return true;
     } catch (const YAML::Exception& e) {
@@ -881,6 +1344,27 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
         cfg.sensing_symbol_stride = 1;
     }
+    if (cfg.measurement_enable) {
+        if (cfg.measurement_mode.empty()) {
+            cfg.measurement_mode = "internal_prbs";
+        }
+        if (!measurement_mode_enabled(cfg)) {
+            LOG_G_WARN() << "Unsupported modulator measurement_mode='"
+                         << cfg.measurement_mode << "'. Disabling measurement mode.";
+            cfg.measurement_enable = false;
+        }
+        if (cfg.measurement_payload_bytes < measurement_payload_header_size()) {
+            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement_payload_bytes
+                         << " is smaller than the measurement header. Clamping to "
+                         << measurement_payload_header_size() << '.';
+            cfg.measurement_payload_bytes = measurement_payload_header_size();
+        }
+        if (cfg.measurement_packets_per_point == 0) {
+            LOG_G_WARN() << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
+            cfg.measurement_packets_per_point = 1;
+        }
+    }
+    finalize_data_resource_grid_config(cfg, "Modulator");
 
     auto make_default_ch0 = [&cfg]() {
         SensingRxChannelConfig ch;
@@ -891,6 +1375,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         ch.time_source = "";
         ch.wire_format_rx = "";
         ch.enable_system_delay_estimation = false;
+        ch.enable_sensing_output = cfg.mono_sensing_output_enabled;
         ch.sensing_ip = cfg.mono_sensing_ip.empty() ? cfg.default_ip : cfg.mono_sensing_ip;
         ch.sensing_port = cfg.mono_sensing_port;
         return ch;
@@ -983,6 +1468,14 @@ inline Config make_default_demodulator_config() {
     cfg.akf_r_min = 1e-8;
     cfg.akf_r_max = 1e3;
     cfg.sensing_symbol_stride = 20;
+    cfg.measurement_enable = false;
+    cfg.measurement_mode = "";
+    cfg.measurement_run_id = "";
+    cfg.measurement_output_dir = "";
+    cfg.measurement_payload_bytes = 1024;
+    cfg.measurement_prbs_seed = 0x5A;
+    cfg.measurement_packets_per_point = 1;
+    cfg.measurement_max_packets_per_frame = 1;
     return cfg;
 }
 
@@ -1005,7 +1498,6 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
-    out << YAML::Key << "cuda_demod_pipeline_slots" << YAML::Value << cfg.cuda_demod_pipeline_slots;
     out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
     out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
     out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
@@ -1028,6 +1520,14 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "vofa_debug_port" << YAML::Value << cfg.vofa_debug_port;
     out << YAML::Key << "udp_output_ip" << YAML::Value << cfg.udp_output_ip;
     out << YAML::Key << "udp_output_port" << YAML::Value << cfg.udp_output_port;
+    out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
+    out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
+    out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
+    out << YAML::Key << "measurement_output_dir" << YAML::Value << cfg.measurement_output_dir;
+    out << YAML::Key << "measurement_payload_bytes" << YAML::Value << cfg.measurement_payload_bytes;
+    out << YAML::Key << "measurement_prbs_seed" << YAML::Value << cfg.measurement_prbs_seed;
+    out << YAML::Key << "measurement_packets_per_point" << YAML::Value << cfg.measurement_packets_per_point;
+    out << YAML::Key << "measurement_max_packets_per_frame" << YAML::Value << cfg.measurement_max_packets_per_frame;
     out << YAML::Key << "software_sync" << YAML::Value << cfg.software_sync;
     out << YAML::Key << "hardware_sync" << YAML::Value << cfg.hardware_sync;
     out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
@@ -1058,6 +1558,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "desired_peak_pos" << YAML::Value << cfg.desired_peak_pos;
     out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
+    config_detail::emit_data_resource_blocks_yaml(out, cfg);
     out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
     out << YAML::EndMap;
 
@@ -1129,6 +1630,16 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["vofa_debug_port"]) cfg.vofa_debug_port = config["vofa_debug_port"].as<int>();
         if (config["udp_output_ip"]) cfg.udp_output_ip = config["udp_output_ip"].as<std::string>();
         if (config["udp_output_port"]) cfg.udp_output_port = config["udp_output_port"].as<int>();
+        if (config["measurement_enable"]) cfg.measurement_enable = config["measurement_enable"].as<bool>();
+        if (config["measurement_mode"]) cfg.measurement_mode = config["measurement_mode"].as<std::string>();
+        if (config["measurement_run_id"]) cfg.measurement_run_id = config["measurement_run_id"].as<std::string>();
+        if (config["measurement_output_dir"]) cfg.measurement_output_dir = config["measurement_output_dir"].as<std::string>();
+        if (config["measurement_payload_bytes"]) cfg.measurement_payload_bytes = config["measurement_payload_bytes"].as<size_t>();
+        if (config["measurement_prbs_seed"]) cfg.measurement_prbs_seed = config["measurement_prbs_seed"].as<uint32_t>();
+        if (config["measurement_packets_per_point"]) cfg.measurement_packets_per_point = config["measurement_packets_per_point"].as<uint32_t>();
+        if (config["measurement_max_packets_per_frame"]) {
+            cfg.measurement_max_packets_per_frame = config["measurement_max_packets_per_frame"].as<size_t>();
+        }
         if (config["software_sync"]) cfg.software_sync = config["software_sync"].as<bool>();
         if (config["hardware_sync"]) cfg.hardware_sync = config["hardware_sync"].as<bool>();
         if (config["hardware_sync_tty"]) cfg.hardware_sync_tty = config["hardware_sync_tty"].as<std::string>();
@@ -1166,6 +1677,9 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
             cfg.sensing_symbol_stride = config["sensing_symbol_stride"].as<size_t>();
         }
         if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
+        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Demodulator config")) {
+            return false;
+        }
         if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
         return true;
     } catch (const YAML::Exception& e) {
@@ -1226,6 +1740,27 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
         cfg.rx_agc_low_threshold_db = 11.0;
         cfg.rx_agc_high_threshold_db = 13.0;
     }
+    if (cfg.measurement_enable) {
+        if (cfg.measurement_mode.empty()) {
+            cfg.measurement_mode = "internal_prbs";
+        }
+        if (!measurement_mode_enabled(cfg)) {
+            LOG_G_WARN() << "Unsupported demodulator measurement_mode='"
+                         << cfg.measurement_mode << "'. Disabling measurement mode.";
+            cfg.measurement_enable = false;
+        }
+        if (cfg.measurement_payload_bytes < measurement_payload_header_size()) {
+            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement_payload_bytes
+                         << " is smaller than the measurement header. Clamping to "
+                         << measurement_payload_header_size() << '.';
+            cfg.measurement_payload_bytes = measurement_payload_header_size();
+        }
+        if (cfg.measurement_packets_per_point == 0) {
+            LOG_G_WARN() << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
+            cfg.measurement_packets_per_point = 1;
+        }
+    }
+    finalize_data_resource_grid_config(cfg, "Demodulator");
     if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = cfg.default_ip;
     if (cfg.channel_ip.empty()) cfg.channel_ip = cfg.default_ip;
     if (cfg.pdf_ip.empty()) cfg.pdf_ip = cfg.default_ip;
@@ -1835,8 +2370,9 @@ public:
         uint64_t first_symbol_index = 0; // OFDM symbol index before sparse sampling
     };
 
-    SensingDataSender(const std::string& ip, int port) 
+    SensingDataSender(const std::string& ip, int port, bool enabled = true) 
         : UdpBaseSender(ip, port),
+          _enabled(enabled),
           _data_queue(64) {}
 
     ~SensingDataSender() {
@@ -1844,6 +2380,7 @@ public:
     }
 
     void start() {
+        if (!_enabled) return;
         if (_running.load()) return;
         _running.store(true);
         _send_thread = std::thread(&SensingDataSender::run, this);
@@ -1861,6 +2398,7 @@ public:
     }
 
     void push_data(const AlignedVector& data, uint64_t first_symbol_index) {
+        if (!_enabled) return;
         if (!_running.load()) return;
 
         FrameData frame_data;
@@ -1876,6 +2414,7 @@ public:
     }
 
     void push_data(AlignedVector&& data, uint64_t first_symbol_index) {
+        if (!_enabled) return;
         if (!_running.load()) return;
 
         FrameData frame_data;
@@ -1892,6 +2431,7 @@ public:
         size_t count,
         uint64_t first_symbol_index
     ) {
+        if (!_enabled) return;
         if (!_running.load()) return;
 
         FrameData frame_data;
@@ -1905,6 +2445,7 @@ public:
     }
 
 private:
+    bool _enabled = true;
     void run() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe();

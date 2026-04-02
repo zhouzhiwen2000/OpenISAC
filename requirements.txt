@@ -3,8 +3,9 @@ matplotlib>=3.5.0
 scipy
 optuna
 #cupy-cuda12x # Uncomment the line above if you want to use CuPy for GPU acceleration
+mlx==0.31.1; platform_system == "Darwin" and platform_machine == "arm64"
 numba
 pyqtgraph>=0.14.0
 PyQt6>=6.0.0
 PyYAML>=6.0
-markdown-it-py>=3.0.0
+markdown-it-py>=4.0.0

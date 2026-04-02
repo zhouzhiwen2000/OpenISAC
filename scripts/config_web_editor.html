@@ -117,6 +117,14 @@
       padding: 18px 32px 32px;
     }
 
+    .planner-page {
+      padding: 18px 32px 32px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
     .panel {
       background: var(--surface-color);
       border: 1px solid var(--border-color);
@@ -283,6 +291,227 @@
       margin: 0 0 10px;
       font-size: 13px;
       color: var(--primary-color);
+    }
+
+    .planner-card {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      background: rgba(255, 255, 255, 0.96);
+    }
+
+    .planner-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+    }
+
+    .planner-toolbar .field {
+      flex: 1 1 180px;
+    }
+
+    .planner-toolbar .field label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted-color);
+      font-weight: 700;
+    }
+
+    .planner-toolbar .field select,
+    .planner-toolbar .field input {
+      width: 100%;
+      height: 40px;
+      padding: 0 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: white;
+      color: var(--text-color);
+      font: inherit;
+    }
+
+    .planner-toolbar .actions {
+      margin-top: 0;
+    }
+
+    .planner-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted-color);
+    }
+
+    .planner-stat {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border-color);
+      color: var(--secondary-color);
+      font-weight: 600;
+    }
+
+    .planner-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted-color);
+    }
+
+    .planner-legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border-color);
+    }
+
+    .planner-legend i {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .planner-canvas-wrap {
+      position: relative;
+      border-radius: 8px;
+      border: 1px solid var(--border-strong);
+      overflow: hidden;
+      background: linear-gradient(180deg, #fbfdff 0%, #eef4fb 100%);
+    }
+
+    .planner-canvas {
+      display: block;
+      width: 100%;
+      height: 340px;
+      cursor: crosshair;
+    }
+
+    .planner-page .planner-canvas {
+      height: 620px;
+    }
+
+    .planner-standalone-row {
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    .planner-standalone-row .key-col {
+      max-width: 840px;
+    }
+
+    .planner-standalone-row .key-col code {
+      font-size: 14px;
+    }
+
+    .planner-summary {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .planner-summary .card {
+      background: linear-gradient(180deg, #fbfdff 0%, #f3f7fb 100%);
+    }
+
+    .planner-targets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .planner-target-note {
+      font-size: 13px;
+      color: var(--muted-color);
+      margin-top: 6px;
+    }
+
+    .planner-axis {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted-color);
+      font-family: var(--code-font);
+    }
+
+    .planner-coord {
+      font-family: var(--code-font);
+      color: var(--secondary-color);
+    }
+
+    .planner-block-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .planner-block {
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px dashed var(--border-strong);
+      background: var(--surface-alt);
+    }
+
+    .planner-block-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .planner-block-head strong {
+      color: var(--primary-color);
+      font-size: 13px;
+    }
+
+    .planner-block-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 10px;
+    }
+
+    .planner-block-grid label {
+      display: block;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted-color);
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .planner-block-grid input {
+      width: 100%;
+      height: 38px;
+      padding: 0 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      font: inherit;
+      background: white;
+    }
+
+    .planner-empty {
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px dashed var(--border-strong);
+      background: var(--surface-alt);
+      color: var(--muted-color);
+      font-size: 13px;
     }
 
     .cpu-table {
@@ -535,9 +764,10 @@
     <div class="tabbar" role="tablist">
       <button class="tab active" data-target="modulator" role="tab">Modulator</button>
       <button class="tab" data-target="demodulator" role="tab">Demodulator</button>
+      <button class="tab" data-target="planner" role="tab">Resource Planner</button>
     </div>
 
-    <div class="grid">
+    <div class="grid" id="configRuntimeView">
       <section class="panel">
         <div class="panel-head">
           <div>
@@ -624,6 +854,27 @@
         </div>
       </section>
     </div>
+
+    <section class="planner-page hidden" id="plannerView">
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Resource Planner</h2>
+            <div class="subtle">Plan `data_resource_blocks` on a large time-frequency canvas, snap selections to RE cells, then apply to TX or RX.</div>
+          </div>
+          <div class="flash" id="plannerFlash"></div>
+        </div>
+        <div class="body">
+          <div class="planner-summary" id="plannerSummary"></div>
+          <div id="plannerHost"></div>
+          <div class="planner-targets">
+            <button class="btn primary" id="applyPlannerTxBtn">Apply to Transmitter</button>
+            <button class="btn primary" id="applyPlannerRxBtn">Apply to Receiver</button>
+          </div>
+          <div class="planner-target-note" id="plannerTargetNote"></div>
+        </div>
+      </section>
+    </section>
   </div>
 
   <script>
@@ -631,6 +882,7 @@
 
     const tabs = Array.from(document.querySelectorAll('.tab'));
     const flash = document.getElementById('flash');
+    const plannerFlash = document.getElementById('plannerFlash');
     const saveBtn = document.getElementById('saveBtn');
     const reloadBtn = document.getElementById('reloadBtn');
     const presetSelect = document.getElementById('presetSelect');
@@ -656,13 +908,22 @@
     const overrideIsolateToggle = document.getElementById('overrideIsolateToggle');
     const overrideIsolateInput = document.getElementById('overrideIsolateInput');
     const sudoPasswordInput = document.getElementById('sudoPasswordInput');
+    const configRuntimeView = document.getElementById('configRuntimeView');
+    const plannerView = document.getElementById('plannerView');
+    const plannerSummary = document.getElementById('plannerSummary');
+    const plannerHost = document.getElementById('plannerHost');
+    const applyPlannerTxBtn = document.getElementById('applyPlannerTxBtn');
+    const applyPlannerRxBtn = document.getElementById('applyPlannerRxBtn');
+    const plannerTargetNote = document.getElementById('plannerTargetNote');
 
     let currentTab = 'modulator';
     const cache = {};
 
     function setFlash(message, kind = '') {
-      flash.textContent = message || '';
-      flash.className = 'flash' + (kind ? ' ' + kind : '');
+      for (const node of [flash, plannerFlash]) {
+        node.textContent = message || '';
+        node.className = 'flash' + (kind ? ' ' + kind : '');
+      }
     }
 
     async function api(path, options = {}) {
@@ -683,9 +944,20 @@
       return payload;
     }
 
+    function modelForTab(tabName) {
+      return cache[tabName]?.config || null;
+    }
+
     function updateTabVisuals() {
       for (const tabButton of tabs) {
         tabButton.classList.toggle('active', tabButton.dataset.target === currentTab);
+      }
+      const plannerModeActive = currentTab === 'planner';
+      configRuntimeView.classList.toggle('hidden', plannerModeActive);
+      plannerView.classList.toggle('hidden', !plannerModeActive);
+      if (plannerModeActive) {
+        buildDirLabel.textContent = APP.build_dir;
+        return;
       }
       const label = APP.tabs[currentTab].label;
       editorTitle.textContent = label + ' Config';
@@ -716,7 +988,7 @@
     }
 
     function currentModel() {
-      return cache[currentTab]?.config;
+      return modelForTab(currentTab);
     }
 
     function currentRuntimePrefs(tab = currentTab) {
@@ -760,6 +1032,313 @@
       return null;
     }
 
+    function parseFlowListInts(field) {
+      if (!field) return [];
+      const raw = field.value_text ?? field.value ?? '';
+      if (Array.isArray(raw)) {
+        return raw
+          .map((item) => parseIntOrNull(item))
+          .filter((value) => value !== null);
+      }
+      return String(raw)
+        .split(',')
+        .map((item) => parseIntOrNull(item))
+        .filter((value) => value !== null);
+    }
+
+    function plannerConfig(tabName = currentTab === 'planner' ? 'modulator' : currentTab) {
+      const model = modelForTab(tabName);
+      if (!model) {
+        return {
+          fftSize: 1024,
+          numSymbols: 100,
+          syncPos: 1,
+          pilotPositions: [],
+          pilotSet: new Set(),
+          dataSymbols: Array.from({ length: 99 }, (_value, index) => index + 1),
+          actualToDataSymbol: [],
+          nonPilotSubcarriers: Array.from({ length: 1024 }, (_value, index) => index),
+          subcarrierToNonPilot: Array.from({ length: 1024 }, (_value, index) => index),
+          nonPilotPerSymbol: 1024,
+          totalNonPilotRe: 99 * 1024,
+        };
+      }
+      const fftSize = Math.max(1, parseIntOrNull(findField(model, 'fft_size')?.value_text ?? '') ?? 1024);
+      const numSymbols = Math.max(1, parseIntOrNull(findField(model, 'num_symbols')?.value_text ?? '') ?? 100);
+      const syncPos = Math.min(
+        numSymbols - 1,
+        Math.max(0, parseIntOrNull(findField(model, 'sync_pos')?.value_text ?? '') ?? 0),
+      );
+      const pilotPositions = parseFlowListInts(findField(model, 'pilot_positions'))
+        .filter((value) => value >= 0 && value < fftSize);
+      const pilotSet = new Set(pilotPositions);
+      const actualToDataSymbol = new Array(numSymbols).fill(-1);
+      const dataSymbols = [];
+      for (let sym = 0; sym < numSymbols; sym += 1) {
+        if (sym === syncPos) continue;
+        actualToDataSymbol[sym] = dataSymbols.length;
+        dataSymbols.push(sym);
+      }
+      const subcarrierToNonPilot = new Array(fftSize).fill(-1);
+      const nonPilotSubcarriers = [];
+      for (let sc = 0; sc < fftSize; sc += 1) {
+        if (pilotSet.has(sc)) continue;
+        subcarrierToNonPilot[sc] = nonPilotSubcarriers.length;
+        nonPilotSubcarriers.push(sc);
+      }
+      return {
+        fftSize,
+        numSymbols,
+        syncPos,
+        pilotPositions,
+        pilotSet,
+        dataSymbols,
+        actualToDataSymbol,
+        nonPilotSubcarriers,
+        subcarrierToNonPilot,
+        nonPilotPerSymbol: nonPilotSubcarriers.length,
+        totalNonPilotRe: nonPilotSubcarriers.length * dataSymbols.length,
+      };
+    }
+
+    function defaultPlannerBlock(config) {
+      const symbolStart = config.dataSymbols.length ? config.dataSymbols[0] : 0;
+      return {
+        symbol_start: symbolStart,
+        symbol_count: Math.max(1, Math.min(4, config.dataSymbols.length || 1)),
+        subcarrier_start: 0,
+        subcarrier_count: Math.max(1, Math.min(128, config.fftSize)),
+      };
+    }
+
+    function guardBandPlannerBlocks(config) {
+      const blocks = [];
+      const symbolCount = Math.max(1, config.numSymbols);
+      const firstStart = 1;
+      const firstEnd = Math.min(config.fftSize - 1, 489);
+      if (firstEnd >= firstStart) {
+        blocks.push({
+          symbol_start: 0,
+          symbol_count: symbolCount,
+          subcarrier_start: firstStart,
+          subcarrier_count: firstEnd - firstStart + 1,
+        });
+      }
+      const secondStart = 535;
+      const secondEnd = config.fftSize - 1;
+      if (secondEnd >= secondStart) {
+        blocks.push({
+          symbol_start: 0,
+          symbol_count: symbolCount,
+          subcarrier_start: secondStart,
+          subcarrier_count: secondEnd - secondStart + 1,
+        });
+      }
+      if (!blocks.length && config.fftSize > 1) {
+        blocks.push({
+          symbol_start: 0,
+          symbol_count: symbolCount,
+          subcarrier_start: 1,
+          subcarrier_count: config.fftSize - 1,
+        });
+      }
+      return blocks;
+    }
+
+    function plannerMode(field) {
+      if (field.mode) return field.mode;
+      if (field.allow_omit && !field.items?.length) return 'legacy';
+      return field.items?.length ? 'custom' : 'disabled';
+    }
+
+    function plannerBlocks(field) {
+      return Array.isArray(field.items) ? field.items : [];
+    }
+
+    function plannerBlockToRect(block, config) {
+      const symbolStart = parseIntOrNull(block.symbol_start);
+      const symbolCount = parseIntOrNull(block.symbol_count);
+      const subcarrierStart = parseIntOrNull(block.subcarrier_start);
+      const subcarrierCount = parseIntOrNull(block.subcarrier_count);
+      if (
+        symbolStart === null || symbolCount === null || symbolCount <= 0 ||
+        subcarrierStart === null || subcarrierCount === null || subcarrierCount <= 0
+      ) {
+        return null;
+      }
+      if (symbolStart >= config.numSymbols || subcarrierStart >= config.fftSize) {
+        return null;
+      }
+      return {
+        symbolStart,
+        symbolEnd: Math.min(config.numSymbols - 1, symbolStart + symbolCount - 1),
+        subcarrierStart,
+        subcarrierEnd: Math.min(config.fftSize - 1, subcarrierStart + subcarrierCount - 1),
+      };
+    }
+
+    function plannerStats(field, config) {
+      const mode = plannerMode(field);
+      const blocks = plannerBlocks(field);
+      if (mode === 'legacy') {
+        return {
+          mode,
+          payloadCount: config.totalNonPilotRe,
+          strippedSync: 0,
+          strippedPilot: 0,
+          overlaps: 0,
+          blocks,
+        };
+      }
+      if (mode === 'disabled') {
+        return {
+          mode,
+          payloadCount: 0,
+          strippedSync: 0,
+          strippedPilot: 0,
+          overlaps: 0,
+          blocks,
+        };
+      }
+
+      const mask = new Uint8Array(config.totalNonPilotRe);
+      let payloadCount = 0;
+      let strippedSync = 0;
+      let strippedPilot = 0;
+      let overlaps = 0;
+      for (const block of blocks) {
+        const rect = plannerBlockToRect(block, config);
+        if (!rect) continue;
+        for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
+          if (sym === config.syncPos) {
+            strippedSync += rect.subcarrierEnd - rect.subcarrierStart + 1;
+            continue;
+          }
+          const dataSymbolIndex = config.actualToDataSymbol[sym];
+          if (dataSymbolIndex < 0) continue;
+          const rowBase = dataSymbolIndex * config.nonPilotPerSymbol;
+          for (let sc = rect.subcarrierStart; sc <= rect.subcarrierEnd; sc += 1) {
+            if (config.pilotSet.has(sc)) {
+              strippedPilot += 1;
+              continue;
+            }
+            const nonPilotIndex = config.subcarrierToNonPilot[sc];
+            if (nonPilotIndex < 0) continue;
+            const flatIndex = rowBase + nonPilotIndex;
+            if (mask[flatIndex]) {
+              overlaps += 1;
+              continue;
+            }
+            mask[flatIndex] = 1;
+            payloadCount += 1;
+          }
+        }
+      }
+      return {
+        mode,
+        payloadCount,
+        strippedSync,
+        strippedPilot,
+        overlaps,
+        blocks,
+      };
+    }
+
+    function clonePlannerItems(items) {
+      return Array.isArray(items) ? structuredClone(items) : [];
+    }
+
+    function plannerFieldForTab(tabName) {
+      const model = modelForTab(tabName);
+      return model ? findField(model, 'data_resource_blocks') : null;
+    }
+
+    function plannerSnapshotForTab(tabName) {
+      const field = plannerFieldForTab(tabName);
+      if (!field) {
+        return { mode: 'legacy', items: [] };
+      }
+      return {
+        mode: plannerMode(field),
+        items: clonePlannerItems(plannerBlocks(field)),
+      };
+    }
+
+    function plannerSnapshotEquals(left, right) {
+      return JSON.stringify(left) === JSON.stringify(right);
+    }
+
+    function ensurePlannerState(force = false) {
+      const txSnapshot = plannerSnapshotForTab('modulator');
+      const rxSnapshot = plannerSnapshotForTab('demodulator');
+      const mismatch = !plannerSnapshotEquals(txSnapshot, rxSnapshot);
+      if (!cache.planner || force || !cache.planner.dirty) {
+        const useRxSnapshot = txSnapshot.mode === 'legacy' && !txSnapshot.items.length &&
+          (rxSnapshot.mode !== 'legacy' || rxSnapshot.items.length);
+        const source = useRxSnapshot ? 'demodulator' : 'modulator';
+        const chosen = useRxSnapshot ? rxSnapshot : txSnapshot;
+        cache.planner = {
+          key: 'data_resource_blocks',
+          comment: 'Optional payload RE rectangles',
+          display_comment: 'Plan payload rectangles on a dedicated grid, then apply them to TX or RX.',
+          allow_omit: true,
+          mode: chosen.mode,
+          items: clonePlannerItems(chosen.items),
+          baseTab: 'modulator',
+          loadedFrom: mismatch ? source : 'shared',
+          dirty: false,
+          txSnapshot,
+          rxSnapshot,
+          mismatch,
+        };
+      } else {
+        cache.planner.txSnapshot = txSnapshot;
+        cache.planner.rxSnapshot = rxSnapshot;
+        cache.planner.mismatch = mismatch;
+      }
+      return cache.planner;
+    }
+
+    function refreshPlannerComparisonState() {
+      if (!cache.planner) return null;
+      cache.planner.txSnapshot = plannerSnapshotForTab('modulator');
+      cache.planner.rxSnapshot = plannerSnapshotForTab('demodulator');
+      cache.planner.mismatch = !plannerSnapshotEquals(cache.planner.txSnapshot, cache.planner.rxSnapshot);
+      return cache.planner;
+    }
+
+    function validatePlannerForTab(tabName, plannerField) {
+      const config = plannerConfig(tabName);
+      if (!plannerField) return null;
+      if (plannerMode(plannerField) !== 'custom') {
+        return null;
+      }
+      const items = plannerBlocks(plannerField);
+      for (let index = 0; index < items.length; index += 1) {
+        const block = items[index];
+        const symbolStart = parseIntOrNull(block.symbol_start);
+        const symbolCount = parseIntOrNull(block.symbol_count);
+        const subcarrierStart = parseIntOrNull(block.subcarrier_start);
+        const subcarrierCount = parseIntOrNull(block.subcarrier_count);
+        if (
+          symbolStart === null || symbolCount === null ||
+          subcarrierStart === null || subcarrierCount === null
+        ) {
+          return `Block ${index + 1} has incomplete coordinates.`;
+        }
+        if (symbolStart < 0 || subcarrierStart < 0 || symbolCount <= 0 || subcarrierCount <= 0) {
+          return `Block ${index + 1} must use non-negative starts and positive counts.`;
+        }
+        if (symbolStart + symbolCount > config.numSymbols) {
+          return `Block ${index + 1} exceeds ${APP.tabs[tabName].label} symbol range (${config.numSymbols}).`;
+        }
+        if (subcarrierStart + subcarrierCount > config.fftSize) {
+          return `Block ${index + 1} exceeds ${APP.tabs[tabName].label} FFT range (${config.fftSize}).`;
+        }
+      }
+      return null;
+    }
+
     function makeSensingChannelItem(field, index, existingItems) {
       const baseSource = existingItems[0] && typeof existingItems[0] === 'object'
         ? structuredClone(existingItems[0])
@@ -795,6 +1374,456 @@
       while (items.length > count) {
         items.pop();
       }
+    }
+
+    function renderDataResourcePlanner(field, options = {}) {
+      const sourceTab = options.sourceTab || currentTab;
+      const standalone = Boolean(options.standalone);
+      const onChange = typeof options.onChange === 'function' ? options.onChange : () => {};
+      field.items = plannerBlocks(field);
+      field.mode = plannerMode(field);
+
+      const holder = document.createElement('div');
+      holder.className = 'kv-row';
+      if (standalone) {
+        holder.classList.add('planner-standalone-row');
+      }
+      holder.innerHTML = `
+        <div class="key-col">
+          <code>${standalone ? 'data_resource_blocks planner' : field.key}</code>
+          <div class="hint">${field.display_comment || field.comment || ''}</div>
+        </div>
+        <div class="value-col"></div>
+      `;
+      const valueCol = holder.querySelector('.value-col');
+      const card = document.createElement('div');
+      card.className = 'planner-card';
+
+      const toolbar = document.createElement('div');
+      toolbar.className = 'planner-toolbar';
+      const modeField = document.createElement('div');
+      modeField.className = 'field';
+      modeField.innerHTML = `
+        <label>Payload Mode</label>
+        <select>
+          <option value="legacy">Legacy Full Grid</option>
+          <option value="custom">Custom Blocks</option>
+          <option value="disabled">Disable Payload</option>
+        </select>
+      `;
+      const modeSelect = modeField.querySelector('select');
+      const presetField = document.createElement('div');
+      presetField.className = 'field';
+      presetField.innerHTML = `
+        <label>Preset</label>
+        <select>
+          <option value="">Custom / Current</option>
+          <option value="guard_band_grid">Guard Band Grid</option>
+        </select>
+      `;
+      const presetSelect = presetField.querySelector('select');
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn';
+      addBtn.textContent = 'Add Block';
+      const loadPresetBtn = document.createElement('button');
+      loadPresetBtn.className = 'btn';
+      loadPresetBtn.textContent = 'Load Preset';
+      const clearBtn = document.createElement('button');
+      clearBtn.className = 'btn warn';
+      clearBtn.textContent = 'Clear Blocks';
+      actions.appendChild(loadPresetBtn);
+      actions.appendChild(addBtn);
+      actions.appendChild(clearBtn);
+      toolbar.appendChild(modeField);
+      toolbar.appendChild(presetField);
+      toolbar.appendChild(actions);
+
+      const statsHost = document.createElement('div');
+      statsHost.className = 'planner-meta';
+
+      const legend = document.createElement('div');
+      legend.className = 'planner-legend';
+      legend.innerHTML = `
+        <span><i style="background:#d8e8ff;"></i>payload area</span>
+        <span><i style="background:#ffddc7;"></i>sync symbol</span>
+        <span><i style="background:#d7dce2;"></i>pilot subcarriers</span>
+        <span><i style="background:#87c4ff;"></i>drag preview / block</span>
+      `;
+
+      const canvasWrap = document.createElement('div');
+      canvasWrap.className = 'planner-canvas-wrap';
+      const canvas = document.createElement('canvas');
+      canvas.className = 'planner-canvas';
+      canvasWrap.appendChild(canvas);
+
+      const axis = document.createElement('div');
+      axis.className = 'planner-axis';
+      axis.innerHTML = `
+        <span>subcarrier: 0</span>
+        <span class="planner-coord">hover: -</span>
+        <span>subcarrier: -</span>
+      `;
+      const coordLabel = axis.querySelector('.planner-coord');
+      const axisRight = axis.lastElementChild;
+
+      const blocksHost = document.createElement('div');
+      blocksHost.className = 'planner-block-list';
+
+      card.appendChild(toolbar);
+      card.appendChild(statsHost);
+      card.appendChild(legend);
+      card.appendChild(canvasWrap);
+      card.appendChild(axis);
+      card.appendChild(blocksHost);
+      valueCol.appendChild(card);
+
+      let dragStart = null;
+      let dragCurrent = null;
+
+      function refreshStats() {
+        const config = plannerConfig(sourceTab);
+        const stats = plannerStats(field, config);
+        modeSelect.value = field.mode;
+        if (!presetSelect.dataset.keepValue) {
+          presetSelect.value = '';
+        }
+        axisRight.textContent = `subcarrier: ${config.fftSize - 1}`;
+        statsHost.innerHTML = '';
+        const payloadPct = config.totalNonPilotRe
+          ? ((stats.payloadCount / config.totalNonPilotRe) * 100).toFixed(1)
+          : '0.0';
+        const statItems = [
+          `payload RE ${stats.payloadCount}/${config.totalNonPilotRe} (${payloadPct}%)`,
+          `sync stripped ${stats.strippedSync}`,
+          `pilot stripped ${stats.strippedPilot}`,
+          `overlap ignored ${stats.overlaps}`,
+        ];
+        if (presetSelect.value === 'guard_band_grid') {
+          statItems.push(
+            config.fftSize >= 535
+              ? 'preset: bins 1-489 and 535-end'
+              : 'preset: bins 1-489 (or FFT end) from plot_const active set'
+          );
+        }
+        if (field.mode !== 'custom' && field.items.length) {
+          statItems.push(`stored blocks ${field.items.length} (currently ignored)`);
+        } else {
+          statItems.push(`blocks ${field.items.length}`);
+        }
+        for (const text of statItems) {
+          const pill = document.createElement('span');
+          pill.className = 'planner-stat';
+          pill.textContent = text;
+          statsHost.appendChild(pill);
+        }
+      }
+
+      function renderBlockList() {
+        blocksHost.innerHTML = '';
+        if (!field.items.length) {
+          const empty = document.createElement('div');
+          empty.className = 'planner-empty';
+          empty.textContent =
+            field.mode === 'legacy'
+              ? 'Legacy full-grid mode is active. Switch to Custom Blocks and drag on the planner to create payload rectangles.'
+              : 'No custom payload blocks yet. Drag on the planner or use Add Block.';
+          blocksHost.appendChild(empty);
+          return;
+        }
+        field.items.forEach((block, index) => {
+          const cardEl = document.createElement('div');
+          cardEl.className = 'planner-block';
+          const head = document.createElement('div');
+          head.className = 'planner-block-head';
+          const title = document.createElement('strong');
+          title.textContent = `Block ${index + 1}`;
+          const removeBtn = document.createElement('button');
+          removeBtn.className = 'btn danger';
+          removeBtn.textContent = 'Delete';
+          removeBtn.addEventListener('click', () => {
+            field.items.splice(index, 1);
+            refreshAll();
+          });
+          head.appendChild(title);
+          head.appendChild(removeBtn);
+          cardEl.appendChild(head);
+
+          const grid = document.createElement('div');
+          grid.className = 'planner-block-grid';
+          const specs = [
+            ['symbol_start', 'Symbol Start'],
+            ['symbol_count', 'Symbol Count'],
+            ['subcarrier_start', 'Subcarrier Start'],
+            ['subcarrier_count', 'Subcarrier Count'],
+          ];
+          for (const [key, label] of specs) {
+            const fieldWrap = document.createElement('div');
+            const labelEl = document.createElement('label');
+            labelEl.textContent = label;
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.step = '1';
+            input.min = '0';
+            input.value = block[key] ?? '';
+            input.addEventListener('input', () => {
+              block[key] = input.value;
+              field.dirty = true;
+              refreshStats();
+              drawPlanner();
+            });
+            input.addEventListener('change', () => {
+              const numeric = parseIntOrNull(input.value);
+              block[key] = numeric === null ? '' : numeric;
+              input.value = block[key] === '' ? '' : String(block[key]);
+              field.dirty = true;
+              refreshAll();
+            });
+            fieldWrap.appendChild(labelEl);
+            fieldWrap.appendChild(input);
+            grid.appendChild(fieldWrap);
+          }
+          cardEl.appendChild(grid);
+          blocksHost.appendChild(cardEl);
+        });
+      }
+
+      function eventToCoord(event) {
+        const config = plannerConfig(sourceTab);
+        const rect = canvas.getBoundingClientRect();
+        const x = Math.min(Math.max(event.clientX - rect.left, 0), rect.width - 1);
+        const y = Math.min(Math.max(event.clientY - rect.top, 0), rect.height - 1);
+        const subcarrier = Math.min(config.fftSize - 1, Math.max(0, Math.round((x / rect.width) * config.fftSize - 0.5)));
+        const symbol = Math.min(config.numSymbols - 1, Math.max(0, Math.round((y / rect.height) * config.numSymbols - 0.5)));
+        return { x, y, subcarrier, symbol };
+      }
+
+      function dragRect(config) {
+        if (!dragStart || !dragCurrent) return null;
+        const symbolStart = Math.min(dragStart.symbol, dragCurrent.symbol);
+        const symbolEnd = Math.max(dragStart.symbol, dragCurrent.symbol);
+        const subcarrierStart = Math.min(dragStart.subcarrier, dragCurrent.subcarrier);
+        const subcarrierEnd = Math.max(dragStart.subcarrier, dragCurrent.subcarrier);
+        return {
+          symbolStart,
+          symbolEnd: Math.min(config.numSymbols - 1, symbolEnd),
+          subcarrierStart,
+          subcarrierEnd: Math.min(config.fftSize - 1, subcarrierEnd),
+        };
+      }
+
+      function drawBlockRect(ctx, rect, config, fillStyle, strokeStyle, dashed = false) {
+        const width = ctx.canvas.width;
+        const height = ctx.canvas.height;
+        const x0 = (rect.subcarrierStart / config.fftSize) * width;
+        const x1 = ((rect.subcarrierEnd + 1) / config.fftSize) * width;
+        const y0 = (rect.symbolStart / config.numSymbols) * height;
+        const y1 = ((rect.symbolEnd + 1) / config.numSymbols) * height;
+        ctx.fillStyle = fillStyle;
+        ctx.fillRect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
+        ctx.save();
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = 2;
+        if (dashed) ctx.setLineDash([8, 4]);
+        ctx.strokeRect(x0 + 1, y0 + 1, Math.max(0, x1 - x0 - 2), Math.max(0, y1 - y0 - 2));
+        ctx.restore();
+      }
+
+      function drawPlanner() {
+        const config = plannerConfig(sourceTab);
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(240, Math.floor(canvas.clientWidth * dpr));
+        const height = Math.max(180, Math.floor(canvas.clientHeight * dpr));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, width, height);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+
+        for (let sym = 0; sym <= config.numSymbols; sym += Math.max(1, Math.floor(config.numSymbols / 10))) {
+          const y = (sym / config.numSymbols) * height;
+          ctx.strokeStyle = 'rgba(95, 111, 130, 0.12)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(width, y);
+          ctx.stroke();
+        }
+        for (let sc = 0; sc <= config.fftSize; sc += Math.max(1, Math.floor(config.fftSize / 8))) {
+          const x = (sc / config.fftSize) * width;
+          ctx.strokeStyle = 'rgba(95, 111, 130, 0.08)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, height);
+          ctx.stroke();
+        }
+
+        if (field.mode === 'legacy') {
+          drawBlockRect(
+            ctx,
+            { symbolStart: 0, symbolEnd: config.numSymbols - 1, subcarrierStart: 0, subcarrierEnd: config.fftSize - 1 },
+            config,
+            'rgba(0, 86, 179, 0.12)',
+            'rgba(0, 86, 179, 0.0)',
+          );
+        } else if (field.mode === 'custom') {
+          field.items.forEach((block, index) => {
+            const rect = plannerBlockToRect(block, config);
+            if (!rect) return;
+            const hue = 205 + (index * 27) % 90;
+            drawBlockRect(
+              ctx,
+              rect,
+              config,
+              `hsla(${hue}, 85%, 72%, 0.32)`,
+              `hsla(${hue}, 80%, 40%, 0.95)`,
+            );
+          });
+        }
+
+        for (const pilot of config.pilotPositions) {
+          const x0 = (pilot / config.fftSize) * width;
+          const x1 = ((pilot + 1) / config.fftSize) * width;
+          ctx.fillStyle = 'rgba(120, 134, 152, 0.55)';
+          ctx.fillRect(x0, 0, Math.max(1, x1 - x0), height);
+        }
+
+        const syncY0 = (config.syncPos / config.numSymbols) * height;
+        const syncY1 = ((config.syncPos + 1) / config.numSymbols) * height;
+        ctx.fillStyle = 'rgba(255, 145, 77, 0.4)';
+        ctx.fillRect(0, syncY0, width, Math.max(1, syncY1 - syncY0));
+
+        const preview = dragRect(config);
+        if (preview) {
+          drawBlockRect(
+            ctx,
+            preview,
+            config,
+            'rgba(70, 162, 255, 0.18)',
+            'rgba(0, 86, 179, 0.95)',
+            true,
+          );
+        }
+
+        ctx.fillStyle = '#2c3e50';
+        ctx.font = `${12 * dpr}px var(--ui-font)`;
+        ctx.fillText(`symbols 0..${config.numSymbols - 1}`, 12 * dpr, 18 * dpr);
+        ctx.fillText(`fft bins 0..${config.fftSize - 1}`, 12 * dpr, 36 * dpr);
+      }
+
+      function refreshAll() {
+        refreshStats();
+        renderBlockList();
+        drawPlanner();
+        onChange(field);
+      }
+
+      modeSelect.addEventListener('change', () => {
+        field.mode = modeSelect.value;
+        field.dirty = true;
+        refreshAll();
+      });
+
+      loadPresetBtn.addEventListener('click', () => {
+        const preset = presetSelect.value;
+        if (!preset) {
+          return;
+        }
+        if (preset === 'guard_band_grid') {
+          field.mode = 'custom';
+          field.items = guardBandPlannerBlocks(plannerConfig(sourceTab));
+          field.dirty = true;
+          presetSelect.dataset.keepValue = '1';
+          refreshAll();
+          delete presetSelect.dataset.keepValue;
+        }
+      });
+
+      addBtn.addEventListener('click', () => {
+        if (field.mode !== 'custom') field.mode = 'custom';
+        field.items.push(defaultPlannerBlock(plannerConfig(sourceTab)));
+        field.dirty = true;
+        refreshAll();
+      });
+
+      clearBtn.addEventListener('click', () => {
+        field.items = [];
+        field.dirty = true;
+        if (field.mode === 'custom') {
+          refreshAll();
+          return;
+        }
+        refreshAll();
+      });
+
+      canvas.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        if (field.mode !== 'custom') field.mode = 'custom';
+        dragStart = eventToCoord(event);
+        dragCurrent = dragStart;
+        coordLabel.textContent = `drag: sym ${dragStart.symbol}, sc ${dragStart.subcarrier}`;
+        drawPlanner();
+      });
+
+      canvas.addEventListener('pointermove', (event) => {
+        const point = eventToCoord(event);
+        if (dragStart) {
+          dragCurrent = point;
+          const preview = dragRect(plannerConfig(sourceTab));
+          if (preview) {
+            coordLabel.textContent =
+              `drag: sym ${preview.symbolStart}..${preview.symbolEnd}, sc ${preview.subcarrierStart}..${preview.subcarrierEnd}`;
+          }
+          drawPlanner();
+          return;
+        }
+        coordLabel.textContent = `hover: sym ${point.symbol}, sc ${point.subcarrier}`;
+      });
+
+      function finishDrag() {
+        if (!dragStart || !dragCurrent) {
+          dragStart = null;
+          dragCurrent = null;
+          drawPlanner();
+          return;
+        }
+        const preview = dragRect(plannerConfig(sourceTab));
+        if (preview) {
+          field.items.push({
+            symbol_start: preview.symbolStart,
+            symbol_count: preview.symbolEnd - preview.symbolStart + 1,
+            subcarrier_start: preview.subcarrierStart,
+            subcarrier_count: preview.subcarrierEnd - preview.subcarrierStart + 1,
+          });
+          field.dirty = true;
+        }
+        dragStart = null;
+        dragCurrent = null;
+        refreshAll();
+      }
+
+      canvas.addEventListener('pointerup', finishDrag);
+      canvas.addEventListener('pointerleave', () => {
+        if (dragStart) {
+          finishDrag();
+          return;
+        }
+        coordLabel.textContent = 'hover: -';
+      });
+
+      if (window.ResizeObserver) {
+        const observer = new ResizeObserver(() => drawPlanner());
+        observer.observe(canvas);
+      }
+
+      refreshAll();
+      return holder;
     }
 
     function cpuThreadRows(tab, cpuValues) {
@@ -873,18 +1902,32 @@
       syncCpuValuesFromRows();
     }
 
-    function syncCpuValuesFromRows() {
-      const model = currentModel();
+    function syncCpuValuesFromRows(tabName = currentTab) {
+      const model = modelForTab(tabName);
       if (!model) return;
       const values = [];
-      for (const row of model.cpu_cores.rows) {
+      let truncated = false;
+      for (const row of (model.cpu_cores.rows || [])) {
         const parsed = parseIntOrNull(row.cpu);
-        if (parsed !== null) values.push(parsed);
+        if (parsed === null) {
+          if (String(row.cpu ?? '').trim() === '') {
+            truncated = true;
+            break;
+          }
+          truncated = true;
+          break;
+        }
+        values.push(parsed);
       }
       model.cpu_cores.values = values;
-      const unique = [...new Set(values)].sort((a, b) => a - b);
-      cpuListPreview.textContent = unique.length ? `isolated CPUs: ${unique.join(',')}` : 'isolated CPUs: -';
-      updateRuntimeOptionControls();
+      if (tabName === currentTab && currentTab !== 'planner') {
+        const unique = [...new Set(values)].sort((a, b) => a - b);
+        const preview = unique.length ? `isolated CPUs: ${unique.join(',')}` : 'isolated CPUs: -';
+        cpuListPreview.textContent = truncated
+          ? `${preview}  |  entries after the first blank row are ignored`
+          : preview;
+        updateRuntimeOptionControls();
+      }
     }
 
     function renderSections() {
@@ -905,6 +1948,9 @@
 
         for (const field of section.fields) {
           if (field.type === 'cpu_cores') {
+            continue;
+          }
+          if (field.key === 'data_resource_blocks') {
             continue;
           }
 
@@ -1062,6 +2108,11 @@
                 field.value = input.value;
                 renderSections();
                 renderCpuBinding();
+                return;
+              }
+              if (['fft_size', 'num_symbols', 'sync_pos', 'pilot_positions'].includes(field.key)) {
+                field.value = input.value;
+                renderSections();
               }
             });
             controlHost.appendChild(input);
@@ -1082,15 +2133,25 @@
       renderCpuBinding();
     }
 
-    function gatherSavePayload() {
-      const model = currentModel();
+    function gatherSavePayloadForTab(tabName) {
+      const model = modelForTab(tabName);
       const scalars = {};
       const mappingLists = {};
+      if (!model) {
+        throw new Error(`Missing config model for ${tabName}.`);
+      }
       for (const section of model.sections) {
         for (const field of section.fields) {
           if (field.type === 'cpu_cores') continue;
           if (field.type === 'mapping_list') {
-            mappingLists[field.key] = field.items;
+            if (field.key === 'data_resource_blocks') {
+              mappingLists[field.key] = {
+                mode: plannerMode(field),
+                items: field.items,
+              };
+            } else {
+              mappingLists[field.key] = field.items;
+            }
           } else if (field.type === 'profiling_modules') {
             scalars[field.key] = Array.isArray(field.selected) ? field.selected : [];
           } else if (field.kind === 'bool') {
@@ -1100,13 +2161,84 @@
           }
         }
       }
-      syncCpuValuesFromRows();
+      syncCpuValuesFromRows(tabName);
       return {
-        name: currentTab,
+        name: tabName,
         scalars,
         mapping_lists: mappingLists,
         cpu_cores: model.cpu_cores.values,
       };
+    }
+
+    function gatherSavePayload() {
+      return gatherSavePayloadForTab(currentTab);
+    }
+
+    function renderPlannerSummary(plannerField) {
+      const txConfig = plannerConfig('modulator');
+      const rxConfig = plannerConfig('demodulator');
+      const txStats = plannerStats(plannerField, txConfig);
+      const rxStats = plannerStats(plannerField, rxConfig);
+      plannerSummary.innerHTML = '';
+
+      const overview = document.createElement('div');
+      overview.className = 'card';
+      const loadedFrom = plannerField.dirty ? 'planner tab' : (plannerField.mismatch ? plannerField.loadedFrom : 'shared');
+      overview.innerHTML = `
+        <h3>Planner Overview</h3>
+        <div class="mono">Canvas reference: Modulator grid (${txConfig.numSymbols} symbols x ${txConfig.fftSize} subcarriers)
+Loaded from: ${loadedFrom}
+TX/RX block configs currently ${plannerField.mismatch ? 'differ' : 'match'}.</div>
+      `;
+      plannerSummary.appendChild(overview);
+
+      const targets = document.createElement('div');
+      targets.className = 'card';
+      const txError = validatePlannerForTab('modulator', plannerField);
+      const rxError = validatePlannerForTab('demodulator', plannerField);
+      targets.innerHTML = `
+        <h3>Target Estimates</h3>
+        <div class="mono">TX payload RE: ${txStats.payloadCount}/${txConfig.totalNonPilotRe}${txError ? `\nTX validate: ${txError}` : ''}
+RX payload RE: ${rxStats.payloadCount}/${rxConfig.totalNonPilotRe}${rxError ? `\nRX validate: ${rxError}` : ''}</div>
+      `;
+      plannerSummary.appendChild(targets);
+    }
+
+    function renderPlannerPage() {
+      const plannerField = ensurePlannerState();
+      plannerHost.innerHTML = '';
+      plannerHost.appendChild(renderDataResourcePlanner(plannerField, {
+        standalone: true,
+        sourceTab: plannerField.baseTab || 'modulator',
+        onChange: () => renderPlannerSummary(plannerField),
+      }));
+      renderPlannerSummary(plannerField);
+      plannerTargetNote.textContent =
+        'Selections are snapped to integer RE cells on drag release. Apply writes the current planner state into Modulator.yaml or Demodulator.yaml.';
+    }
+
+    async function applyPlannerToTab(tabName) {
+      await loadConfig(tabName, true);
+      const plannerField = ensurePlannerState();
+      const validationError = validatePlannerForTab(tabName, plannerField);
+      if (validationError) {
+        throw new Error(validationError);
+      }
+      const targetField = plannerFieldForTab(tabName);
+      if (!targetField) {
+        throw new Error(`Missing data_resource_blocks field in ${tabName} config model.`);
+      }
+      targetField.mode = plannerField.mode;
+      targetField.items = clonePlannerItems(plannerField.items);
+      const result = await api('/api/config/save', {
+        method: 'POST',
+        body: JSON.stringify(gatherSavePayloadForTab(tabName)),
+      });
+      cache[tabName] = { ...cache[tabName], config: result };
+      plannerField.dirty = true;
+      refreshPlannerComparisonState();
+      renderPlannerPage();
+      setFlash(`Applied planner to ${APP.tabs[tabName].label}.`, 'ok');
     }
 
     async function loadConfig(tab, preserveCommand = false) {
@@ -1171,6 +2303,16 @@
     async function switchTab(tab) {
       currentTab = tab;
       updateTabVisuals();
+      if (tab === 'planner') {
+        await Promise.all([
+          loadConfig('modulator', true),
+          loadConfig('demodulator', true),
+        ]);
+        ensurePlannerState(false);
+        renderPlannerPage();
+        setFlash('');
+        return;
+      }
       populatePresets(tab);
       await loadConfig(tab);
       await refreshRuntime(tab);
@@ -1311,6 +2453,28 @@
       }
     });
 
+    applyPlannerTxBtn.addEventListener('click', async () => {
+      applyPlannerTxBtn.disabled = true;
+      try {
+        await applyPlannerToTab('modulator');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        applyPlannerTxBtn.disabled = false;
+      }
+    });
+
+    applyPlannerRxBtn.addEventListener('click', async () => {
+      applyPlannerRxBtn.disabled = true;
+      try {
+        await applyPlannerToTab('demodulator');
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        applyPlannerRxBtn.disabled = false;
+      }
+    });
+
     tabs.forEach((tabButton) => {
       tabButton.addEventListener('click', () => {
         switchTab(tabButton.dataset.target).catch((error) => setFlash(error.message, 'err'));
@@ -1318,6 +2482,7 @@
     });
 
     setInterval(() => {
+      if (currentTab === 'planner') return;
       refreshRuntime(currentTab).catch(() => {});
     }, 1500);
 

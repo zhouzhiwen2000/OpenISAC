@@ -227,6 +227,11 @@
 <li>下载: <a href="http://www.ubuntu.com/download/desktop">http://www.ubuntu.com/download/desktop</a></li>
 </ul>
 </li>
+<li><strong>macOS (Apple Silicon，仅建议用于本地开发 / 演示)</strong>
+<ul>
+<li>教程: <a href="https://github.com/zhouzhiwen2000/UHD_OFDM/blob/OpenISAC_MultiChannel/docs/macos_build_zh.md">独立 macOS 构建教程</a></li>
+</ul>
+</li>
 </ul>
 <h4>依赖项和安装</h4>
 <h4>1. UHD (USRP 硬件驱动程序)</h4>
@@ -355,12 +360,7 @@ conda activate OpenISAC
 <li><strong>Windows:</strong> 从 <a href="https://ffmpeg.org/download.html">ffmpeg.org</a> 下载并添加到 PATH，或将可执行文件放置在工作目录中。</li>
 </ul>
 <h4>启用 GPU 加速 (可选)</h4>
-<p>如果有 Nvidia GPU，请安装 <code>cupy-cuda12x</code> 以启用 GPU 加速：</p>
-<blockquote>
-<p><strong>注意:</strong> 安装 CuPy 之前，请务必先安装 CUDA Toolkit。</p>
-</blockquote>
-<pre><code class="language-bash">pip install cupy-cuda12x
-</code></pre>
+<p>部分快速绘图脚本可以在当前 Python 环境提供可选 GPU 数组后端时启用加速；如果未安装相关后端，则会自动回退到 CPU 执行。</p>
 <h4>启用 Intel 集成显卡加速 (可选)</h4>
 <p>如果您的设备配备 Intel 集成显卡（如 Intel UHD Graphics、Intel Iris Xe 等），可以通过 <code>dpctl</code> 和 <code>dpnp</code> 启用 GPU 加速。这对于没有 Nvidia 独立显卡的笔记本电脑和台式机特别有用。</p>
 <h5>1. 安装 Intel 显卡官方驱动</h5>
@@ -382,10 +382,10 @@ conda activate OpenISAC
 <pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]
 </code></pre>
 <h5>4. 使用说明</h5>
-<p>OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：</p>
+<p>OpenISAC 前端会自动检测可用的数组后端。优先级顺序为：</p>
 <ol>
-<li>Nvidia GPU (CUDA)</li>
-<li>Intel iGPU (dpnp)</li>
+<li>CuPy 后端</li>
+<li>dpnp 后端</li>
 <li>CPU (回退选项)</li>
 </ol>
 <p>无需修改代码，系统会自动选择最佳可用后端。</p>
@@ -446,17 +446,21 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <p>随后在浏览器打开 <code>http://&lt;your-host&gt;:8765</code>。</p>
 <p>功能：</p>
 <ul>
-<li>调制端和解调端使用不同 tab 分开管理。</li>
+<li>调制端和解调端使用不同 tab 分开管理，并额外提供一个专门编辑 <code>data_resource_blocks</code> 的 <code>Resource Planner</code> tab。</li>
 <li>以“参数 / 值”表单方式编辑 <code>build/Modulator.yaml</code> 和 <code>build/Demodulator.yaml</code>，而不是原始 YAML 文本框。</li>
 <li>为 <code>cpu_cores</code> 提供专门的 CPU 绑定编辑器，可按线程名填写 CPU，并自动生成对应注释。</li>
 <li>保存当前表单后，可在 <code>build/</code> 目录中启动/停止调制与解调进程。</li>
 <li>提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。</li>
-<li>每个 tab 都提供 CPU 预设命令，也支持自定义启动命令。</li>
+<li>每个 tab 都提供命令预设，也支持自定义启动命令。</li>
+<li>可以在较大的时频资源网格画布上直接绘制 payload 矩形块，绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。</li>
+<li>内置 <code>Guard Band Grid</code> 预设，规则与 <code>scripts/plot_const.py</code> 一致：默认仅保留 <code>1..489</code> 和 <code>535..N-1</code> 这两段子载波，然后再继续套用 sync / pilot 的剔除规则。</li>
 </ul>
 <p>说明：</p>
 <ul>
 <li>默认命令分别是 <code>./OFDMModulator</code> 和 <code>./OFDMDemodulator</code>。</li>
 <li>编辑器当前直接面向 <code>build/</code> 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 <code>Modulator.yaml</code> / <code>Demodulator.yaml</code>。</li>
+<li><code>Resource Planner</code> tab 只负责编辑 <code>data_resource_blocks</code>。点击 <code>Apply to Transmitter</code> 会把当前 planner 状态写入 <code>build/Modulator.yaml</code>，点击 <code>Apply to Receiver</code> 会写入 <code>build/Demodulator.yaml</code>。</li>
+<li>为了便于实验，planner 允许 TX 和 RX 暂时配置不同；但正常收发时两端仍应保持相同的 <code>data_resource_blocks</code>。</li>
 <li>当 CPU 核心不足时，建议先给 <code>main thread affinity</code> 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。</li>
 <li>若开启 <code>Enable runtime CPU isolation</code>，控制台会根据当前 <code>cpu_cores</code> 计算默认 isolate CPU 列表，并在启动前调用 <code>scripts/isolate_cpus.bash</code>。</li>
 <li>若再开启 <code>Override CPU isolation list</code>，右侧文本框会先用默认 isolate 列表初始化，然后允许按本次启动需要手工修改。</li>
@@ -543,6 +547,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[571,...,451]</code></td>
 <td style="text-align:left">导频子载波索引列表。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">可选的 payload 资源矩形块。省略该键时保持旧版“全部非同步、非导频 RE 都承载 payload”的行为；设置为 <code>[]</code> 时表示完全禁用 payload RE。每个块使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>；只有选中的非同步、非导频 RE 会承载真实业务数据，其余非同步、非导频 RE 会发送预生成 QPSK。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -659,6 +669,48 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">控制命令 UDP 端口（心跳/MTI 等）。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用 CPU 版内部测量模式。启用后，<code>OFDMModulator</code> 不再监听 <code>udp_input_*</code>，而是内部生成确定性的 PRBS 载荷；<code>OFDMDemodulator</code> 会把测量载荷转入 BER/BLER/EVM 统计。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">测量模式选择。目前仅支持 <code>internal_prbs</code>；非法值会在配置归一化阶段自动关闭测量模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">写入测量 CSV 汇总的运行 ID。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">CPU 测量汇总文件输出目录。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">每个内部测量载荷的字节数。若小于内部测量头长度，会自动钳制到最小合法值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">用于生成确定性 PRBS 载荷内容的基础种子。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每个在线 <code>MRST</code> epoch 要发送的测量载荷数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
@@ -672,6 +724,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </tr>
 </tbody>
 </table>
+<p>若启用 <code>data_resource_blocks</code>，请把相同的矩形块同步写入 <code>Demodulator.yaml</code>；当矩形块与 <code>sync_pos</code> 或 <code>pilot_positions</code> 重叠时，后两者优先。</p>
 <p><code>sensing_rx_channels</code> 子项字段：</p>
 <table>
 <thead>
@@ -735,7 +788,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>enable_system_delay_estimation</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">若为 <code>true</code>，该通道会在启动时执行一次基于 ZC 相关的系统时延估计，随后继续消耗帧数据，但保持常规感知处理链停用。</td>
+<td style="text-align:left">若为 <code>true</code>，该通道会在启动时执行一次基于 ZC 相关的系统时延估计，之后每隔 434 个帧再执行一次；同时继续消耗帧数据，但保持常规感知处理链停用。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>sensing_ip</code></td>
@@ -755,7 +808,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <ul>
 <li>当 <code>sensing_rx_channels</code> 为空且 <code>sensing_rx_channel_count &gt; 0</code> 时，程序按通道号 <code>0..N-1</code> 自动补齐默认项。</li>
 <li>若两者数量不一致，程序会按 <code>sensing_rx_channel_count</code> 对通道列表做裁剪或扩展。</li>
-<li>当某通道设置 <code>enable_system_delay_estimation=true</code> 时，该通道只会在启动附近执行一次系统时延估计，后续不再重复做该计算，但会继续消耗帧数据；常规感知处理和感知 UDP 输出保持停用。</li>
+<li>当某通道设置 <code>enable_system_delay_estimation=true</code> 时，该通道会在启动附近执行一次系统时延估计，之后每隔 434 个帧重复执行一次，同时继续消耗帧数据；常规感知处理和感知 UDP 输出保持停用。</li>
 <li><code>device_args</code>、<code>wire_format_*</code>、每通道天线口和输出 IP 等字段通常与硬件平台和部署环境强相关；样本 YAML 只是起点，不应把不同机器/射频平台的值机械互换。</li>
 </ul>
 <h3>OFDM 解调器 (OFDMDemodulator)</h3>
@@ -905,6 +958,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">导频子载波索引列表。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">可选的 payload 资源矩形块。省略该键时保持旧版“全部非同步、非导频 RE 都提取 payload”的行为；设置为 <code>[]</code> 时表示不提取任何 payload LLR。每个块使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>；实际 payload RE 会在移除 <code>sync_pos</code> 和 <code>pilot_positions</code> 后得到。启用时该配置必须与 <code>Modulator.yaml</code> 保持一致。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>device_args</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
@@ -1046,7 +1105,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>enable_bi_sensing</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用双站感知处理链和 UDP 输出；设为 <code>false</code> 时 <code>OFDMDemodulator</code> 不会启动双站感知通道。</td>
+<td style="text-align:left">启用双站感知处理链和 UDP 输出；设为 <code>false</code> 时解调器不会启动双站感知通道。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_ip</code></td>
@@ -1133,10 +1192,52 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">控制命令 UDP 端口。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 <code>udp_output_*</code>，而是直接用于 BER/BLER/EVM 统计。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">测量模式选择。目前仅支持 <code>internal_prbs</code>；非法值会在配置归一化阶段自动关闭测量模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">写入测量 CSV 汇总的运行 ID。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">CPU 测量汇总文件输出目录。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">每个测量载荷期望的字节数。若小于内部测量头长度，会自动钳制到最小合法值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">用于重建确定性 PRBS 测量载荷的基础种子。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每个在线 <code>MRST</code> epoch 期望统计的测量载荷数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>agc</code>、<code>align</code>；<code>all</code> 表示全部。<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志。</td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>agc</code>、<code>align</code>、<code>snr</code>；<code>all</code> 表示全部。<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前解调路径的 <code>_snr_db / _noise_var / _llr_scale</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cpu_cores</code></td>

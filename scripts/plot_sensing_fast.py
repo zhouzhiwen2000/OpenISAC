@@ -2,6 +2,8 @@ import argparse
 import numpy as np
 import sys
 import os
+import platform
+import subprocess
 import time
 import threading
 from queue import Queue, Empty
@@ -12,30 +14,98 @@ import datetime
 import scipy.io as sio
 
 # PyQt6 + PyQtGraph Imports
-from PyQt6 import QtWidgets, QtCore
+from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 # ====== Backend Detection ======
 USE_NVIDIA_GPU = False
+USE_APPLE_GPU = False
 USE_INTEL_GPU = False
 cp = None
 xp = np
+mx = None
+BACKEND_NAME = "CPU"
+FORCED_BACKEND = os.environ.get("OPENISAC_BACKEND", "auto").strip().lower()
 
-try:
-    import cupy as _cp
+if FORCED_BACKEND not in {"auto", "cpu", "cuda", "apple", "mlx", "intel"}:
+    print(f"Backend: Unknown OPENISAC_BACKEND={FORCED_BACKEND!r}; falling back to auto")
+    FORCED_BACKEND = "auto"
+
+
+def _backend_allowed(name):
+    if name == "mlx":
+        return FORCED_BACKEND in ("auto", "apple", "mlx")
+    return FORCED_BACKEND in ("auto", name)
+
+
+def _probe_mlx_backend(timeout_s=5.0):
+    if sys.platform != "darwin" or platform.machine().lower() != "arm64":
+        return False, "MLX backend requires Apple Silicon macOS"
+
+    probe_code = (
+        "import mlx.core as mx\n"
+        "x = mx.array([1.0], dtype=mx.float32)\n"
+        "y = mx.fft.fftshift(mx.array([[1+0j, 2+0j]], dtype=mx.complex64), axes=(1,))\n"
+        "z = mx.fft.ifft(y, axis=1)\n"
+        "_ = float(mx.abs(z).sum().item())\n"
+        "print('mlx-ok')\n"
+    )
     try:
-        _gpu_count = _cp.cuda.runtime.getDeviceCount()
-        if _gpu_count > 0:
-            USE_NVIDIA_GPU = True
-            cp = _cp
-            xp = _cp
-            print(f"Backend: Using NVIDIA GPU via CuPy (devices: {_gpu_count})")
-    except Exception as _e:
-        print(f"Backend: CuPy available but CUDA init failed: {_e}")
-except ImportError:
-    pass
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_s,
+            env=dict(os.environ, PYTHONNOUSERSITE="1"),
+        )
+    except Exception as exc:
+        return False, f"MLX probe failed: {exc}"
 
-if not USE_NVIDIA_GPU:
+    if result.returncode == 0 and "mlx-ok" in result.stdout:
+        return True, "Apple GPU via MLX"
+
+    stderr = (result.stderr or "").strip().splitlines()
+    if stderr:
+        detail = stderr[-1]
+    else:
+        detail = f"probe exited with code {result.returncode}"
+    return False, f"MLX probe failed: {detail}"
+
+if _backend_allowed("cuda"):
+    try:
+        import cupy as _cp
+        try:
+            _gpu_count = _cp.cuda.runtime.getDeviceCount()
+            if _gpu_count > 0:
+                USE_NVIDIA_GPU = True
+                cp = _cp
+                xp = _cp
+                BACKEND_NAME = f"NVIDIA GPU via CuPy (devices: {_gpu_count})"
+                print(f"Backend: Using {BACKEND_NAME}")
+        except Exception as _e:
+            print(f"Backend: CuPy available but CUDA init failed: {_e}")
+    except ImportError:
+        if FORCED_BACKEND == "cuda":
+            print("Backend: Forced CUDA backend requested but CuPy is not installed")
+
+if not USE_NVIDIA_GPU and _backend_allowed("mlx"):
+    _mlx_ok, _mlx_msg = _probe_mlx_backend()
+    if _mlx_ok:
+        import mlx.core as _mx
+
+        if not hasattr(_mx, "fft") or not hasattr(_mx.fft, "fftshift"):
+            _mlx_msg = "MLX import succeeded but required FFT APIs are missing"
+        else:
+            USE_APPLE_GPU = True
+            mx = _mx
+            BACKEND_NAME = _mlx_msg
+            print(f"Backend: Using {BACKEND_NAME}")
+
+    if not USE_APPLE_GPU and FORCED_BACKEND in {"apple", "mlx"}:
+        print(f"Backend: Forced MLX backend unavailable: {_mlx_msg}")
+
+if not USE_NVIDIA_GPU and not USE_APPLE_GPU and _backend_allowed("intel"):
     def _try_intel_gpu():
         global USE_INTEL_GPU, cp, xp
         try:
@@ -64,9 +134,10 @@ if not USE_NVIDIA_GPU:
         USE_INTEL_GPU = True
         cp = _intel_result[0]
         xp = _intel_result[0]
-        print(f"Backend: Using Intel GPU via dpnp ({_intel_result[1]})")
+        BACKEND_NAME = f"Intel GPU via dpnp ({_intel_result[1]})"
+        print(f"Backend: Using {BACKEND_NAME}")
 
-USE_GPU = USE_NVIDIA_GPU or USE_INTEL_GPU
+USE_GPU = USE_NVIDIA_GPU or USE_APPLE_GPU or USE_INTEL_GPU
 if not USE_GPU:
     print("Backend: No GPU acceleration available; using CPU")
 
@@ -356,9 +427,12 @@ for _ch in CHANNELS:
 
 
 # ====== FFT Processing ======
-if USE_GPU:
+if USE_NVIDIA_GPU or USE_INTEL_GPU:
     range_window = cp.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE), dtype=cp.float32)
     doppler_window = cp.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1), dtype=cp.float32)
+elif USE_APPLE_GPU:
+    range_window = mx.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32))
+    doppler_window = mx.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32))
 else:
     range_window = np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32)
     doppler_window = np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32)
@@ -403,14 +477,17 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
     if max_view_range_bins is None:
         max_view_range_bins = MAX_RANGE_BIN
 
-    range_win = range_window if enable_range_window else (
-        cp.ones((1, FFT_SIZE), dtype=cp.float32) if USE_GPU else np.ones((1, FFT_SIZE), dtype=np.float32)
-    )
-    doppler_win = doppler_window if enable_doppler_window else (
-        cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32) if USE_GPU else np.ones((NUM_SYMBOLS, 1), dtype=np.float32)
-    )
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
+        range_win = range_window if enable_range_window else cp.ones((1, FFT_SIZE), dtype=cp.float32)
+        doppler_win = doppler_window if enable_doppler_window else cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32)
+    elif USE_APPLE_GPU:
+        range_win = range_window if enable_range_window else mx.ones((1, FFT_SIZE), dtype=mx.float32)
+        doppler_win = doppler_window if enable_doppler_window else mx.ones((NUM_SYMBOLS, 1), dtype=mx.float32)
+    else:
+        range_win = range_window if enable_range_window else np.ones((1, FFT_SIZE), dtype=np.float32)
+        doppler_win = doppler_window if enable_doppler_window else np.ones((NUM_SYMBOLS, 1), dtype=np.float32)
 
-    if USE_GPU:
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
         frame_data_gpu = cp.array(frame_data)
         shifted_data = cp.fft.fftshift(frame_data_gpu, axes=1)
         windowed_data = shifted_data * range_win
@@ -434,6 +511,25 @@ def process_range_doppler(frame_data, max_view_range_bins=None):
         magnitude = cp.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE)
         magnitude_db = 20 * cp.log10(magnitude + 1e-12)
         return to_numpy(magnitude_db), range_time_cpu, to_numpy(doppler_shifted)
+
+    if USE_APPLE_GPU:
+        frame_data_gpu = mx.array(frame_data, dtype=mx.complex64)
+        shifted_data = mx.fft.fftshift(frame_data_gpu, axes=(1,))
+        windowed_data = shifted_data * range_win
+        range_time = mx.fft.ifft(windowed_data, n=RANGE_FFT_SIZE, axis=1) * RANGE_FFT_SIZE
+
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        doppler_windowed = range_time_view * doppler_win
+        doppler_fft = mx.fft.fft(doppler_windowed, n=DOPPLER_FFT_SIZE, axis=0)
+        doppler_shifted = mx.fft.fftshift(doppler_fft, axes=(0,))
+
+        magnitude = mx.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        magnitude_db = 20.0 * mx.log10(magnitude + 1e-12)
+        return (
+            np.array(magnitude_db, copy=False).astype(np.float32, copy=False),
+            np.array(range_time_view, copy=False),
+            np.array(doppler_shifted, copy=False).astype(np.complex64, copy=False),
+        )
 
     if HAVE_NUMBA:
         padded_data = cpu_prep_range_fft(frame_data, range_win, FFT_SIZE, RANGE_FFT_SIZE)
@@ -689,6 +785,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("OpenISAC Sensing - PyQtGraph (Multi-Channel)")
         self.resize(1600, 900)
+        self._control_panel_width = 520
+        self._status_label_text_width = self._control_panel_width - 24
 
         self.phase_ready = False
         self.synced_frame_id = None
@@ -757,6 +855,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Control Panel
         control_panel = QtWidgets.QWidget()
+        control_panel.setFixedWidth(self._control_panel_width)
         control_layout = QtWidgets.QVBoxLayout(control_panel)
         control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         main_layout.addWidget(control_panel, stretch=1)
@@ -781,7 +880,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_phase_clicked,
             self.lbl_aoa_status,
         ]:
+            lbl.setWordWrap(False)
+            lbl.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            lbl.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
             control_layout.addWidget(lbl)
+
+        fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        for lbl in [
+            self.lbl_display,
+            self.lbl_fps,
+            self.lbl_queue,
+            self.lbl_sender,
+            self.lbl_buffer,
+            self.lbl_phase_sync,
+            self.lbl_phase_clicked,
+            self.lbl_aoa_status,
+        ]:
+            lbl.setFont(fixed_font)
+            lbl.setFixedWidth(self._status_label_text_width)
+            self._set_status_label_text(lbl, lbl.text())
 
         control_layout.addSpacing(16)
 
@@ -913,6 +1030,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         threading.Thread(target=send_skip_command, daemon=True).start()
 
+    def _set_status_label_text(self, label, text):
+        elided = label.fontMetrics().elidedText(
+            text,
+            QtCore.Qt.TextElideMode.ElideRight,
+            self._status_label_text_width
+        )
+        label.setText(elided)
+        label.setToolTip(text)
+
     def update_toggle_style(self, btn, state):
         btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
 
@@ -922,7 +1048,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if n_ch <= 0:
             display_channel = 0
             self.combo_display_channel.setEnabled(False)
-            self.lbl_display.setText("Display: N/A")
+            self._set_status_label_text(self.lbl_display, "Display: N/A")
             self.phase_curve_plot.setVisible(False)
             if hasattr(self, "btn_calibrate"):
                 self.btn_calibrate.setEnabled(False)
@@ -945,7 +1071,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.phase_curve_plot.setVisible(n_ch >= 2)
         if hasattr(self, "btn_calibrate"):
             self.btn_calibrate.setEnabled(n_ch >= 2)
-        self.lbl_display.setText(f"Display: CH{display_channel + 1}")
+        self._set_status_label_text(self.lbl_display, f"Display: CH{display_channel + 1}")
 
     def _get_display_channel_runtime(self):
         if not CHANNELS:
@@ -1015,12 +1141,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def calibrate_phase_bias(self):
         if len(CHANNELS) < 2:
-            self.lbl_aoa_status.setText("AoA: unavailable (need >=2 channels)")
+            self._set_status_label_text(self.lbl_aoa_status, "AoA: unavailable (need >=2 channels)")
             print("Calibration skipped: need >=2 channels")
             return
         phase_result = self._compute_phase_vectors()
         if phase_result is None:
-            self.lbl_aoa_status.setText("AoA: calibration failed (sync/click not ready)")
+            self._set_status_label_text(self.lbl_aoa_status, "AoA: calibration failed (sync/click not ready)")
             print("Calibration skipped: phase vector not ready")
             return
 
@@ -1213,20 +1339,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.phase_ready = False
             self.synced_frame_id = None
             self.synced_rd_complex = None
-            self.lbl_phase_sync.setText("Phase Sync: unavailable (need >=2 channels)")
-            self.lbl_aoa_status.setText("AoA: unavailable (need >=2 channels)")
+            self._set_status_label_text(self.lbl_phase_sync, "Phase Sync: unavailable (need >=2 channels)")
+            self._set_status_label_text(self.lbl_aoa_status, "AoA: unavailable (need >=2 channels)")
             return
 
         frame_tags = ", ".join([f"CH{i + 1}={CHANNELS[i].last_frame_id}" for i in range(len(CHANNELS))])
         if not self.phase_ready or self.synced_frame_id is None or self.synced_rd_complex is None:
-            self.lbl_phase_sync.setText(f"Phase Sync: waiting same frame across {len(CHANNELS)} channels ({frame_tags})")
+            self._set_status_label_text(
+                self.lbl_phase_sync,
+                f"Phase Sync: waiting same frame across {len(CHANNELS)} channels ({frame_tags})"
+            )
             if self.phase_calibrated:
-                self.lbl_aoa_status.setText("AoA: waiting phase sync (calibrated)")
+                self._set_status_label_text(self.lbl_aoa_status, "AoA: waiting phase sync (calibrated)")
             else:
-                self.lbl_aoa_status.setText("AoA: waiting phase sync (not calibrated)")
+                self._set_status_label_text(self.lbl_aoa_status, "AoA: waiting phase sync (not calibrated)")
             return
 
-        self.lbl_phase_sync.setText(
+        self._set_status_label_text(
+            self.lbl_phase_sync,
             f"Phase Sync: locked frame {self.synced_frame_id} across {len(CHANNELS)} channels"
         )
 
@@ -1235,19 +1365,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.phase_curve_raw = None
             self.phase_curve_comp = None
             self._update_phase_curve_plot()
-            self.lbl_phase_clicked.setText("Phase@Clicked: unavailable (need >=2 channels)")
-            self.lbl_aoa_status.setText("AoA: unavailable (need >=2 channels)")
+            self._set_status_label_text(self.lbl_phase_clicked, "Phase@Clicked: unavailable (need >=2 channels)")
+            self._set_status_label_text(self.lbl_aoa_status, "AoA: unavailable (need >=2 channels)")
             return
 
         if self.clicked_range_idx is None or self.clicked_doppler_idx is None:
             self.phase_curve_raw = None
             self.phase_curve_comp = None
             self._update_phase_curve_plot()
-            self.lbl_phase_clicked.setText("Phase@Clicked: click RD map to query")
+            self._set_status_label_text(self.lbl_phase_clicked, "Phase@Clicked: click RD map to query")
             if self.phase_calibrated:
-                self.lbl_aoa_status.setText("AoA: calibrated; click RD map to query")
+                self._set_status_label_text(self.lbl_aoa_status, "AoA: calibrated; click RD map to query")
             else:
-                self.lbl_aoa_status.setText("AoA: not calibrated; click RD map then calibrate")
+                self._set_status_label_text(self.lbl_aoa_status, "AoA: not calibrated; click RD map then calibrate")
             return
 
         phase_result = self._compute_phase_vectors()
@@ -1255,11 +1385,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.phase_curve_raw = None
             self.phase_curve_comp = None
             self._update_phase_curve_plot()
-            self.lbl_phase_clicked.setText("Phase@Clicked: waiting same-frame data across all channels")
+            self._set_status_label_text(
+                self.lbl_phase_clicked,
+                "Phase@Clicked: waiting same-frame data across all channels"
+            )
             if self.phase_calibrated:
-                self.lbl_aoa_status.setText("AoA: waiting same-frame phase (calibrated)")
+                self._set_status_label_text(self.lbl_aoa_status, "AoA: waiting same-frame phase (calibrated)")
             else:
-                self.lbl_aoa_status.setText("AoA: waiting same-frame phase")
+                self._set_status_label_text(self.lbl_aoa_status, "AoA: waiting same-frame phase")
             return
 
         _, r_idx, doppler_bin, phase_raw, phase_comp = phase_result
@@ -1273,15 +1406,17 @@ class MainWindow(QtWidgets.QMainWindow):
         aoa_deg, slope = self._estimate_aoa_from_phase(phase_comp)
 
         calib_tag = "calibrated" if self.phase_calibrated else "uncalibrated"
-        self.lbl_phase_clicked.setText(
+        self._set_status_label_text(
+            self.lbl_phase_clicked,
             f"Phase@R={r_idx},D={doppler_bin:+.0f},F={self.synced_frame_id}: "
             f"CH{disp_idx + 1} raw={ph_raw_disp:+.3f}, comp={ph_comp_disp:+.3f} rad ({calib_tag})"
         )
 
         if aoa_deg is None or slope is None:
-            self.lbl_aoa_status.setText("AoA: estimation unavailable")
+            self._set_status_label_text(self.lbl_aoa_status, "AoA: estimation unavailable")
             return
-        self.lbl_aoa_status.setText(
+        self._set_status_label_text(
+            self.lbl_aoa_status,
             f"AoA@R={r_idx},D={doppler_bin:+.0f}: {aoa_deg:+.2f} deg, slope={slope:+.4f} rad/ch, "
             f"fc={self.center_freq_hz/1e9:.3f} GHz ({calib_tag})"
         )
@@ -1311,8 +1446,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update currently displayed channel
         ch = self._get_display_channel_runtime()
         if ch is None:
-            self.lbl_sender.setText("Sender: N/A")
-            self.lbl_buffer.setText("MD Buffer: N/A")
+            self._set_status_label_text(self.lbl_sender, "Sender: N/A")
+            self._set_status_label_text(self.lbl_buffer, "MD Buffer: N/A")
             self.rd_click_marker.setData([], [])
         else:
             latest_disp = ch.current_display_data
@@ -1341,14 +1476,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
             with ch.sender_lock:
                 if ch.sender_ip:
-                    self.lbl_sender.setText(
+                    self._set_status_label_text(
+                        self.lbl_sender,
                         f"Sender(CH{ch.ch_id + 1}): {ch.sender_ip}:{ch.control_port} | Frame: {ch.last_frame_id}"
                     )
                 else:
-                    self.lbl_sender.setText(f"Sender(CH{ch.ch_id + 1}): Detecting...")
+                    self._set_status_label_text(self.lbl_sender, f"Sender(CH{ch.ch_id + 1}): Detecting...")
 
             with ch.micro_lock:
-                self.lbl_buffer.setText(f"MD Buffer(CH{ch.ch_id + 1}): {len(ch.micro_doppler_buffer)}/{BUFFER_LENGTH}")
+                self._set_status_label_text(
+                    self.lbl_buffer,
+                    f"MD Buffer(CH{ch.ch_id + 1}): {len(ch.micro_doppler_buffer)}/{BUFFER_LENGTH}"
+                )
 
         self.update_phase_probe_text()
         self.refresh_display_button_text()
@@ -1357,7 +1496,7 @@ class MainWindow(QtWidgets.QMainWindow):
         queue_states = " ".join(
             [f"CH{i + 1}:{CHANNELS[i].raw_frame_queue.qsize()}/{CHANNELS[i].display_queue.qsize()}" for i in range(len(CHANNELS))]
         )
-        self.lbl_queue.setText(f"Q(raw/disp) {queue_states}")
+        self._set_status_label_text(self.lbl_queue, f"Q(raw/disp) {queue_states}")
 
         # FPS + DSP time
         if updated_any:
@@ -1368,7 +1507,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if elapsed > 0.5:
             fps = self.frame_count / elapsed
             avg_dsp = (self.total_dsp_time / self.frame_count * 1000) if self.frame_count > 0 else 0.0
-            self.lbl_fps.setText(f"FPS: {fps:.1f} | DSP: {avg_dsp:.1f}ms")
+            self._set_status_label_text(self.lbl_fps, f"FPS: {fps:.1f} | DSP: {avg_dsp:.1f}ms")
             self.frame_count = 0
             self.total_dsp_time = 0.0
             self.last_update_time = current_time

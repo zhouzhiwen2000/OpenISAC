@@ -39,8 +39,8 @@ control_port: 9999  # UDP port for runtime control commands
 default_ip: 192.168.2.178  # Default destination IP when per-output IP is empty
 
 # ===== Sensing RX Channels =====
-sensing_rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
-sensing_rx_channels:
+sensing_rx_channel_count: 0  # Number of sensing RX channels (0 disables sensing RX)
+sensing_rx_channels: []
 range_fft_size: 1024
 doppler_fft_size: 100
 sensing_symbol_num: 100
@@ -55,6 +55,4 @@ cpu_cores:
   - 5  # idx0 (hint 0): _tx_proc
   - 7  # idx1 (hint 1): _modulation_proc
   - 8  # idx2 (hint 2): _data_ingest_proc
-  - 9  # idx3 (hint 3): SensingChannel::_rx_loop (CH0)
-  - 4  # idx4 (hint 4): SensingChannel::_sensing_loop (CH0)
-  - 6  # idx_last: main thread affinity
+  - 9  # idx_last: main thread affinity

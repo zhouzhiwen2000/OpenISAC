@@ -38,7 +38,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("measurement/modulator_cpu_bench"))
     return parser.parse_args()
 
-
 def build_mod_role_map(mod_cfg: dict, pid: int) -> dict[tuple[int, str], str]:
     role_map: dict[tuple[int, str], str] = {}
     mod_cores = [str(core) for core in mod_cfg.get("cpu_cores", [])]
@@ -145,6 +144,7 @@ def launch_modulator_with_isolation(
             launcher_output = launcher.communicate(timeout=1.0)[0]
         except subprocess.TimeoutExpired:
             launcher.terminate()
+            pass
         except ProcessLookupError:
             pass
 
