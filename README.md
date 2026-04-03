@@ -8,7 +8,7 @@
 
 # OpenISAC
 
-[中文版本](README_zh.md)
+[中文版本](README_zh.md) | [Changelog](CHANGELOG.md)
 
 OpenISAC is a real-time OFDM platform for integrated sensing and communication (ISAC), built for academic experiments and rapid PHY iteration.
 
@@ -38,6 +38,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - First end-to-end run: [Typical Usage Example](#typical-usage-example)
 - Runtime configuration: [OFDM Modulator](#ofdm-modulator), [OFDM Demodulator](#ofdm-demodulator)
 - Web control UI: [Web Config Console](#7-web-config-console)
+- Recent updates: [Changelog](CHANGELOG.md)
 
 ## Repository Layout
 
