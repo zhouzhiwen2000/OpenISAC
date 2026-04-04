@@ -555,6 +555,12 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left">Number of OFDM symbols per frame.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left">Sensing UDP output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>pilot_positions</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[571,...,451]</code></td>
@@ -565,6 +571,12 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">omitted</td>
 <td style="text-align:left">Optional payload resource rectangles. Omit the key to keep legacy full-grid payload mapping; set <code>[]</code> to disable payload RE entirely. Each block uses <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>; only selected non-sync, non-pilot RE carry real payload, and all other non-sync, non-pilot RE transmit pre-generated QPSK.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">omitted</td>
+<td style="text-align:left">Optional compact sensing RE rectangles. Used only when <code>sensing_output_mode=compact_mask</code>. Blocks use absolute frame symbol indices and raw FFT-bin indices, allow sync/pilot RE, are unioned on overlap, and are emitted in symbol-major then subcarrier-major order. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, compact sensing can also enable runtime MTI and local Delay-Doppler processing.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -737,6 +749,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 </tbody>
 </table>
 <p>If <code>data_resource_blocks</code> is enabled, copy the same rectangles into <code>Demodulator.yaml</code>; <code>sync_pos</code> and <code>pilot_positions</code> still take precedence over overlapping payload rectangles.</p>
+<p>When <code>sensing_output_mode=compact_mask</code>, sensing switches to one UDP frame per OFDM frame and only the selected RE channel estimates are sent in compact mode. <code>STRD</code> remains ignored because the stride is defined implicitly by <code>sensing_mask_blocks</code>. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, runtime <code>MTI</code> and <code>SKIP</code> are enabled: <code>SKIP=1</code> keeps the compact raw-RE payload, while <code>SKIP=0</code> switches back to the existing dense Delay-Doppler output. For that regular compact mode, config normalization expands <code>range_fft_size</code> to at least the selected subcarrier count and <code>doppler_fft_size</code> to at least the selected sensing symbol count. The compact sensing UDP payload begins with <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>, followed by <code>re_count</code> raw <code>complex&lt;float&gt;</code> values in the configured fixed order. Existing <code>plot_sensing*.py</code> viewers do not parse this compact payload yet.</p>
 <p><code>sensing_rx_channels</code> object fields:</p>
 <table>
 <thead>
@@ -934,6 +947,12 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left">Number of symbols used for sensing processing.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left">Bistatic sensing UDP output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>frame_queue_size</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8</code></td>
@@ -974,6 +993,12 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">omitted</td>
 <td style="text-align:left">Optional payload resource rectangles. Omit the key to keep legacy full-grid payload extraction; set <code>[]</code> to extract no payload LLR. Each block uses <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>, and the effective payload RE are the selected rectangles after removing <code>sync_pos</code> and <code>pilot_positions</code>. This setting must match <code>Modulator.yaml</code> when enabled.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">omitted</td>
+<td style="text-align:left">Optional compact sensing RE rectangles. Used only when <code>sensing_output_mode=compact_mask</code>. Blocks use absolute frame symbol indices and raw FFT-bin indices, allow sync/pilot RE, are unioned on overlap, and are emitted in symbol-major then subcarrier-major order. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, compact sensing can also enable runtime MTI and local Delay-Doppler processing.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -1259,6 +1284,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 </tr>
 </tbody>
 </table>
+<p>When <code>sensing_output_mode=compact_mask</code>, bistatic sensing also switches to one UDP frame per OFDM frame and only the selected RE channel estimates are sent in compact mode. <code>STRD</code> remains ignored because the stride is defined implicitly by <code>sensing_mask_blocks</code>. If every selected symbol uses the same subcarrier set and the selected symbols are equally spaced on the frame ring, runtime <code>MTI</code> and <code>SKIP</code> are enabled: <code>SKIP=1</code> keeps the compact raw-RE payload, while <code>SKIP=0</code> switches back to the existing dense Delay-Doppler output. For that regular compact mode, config normalization expands <code>range_fft_size</code> to at least the selected subcarrier count and <code>doppler_fft_size</code> to at least the selected sensing symbol count. The compact payload uses the same <code>CompactSensingFrameHeader</code> and fixed RE ordering as the modulator side.</p>
 <p>Notes:</p>
 <ul>
 <li>RX AGC has two phases. During <code>SYNC_SEARCH</code>, the receiver resets gain to the configured <code>rx_gain</code> and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered <code>delay_spectrum</code> peak window defined by <code>rx_agc_low_threshold_db</code> and <code>rx_agc_high_threshold_db</code>.</li>

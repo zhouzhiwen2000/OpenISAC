@@ -17,6 +17,16 @@ import scipy.io as sio
 from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
+from sensing_runtime_protocol import (
+    CTRL_HEADER,
+    PARAMS_COMMAND,
+    READY_COMMAND,
+    ViewerRuntimeParams,
+    build_params_request,
+    decode_sensing_payload,
+    parse_params_packet,
+)
+
 # ====== Backend Detection ======
 USE_NVIDIA_GPU = False
 USE_APPLE_GPU = False
@@ -199,9 +209,27 @@ MAX_RANGE_BIN = 1000
 MAX_DOPPLER_BINS = 1000
 RANGE_FFT_SIZE = 10240
 DOPPLER_FFT_SIZE = 1000
+PROCESS_RANGE_FFT_SIZE = RANGE_FFT_SIZE
+PROCESS_DOPPLER_FFT_SIZE = DOPPLER_FFT_SIZE
+DISPLAY_RANGE_BIN_LIMIT = MAX_RANGE_BIN
+DISPLAY_DOPPLER_BIN_LIMIT = MAX_DOPPLER_BINS
 enable_mti = True
 enable_range_window = True
 enable_doppler_window = True
+
+LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
+    version=0,
+    flags=0,
+    frame_format=0,
+    wire_rows=NUM_SYMBOLS,
+    wire_cols=FFT_SIZE,
+    active_rows=NUM_SYMBOLS,
+    active_cols=FFT_SIZE,
+    frame_symbol_period=NUM_SYMBOLS,
+    range_fft_size=FFT_SIZE,
+    doppler_fft_size=NUM_SYMBOLS,
+    compact_mask_hash=0,
+)
 
 RAW_QUEUE_SIZE = 20
 DISPLAY_QUEUE_SIZE = 5
@@ -219,6 +247,51 @@ range_time_lock = threading.Lock()
 current_display_data = {}
 BUFFER_LENGTH = 5000
 micro_doppler_buffer = deque(maxlen=BUFFER_LENGTH)
+viewer_params = LEGACY_VIEWER_PARAMS
+viewer_params_lock = threading.Lock()
+last_param_error = None
+
+
+def get_processing_range_fft_size():
+    return max(1, int(PROCESS_RANGE_FFT_SIZE))
+
+
+def get_processing_doppler_fft_size():
+    return max(1, int(PROCESS_DOPPLER_FFT_SIZE))
+
+
+def get_display_range_bin_limit():
+    return max(1, int(DISPLAY_RANGE_BIN_LIMIT))
+
+
+def get_display_doppler_bin_limit():
+    return max(1, int(DISPLAY_DOPPLER_BIN_LIMIT))
+
+
+def reset_processing_state():
+    global current_display_data, range_time_data
+    with range_time_lock:
+        range_time_data = None
+    with buffer_lock:
+        micro_doppler_buffer.clear()
+    while True:
+        try:
+            display_queue.get_nowait()
+        except Exception:
+            break
+    current_display_data = {}
+
+
+def get_viewer_params():
+    with viewer_params_lock:
+        return viewer_params
+
+
+def set_viewer_params(params):
+    global viewer_params, last_param_error
+    with viewer_params_lock:
+        viewer_params = params
+    last_param_error = None
 
 class FrameBuffer:
     def __init__(self):
@@ -240,10 +313,10 @@ class FrameBuffer:
             return self.received_chunks == self.total_chunks
         return False
     
-    def assemble_frame(self):
+    def assemble_frame(self, runtime_params):
         byte_data = b''.join(self.buffer[:self.total_chunks])
-        complex_array = np.frombuffer(byte_data, dtype=np.complex64)
-        return complex_array.reshape((NUM_SYMBOLS, FFT_SIZE))
+        decoded = decode_sensing_payload(self.frame_id, byte_data, runtime_params)
+        return decoded.frame_id, decoded.matrix
 
 current_frame = FrameBuffer()
 
@@ -258,16 +331,31 @@ def send_skip_command():
         print("Error: Cannot send command - sender IP not detected.")
         return
     try:
+        request_viewer_params()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         command_data = struct.pack("!4s4si", b"CMD ", b"SKIP", 1)
         sock.sendto(command_data, (sender_ip, CONTROL_PORT))
         print(f"Sent skip FFT command to {sender_ip}: SKIP 1")
         sock.close()
+        time.sleep(0.05)
+        request_viewer_params()
     except Exception as e:
         print(f"Failed to send skip FFT command: {str(e)}")
 
+
+def request_viewer_params():
+    global sender_ip
+    if sender_ip is None:
+        return
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(build_params_request(0), (sender_ip, CONTROL_PORT))
+        sock.close()
+    except Exception as e:
+        print(f"Failed to request viewer params: {e}")
+
 def udp_receiver():
-    global sender_ip, CONTROL_PORT
+    global sender_ip, CONTROL_PORT, last_param_error
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_SIZE)
@@ -287,9 +375,18 @@ def udp_receiver():
                 if sender_ip is None:
                     sender_ip = addr[0]
                     print(f"Detected data sender IP: {sender_ip}")
-            if len(data) >= 8 and data[:4] == b'CTRL':
+            if len(data) >= 8 and data[:4] == CTRL_HEADER:
+                command = data[4:8]
                 if CONTROL_PORT != addr[1]:
                     CONTROL_PORT = addr[1]
+                if command == PARAMS_COMMAND:
+                    params = parse_params_packet(data)
+                    if params is not None:
+                        set_viewer_params(params)
+                        print(f"Viewer params: {params.describe()}")
+                elif command == READY_COMMAND:
+                    if get_viewer_params().version == 0 or last_param_error is not None:
+                        request_viewer_params()
                 continue
             if len(data) < HEADER_SIZE:
                 continue
@@ -302,7 +399,7 @@ def udp_receiver():
                 if current_frame.frame_id != frame_id:
                     current_frame.init(frame_id, total_chunks)
                 if current_frame.add_chunk(chunk_id, chunk_data):
-                    frame_data = current_frame.assemble_frame()
+                    frame_data = current_frame.assemble_frame(get_viewer_params())
                     if raw_frame_queue.full():
                         try:
                             raw_frame_queue.get_nowait()
@@ -314,20 +411,47 @@ def udp_receiver():
                 print(f"Socket error: {e}")
         except Exception as e:
             print(f"Unexpected error in receiver: {str(e)}")
+            last_param_error = str(e)
+            request_viewer_params()
 
 receiver_thread = threading.Thread(target=udp_receiver, daemon=True)
 receiver_thread.start()
 
 # FFT Processing
-if USE_NVIDIA_GPU or USE_INTEL_GPU:
-    range_window = cp.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE), dtype=cp.float32)
-    doppler_window = cp.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1), dtype=cp.float32)
-elif USE_APPLE_GPU:
-    range_window = mx.array(np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32))
-    doppler_window = mx.array(np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32))
-else:
-    range_window = np.hamming(FFT_SIZE).reshape(1, FFT_SIZE).astype(np.float32)
-    doppler_window = np.hamming(NUM_SYMBOLS).reshape(NUM_SYMBOLS, 1).astype(np.float32)
+_range_window_cache = {}
+_doppler_window_cache = {}
+
+
+def get_range_window(length):
+    length = max(1, int(length))
+    cached = _range_window_cache.get(length)
+    if cached is not None:
+        return cached
+    base = np.hamming(length).reshape(1, length).astype(np.float32)
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
+        cached = cp.array(base, dtype=cp.float32)
+    elif USE_APPLE_GPU:
+        cached = mx.array(base)
+    else:
+        cached = base
+    _range_window_cache[length] = cached
+    return cached
+
+
+def get_doppler_window(length):
+    length = max(1, int(length))
+    cached = _doppler_window_cache.get(length)
+    if cached is not None:
+        return cached
+    base = np.hamming(length).reshape(length, 1).astype(np.float32)
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
+        cached = cp.array(base, dtype=cp.float32)
+    elif USE_APPLE_GPU:
+        cached = mx.array(base)
+    else:
+        cached = base
+    _doppler_window_cache[length] = cached
+    return cached
 
 if HAVE_NUMBA:
     @njit(parallel=True, fastmath=True)
@@ -364,91 +488,112 @@ if HAVE_NUMBA:
                 out[i + half_rows, j] = 20.0 * np.log10(np.abs(doppler_fft_data[i, j]) * norm_factor + 1e-12)
         return out
 
-def process_range_doppler(frame_data, max_view_range_bins=None):
+def process_range_doppler(frame_data, runtime_params, max_view_range_bins=None):
     global range_time_data
+
+    if runtime_params.is_dense_range_doppler():
+        rd_complex = np.asarray(
+            frame_data[:runtime_params.wire_rows, :runtime_params.wire_cols],
+            dtype=np.complex64,
+        )
+        rd_shifted = np.fft.fftshift(rd_complex, axes=0)
+        with range_time_lock:
+            range_time_data = None
+        return 20.0 * np.log10(np.abs(rd_shifted) + 1e-12)
+
+    if not runtime_params.raw_fft_locally_supported():
+        raise ValueError(f"Unsupported sensing frame format: {runtime_params.describe()}")
+
+    raw_rows = max(1, int(runtime_params.active_rows))
+    raw_cols = max(1, int(runtime_params.active_cols))
+    range_fft_size = max(raw_cols, get_processing_range_fft_size())
+    doppler_fft_size = max(raw_rows, get_processing_doppler_fft_size())
+    raw_frame = np.asarray(frame_data[:raw_rows, :raw_cols], dtype=np.complex64)
+
     if max_view_range_bins is None:
-        max_view_range_bins = MAX_RANGE_BIN
+        max_view_range_bins = get_display_range_bin_limit()
+    max_view_range_bins = min(max_view_range_bins, range_fft_size)
 
     if USE_NVIDIA_GPU or USE_INTEL_GPU:
-        range_win = range_window if enable_range_window else cp.ones((1, FFT_SIZE), dtype=cp.float32)
-        doppler_win = doppler_window if enable_doppler_window else cp.ones((NUM_SYMBOLS, 1), dtype=cp.float32)
-    elif USE_APPLE_GPU:
-        range_win = range_window if enable_range_window else mx.ones((1, FFT_SIZE), dtype=mx.float32)
-        doppler_win = doppler_window if enable_doppler_window else mx.ones((NUM_SYMBOLS, 1), dtype=mx.float32)
-    else:
-        range_win = range_window if enable_range_window else np.ones((1, FFT_SIZE), dtype=np.float32)
-        doppler_win = doppler_window if enable_doppler_window else np.ones((NUM_SYMBOLS, 1), dtype=np.float32)
-
-    if USE_NVIDIA_GPU or USE_INTEL_GPU:
-        frame_data_gpu = cp.array(frame_data)
+        range_win = get_range_window(raw_cols) if enable_range_window else cp.ones((1, raw_cols), dtype=cp.float32)
+        doppler_win = get_doppler_window(raw_rows) if enable_doppler_window else cp.ones((raw_rows, 1), dtype=cp.float32)
+        frame_data_gpu = cp.array(raw_frame)
         shifted_data = cp.fft.fftshift(frame_data_gpu, axes=1)
         windowed_data = shifted_data * range_win
-        padded_data = cp.zeros((NUM_SYMBOLS, RANGE_FFT_SIZE), dtype=cp.complex64)
-        padded_data[:, :FFT_SIZE] = windowed_data
-        range_time = cp.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
-        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        padded_data = cp.zeros((raw_rows, range_fft_size), dtype=cp.complex64)
+        padded_data[:, :raw_cols] = windowed_data
+        range_time = cp.fft.ifft(padded_data, axis=1) * range_fft_size
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < range_fft_size else range_time
         range_time_cpu = to_numpy(range_time_view)
         range_time_gpu = cp.array(range_time_cpu, dtype=cp.complex64)
         doppler_windowed = range_time_gpu * doppler_win
         view_width = range_time_view.shape[1]
-        padded_doppler = cp.zeros((DOPPLER_FFT_SIZE, view_width), dtype=cp.complex64)
-        padded_doppler[:NUM_SYMBOLS, :] = doppler_windowed
+        padded_doppler = cp.zeros((doppler_fft_size, view_width), dtype=cp.complex64)
+        padded_doppler[:raw_rows, :] = doppler_windowed
         doppler_fft = cp.fft.fft(padded_doppler, axis=0)
         doppler_shifted = cp.fft.fftshift(doppler_fft, axes=0)
-        magnitude = cp.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        magnitude = cp.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols)
         magnitude_db = 20 * cp.log10(magnitude + 1e-12)
         with range_time_lock:
             range_time_data = range_time_cpu
         return to_numpy(magnitude_db)
     elif USE_APPLE_GPU:
-        frame_data_gpu = mx.array(frame_data, dtype=mx.complex64)
+        range_win = get_range_window(raw_cols) if enable_range_window else mx.ones((1, raw_cols), dtype=mx.float32)
+        doppler_win = get_doppler_window(raw_rows) if enable_doppler_window else mx.ones((raw_rows, 1), dtype=mx.float32)
+        frame_data_gpu = mx.array(raw_frame, dtype=mx.complex64)
         shifted_data = mx.fft.fftshift(frame_data_gpu, axes=(1,))
         windowed_data = shifted_data * range_win
-        range_time = mx.fft.ifft(windowed_data, n=RANGE_FFT_SIZE, axis=1) * RANGE_FFT_SIZE
-        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        range_time = mx.fft.ifft(windowed_data, n=range_fft_size, axis=1) * range_fft_size
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < range_fft_size else range_time
         doppler_windowed = range_time_view * doppler_win
-        doppler_fft = mx.fft.fft(doppler_windowed, n=DOPPLER_FFT_SIZE, axis=0)
+        doppler_fft = mx.fft.fft(doppler_windowed, n=doppler_fft_size, axis=0)
         doppler_shifted = mx.fft.fftshift(doppler_fft, axes=(0,))
-        magnitude = mx.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE)
+        magnitude = mx.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols)
         magnitude_db = 20.0 * mx.log10(magnitude + 1e-12)
         range_time_cpu = np.array(range_time_view, copy=False)
         with range_time_lock:
             range_time_data = range_time_cpu
         return np.array(magnitude_db, copy=False).astype(np.float32, copy=False)
     elif HAVE_NUMBA:
-        padded_data = cpu_prep_range_fft(frame_data, range_win, FFT_SIZE, RANGE_FFT_SIZE)
-        range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
-        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
+        range_win = get_range_window(raw_cols) if enable_range_window else np.ones((1, raw_cols), dtype=np.float32)
+        doppler_win = get_doppler_window(raw_rows) if enable_doppler_window else np.ones((raw_rows, 1), dtype=np.float32)
+        padded_data = cpu_prep_range_fft(raw_frame, range_win, raw_cols, range_fft_size)
+        range_time = np.fft.ifft(padded_data, axis=1) * range_fft_size
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < range_fft_size else range_time
         view_width = range_time_view.shape[1]
-        padded_doppler = cpu_prep_doppler_fft(range_time_view, doppler_win, NUM_SYMBOLS, DOPPLER_FFT_SIZE, view_width)
-        doppler_fft = np.fft.fft(padded_doppler, axis=0)
-        magnitude_db = cpu_calc_mag_db(doppler_fft, NUM_SYMBOLS, FFT_SIZE)
-        with range_time_lock:
-            range_time_data = range_time_view
-        return magnitude_db
-    else:
-        shifted_data = np.fft.fftshift(frame_data, axes=1)
-        windowed_data = shifted_data * range_win
-        padded_data = np.zeros((NUM_SYMBOLS, RANGE_FFT_SIZE), dtype=np.complex64)
-        padded_data[:, :FFT_SIZE] = windowed_data
-        range_time = np.fft.ifft(padded_data, axis=1) * RANGE_FFT_SIZE
-        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < RANGE_FFT_SIZE else range_time
-        view_width = range_time_view.shape[1]
-        doppler_windowed = range_time_view * doppler_win
-        padded_doppler = np.zeros((DOPPLER_FFT_SIZE, view_width), dtype=np.complex64)
-        padded_doppler[:NUM_SYMBOLS, :] = doppler_windowed
+        padded_doppler = cpu_prep_doppler_fft(range_time_view, doppler_win, raw_rows, doppler_fft_size, view_width)
         doppler_fft = np.fft.fft(padded_doppler, axis=0)
         doppler_shifted = np.fft.fftshift(doppler_fft, axes=0)
-        magnitude_db = 20 * np.log10(np.abs(doppler_shifted) / np.sqrt(NUM_SYMBOLS * FFT_SIZE) + 1e-12)
+        magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
         with range_time_lock:
             range_time_data = range_time_view
-        return magnitude_db
+        return magnitude_db.astype(np.float32, copy=False)
+    else:
+        range_win = get_range_window(raw_cols) if enable_range_window else np.ones((1, raw_cols), dtype=np.float32)
+        doppler_win = get_doppler_window(raw_rows) if enable_doppler_window else np.ones((raw_rows, 1), dtype=np.float32)
+        shifted_data = np.fft.fftshift(raw_frame, axes=1)
+        windowed_data = shifted_data * range_win
+        padded_data = np.zeros((raw_rows, range_fft_size), dtype=np.complex64)
+        padded_data[:, :raw_cols] = windowed_data
+        range_time = np.fft.ifft(padded_data, axis=1) * range_fft_size
+        range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < range_fft_size else range_time
+        view_width = range_time_view.shape[1]
+        doppler_windowed = range_time_view * doppler_win
+        padded_doppler = np.zeros((doppler_fft_size, view_width), dtype=np.complex64)
+        padded_doppler[:raw_rows, :] = doppler_windowed
+        doppler_fft = np.fft.fft(padded_doppler, axis=0)
+        doppler_shifted = np.fft.fftshift(doppler_fft, axes=0)
+        magnitude_db = 20 * np.log10(np.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
+        with range_time_lock:
+            range_time_data = range_time_view
+        return magnitude_db.astype(np.float32, copy=False)
 
 def accumulate_range_time_data():
     with range_time_lock:
-        if range_time_data is not None:
+        if range_time_data is not None and range_time_data.size > 0:
+            range_idx = min(selected_range_bin, range_time_data.shape[1] - 1)
             with buffer_lock:
-                micro_doppler_buffer.extend(range_time_data[:, selected_range_bin])
+                micro_doppler_buffer.extend(range_time_data[:, range_idx])
 
 def calculate_micro_doppler():
     if len(micro_doppler_buffer) < 256:
@@ -472,9 +617,14 @@ def dsp_worker():
     while True:
         try:
             try:
-                raw_frame = raw_frame_queue.get(timeout=0.1)
+                raw_item = raw_frame_queue.get(timeout=0.1)
             except:
                 continue
+
+            if isinstance(raw_item, tuple) and len(raw_item) == 2:
+                frame_id, raw_frame = raw_item
+            else:
+                frame_id, raw_frame = -1, raw_item
             
             # Power calculation
             current_power = np.mean(np.abs(raw_frame)**2)
@@ -488,12 +638,15 @@ def dsp_worker():
                 power_frame_count = 0
             
             t_start = time.time()
-            rd_spectrum = process_range_doppler(raw_frame)
-            if rd_spectrum.shape[1] > MAX_RANGE_BIN:
-                rd_spectrum = rd_spectrum[:, :MAX_RANGE_BIN]
+            runtime_params = get_viewer_params()
+            rd_spectrum = process_range_doppler(raw_frame, runtime_params)
+            display_range_bins = get_display_range_bin_limit()
+            display_doppler_bins = get_display_doppler_bin_limit()
+            if rd_spectrum.shape[1] > display_range_bins:
+                rd_spectrum = rd_spectrum[:, :display_range_bins]
             center_idx = rd_spectrum.shape[0] // 2
-            start_idx = max(0, center_idx - MAX_DOPPLER_BINS // 2)
-            end_idx = min(rd_spectrum.shape[0], start_idx + MAX_DOPPLER_BINS)
+            start_idx = max(0, center_idx - display_doppler_bins // 2)
+            end_idx = min(rd_spectrum.shape[0], start_idx + display_doppler_bins)
             rd_spectrum = rd_spectrum[start_idx:end_idx, :]
             rd_spectrum_plot = rd_spectrum  # Keep as (doppler, range): Y=Doppler, X=Range
             if DISPLAY_DOWNSAMPLE > 1:
@@ -505,7 +658,14 @@ def dsp_worker():
                 if Pxx is not None:
                     md_spectrum = Pxx.T  # Transpose: Y=Time, X=Frequency
             dsp_time = time.time() - t_start
-            result = {'raw': raw_frame, 'rd': rd_spectrum_plot, 'md': md_spectrum, 'dsp_time': dsp_time}
+            result = {
+                'frame_id': int(frame_id),
+                'raw': raw_frame,
+                'rd': rd_spectrum_plot,
+                'md': md_spectrum,
+                'dsp_time': dsp_time,
+                'viewer_params': runtime_params,
+            }
             if display_queue.full():
                 try:
                     display_queue.get_nowait()
@@ -539,8 +699,10 @@ def send_alignment_command(val):
 
 def send_strd_command(val):
     try:
-        strd_val = max(1, min(NUM_SYMBOLS, int(val)))
+        strd_val = max(1, min(get_viewer_params().max_strd_value(), int(val)))
         send_command(b"CMD ", b"STRD", strd_val)
+        time.sleep(0.02)
+        request_viewer_params()
     except ValueError:
         print(f"Invalid STRD value: {val}")
 
@@ -601,15 +763,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_fps = QtWidgets.QLabel("FPS: 0.0")
         self.lbl_queue = QtWidgets.QLabel("Queue: 0")
         self.lbl_sender = QtWidgets.QLabel("Sender: Detecting...")
+        self.lbl_params = QtWidgets.QLabel("Params: waiting...")
         self.lbl_buffer = QtWidgets.QLabel("MD Buffer: 0/5000")
-        for lbl in [self.lbl_fps, self.lbl_queue, self.lbl_sender, self.lbl_buffer]:
+        for lbl in [self.lbl_fps, self.lbl_queue, self.lbl_sender, self.lbl_params, self.lbl_buffer]:
             lbl.setWordWrap(False)
             lbl.setTextFormat(QtCore.Qt.TextFormat.PlainText)
             lbl.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed)
             control_layout.addWidget(lbl)
 
         fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
-        for lbl in [self.lbl_fps, self.lbl_queue, self.lbl_sender, self.lbl_buffer]:
+        for lbl in [self.lbl_fps, self.lbl_queue, self.lbl_sender, self.lbl_params, self.lbl_buffer]:
             lbl.setFont(fixed_font)
             lbl.setFixedWidth(self._status_label_text_width)
             self._set_status_label_text(lbl, lbl.text())
@@ -624,6 +787,42 @@ class MainWindow(QtWidgets.QMainWindow):
         rb_layout.addWidget(self.txt_range_bin)
         rb_layout.addWidget(btn_set_rb)
         control_layout.addLayout(rb_layout)
+
+        fft_layout = QtWidgets.QHBoxLayout()
+        fft_layout.addWidget(QtWidgets.QLabel("Delay FFT:"))
+        self.txt_delay_fft = QtWidgets.QLineEdit(str(get_processing_range_fft_size()))
+        btn_delay_fft = QtWidgets.QPushButton("Set")
+        btn_delay_fft.clicked.connect(self.set_delay_fft_size)
+        fft_layout.addWidget(self.txt_delay_fft)
+        fft_layout.addWidget(btn_delay_fft)
+        control_layout.addLayout(fft_layout)
+
+        doppler_fft_layout = QtWidgets.QHBoxLayout()
+        doppler_fft_layout.addWidget(QtWidgets.QLabel("Doppler FFT:"))
+        self.txt_doppler_fft = QtWidgets.QLineEdit(str(get_processing_doppler_fft_size()))
+        btn_doppler_fft = QtWidgets.QPushButton("Set")
+        btn_doppler_fft.clicked.connect(self.set_doppler_fft_size)
+        doppler_fft_layout.addWidget(self.txt_doppler_fft)
+        doppler_fft_layout.addWidget(btn_doppler_fft)
+        control_layout.addLayout(doppler_fft_layout)
+
+        delay_view_layout = QtWidgets.QHBoxLayout()
+        delay_view_layout.addWidget(QtWidgets.QLabel("Delay View:"))
+        self.txt_delay_view = QtWidgets.QLineEdit(str(get_display_range_bin_limit()))
+        btn_delay_view = QtWidgets.QPushButton("Set")
+        btn_delay_view.clicked.connect(self.set_delay_view_bins)
+        delay_view_layout.addWidget(self.txt_delay_view)
+        delay_view_layout.addWidget(btn_delay_view)
+        control_layout.addLayout(delay_view_layout)
+
+        doppler_view_layout = QtWidgets.QHBoxLayout()
+        doppler_view_layout.addWidget(QtWidgets.QLabel("Doppler View:"))
+        self.txt_doppler_view = QtWidgets.QLineEdit(str(get_display_doppler_bin_limit()))
+        btn_doppler_view = QtWidgets.QPushButton("Set")
+        btn_doppler_view.clicked.connect(self.set_doppler_view_bins)
+        doppler_view_layout.addWidget(self.txt_doppler_view)
+        doppler_view_layout.addWidget(btn_doppler_view)
+        control_layout.addLayout(doppler_view_layout)
 
         # Micro-Doppler Toggle
         self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
@@ -714,13 +913,56 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_range_bin(self):
         global selected_range_bin
         try:
-            val = max(0, min(MAX_RANGE_BIN - 1, int(self.txt_range_bin.text())))
+            max_range_bin = min(get_display_range_bin_limit(), get_viewer_params().max_range_bin()) - 1
+            val = max(0, min(max_range_bin, int(self.txt_range_bin.text())))
             selected_range_bin = val
             with buffer_lock:
                 micro_doppler_buffer.clear()
             print(f"Range bin set to: {val}")
         except ValueError:
             print("Invalid range bin")
+
+    def set_delay_fft_size(self):
+        global PROCESS_RANGE_FFT_SIZE
+        try:
+            PROCESS_RANGE_FFT_SIZE = max(1, int(self.txt_delay_fft.text()))
+            self.txt_delay_fft.setText(str(PROCESS_RANGE_FFT_SIZE))
+            reset_processing_state()
+            print(f"Delay FFT size set to: {PROCESS_RANGE_FFT_SIZE}")
+        except ValueError:
+            print("Invalid delay FFT size")
+
+    def set_doppler_fft_size(self):
+        global PROCESS_DOPPLER_FFT_SIZE
+        try:
+            PROCESS_DOPPLER_FFT_SIZE = max(1, int(self.txt_doppler_fft.text()))
+            self.txt_doppler_fft.setText(str(PROCESS_DOPPLER_FFT_SIZE))
+            reset_processing_state()
+            print(f"Doppler FFT size set to: {PROCESS_DOPPLER_FFT_SIZE}")
+        except ValueError:
+            print("Invalid doppler FFT size")
+
+    def set_delay_view_bins(self):
+        global DISPLAY_RANGE_BIN_LIMIT, selected_range_bin
+        try:
+            DISPLAY_RANGE_BIN_LIMIT = max(1, int(self.txt_delay_view.text()))
+            self.txt_delay_view.setText(str(DISPLAY_RANGE_BIN_LIMIT))
+            selected_range_bin = min(selected_range_bin, DISPLAY_RANGE_BIN_LIMIT - 1)
+            self.txt_range_bin.setText(str(selected_range_bin))
+            reset_processing_state()
+            print(f"Delay display bins set to: {DISPLAY_RANGE_BIN_LIMIT}")
+        except ValueError:
+            print("Invalid delay display bins")
+
+    def set_doppler_view_bins(self):
+        global DISPLAY_DOPPLER_BIN_LIMIT
+        try:
+            DISPLAY_DOPPLER_BIN_LIMIT = max(1, int(self.txt_doppler_view.text()))
+            self.txt_doppler_view.setText(str(DISPLAY_DOPPLER_BIN_LIMIT))
+            reset_processing_state()
+            print(f"Doppler display bins set to: {DISPLAY_DOPPLER_BIN_LIMIT}")
+        except ValueError:
+            print("Invalid doppler display bins")
 
     def toggle_micro_doppler(self):
         global show_micro_doppler
@@ -775,12 +1017,21 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"Error saving {suffix}: {e}")
 
     def update_plots(self):
-        global current_display_data, sender_ip
+        global current_display_data, sender_ip, last_param_error
         with sender_lock:
             if sender_ip:
                 self._set_status_label_text(self.lbl_sender, f"Sender: {sender_ip}")
             else:
                 self._set_status_label_text(self.lbl_sender, "Sender: Detecting...")
+
+        params_text = (
+            f"Params: {get_viewer_params().describe()} | "
+            f"local_fft={get_processing_range_fft_size()}x{get_processing_doppler_fft_size()} | "
+            f"view={get_display_range_bin_limit()}x{get_display_doppler_bin_limit()}"
+        )
+        if last_param_error:
+            params_text += f" | last_error={last_param_error}"
+        self._set_status_label_text(self.lbl_params, params_text)
 
         latest = None
         while not display_queue.empty():

@@ -2055,8 +2055,9 @@ public:
      * 
      * @param rx_symbols Vector of frequency-domain symbols to copy
      */
-    void copy_symbols_to_buffer(const std::vector<AlignedVector>& rx_symbols) {
-        const size_t num_symbols = std::min(rx_symbols.size(), _params.sensing_symbol_num);
+    void copy_symbols_to_buffer(const std::vector<AlignedVector>& rx_symbols, size_t symbol_count = 0) {
+        size_t num_symbols = symbol_count > 0 ? symbol_count : rx_symbols.size();
+        num_symbols = std::min(num_symbols, std::min(rx_symbols.size(), _params.sensing_symbol_num));
         for (size_t i = 0; i < num_symbols; ++i) {
             auto* dest = _channel_buffer.data() + i * _params.range_fft_size;
             std::copy(rx_symbols[i].begin(), rx_symbols[i].end(), dest);
@@ -2089,9 +2090,11 @@ public:
      * 
      * @param enabled Whether to enable MTI filtering. If false, does nothing.
      */
-    void apply_mti(bool enabled) {
+    void apply_mti(bool enabled, size_t symbol_count = 0) {
         if (enabled) {
-            _mti_filter.apply(_channel_buffer, _params.fft_size, _params.sensing_symbol_num);
+            const size_t num_symbols =
+                (symbol_count > 0) ? std::min(symbol_count, _params.sensing_symbol_num) : _params.sensing_symbol_num;
+            _mti_filter.apply(_channel_buffer, _params.fft_size, num_symbols);
         }
     }
 
@@ -2100,11 +2103,13 @@ public:
      * For mono-static sensing where TX symbols have unit magnitude.
      * Operates on internal channel buffer.
      */
-    void channel_estimate_with_shift(const std::vector<AlignedVector>& tx_symbols) {
+    void channel_estimate_with_shift(const std::vector<AlignedVector>& tx_symbols, size_t symbol_count = 0) {
         const size_t fft_size = _params.fft_size;
         const size_t half_size = fft_size / 2;
-        
-        for (size_t i = 0; i < _params.sensing_symbol_num; ++i) {
+
+        size_t num_symbols = symbol_count > 0 ? symbol_count : tx_symbols.size();
+        num_symbols = std::min(num_symbols, std::min(tx_symbols.size(), _params.sensing_symbol_num));
+        for (size_t i = 0; i < num_symbols; ++i) {
             auto* __restrict__ ch_data = _channel_buffer.data() + i * _params.range_fft_size;
             const auto* __restrict__ tx_data = tx_symbols[i].data();
             
@@ -2189,10 +2194,13 @@ public:
     void apply_windows(
         AlignedVector& buffer,
         const AlignedFloatVector& range_window,
-        const AlignedFloatVector& doppler_window
+        const AlignedFloatVector& doppler_window,
+        size_t symbol_count = 0
     ) {
+        const size_t num_symbols =
+            (symbol_count > 0) ? std::min(symbol_count, _params.sensing_symbol_num) : _params.sensing_symbol_num;
         // Apply range window (per symbol)
-        for (size_t i = 0; i < _params.sensing_symbol_num; ++i) {
+        for (size_t i = 0; i < num_symbols; ++i) {
             auto* symbol_data = buffer.data() + i * _params.range_fft_size;
             #pragma omp simd simdlen(16) aligned(symbol_data: 64)
             for (size_t j = 0; j < _params.fft_size; ++j) {
@@ -2203,7 +2211,7 @@ public:
         // Apply Doppler window (across symbols for each bin)
         for (size_t bin = 0; bin < _params.fft_size; ++bin) {
             #pragma omp simd simdlen(16)
-            for (size_t i = 0; i < _params.sensing_symbol_num; ++i) {
+            for (size_t i = 0; i < num_symbols; ++i) {
                 size_t idx = i * _params.range_fft_size + bin;
                 buffer[idx] *= doppler_window[i];
             }

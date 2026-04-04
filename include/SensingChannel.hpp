@@ -119,6 +119,10 @@ private:
     struct SensingComputeContext {
         std::vector<AlignedVector> accumulated_rx_symbols;
         std::vector<AlignedVector> accumulated_tx_symbols;
+        SensingMaskLayout sensing_mask_layout;
+        CompactSensingMaskAnalysis compact_mask_analysis;
+        AlignedVector compact_channel_output;
+        std::vector<AlignedVector> compact_selected_tx_symbols;
         uint64_t next_symbol_to_sample = 0;
         uint64_t current_batch_first_symbol = 0;
         bool batch_has_first_symbol = false;
@@ -130,6 +134,7 @@ private:
         bool delay_estimation_enabled = false;
         uint64_t next_delay_estimation_frame_seq = 0;
         bool sensing_pipeline_disabled_by_mode = false;
+        bool compact_mask_local_delay_doppler_supported = false;
         uint64_t applied_generation = 0;
         std::unique_ptr<SyncProcessor> system_delay_sync;
         size_t system_delay_symbol_len = 0;
@@ -139,10 +144,14 @@ private:
         AlignedVector demod_fft_out;
         fftwf_plan demod_fft_plan = nullptr;
         SensingProcessor sensing_core;
+        std::unique_ptr<SensingProcessor> compact_sensing_core;
         SensingDataSender sensing_sender;
         AlignedFloatVector range_window;
+        AlignedFloatVector compact_range_window;
         AlignedFloatVector doppler_window;
+        AlignedFloatVector compact_doppler_window;
         std::vector<int> actual_subcarrier_indices;
+        std::vector<int> compact_shifted_subcarrier_indices;
         std::vector<float> subcarrier_phases_unit_delay;
         std::chrono::steady_clock::time_point next_hb_time;
         double pending_batch_gather_us = 0.0;
@@ -171,13 +180,22 @@ private:
     void _sensing_loop();
     void _send_heartbeat_if_due(const std::chrono::steady_clock::time_point& now);
     void _estimate_system_delay(const AlignedVector& rx_frame_data, uint64_t frame_seq);
+    void _process_compact_monostatic_frame(const AlignedVector& rx_frame_data, const TxSymbolsFrame& tx_frame);
+    void _process_compact_bistatic_frame(const SensingFrame& frame, uint64_t frame_start_symbol_index);
+    void _process_regular_compact_monostatic_frame(const AlignedVector& rx_frame_data, const TxSymbolsFrame& tx_frame);
+    void _process_regular_compact_bistatic_frame(const SensingFrame& frame, uint64_t frame_start_symbol_index);
+    void _process_regular_compact_buffer(
+        const std::vector<AlignedVector>& tx_symbols,
+        uint64_t frame_start_symbol_index
+    );
     void _sensing_process(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us);
     void _sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us);
     void _sensing_process_finalize(
         const std::vector<AlignedVector>& tx_symbols,
         uint64_t first_symbol_index,
         double gather_us,
-        double prep_us
+        double prep_us,
+        size_t symbol_count
     );
     void _apply_shared_sensing_if_due(uint64_t symbol_index);
 

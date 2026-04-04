@@ -495,7 +495,8 @@
       margin-bottom: 4px;
     }
 
-    .planner-block-grid input {
+    .planner-block-grid input,
+    .planner-block-grid select {
       width: 100%;
       height: 38px;
       padding: 0 10px;
@@ -761,11 +762,12 @@
       </div>
     </section>
 
-    <div class="tabbar" role="tablist">
-      <button class="tab active" data-target="modulator" role="tab">Modulator</button>
-      <button class="tab" data-target="demodulator" role="tab">Demodulator</button>
-      <button class="tab" data-target="planner" role="tab">Resource Planner</button>
-    </div>
+	    <div class="tabbar" role="tablist">
+	      <button class="tab active" data-target="modulator" role="tab">Modulator</button>
+	      <button class="tab" data-target="demodulator" role="tab">Demodulator</button>
+	      <button class="tab" data-target="planner" role="tab">Resource Map</button>
+	      <button class="tab" data-target="sensingPlanner" role="tab">Sensing Resource Map</button>
+	    </div>
 
     <div class="grid" id="configRuntimeView">
       <section class="panel">
@@ -855,22 +857,24 @@
       </section>
     </div>
 
-    <section class="planner-page hidden" id="plannerView">
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>Resource Planner</h2>
-            <div class="subtle">Plan `data_resource_blocks` on a large time-frequency canvas, snap selections to RE cells, then apply to TX or RX.</div>
-          </div>
-          <div class="flash" id="plannerFlash"></div>
-        </div>
-        <div class="body">
-          <div class="planner-summary" id="plannerSummary"></div>
-          <div id="plannerHost"></div>
-          <div class="planner-targets">
-            <button class="btn primary" id="applyPlannerTxBtn">Apply to Transmitter</button>
-            <button class="btn primary" id="applyPlannerRxBtn">Apply to Receiver</button>
-          </div>
+	    <section class="planner-page hidden" id="plannerView">
+	      <section class="panel">
+	        <div class="panel-head">
+	          <div>
+	            <h2 id="plannerTitle">Resource Map</h2>
+	            <div class="subtle" id="plannerIntro">Plan `data_resource_blocks` on a large time-frequency canvas, snap selections to RE cells, then apply to TX or RX.</div>
+	          </div>
+	          <div class="flash" id="plannerFlash"></div>
+	        </div>
+	        <div class="body">
+	          <div class="planner-summary" id="plannerSummary"></div>
+	          <div id="plannerHost"></div>
+	          <div class="planner-targets">
+		            <button class="btn" id="loadPlannerTxBtn">Load from Modulator</button>
+		            <button class="btn" id="loadPlannerRxBtn">Load from Demodulator</button>
+		            <button class="btn primary" id="applyPlannerTxBtn">Apply to Modulator</button>
+		            <button class="btn primary" id="applyPlannerRxBtn">Apply to Demodulator</button>
+	          </div>
           <div class="planner-target-note" id="plannerTargetNote"></div>
         </div>
       </section>
@@ -908,16 +912,21 @@
     const overrideIsolateToggle = document.getElementById('overrideIsolateToggle');
     const overrideIsolateInput = document.getElementById('overrideIsolateInput');
     const sudoPasswordInput = document.getElementById('sudoPasswordInput');
-    const configRuntimeView = document.getElementById('configRuntimeView');
-    const plannerView = document.getElementById('plannerView');
-    const plannerSummary = document.getElementById('plannerSummary');
-    const plannerHost = document.getElementById('plannerHost');
-    const applyPlannerTxBtn = document.getElementById('applyPlannerTxBtn');
-    const applyPlannerRxBtn = document.getElementById('applyPlannerRxBtn');
-    const plannerTargetNote = document.getElementById('plannerTargetNote');
+	    const configRuntimeView = document.getElementById('configRuntimeView');
+	    const plannerView = document.getElementById('plannerView');
+	    const plannerTitle = document.getElementById('plannerTitle');
+	    const plannerIntro = document.getElementById('plannerIntro');
+	    const plannerSummary = document.getElementById('plannerSummary');
+	    const plannerHost = document.getElementById('plannerHost');
+	    const loadPlannerTxBtn = document.getElementById('loadPlannerTxBtn');
+	    const loadPlannerRxBtn = document.getElementById('loadPlannerRxBtn');
+	    const applyPlannerTxBtn = document.getElementById('applyPlannerTxBtn');
+	    const applyPlannerRxBtn = document.getElementById('applyPlannerRxBtn');
+	    const plannerTargetNote = document.getElementById('plannerTargetNote');
 
-    let currentTab = 'modulator';
-    const cache = {};
+	    let currentTab = 'modulator';
+	    const cache = {};
+	    const specialPlannerTabs = new Set(['planner', 'sensingPlanner']);
 
     function setFlash(message, kind = '') {
       for (const node of [flash, plannerFlash]) {
@@ -944,20 +953,47 @@
       return payload;
     }
 
-    function modelForTab(tabName) {
-      return cache[tabName]?.config || null;
-    }
+	    function modelForTab(tabName) {
+	      return cache[tabName]?.config || null;
+	    }
 
-    function updateTabVisuals() {
-      for (const tabButton of tabs) {
-        tabButton.classList.toggle('active', tabButton.dataset.target === currentTab);
-      }
-      const plannerModeActive = currentTab === 'planner';
-      configRuntimeView.classList.toggle('hidden', plannerModeActive);
-      plannerView.classList.toggle('hidden', !plannerModeActive);
-      if (plannerModeActive) {
-        buildDirLabel.textContent = APP.build_dir;
-        return;
+	    function plannerSpec(tabName = currentTab) {
+	      if (tabName === 'sensingPlanner') {
+	        return {
+	          cacheKey: 'sensingPlanner',
+	          fieldKey: 'sensing_mask_blocks',
+		          title: 'Sensing Resource Map',
+	          intro: 'Plan sensing time-frequency resources on a large canvas, choose whether to load from the modulator or demodulator config, then apply back to either side.',
+		          summaryTitle: 'Sensing Resource Map',
+		          loadedFromLabel: 'current sensing resource map tab',
+	          metricLabel: 'sensing RE',
+	          missingMode: 'disabled',
+	          note: 'Selections are snapped to integer RE cells on drag release. STRD-based mode writes `sensing_output_mode=dense`. Custom Blocks writes `sensing_output_mode=compact_mask` plus `sensing_mask_blocks`. If every selected symbol uses the same subcarrier set and symbols are equally spaced across the frame ring, compact sensing can enable MTI and local Delay-Doppler; in that mode `range_fft_size` must cover the selected subcarrier count and `doppler_fft_size` must cover the selected symbol count. Load pulls `sensing_mask_blocks` from Modulator.yaml or Demodulator.yaml. Apply writes the current sensing resource plan back to either file.',
+	        };
+	      }
+	      return {
+	        cacheKey: 'planner',
+	        fieldKey: 'data_resource_blocks',
+		        title: 'Resource Map',
+	        intro: 'Plan `data_resource_blocks` on a large time-frequency canvas, choose whether each block carries payload or sensing pilot, then load/apply the result to the modulator or demodulator config.',
+		        summaryTitle: 'Resource Map',
+		        loadedFromLabel: 'current resource map tab',
+	        metricLabel: 'payload RE',
+	        missingMode: 'legacy',
+	        note: 'Selections are snapped to integer RE cells on drag release. Each `data_resource_blocks` entry can be `payload` or `sensing_pilot`. Sensing-pilot RE transmit the sync-symbol sequence on the same subcarriers, but are excluded from payload extraction and payload modulation. Load pulls `data_resource_blocks` from Modulator.yaml or Demodulator.yaml. Apply writes the current planner state back to either file.',
+	      };
+	    }
+
+	    function updateTabVisuals() {
+	      for (const tabButton of tabs) {
+	        tabButton.classList.toggle('active', tabButton.dataset.target === currentTab);
+	      }
+	      const plannerModeActive = specialPlannerTabs.has(currentTab);
+	      configRuntimeView.classList.toggle('hidden', plannerModeActive);
+	      plannerView.classList.toggle('hidden', !plannerModeActive);
+	      if (plannerModeActive) {
+	        buildDirLabel.textContent = APP.build_dir;
+	        return;
       }
       const label = APP.tabs[currentTab].label;
       editorTitle.textContent = label + ' Config';
@@ -1046,7 +1082,7 @@
         .filter((value) => value !== null);
     }
 
-    function plannerConfig(tabName = currentTab === 'planner' ? 'modulator' : currentTab) {
+	    function plannerConfig(tabName = specialPlannerTabs.has(currentTab) ? 'modulator' : currentTab) {
       const model = modelForTab(tabName);
       if (!model) {
         return {
@@ -1061,17 +1097,28 @@
           subcarrierToNonPilot: Array.from({ length: 1024 }, (_value, index) => index),
           nonPilotPerSymbol: 1024,
           totalNonPilotRe: 99 * 1024,
+          rangeFftSize: 1024,
+          dopplerFftSize: 100,
+          sensingSymbolNum: 100,
         };
       }
       const fftSize = Math.max(1, parseIntOrNull(findField(model, 'fft_size')?.value_text ?? '') ?? 1024);
       const numSymbols = Math.max(1, parseIntOrNull(findField(model, 'num_symbols')?.value_text ?? '') ?? 100);
+      const rangeFftSize = Math.max(1, parseIntOrNull(findField(model, 'range_fft_size')?.value_text ?? '') ?? fftSize);
+      const dopplerFftSize = Math.max(1, parseIntOrNull(findField(model, 'doppler_fft_size')?.value_text ?? '') ?? 100);
+      const sensingSymbolNum = Math.max(1, parseIntOrNull(findField(model, 'sensing_symbol_num')?.value_text ?? '') ?? numSymbols);
       const syncPos = Math.min(
         numSymbols - 1,
         Math.max(0, parseIntOrNull(findField(model, 'sync_pos')?.value_text ?? '') ?? 0),
       );
-      const pilotPositions = parseFlowListInts(findField(model, 'pilot_positions'))
-        .filter((value) => value >= 0 && value < fftSize);
-      const pilotSet = new Set(pilotPositions);
+	      const pilotPositions = parseFlowListInts(findField(model, 'pilot_positions'))
+	        .filter((value) => value >= 0 && value < fftSize);
+        const dataResourceField = findField(model, 'data_resource_blocks');
+        const sensingPilotBlocks = (!dataResourceField || plannerMode(dataResourceField) !== 'custom')
+          ? []
+          : plannerBlocks(dataResourceField)
+            .filter((block) => payloadBlockKind(block) === 'sensing_pilot');
+	      const pilotSet = new Set(pilotPositions);
       const actualToDataSymbol = new Array(numSymbols).fill(-1);
       const dataSymbols = [];
       for (let sym = 0; sym < numSymbols; sym += 1) {
@@ -1096,20 +1143,64 @@
         actualToDataSymbol,
         nonPilotSubcarriers,
         subcarrierToNonPilot,
-        nonPilotPerSymbol: nonPilotSubcarriers.length,
-        totalNonPilotRe: nonPilotSubcarriers.length * dataSymbols.length,
-      };
-    }
+	        nonPilotPerSymbol: nonPilotSubcarriers.length,
+	        totalNonPilotRe: nonPilotSubcarriers.length * dataSymbols.length,
+	        rangeFftSize,
+	        dopplerFftSize,
+	        sensingSymbolNum,
+          sensingPilotBlocks,
+	      };
+	    }
 
     function defaultPlannerBlock(config) {
       const symbolStart = config.dataSymbols.length ? config.dataSymbols[0] : 0;
       return {
+        kind: 'payload',
         symbol_start: symbolStart,
         symbol_count: Math.max(1, Math.min(4, config.dataSymbols.length || 1)),
         subcarrier_start: 0,
         subcarrier_count: Math.max(1, Math.min(128, config.fftSize)),
       };
     }
+
+    function syncSymbolsOnlyPlannerBlocks(config) {
+      return [{
+        symbol_start: config.syncPos,
+        symbol_count: 1,
+        subcarrier_start: 0,
+        subcarrier_count: Math.max(1, config.fftSize),
+      }];
+    }
+
+	    function knownSymbolsOnlyPlannerBlocks(config) {
+	      const blocks = syncSymbolsOnlyPlannerBlocks(config);
+	      for (const pilot of config.pilotPositions) {
+	        blocks.push({
+	          symbol_start: 0,
+          symbol_count: Math.max(1, config.numSymbols),
+          subcarrier_start: pilot,
+	          subcarrier_count: 1,
+	        });
+	      }
+        for (const block of (config.sensingPilotBlocks || [])) {
+          blocks.push({
+            symbol_start: block.symbol_start,
+            symbol_count: block.symbol_count,
+            subcarrier_start: block.subcarrier_start,
+            subcarrier_count: block.subcarrier_count,
+          });
+        }
+	      return blocks;
+	    }
+
+      function sensingPilotsOnlyPlannerBlocks(config) {
+        return (config.sensingPilotBlocks || []).map((block) => ({
+          symbol_start: block.symbol_start,
+          symbol_count: block.symbol_count,
+          subcarrier_start: block.subcarrier_start,
+          subcarrier_count: block.subcarrier_count,
+        }));
+      }
 
     function guardBandPlannerBlocks(config) {
       const blocks = [];
@@ -1118,6 +1209,7 @@
       const firstEnd = Math.min(config.fftSize - 1, 489);
       if (firstEnd >= firstStart) {
         blocks.push({
+          kind: 'payload',
           symbol_start: 0,
           symbol_count: symbolCount,
           subcarrier_start: firstStart,
@@ -1128,6 +1220,7 @@
       const secondEnd = config.fftSize - 1;
       if (secondEnd >= secondStart) {
         blocks.push({
+          kind: 'payload',
           symbol_start: 0,
           symbol_count: symbolCount,
           subcarrier_start: secondStart,
@@ -1136,6 +1229,7 @@
       }
       if (!blocks.length && config.fftSize > 1) {
         blocks.push({
+          kind: 'payload',
           symbol_start: 0,
           symbol_count: symbolCount,
           subcarrier_start: 1,
@@ -1145,14 +1239,26 @@
       return blocks;
     }
 
+	    function plannerKind(field) {
+      if (field?.key === 'sensing_mask_blocks') return 'sensing_mask';
+      if (field?.key === 'data_resource_blocks') return 'payload';
+	      return field?.planner_kind || 'payload';
+	    }
+
     function plannerMode(field) {
       if (field.mode) return field.mode;
-      if (field.allow_omit && !field.items?.length) return 'legacy';
+      if (plannerKind(field) === 'payload' && field.allow_omit && !field.items?.length) return 'legacy';
+      if (plannerKind(field) === 'sensing_mask') return 'strd';
       return field.items?.length ? 'custom' : 'disabled';
     }
 
     function plannerBlocks(field) {
       return Array.isArray(field.items) ? field.items : [];
+    }
+
+    function payloadBlockKind(block) {
+      const raw = String(block?.kind || 'payload').trim().toLowerCase().replace(/[\s-]+/g, '_');
+      return raw === 'sensing_pilot' ? 'sensing_pilot' : 'payload';
     }
 
     function plannerBlockToRect(block, config) {
@@ -1177,13 +1283,117 @@
       };
     }
 
+    function analyzeSensingCompactMask(blocks, config) {
+      const totalGridRe = config.numSymbols * config.fftSize;
+      const mask = new Uint8Array(totalGridRe);
+      for (const block of blocks) {
+        const rect = plannerBlockToRect(block, config);
+        if (!rect) continue;
+        for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
+          const rowBase = sym * config.fftSize;
+          for (let sc = rect.subcarrierStart; sc <= rect.subcarrierEnd; sc += 1) {
+            mask[rowBase + sc] = 1;
+          }
+        }
+      }
+
+      const selectedSymbols = [];
+      const perSymbolSubcarriers = [];
+      for (let sym = 0; sym < config.numSymbols; sym += 1) {
+        const row = [];
+        const rowBase = sym * config.fftSize;
+        for (let sc = 0; sc < config.fftSize; sc += 1) {
+          if (mask[rowBase + sc]) {
+            row.push(sc);
+          }
+        }
+        if (row.length) {
+          selectedSymbols.push(sym);
+          perSymbolSubcarriers.push(row);
+        }
+      }
+
+      const result = {
+        regularCompatible: false,
+        localDelayDopplerSupported: false,
+        selectedSymbolCount: selectedSymbols.length,
+        commonSubcarrierCount: perSymbolSubcarriers[0]?.length || 0,
+        implicitStride: 0,
+        selectedSymbols,
+        commonSubcarriers: perSymbolSubcarriers[0] ? [...perSymbolSubcarriers[0]] : [],
+        reason: '',
+        requiredRangeBins: perSymbolSubcarriers[0]?.length || 0,
+        requiredDopplerBins: selectedSymbols.length,
+      };
+
+      if (!selectedSymbols.length) {
+        result.reason = 'no sensing RE selected';
+        return result;
+      }
+      if (!result.commonSubcarrierCount) {
+        result.reason = 'selected symbols have no subcarriers';
+        return result;
+      }
+
+      for (let row = 1; row < perSymbolSubcarriers.length; row += 1) {
+        const current = perSymbolSubcarriers[row];
+        if (current.length !== result.commonSubcarrierCount) {
+          result.reason = 'selected subcarrier count differs across symbols';
+          return result;
+        }
+        for (let idx = 0; idx < current.length; idx += 1) {
+          if (current[idx] !== result.commonSubcarriers[idx]) {
+            result.reason = 'selected subcarrier set differs across symbols';
+            return result;
+          }
+        }
+      }
+
+      let expectedGap = config.numSymbols;
+      if (selectedSymbols.length > 1) {
+        expectedGap = selectedSymbols[1] - selectedSymbols[0];
+      }
+      if (expectedGap <= 0) {
+        result.reason = 'selected symbols must be strictly increasing';
+        return result;
+      }
+      for (let idx = 1; idx < selectedSymbols.length; idx += 1) {
+        if (selectedSymbols[idx] - selectedSymbols[idx - 1] !== expectedGap) {
+          result.reason = 'selected symbols are not equally spaced';
+          return result;
+        }
+      }
+      const wrapGap = config.numSymbols + selectedSymbols[0] - selectedSymbols[selectedSymbols.length - 1];
+      if (wrapGap !== expectedGap) {
+        result.reason = 'selected symbols are not equally spaced across frame wrap-around';
+        return result;
+      }
+
+      result.regularCompatible = true;
+      result.implicitStride = expectedGap;
+      if (config.rangeFftSize < result.requiredRangeBins) {
+        result.reason = `range_fft_size ${config.rangeFftSize} < required ${result.requiredRangeBins}`;
+        return result;
+      }
+      if (config.dopplerFftSize < result.requiredDopplerBins) {
+        result.reason = `doppler_fft_size ${config.dopplerFftSize} < required ${result.requiredDopplerBins}`;
+        return result;
+      }
+      result.localDelayDopplerSupported = true;
+      return result;
+    }
+
     function plannerStats(field, config) {
       const mode = plannerMode(field);
       const blocks = plannerBlocks(field);
+      const kind = plannerKind(field);
+      const totalGridRe = config.numSymbols * config.fftSize;
       if (mode === 'legacy') {
         return {
           mode,
+          kind,
           payloadCount: config.totalNonPilotRe,
+          totalCount: config.totalNonPilotRe,
           strippedSync: 0,
           strippedPilot: 0,
           overlaps: 0,
@@ -1193,7 +1403,9 @@
       if (mode === 'disabled') {
         return {
           mode,
+          kind,
           payloadCount: 0,
+          totalCount: kind === 'payload' ? config.totalNonPilotRe : totalGridRe,
           strippedSync: 0,
           strippedPilot: 0,
           overlaps: 0,
@@ -1201,19 +1413,72 @@
         };
       }
 
-      const mask = new Uint8Array(config.totalNonPilotRe);
+      if (kind === 'sensing_mask' && mode === 'strd') {
+        return {
+          mode,
+          kind,
+          payloadCount: 0,
+          totalCount: totalGridRe,
+          strippedSync: 0,
+          strippedPilot: 0,
+          overlaps: 0,
+          blocks,
+          compactAnalysis: null,
+        };
+      }
+
+      if (kind === 'sensing_mask') {
+        const mask = new Uint8Array(totalGridRe);
+        let selectedCount = 0;
+        let overlaps = 0;
+        for (const block of blocks) {
+          const rect = plannerBlockToRect(block, config);
+          if (!rect) continue;
+          for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
+            const rowBase = sym * config.fftSize;
+            for (let sc = rect.subcarrierStart; sc <= rect.subcarrierEnd; sc += 1) {
+              const flatIndex = rowBase + sc;
+              if (mask[flatIndex]) {
+                overlaps += 1;
+                continue;
+              }
+              mask[flatIndex] = 1;
+              selectedCount += 1;
+            }
+          }
+        }
+        return {
+          mode,
+          kind,
+          payloadCount: selectedCount,
+          totalCount: totalGridRe,
+          strippedSync: 0,
+          strippedPilot: 0,
+          overlaps,
+          blocks,
+          compactAnalysis: analyzeSensingCompactMask(blocks, config),
+        };
+      }
+
+      const payloadMask = new Uint8Array(config.totalNonPilotRe);
+      const sensingPilotMask = new Uint8Array(config.totalNonPilotRe);
       let payloadCount = 0;
+      let sensingPilotCount = 0;
       let strippedSync = 0;
       let strippedPilot = 0;
       let overlaps = 0;
+      let crossKindOverlap = 0;
       for (const block of blocks) {
         const rect = plannerBlockToRect(block, config);
         if (!rect) continue;
-        for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
-          if (sym === config.syncPos) {
-            strippedSync += rect.subcarrierEnd - rect.subcarrierStart + 1;
-            continue;
-          }
+        const blockKind = payloadBlockKind(block);
+	        for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
+	          if (sym === config.syncPos) {
+              if (blockKind === 'payload') {
+	                strippedSync += rect.subcarrierEnd - rect.subcarrierStart + 1;
+              }
+	            continue;
+	          }
           const dataSymbolIndex = config.actualToDataSymbol[sym];
           if (dataSymbolIndex < 0) continue;
           const rowBase = dataSymbolIndex * config.nonPilotPerSymbol;
@@ -1225,87 +1490,124 @@
             const nonPilotIndex = config.subcarrierToNonPilot[sc];
             if (nonPilotIndex < 0) continue;
             const flatIndex = rowBase + nonPilotIndex;
-            if (mask[flatIndex]) {
+            if (blockKind === 'sensing_pilot') {
+              if (sensingPilotMask[flatIndex]) {
+                overlaps += 1;
+                continue;
+              }
+              if (payloadMask[flatIndex]) {
+                crossKindOverlap += 1;
+              }
+              sensingPilotMask[flatIndex] = 1;
+              continue;
+            }
+            if (payloadMask[flatIndex]) {
               overlaps += 1;
               continue;
             }
-            mask[flatIndex] = 1;
-            payloadCount += 1;
+            if (sensingPilotMask[flatIndex]) {
+              crossKindOverlap += 1;
+            }
+            payloadMask[flatIndex] = 1;
           }
         }
       }
-      return {
-        mode,
-        payloadCount,
-        strippedSync,
-        strippedPilot,
-        overlaps,
-        blocks,
-      };
-    }
+      for (let idx = 0; idx < payloadMask.length; idx += 1) {
+        if (sensingPilotMask[idx]) {
+          sensingPilotCount += 1;
+          payloadMask[idx] = 0;
+        }
+        if (payloadMask[idx]) {
+          payloadCount += 1;
+        }
+      }
+        return {
+          mode,
+          kind,
+          payloadCount,
+          sensingPilotCount,
+          totalCount: config.totalNonPilotRe,
+          strippedSync,
+          strippedPilot,
+          overlaps,
+          crossKindOverlap,
+          blocks,
+          compactAnalysis: null,
+        };
+      }
 
     function clonePlannerItems(items) {
       return Array.isArray(items) ? structuredClone(items) : [];
     }
 
-    function plannerFieldForTab(tabName) {
-      const model = modelForTab(tabName);
-      return model ? findField(model, 'data_resource_blocks') : null;
-    }
+	    function plannerFieldForTab(tabName, spec = plannerSpec()) {
+	      const model = modelForTab(tabName);
+	      return model ? findField(model, spec.fieldKey) : null;
+	    }
 
-    function plannerSnapshotForTab(tabName) {
-      const field = plannerFieldForTab(tabName);
-      if (!field) {
-        return { mode: 'legacy', items: [] };
-      }
-      return {
-        mode: plannerMode(field),
-        items: clonePlannerItems(plannerBlocks(field)),
-      };
-    }
+	    function plannerSnapshotForTab(tabName, spec = plannerSpec()) {
+	      const field = plannerFieldForTab(tabName, spec);
+	      if (!field) {
+	        return { mode: spec.missingMode, items: [] };
+	      }
+	      return {
+	        mode: plannerMode(field),
+	        items: clonePlannerItems(plannerBlocks(field)),
+	      };
+	    }
 
     function plannerSnapshotEquals(left, right) {
       return JSON.stringify(left) === JSON.stringify(right);
     }
 
-    function ensurePlannerState(force = false) {
-      const txSnapshot = plannerSnapshotForTab('modulator');
-      const rxSnapshot = plannerSnapshotForTab('demodulator');
-      const mismatch = !plannerSnapshotEquals(txSnapshot, rxSnapshot);
-      if (!cache.planner || force || !cache.planner.dirty) {
-        const useRxSnapshot = txSnapshot.mode === 'legacy' && !txSnapshot.items.length &&
-          (rxSnapshot.mode !== 'legacy' || rxSnapshot.items.length);
-        const source = useRxSnapshot ? 'demodulator' : 'modulator';
-        const chosen = useRxSnapshot ? rxSnapshot : txSnapshot;
-        cache.planner = {
-          key: 'data_resource_blocks',
-          comment: 'Optional payload RE rectangles',
-          display_comment: 'Plan payload rectangles on a dedicated grid, then apply them to TX or RX.',
-          allow_omit: true,
-          mode: chosen.mode,
-          items: clonePlannerItems(chosen.items),
-          baseTab: 'modulator',
-          loadedFrom: mismatch ? source : 'shared',
+	    function ensurePlannerState(force = false, spec = plannerSpec()) {
+	      if (!cache._plannerStates) {
+	        cache._plannerStates = {};
+	      }
+	      const txSnapshot = plannerSnapshotForTab('modulator', spec);
+	      const rxSnapshot = plannerSnapshotForTab('demodulator', spec);
+	      const mismatch = !plannerSnapshotEquals(txSnapshot, rxSnapshot);
+	      const state = cache._plannerStates[spec.cacheKey];
+	      if (!state || force || !state.dirty) {
+	        const useRxSnapshot = txSnapshot.mode === spec.missingMode && !txSnapshot.items.length &&
+	          (rxSnapshot.mode !== spec.missingMode || rxSnapshot.items.length);
+	        const source = useRxSnapshot ? APP.tabs.demodulator.label : APP.tabs.modulator.label;
+	        const chosen = useRxSnapshot ? rxSnapshot : txSnapshot;
+	        cache._plannerStates[spec.cacheKey] = {
+	          key: spec.fieldKey,
+		          planner_kind: spec.fieldKey === 'sensing_mask_blocks' ? 'sensing_mask' : 'payload',
+		          comment: spec.fieldKey === 'sensing_mask_blocks'
+		            ? 'Optional compact sensing RE rectangles'
+		            : 'Optional payload / sensing-pilot RE rectangles',
+		          display_comment: spec.fieldKey === 'sensing_mask_blocks'
+		            ? 'Plan compact sensing rectangles on a dedicated grid, then write them to TX or RX.'
+		            : 'Plan payload or sensing-pilot rectangles on a dedicated grid, then apply them to TX or RX.',
+	          allow_omit: true,
+	          mode: chosen.mode,
+	          items: clonePlannerItems(chosen.items),
+	          baseTab: 'modulator',
+	          loadedFrom: mismatch ? source : 'shared',
           dirty: false,
-          txSnapshot,
-          rxSnapshot,
-          mismatch,
-        };
-      } else {
-        cache.planner.txSnapshot = txSnapshot;
-        cache.planner.rxSnapshot = rxSnapshot;
-        cache.planner.mismatch = mismatch;
-      }
-      return cache.planner;
-    }
+	          txSnapshot,
+	          rxSnapshot,
+	          mismatch,
+	        };
+	      } else {
+	        cache._plannerStates[spec.cacheKey].txSnapshot = txSnapshot;
+	        cache._plannerStates[spec.cacheKey].rxSnapshot = rxSnapshot;
+	        cache._plannerStates[spec.cacheKey].mismatch = mismatch;
+	      }
+	      return cache._plannerStates[spec.cacheKey];
+	    }
 
-    function refreshPlannerComparisonState() {
-      if (!cache.planner) return null;
-      cache.planner.txSnapshot = plannerSnapshotForTab('modulator');
-      cache.planner.rxSnapshot = plannerSnapshotForTab('demodulator');
-      cache.planner.mismatch = !plannerSnapshotEquals(cache.planner.txSnapshot, cache.planner.rxSnapshot);
-      return cache.planner;
-    }
+	    function refreshPlannerComparisonState(spec = plannerSpec()) {
+	      const state = cache._plannerStates?.[spec.cacheKey];
+	      if (!state) return null;
+	      state.txSnapshot = plannerSnapshotForTab('modulator', spec);
+	      state.rxSnapshot = plannerSnapshotForTab('demodulator', spec);
+	      state.mismatch = !plannerSnapshotEquals(state.txSnapshot, state.rxSnapshot);
+	      return state;
+	    }
 
     function validatePlannerForTab(tabName, plannerField) {
       const config = plannerConfig(tabName);
@@ -1326,12 +1628,18 @@
         ) {
           return `Block ${index + 1} has incomplete coordinates.`;
         }
-        if (symbolStart < 0 || subcarrierStart < 0 || symbolCount <= 0 || subcarrierCount <= 0) {
-          return `Block ${index + 1} must use non-negative starts and positive counts.`;
+	        if (symbolStart < 0 || subcarrierStart < 0 || symbolCount <= 0 || subcarrierCount <= 0) {
+	          return `Block ${index + 1} must use non-negative starts and positive counts.`;
+	        }
+        if (plannerKind(plannerField) === 'payload') {
+          const blockKind = payloadBlockKind(block);
+          if (!['payload', 'sensing_pilot'].includes(blockKind)) {
+            return `Block ${index + 1} must use payload or sensing_pilot type.`;
+          }
         }
-        if (symbolStart + symbolCount > config.numSymbols) {
-          return `Block ${index + 1} exceeds ${APP.tabs[tabName].label} symbol range (${config.numSymbols}).`;
-        }
+	        if (symbolStart + symbolCount > config.numSymbols) {
+	          return `Block ${index + 1} exceeds ${APP.tabs[tabName].label} symbol range (${config.numSymbols}).`;
+	        }
         if (subcarrierStart + subcarrierCount > config.fftSize) {
           return `Block ${index + 1} exceeds ${APP.tabs[tabName].label} FFT range (${config.fftSize}).`;
         }
@@ -1376,12 +1684,32 @@
       }
     }
 
-    function renderDataResourcePlanner(field, options = {}) {
-      const sourceTab = options.sourceTab || currentTab;
-      const standalone = Boolean(options.standalone);
-      const onChange = typeof options.onChange === 'function' ? options.onChange : () => {};
-      field.items = plannerBlocks(field);
-      field.mode = plannerMode(field);
+	    function renderDataResourcePlanner(field, options = {}) {
+	      const sourceTab = options.sourceTab || currentTab;
+	      const standalone = Boolean(options.standalone);
+      const readOnly = Boolean(options.readOnly);
+	      const onChange = typeof options.onChange === 'function' ? options.onChange : () => {};
+	      const kind = plannerKind(field);
+	      const isPayloadPlanner = kind === 'payload';
+	      const isSensingPlanner = kind === 'sensing_mask';
+	      if (isPayloadPlanner && !field.new_block_kind) {
+	        field.new_block_kind = 'payload';
+	      }
+	      const plannerTitle = isPayloadPlanner ? 'Resource Map' : 'Sensing Resource Map';
+	      const plannerModeLabel = isPayloadPlanner ? 'Resource Mapping Mode' : 'Sensing Resource Mode';
+	      const legacyOption = isPayloadPlanner
+	        ? '<option value="legacy">Legacy Full Grid</option>'
+	        : '';
+	      const customOptionLabel = isPayloadPlanner ? 'Custom Blocks' : 'Custom Blocks';
+	      const disabledOptionLabel = isPayloadPlanner ? 'Disable Payload' : 'Disable Compact Mask';
+	      const sensingModeOptions = isSensingPlanner
+	        ? '<option value="strd">STRD-based</option><option value="custom">Custom Blocks</option>'
+	        : '';
+	      const presetOptions = isPayloadPlanner
+	        ? '<option value="guard_band_grid">Guard Band Grid</option>'
+	        : '<option value="sync_symbols_only">Sync symbols only</option><option value="known_symbols_only">Known symbols only</option><option value="sensing_pilots_only">Sensing pilots only</option>';
+	      field.items = plannerBlocks(field);
+	      field.mode = plannerMode(field);
 
       const holder = document.createElement('div');
       holder.className = 'kv-row';
@@ -1390,7 +1718,7 @@
       }
       holder.innerHTML = `
         <div class="key-col">
-          <code>${standalone ? 'data_resource_blocks planner' : field.key}</code>
+          <code>${plannerTitle}</code>
           <div class="hint">${field.display_comment || field.comment || ''}</div>
         </div>
         <div class="value-col"></div>
@@ -1399,58 +1727,101 @@
       const card = document.createElement('div');
       card.className = 'planner-card';
 
-      const toolbar = document.createElement('div');
-      toolbar.className = 'planner-toolbar';
-      const modeField = document.createElement('div');
-      modeField.className = 'field';
-      modeField.innerHTML = `
-        <label>Payload Mode</label>
-        <select>
-          <option value="legacy">Legacy Full Grid</option>
-          <option value="custom">Custom Blocks</option>
-          <option value="disabled">Disable Payload</option>
-        </select>
-      `;
-      const modeSelect = modeField.querySelector('select');
-      const presetField = document.createElement('div');
-      presetField.className = 'field';
-      presetField.innerHTML = `
-        <label>Preset</label>
-        <select>
-          <option value="">Custom / Current</option>
-          <option value="guard_band_grid">Guard Band Grid</option>
-        </select>
-      `;
-      const presetSelect = presetField.querySelector('select');
-      const actions = document.createElement('div');
-      actions.className = 'actions';
-      const addBtn = document.createElement('button');
-      addBtn.className = 'btn';
-      addBtn.textContent = 'Add Block';
-      const loadPresetBtn = document.createElement('button');
-      loadPresetBtn.className = 'btn';
-      loadPresetBtn.textContent = 'Load Preset';
-      const clearBtn = document.createElement('button');
-      clearBtn.className = 'btn warn';
-      clearBtn.textContent = 'Clear Blocks';
-      actions.appendChild(loadPresetBtn);
-      actions.appendChild(addBtn);
-      actions.appendChild(clearBtn);
-      toolbar.appendChild(modeField);
-      toolbar.appendChild(presetField);
-      toolbar.appendChild(actions);
+      let modeSelect = null;
+      let presetSelect = null;
+      let loadPresetBtn = null;
+      let addBtn = null;
+      let clearBtn = null;
+      if (!readOnly) {
+	        const toolbar = document.createElement('div');
+	        toolbar.className = 'planner-toolbar';
+	        const modeField = document.createElement('div');
+	        modeField.className = 'field';
+	        modeField.innerHTML = `
+	          <label>${plannerModeLabel}</label>
+	          <select>
+	            ${legacyOption}
+	            ${isSensingPlanner ? sensingModeOptions : `<option value="custom">${customOptionLabel}</option><option value="disabled">${disabledOptionLabel}</option>`}
+	          </select>
+	        `;
+	        modeSelect = modeField.querySelector('select');
+	        const presetField = document.createElement('div');
+	        presetField.className = 'field';
+	        presetField.innerHTML = `
+	          <label>Preset</label>
+	          <select>
+	            <option value="">Custom / Current</option>
+	            ${presetOptions}
+	          </select>
+	        `;
+	        presetSelect = presetField.querySelector('select');
+      let blockKindField = null;
+      let blockKindSelect = null;
+        if (isPayloadPlanner) {
+        blockKindField = document.createElement('div');
+        blockKindField.className = 'field';
+        blockKindField.innerHTML = `
+          <label>New Block Type</label>
+          <select>
+            <option value="payload">payload</option>
+            <option value="sensing_pilot">sensing_pilot</option>
+          </select>
+        `;
+        blockKindSelect = blockKindField.querySelector('select');
+        blockKindSelect.value = field.new_block_kind || 'payload';
+        blockKindSelect.addEventListener('change', () => {
+          field.new_block_kind = blockKindSelect.value;
+        });
+      }
+	        const actions = document.createElement('div');
+	        actions.className = 'actions';
+	        addBtn = document.createElement('button');
+	        addBtn.className = 'btn';
+	        addBtn.textContent = 'Add Block';
+	        loadPresetBtn = document.createElement('button');
+	        loadPresetBtn.className = 'btn';
+	        loadPresetBtn.textContent = 'Load Preset';
+	        clearBtn = document.createElement('button');
+	        clearBtn.className = 'btn warn';
+	        clearBtn.textContent = 'Clear Blocks';
+	        actions.appendChild(loadPresetBtn);
+	        actions.appendChild(addBtn);
+	        actions.appendChild(clearBtn);
+	        toolbar.appendChild(modeField);
+	        toolbar.appendChild(presetField);
+        if (blockKindField) {
+          toolbar.appendChild(blockKindField);
+        }
+	        toolbar.appendChild(actions);
+        card.appendChild(toolbar);
 
-      const statsHost = document.createElement('div');
-      statsHost.className = 'planner-meta';
+        modeField._modeSelect = modeSelect;
+        presetField._presetSelect = presetSelect;
+        actions._addBtn = addBtn;
+        actions._loadPresetBtn = loadPresetBtn;
+        actions._clearBtn = clearBtn;
+        toolbar._blockKindSelect = blockKindSelect;
+	      }
+      if (readOnly) {
+        const note = document.createElement('div');
+        note.className = 'subtle';
+        note.textContent = isPayloadPlanner
+          ? 'Read-only preview. Edit payload / sensing-pilot mapping in the Resource Map tab.'
+          : 'Read-only preview. Edit sensing resource mapping in the Sensing Resource Map tab.';
+        card.appendChild(note);
+      }
+	      const statsHost = document.createElement('div');
+	      statsHost.className = 'planner-meta';
 
-      const legend = document.createElement('div');
-      legend.className = 'planner-legend';
-      legend.innerHTML = `
-        <span><i style="background:#d8e8ff;"></i>payload area</span>
-        <span><i style="background:#ffddc7;"></i>sync symbol</span>
-        <span><i style="background:#d7dce2;"></i>pilot subcarriers</span>
-        <span><i style="background:#87c4ff;"></i>drag preview / block</span>
-      `;
+	      const legend = document.createElement('div');
+	      legend.className = 'planner-legend';
+	      legend.innerHTML = `
+	        <span><i style="background:#d8e8ff;"></i>${isPayloadPlanner ? 'payload area' : 'sensing resource area'}</span>
+	        ${isPayloadPlanner ? '<span><i style="background:#d7f5d1;"></i>sensing pilot area</span>' : ''}
+	        <span><i style="background:#ffddc7;"></i>sync symbol</span>
+	        <span><i style="background:#d7dce2;"></i>pilot subcarriers</span>
+	        <span><i style="background:#87c4ff;"></i>drag preview / block</span>
+	      `;
 
       const canvasWrap = document.createElement('div');
       canvasWrap.className = 'planner-canvas-wrap';
@@ -1470,14 +1841,14 @@
 
       const blocksHost = document.createElement('div');
       blocksHost.className = 'planner-block-list';
-
-      card.appendChild(toolbar);
-      card.appendChild(statsHost);
-      card.appendChild(legend);
-      card.appendChild(canvasWrap);
-      card.appendChild(axis);
-      card.appendChild(blocksHost);
-      valueCol.appendChild(card);
+	      card.appendChild(statsHost);
+	      card.appendChild(legend);
+	      card.appendChild(canvasWrap);
+	      card.appendChild(axis);
+      if (!readOnly) {
+	        card.appendChild(blocksHost);
+      }
+	      valueCol.appendChild(card);
 
       let dragStart = null;
       let dragCurrent = null;
@@ -1485,34 +1856,71 @@
       function refreshStats() {
         const config = plannerConfig(sourceTab);
         const stats = plannerStats(field, config);
-        modeSelect.value = field.mode;
-        if (!presetSelect.dataset.keepValue) {
-          presetSelect.value = '';
+        const currentPreset = presetSelect ? presetSelect.value : '';
+        if (modeSelect) {
+	          modeSelect.value = field.mode;
         }
+	        if (presetSelect && !presetSelect.dataset.keepValue) {
+	          presetSelect.value = '';
+	        }
         axisRight.textContent = `subcarrier: ${config.fftSize - 1}`;
         statsHost.innerHTML = '';
-        const payloadPct = config.totalNonPilotRe
-          ? ((stats.payloadCount / config.totalNonPilotRe) * 100).toFixed(1)
+	        const payloadPct = stats.totalCount
+	          ? ((stats.payloadCount / stats.totalCount) * 100).toFixed(1)
+	          : '0.0';
+        const sensingPilotPct = stats.totalCount
+          ? (((stats.sensingPilotCount || 0) / stats.totalCount) * 100).toFixed(1)
           : '0.0';
-        const statItems = [
-          `payload RE ${stats.payloadCount}/${config.totalNonPilotRe} (${payloadPct}%)`,
-          `sync stripped ${stats.strippedSync}`,
-          `pilot stripped ${stats.strippedPilot}`,
-          `overlap ignored ${stats.overlaps}`,
-        ];
-        if (presetSelect.value === 'guard_band_grid') {
-          statItems.push(
-            config.fftSize >= 535
-              ? 'preset: bins 1-489 and 535-end'
-              : 'preset: bins 1-489 (or FFT end) from plot_const active set'
-          );
-        }
-        if (field.mode !== 'custom' && field.items.length) {
-          statItems.push(`stored blocks ${field.items.length} (currently ignored)`);
-        } else {
-          statItems.push(`blocks ${field.items.length}`);
-        }
-        for (const text of statItems) {
+	        const primaryLabel = isPayloadPlanner ? 'payload RE' : 'sensing RE';
+	        const statItems = [
+	          `${primaryLabel} ${stats.payloadCount}/${stats.totalCount} (${payloadPct}%)`,
+	          `overlap ignored ${stats.overlaps}`,
+	        ];
+	        if (isPayloadPlanner) {
+          statItems.push(`sensing pilot RE ${stats.sensingPilotCount || 0}/${stats.totalCount} (${sensingPilotPct}%)`);
+	          statItems.push(`sync stripped ${stats.strippedSync}`);
+	          statItems.push(`pilot stripped ${stats.strippedPilot}`);
+          if (stats.crossKindOverlap) {
+            statItems.push(`payload/sensing overlap ${stats.crossKindOverlap} (sensing pilot wins)`);
+          }
+	        }
+	        if (currentPreset === 'guard_band_grid') {
+	          statItems.push(
+	            isPayloadPlanner && config.fftSize >= 535
+	              ? 'preset: bins 1-489 and 535-end'
+	              : 'preset: bins 1-489 (or FFT end) from plot_const active set'
+	          );
+	        } else if (currentPreset === 'sync_symbols_only') {
+	          statItems.push(`preset: sync symbol row only`);
+	        } else if (currentPreset === 'known_symbols_only') {
+	          statItems.push(`preset: sync symbol plus pilots plus sensing pilots`);
+          } else if (currentPreset === 'sensing_pilots_only') {
+            statItems.push(`preset: sensing pilot blocks only`);
+	        }
+	        if (field.mode !== 'custom' && field.items.length) {
+	          statItems.push(`stored blocks ${field.items.length} (currently ignored)`);
+	        } else {
+	          statItems.push(`blocks ${field.items.length}`);
+	        }
+	        if (isSensingPlanner) {
+	          statItems.push(`mode ${field.mode === 'custom' ? 'Custom Blocks' : 'STRD-based'}`);
+	          if (stats.compactAnalysis) {
+	            const analysis = stats.compactAnalysis;
+	            if (analysis.localDelayDopplerSupported) {
+	              statItems.push('MTI/local DD available');
+	              statItems.push(`implicit stride ${analysis.implicitStride}`);
+	              statItems.push(`used symbols ${analysis.selectedSymbolCount}`);
+	              statItems.push(`used subcarriers ${analysis.commonSubcarrierCount}`);
+	            } else if (analysis.regularCompatible) {
+	              statItems.push('regular mask but FFT sizes too small');
+	              statItems.push(`need range_fft_size >= ${analysis.requiredRangeBins}`);
+	              statItems.push(`need doppler_fft_size >= ${analysis.requiredDopplerBins}`);
+	            } else {
+	              statItems.push(`not compatible: ${analysis.reason || 'mask is not regular-sampling compatible'}`);
+	            }
+	          }
+	        }
+	        for (const text of statItems) {
           const pill = document.createElement('span');
           pill.className = 'planner-stat';
           pill.textContent = text;
@@ -1524,21 +1932,28 @@
         blocksHost.innerHTML = '';
         if (!field.items.length) {
           const empty = document.createElement('div');
-          empty.className = 'planner-empty';
-          empty.textContent =
-            field.mode === 'legacy'
-              ? 'Legacy full-grid mode is active. Switch to Custom Blocks and drag on the planner to create payload rectangles.'
-              : 'No custom payload blocks yet. Drag on the planner or use Add Block.';
-          blocksHost.appendChild(empty);
-          return;
-        }
+	          empty.className = 'planner-empty';
+	          empty.textContent =
+	            field.mode === 'legacy'
+	              ? 'Legacy full-grid mode is active. Switch to Custom Blocks and drag on the planner to create payload rectangles.'
+	              : isSensingPlanner && field.mode === 'strd'
+	                ? 'Traditional STRD-based sensing mode is active. Switch to Custom Blocks to explicitly plan sensing time-frequency resources.'
+	                : isPayloadPlanner
+	                ? 'No custom payload blocks yet. Drag on the planner or use Add Block.'
+	                : 'No custom sensing resource blocks yet. Drag on the planner or use Add Block.';
+	          blocksHost.appendChild(empty);
+	          return;
+	        }
         field.items.forEach((block, index) => {
           const cardEl = document.createElement('div');
           cardEl.className = 'planner-block';
-          const head = document.createElement('div');
-          head.className = 'planner-block-head';
-          const title = document.createElement('strong');
-          title.textContent = `Block ${index + 1}`;
+	          const head = document.createElement('div');
+	          head.className = 'planner-block-head';
+	          const title = document.createElement('strong');
+          const blockKind = isPayloadPlanner ? payloadBlockKind(block) : '';
+	          title.textContent = isPayloadPlanner
+            ? `Block ${index + 1} · ${blockKind}`
+            : `Block ${index + 1}`;
           const removeBtn = document.createElement('button');
           removeBtn.className = 'btn danger';
           removeBtn.textContent = 'Delete';
@@ -1550,39 +1965,58 @@
           head.appendChild(removeBtn);
           cardEl.appendChild(head);
 
-          const grid = document.createElement('div');
-          grid.className = 'planner-block-grid';
-          const specs = [
+	          const grid = document.createElement('div');
+	          grid.className = 'planner-block-grid';
+          const specs = [];
+          if (isPayloadPlanner) {
+            specs.push(['kind', 'Type']);
+          }
+          specs.push(
             ['symbol_start', 'Symbol Start'],
             ['symbol_count', 'Symbol Count'],
             ['subcarrier_start', 'Subcarrier Start'],
             ['subcarrier_count', 'Subcarrier Count'],
-          ];
-          for (const [key, label] of specs) {
-            const fieldWrap = document.createElement('div');
-            const labelEl = document.createElement('label');
-            labelEl.textContent = label;
-            const input = document.createElement('input');
-            input.type = 'number';
-            input.step = '1';
-            input.min = '0';
-            input.value = block[key] ?? '';
-            input.addEventListener('input', () => {
-              block[key] = input.value;
-              field.dirty = true;
-              refreshStats();
-              drawPlanner();
-            });
-            input.addEventListener('change', () => {
-              const numeric = parseIntOrNull(input.value);
-              block[key] = numeric === null ? '' : numeric;
-              input.value = block[key] === '' ? '' : String(block[key]);
-              field.dirty = true;
-              refreshAll();
-            });
-            fieldWrap.appendChild(labelEl);
-            fieldWrap.appendChild(input);
-            grid.appendChild(fieldWrap);
+          );
+	          for (const [key, label] of specs) {
+	            const fieldWrap = document.createElement('div');
+	            const labelEl = document.createElement('label');
+	            labelEl.textContent = label;
+            let input;
+            if (key === 'kind') {
+              input = document.createElement('select');
+              input.innerHTML = `
+                <option value="payload">payload</option>
+                <option value="sensing_pilot">sensing_pilot</option>
+              `;
+              input.value = payloadBlockKind(block);
+              input.addEventListener('change', () => {
+                block[key] = input.value;
+                field.dirty = true;
+                refreshAll();
+              });
+            } else {
+	              input = document.createElement('input');
+	              input.type = 'number';
+	              input.step = '1';
+	              input.min = '0';
+	              input.value = block[key] ?? '';
+	              input.addEventListener('input', () => {
+	                block[key] = input.value;
+	                field.dirty = true;
+	                refreshStats();
+	                drawPlanner();
+	              });
+	              input.addEventListener('change', () => {
+	                const numeric = parseIntOrNull(input.value);
+	                block[key] = numeric === null ? '' : numeric;
+	                input.value = block[key] === '' ? '' : String(block[key]);
+	                field.dirty = true;
+	                refreshAll();
+	              });
+            }
+	            fieldWrap.appendChild(labelEl);
+	            fieldWrap.appendChild(input);
+	            grid.appendChild(fieldWrap);
           }
           cardEl.appendChild(grid);
           blocksHost.appendChild(cardEl);
@@ -1664,28 +2098,31 @@
           ctx.stroke();
         }
 
-        if (field.mode === 'legacy') {
-          drawBlockRect(
-            ctx,
-            { symbolStart: 0, symbolEnd: config.numSymbols - 1, subcarrierStart: 0, subcarrierEnd: config.fftSize - 1 },
-            config,
-            'rgba(0, 86, 179, 0.12)',
-            'rgba(0, 86, 179, 0.0)',
-          );
-        } else if (field.mode === 'custom') {
-          field.items.forEach((block, index) => {
-            const rect = plannerBlockToRect(block, config);
-            if (!rect) return;
-            const hue = 205 + (index * 27) % 90;
-            drawBlockRect(
-              ctx,
-              rect,
-              config,
-              `hsla(${hue}, 85%, 72%, 0.32)`,
-              `hsla(${hue}, 80%, 40%, 0.95)`,
-            );
-          });
-        }
+	        if (field.mode === 'legacy') {
+	          drawBlockRect(
+	            ctx,
+	            { symbolStart: 0, symbolEnd: config.numSymbols - 1, subcarrierStart: 0, subcarrierEnd: config.fftSize - 1 },
+	            config,
+	            'rgba(0, 86, 179, 0.12)',
+	            'rgba(0, 86, 179, 0.0)',
+	          );
+	        } else if (field.mode === 'custom') {
+	          field.items.forEach((block, index) => {
+	            const rect = plannerBlockToRect(block, config);
+	            if (!rect) return;
+            const blockKind = isPayloadPlanner ? payloadBlockKind(block) : 'payload';
+	            const hue = blockKind === 'sensing_pilot'
+              ? (120 + (index * 19) % 40)
+              : (205 + (index * 27) % 90);
+	            drawBlockRect(
+	              ctx,
+	              rect,
+	              config,
+	              `hsla(${hue}, 85%, ${blockKind === 'sensing_pilot' ? '74' : '72'}%, 0.32)`,
+	              `hsla(${hue}, 80%, ${blockKind === 'sensing_pilot' ? '32' : '40'}%, 0.95)`,
+	            );
+	          });
+	        }
 
         for (const pilot of config.pilotPositions) {
           const x0 = (pilot / config.fftSize) * width;
@@ -1717,40 +2154,74 @@
         ctx.fillText(`fft bins 0..${config.fftSize - 1}`, 12 * dpr, 36 * dpr);
       }
 
-      function refreshAll() {
-        refreshStats();
-        renderBlockList();
-        drawPlanner();
-        onChange(field);
-      }
+	      function refreshAll() {
+	        refreshStats();
+        if (!readOnly) {
+	          renderBlockList();
+        }
+	        drawPlanner();
+	        onChange(field);
+	      }
 
-      modeSelect.addEventListener('change', () => {
-        field.mode = modeSelect.value;
-        field.dirty = true;
-        refreshAll();
-      });
+        if (!readOnly) {
+	      modeSelect.addEventListener('change', () => {
+	        field.mode = modeSelect.value;
+	        field.dirty = true;
+	        refreshAll();
+	      });
 
       loadPresetBtn.addEventListener('click', () => {
-        const preset = presetSelect.value;
-        if (!preset) {
-          return;
-        }
-        if (preset === 'guard_band_grid') {
+	        const preset = presetSelect.value;
+	        if (!preset) {
+	          return;
+	        }
+	        if (preset === 'guard_band_grid') {
           field.mode = 'custom';
           field.items = guardBandPlannerBlocks(plannerConfig(sourceTab));
           field.dirty = true;
           presetSelect.dataset.keepValue = '1';
-          refreshAll();
-          delete presetSelect.dataset.keepValue;
-        }
-      });
+	          refreshAll();
+	          delete presetSelect.dataset.keepValue;
+	          return;
+	        }
+	        if (preset === 'sync_symbols_only') {
+	          field.mode = 'custom';
+	          field.items = syncSymbolsOnlyPlannerBlocks(plannerConfig(sourceTab));
+	          field.dirty = true;
+	          presetSelect.dataset.keepValue = '1';
+	          refreshAll();
+	          delete presetSelect.dataset.keepValue;
+	          return;
+	        }
+	        if (preset === 'known_symbols_only') {
+	          field.mode = 'custom';
+	          field.items = knownSymbolsOnlyPlannerBlocks(plannerConfig(sourceTab));
+	          field.dirty = true;
+	          presetSelect.dataset.keepValue = '1';
+	          refreshAll();
+	          delete presetSelect.dataset.keepValue;
+            return;
+	        }
+          if (preset === 'sensing_pilots_only') {
+            field.mode = 'custom';
+            field.items = sensingPilotsOnlyPlannerBlocks(plannerConfig(sourceTab));
+            field.dirty = true;
+            presetSelect.dataset.keepValue = '1';
+            refreshAll();
+            delete presetSelect.dataset.keepValue;
+	        }
+	      });
 
-      addBtn.addEventListener('click', () => {
-        if (field.mode !== 'custom') field.mode = 'custom';
-        field.items.push(defaultPlannerBlock(plannerConfig(sourceTab)));
-        field.dirty = true;
-        refreshAll();
-      });
+	      addBtn.addEventListener('click', () => {
+	        if (field.mode !== 'custom') field.mode = 'custom';
+        const nextBlock = defaultPlannerBlock(plannerConfig(sourceTab));
+        if (isPayloadPlanner) {
+          nextBlock.kind = field.new_block_kind || 'payload';
+        }
+	        field.items.push(nextBlock);
+	        field.dirty = true;
+	        refreshAll();
+	      });
 
       clearBtn.addEventListener('click', () => {
         field.items = [];
@@ -1794,28 +2265,33 @@
           return;
         }
         const preview = dragRect(plannerConfig(sourceTab));
-        if (preview) {
-          field.items.push({
-            symbol_start: preview.symbolStart,
-            symbol_count: preview.symbolEnd - preview.symbolStart + 1,
-            subcarrier_start: preview.subcarrierStart,
-            subcarrier_count: preview.subcarrierEnd - preview.subcarrierStart + 1,
-          });
-          field.dirty = true;
-        }
+	        if (preview) {
+            const nextBlock = {
+              ...(isPayloadPlanner ? { kind: field.new_block_kind || 'payload' } : {}),
+	            symbol_start: preview.symbolStart,
+	            symbol_count: preview.symbolEnd - preview.symbolStart + 1,
+	            subcarrier_start: preview.subcarrierStart,
+	            subcarrier_count: preview.subcarrierEnd - preview.subcarrierStart + 1,
+	          };
+	          field.items.push(nextBlock);
+	          field.dirty = true;
+	        }
         dragStart = null;
         dragCurrent = null;
         refreshAll();
       }
 
       canvas.addEventListener('pointerup', finishDrag);
-      canvas.addEventListener('pointerleave', () => {
-        if (dragStart) {
-          finishDrag();
-          return;
+	      canvas.addEventListener('pointerleave', () => {
+	        if (dragStart) {
+	          finishDrag();
+	          return;
+	        }
+	        coordLabel.textContent = 'hover: -';
+	      });
+        } else {
+          canvas.style.cursor = 'default';
         }
-        coordLabel.textContent = 'hover: -';
-      });
 
       if (window.ResizeObserver) {
         const observer = new ResizeObserver(() => drawPlanner());
@@ -1920,7 +2396,7 @@
         values.push(parsed);
       }
       model.cpu_cores.values = values;
-      if (tabName === currentTab && currentTab !== 'planner') {
+	      if (tabName === currentTab && !specialPlannerTabs.has(currentTab)) {
         const unique = [...new Set(values)].sort((a, b) => a - b);
         const preview = unique.length ? `isolated CPUs: ${unique.join(',')}` : 'isolated CPUs: -';
         cpuListPreview.textContent = truncated
@@ -1930,29 +2406,45 @@
       }
     }
 
-    function renderSections() {
-      const model = currentModel();
-      if (!model) return;
-      ensureSensingChannelItems();
-      configSections.innerHTML = '';
+	    function renderSections() {
+	      const model = currentModel();
+	      if (!model) return;
+	      ensureSensingChannelItems();
+	      configSections.innerHTML = '';
 
-      for (const section of model.sections) {
-        const card = document.createElement('div');
-        card.className = 'section-card';
-        const title = document.createElement('h3');
+        const fieldSortOrder = {
+          data_resource_blocks: 0,
+          sensing_mask_blocks: 1,
+        };
+
+	      for (const section of model.sections) {
+	        const card = document.createElement('div');
+	        card.className = 'section-card';
+	        const title = document.createElement('h3');
         title.textContent = section.title;
         card.appendChild(title);
 
         const kv = document.createElement('div');
         kv.className = 'kv';
 
-        for (const field of section.fields) {
+          const orderedFields = [...section.fields].sort((lhs, rhs) => {
+            const lhsOrder = fieldSortOrder[lhs.key] ?? 100;
+            const rhsOrder = fieldSortOrder[rhs.key] ?? 100;
+            if (lhsOrder !== rhsOrder) return lhsOrder - rhsOrder;
+            return 0;
+          });
+
+	        for (const field of orderedFields) {
           if (field.type === 'cpu_cores') {
             continue;
           }
-          if (field.key === 'data_resource_blocks') {
-            continue;
-          }
+	          if (field.key === 'data_resource_blocks' || field.key === 'sensing_mask_blocks') {
+	            kv.appendChild(renderDataResourcePlanner(field, {
+	              sourceTab: currentTab,
+                readOnly: true,
+	            }));
+	            continue;
+	          }
 
           if (field.type === 'mapping_list') {
             const holder = document.createElement('div');
@@ -2144,7 +2636,7 @@
         for (const field of section.fields) {
           if (field.type === 'cpu_cores') continue;
           if (field.type === 'mapping_list') {
-            if (field.key === 'data_resource_blocks') {
+            if (field.key === 'data_resource_blocks' || field.key === 'sensing_mask_blocks') {
               mappingLists[field.key] = {
                 mode: plannerMode(field),
                 items: field.items,
@@ -2174,72 +2666,111 @@
       return gatherSavePayloadForTab(currentTab);
     }
 
-    function renderPlannerSummary(plannerField) {
-      const txConfig = plannerConfig('modulator');
-      const rxConfig = plannerConfig('demodulator');
-      const txStats = plannerStats(plannerField, txConfig);
-      const rxStats = plannerStats(plannerField, rxConfig);
-      plannerSummary.innerHTML = '';
+	    function renderPlannerSummary(plannerField, spec = plannerSpec()) {
+	      const txConfig = plannerConfig('modulator');
+	      const rxConfig = plannerConfig('demodulator');
+	      const txStats = plannerStats(plannerField, txConfig);
+	      const rxStats = plannerStats(plannerField, rxConfig);
+	      plannerSummary.innerHTML = '';
 
-      const overview = document.createElement('div');
-      overview.className = 'card';
-      const loadedFrom = plannerField.dirty ? 'planner tab' : (plannerField.mismatch ? plannerField.loadedFrom : 'shared');
-      overview.innerHTML = `
-        <h3>Planner Overview</h3>
-        <div class="mono">Canvas reference: Modulator grid (${txConfig.numSymbols} symbols x ${txConfig.fftSize} subcarriers)
+	      const overview = document.createElement('div');
+	      overview.className = 'card';
+	      const loadedFrom = plannerField.dirty
+	        ? (plannerField.loadedFrom && plannerField.loadedFrom !== 'shared'
+	          ? plannerField.loadedFrom
+	          : spec.loadedFromLabel)
+	        : (plannerField.mismatch ? plannerField.loadedFrom : 'shared');
+	      overview.innerHTML = `
+	        <h3>${spec.summaryTitle}</h3>
+	        <div class="mono">Canvas reference: Modulator grid (${txConfig.numSymbols} symbols x ${txConfig.fftSize} subcarriers)
 Loaded from: ${loadedFrom}
 TX/RX block configs currently ${plannerField.mismatch ? 'differ' : 'match'}.</div>
-      `;
+	      `;
       plannerSummary.appendChild(overview);
 
-      const targets = document.createElement('div');
-      targets.className = 'card';
-      const txError = validatePlannerForTab('modulator', plannerField);
-      const rxError = validatePlannerForTab('demodulator', plannerField);
-      targets.innerHTML = `
-        <h3>Target Estimates</h3>
-        <div class="mono">TX payload RE: ${txStats.payloadCount}/${txConfig.totalNonPilotRe}${txError ? `\nTX validate: ${txError}` : ''}
-RX payload RE: ${rxStats.payloadCount}/${rxConfig.totalNonPilotRe}${rxError ? `\nRX validate: ${rxError}` : ''}</div>
-      `;
-      plannerSummary.appendChild(targets);
-    }
+	      const targets = document.createElement('div');
+	      targets.className = 'card';
+	      const txError = validatePlannerForTab('modulator', plannerField);
+	      const rxError = validatePlannerForTab('demodulator', plannerField);
+        const summaryHeading = 'Resource Summary';
+        if (spec.fieldKey === 'sensing_mask_blocks') {
+	        targets.innerHTML = `
+	          <h3>${summaryHeading}</h3>
+	          <div class="mono">Modulator ${spec.metricLabel}: ${txStats.payloadCount}/${txStats.totalCount}${txError ? `\nModulator validate: ${txError}` : ''}
+Demodulator ${spec.metricLabel}: ${rxStats.payloadCount}/${rxStats.totalCount}${rxError ? `\nDemodulator validate: ${rxError}` : ''}</div>
+	        `;
+        } else {
+          const resourceError = txError || rxError;
+	        targets.innerHTML = `
+	          <h3>${summaryHeading}</h3>
+	          <div class="mono">payload RE: ${txStats.payloadCount}/${txStats.totalCount}
+sensing pilot RE: ${txStats.sensingPilotCount || 0}/${txStats.totalCount}
+overlap ignored: ${txStats.overlaps}
+payload/sensing overlap: ${txStats.crossKindOverlap || 0} (sensing pilot wins)
+sync stripped: ${txStats.strippedSync}
+pilot stripped: ${txStats.strippedPilot}${resourceError ? `\nvalidate: ${resourceError}` : ''}</div>
+	        `;
+        }
+	      plannerSummary.appendChild(targets);
+	    }
 
-    function renderPlannerPage() {
-      const plannerField = ensurePlannerState();
-      plannerHost.innerHTML = '';
-      plannerHost.appendChild(renderDataResourcePlanner(plannerField, {
-        standalone: true,
-        sourceTab: plannerField.baseTab || 'modulator',
-        onChange: () => renderPlannerSummary(plannerField),
-      }));
-      renderPlannerSummary(plannerField);
-      plannerTargetNote.textContent =
-        'Selections are snapped to integer RE cells on drag release. Apply writes the current planner state into Modulator.yaml or Demodulator.yaml.';
-    }
+	    function renderPlannerPage() {
+	      const spec = plannerSpec();
+	      const plannerField = ensurePlannerState(false, spec);
+	      plannerTitle.textContent = spec.title;
+	      plannerIntro.innerHTML = spec.intro;
+	      plannerHost.innerHTML = '';
+	      plannerHost.appendChild(renderDataResourcePlanner(plannerField, {
+	        standalone: true,
+	        sourceTab: plannerField.baseTab || 'modulator',
+	        onChange: () => renderPlannerSummary(plannerField, spec),
+	      }));
+	      renderPlannerSummary(plannerField, spec);
+	      plannerTargetNote.textContent = spec.note;
+	    }
 
-    async function applyPlannerToTab(tabName) {
-      await loadConfig(tabName, true);
-      const plannerField = ensurePlannerState();
-      const validationError = validatePlannerForTab(tabName, plannerField);
-      if (validationError) {
-        throw new Error(validationError);
-      }
-      const targetField = plannerFieldForTab(tabName);
-      if (!targetField) {
-        throw new Error(`Missing data_resource_blocks field in ${tabName} config model.`);
-      }
-      targetField.mode = plannerField.mode;
-      targetField.items = clonePlannerItems(plannerField.items);
-      const result = await api('/api/config/save', {
-        method: 'POST',
+	    async function loadPlannerFromTab(tabName) {
+	      const spec = plannerSpec();
+	      await loadConfig(tabName, true);
+	      const sourceField = plannerFieldForTab(tabName, spec);
+	      if (!sourceField) {
+	        throw new Error(`Missing ${spec.fieldKey} field in ${tabName} config model.`);
+	      }
+	      const plannerField = ensurePlannerState(true, spec);
+	      plannerField.mode = plannerMode(sourceField);
+	      plannerField.items = clonePlannerItems(plannerBlocks(sourceField));
+	      plannerField.baseTab = tabName;
+	      plannerField.loadedFrom = APP.tabs[tabName].label;
+	      plannerField.dirty = true;
+	      refreshPlannerComparisonState(spec);
+	      renderPlannerPage();
+	      setFlash(`Loaded ${spec.fieldKey} from ${APP.tabs[tabName].label}.`, 'ok');
+	    }
+
+	    async function applyPlannerToTab(tabName) {
+	      const spec = plannerSpec();
+	      await loadConfig(tabName, true);
+	      const plannerField = ensurePlannerState(false, spec);
+	      const validationError = validatePlannerForTab(tabName, plannerField);
+	      if (validationError) {
+	        throw new Error(validationError);
+	      }
+	      const targetField = plannerFieldForTab(tabName, spec);
+	      if (!targetField) {
+	        throw new Error(`Missing ${spec.fieldKey} field in ${tabName} config model.`);
+	      }
+	      targetField.mode = plannerField.mode;
+	      targetField.items = clonePlannerItems(plannerField.items);
+	      const result = await api('/api/config/save', {
+	        method: 'POST',
         body: JSON.stringify(gatherSavePayloadForTab(tabName)),
-      });
-      cache[tabName] = { ...cache[tabName], config: result };
-      plannerField.dirty = true;
-      refreshPlannerComparisonState();
-      renderPlannerPage();
-      setFlash(`Applied planner to ${APP.tabs[tabName].label}.`, 'ok');
-    }
+	      });
+	      cache[tabName] = { ...cache[tabName], config: result };
+	      plannerField.dirty = true;
+	      refreshPlannerComparisonState(spec);
+	      renderPlannerPage();
+	      setFlash(`Applied ${spec.fieldKey} to ${APP.tabs[tabName].label}.`, 'ok');
+	    }
 
     async function loadConfig(tab, preserveCommand = false) {
       const data = await api(`/api/config?name=${encodeURIComponent(tab)}`);
@@ -2300,18 +2831,18 @@ RX payload RE: ${rxStats.payloadCount}/${rxConfig.totalNonPilotRe}${rxError ? `\
       if (showMessage) setFlash('Saved successfully.', 'ok');
     }
 
-    async function switchTab(tab) {
-      currentTab = tab;
-      updateTabVisuals();
-      if (tab === 'planner') {
-        await Promise.all([
-          loadConfig('modulator', true),
-          loadConfig('demodulator', true),
-        ]);
-        ensurePlannerState(false);
-        renderPlannerPage();
-        setFlash('');
-        return;
+	    async function switchTab(tab) {
+	      currentTab = tab;
+	      updateTabVisuals();
+	      if (specialPlannerTabs.has(tab)) {
+	        await Promise.all([
+	          loadConfig('modulator', true),
+	          loadConfig('demodulator', true),
+	        ]);
+	        ensurePlannerState(false, plannerSpec(tab));
+	        renderPlannerPage();
+	        setFlash('');
+	        return;
       }
       populatePresets(tab);
       await loadConfig(tab);
@@ -2453,21 +2984,43 @@ RX payload RE: ${rxStats.payloadCount}/${rxConfig.totalNonPilotRe}${rxError ? `\
       }
     });
 
-    applyPlannerTxBtn.addEventListener('click', async () => {
-      applyPlannerTxBtn.disabled = true;
-      try {
-        await applyPlannerToTab('modulator');
+	    applyPlannerTxBtn.addEventListener('click', async () => {
+	      applyPlannerTxBtn.disabled = true;
+	      try {
+	        await applyPlannerToTab('modulator');
       } catch (error) {
         setFlash(error.message, 'err');
       } finally {
         applyPlannerTxBtn.disabled = false;
-      }
-    });
+	      }
+	    });
 
-    applyPlannerRxBtn.addEventListener('click', async () => {
-      applyPlannerRxBtn.disabled = true;
-      try {
-        await applyPlannerToTab('demodulator');
+	    loadPlannerTxBtn.addEventListener('click', async () => {
+	      loadPlannerTxBtn.disabled = true;
+	      try {
+	        await loadPlannerFromTab('modulator');
+	      } catch (error) {
+	        setFlash(error.message, 'err');
+	      } finally {
+	        loadPlannerTxBtn.disabled = false;
+	      }
+	    });
+
+	    loadPlannerRxBtn.addEventListener('click', async () => {
+	      loadPlannerRxBtn.disabled = true;
+	      try {
+	        await loadPlannerFromTab('demodulator');
+	      } catch (error) {
+	        setFlash(error.message, 'err');
+	      } finally {
+	        loadPlannerRxBtn.disabled = false;
+	      }
+	    });
+
+	    applyPlannerRxBtn.addEventListener('click', async () => {
+	      applyPlannerRxBtn.disabled = true;
+	      try {
+	        await applyPlannerToTab('demodulator');
       } catch (error) {
         setFlash(error.message, 'err');
       } finally {
@@ -2481,10 +3034,10 @@ RX payload RE: ${rxStats.payloadCount}/${rxConfig.totalNonPilotRe}${rxError ? `\
       });
     });
 
-    setInterval(() => {
-      if (currentTab === 'planner') return;
-      refreshRuntime(currentTab).catch(() => {});
-    }, 1500);
+	    setInterval(() => {
+	      if (specialPlannerTabs.has(currentTab)) return;
+	      refreshRuntime(currentTab).catch(() => {});
+	    }, 1500);
 
     switchTab(currentTab).catch((error) => setFlash(error.message, 'err'));
   </script>

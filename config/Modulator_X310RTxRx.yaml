@@ -22,6 +22,12 @@ pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270,
 # ===== Sensing FFT =====
 range_fft_size: 1024           # Range FFT size
 doppler_fft_size: 100          # Doppler FFT size
+sensing_output_mode: dense     # dense or compact_mask
+# sensing_mask_blocks:           # Used only when sensing_output_mode=compact_mask
+#   - symbol_start: 0            # 0-based absolute frame symbol index
+#     symbol_count: 2
+#     subcarrier_start: 64       # 0-based FFT-bin index
+#     subcarrier_count: 32
 
 # ===== RF / Sampling =====
 sample_rate: 50000000          # Baseband sample rate (Hz)

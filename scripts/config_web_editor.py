@@ -67,18 +67,49 @@ FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
         },
     },
     "data_resource_blocks": {
-        "title": "Resource Planner",
+        "title": "Resource Preview",
         "field": {
             "type": "mapping_list",
             "key": "data_resource_blocks",
-            "comment": "Optional payload RE rectangles",
+            "comment": "Optional payload / sensing-pilot RE rectangles",
             "allow_omit": True,
+            "planner_kind": "payload",
+            "item_fields": [
+                {
+                    "key": "kind",
+                    "comment": "Block role: payload or sensing_pilot",
+                    "kind": "string",
+                    "options": ["payload", "sensing_pilot"],
+                },
+                {"key": "symbol_start", "comment": "0-based absolute frame symbol index", "kind": "int"},
+                {"key": "symbol_count", "comment": "Number of OFDM symbols in this block", "kind": "int"},
+                {"key": "subcarrier_start", "comment": "0-based FFT-bin start index", "kind": "int"},
+                {"key": "subcarrier_count", "comment": "Number of contiguous subcarriers in this block", "kind": "int"},
+            ],
+        },
+    },
+    "sensing_mask_blocks": {
+        "title": "Resource Preview",
+        "field": {
+            "type": "mapping_list",
+            "key": "sensing_mask_blocks",
+            "comment": "Optional compact sensing RE rectangles",
+            "allow_omit": True,
+            "planner_kind": "sensing_mask",
             "item_fields": [
                 {"key": "symbol_start", "comment": "0-based absolute frame symbol index", "kind": "int"},
                 {"key": "symbol_count", "comment": "Number of OFDM symbols in this block", "kind": "int"},
                 {"key": "subcarrier_start", "comment": "0-based FFT-bin start index", "kind": "int"},
                 {"key": "subcarrier_count", "comment": "Number of contiguous subcarriers in this block", "kind": "int"},
             ],
+        },
+    },
+    "sensing_output_mode": {
+        "title": "Sensing FFT",
+        "field": {
+            "type": "scalar",
+            "key": "sensing_output_mode",
+            "comment": "Sensing output mode: dense or compact_mask",
         },
     },
     "sensing_symbol_num": {
@@ -575,7 +606,7 @@ def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, 
                 if item_key in seen_keys:
                     continue
                 merged_item_fields.append(copy.deepcopy(fallback_field))
-            if field_key == "data_resource_blocks":
+            if field_key in {"data_resource_blocks", "sensing_mask_blocks"}:
                 field["allow_omit"] = True
             field["item_fields"] = merged_item_fields
     return layout_copy
@@ -631,7 +662,7 @@ def default_sensing_channel_item(
     }
 
 
-def default_data_resource_block_item(data: dict[str, Any]) -> dict[str, int]:
+def default_data_resource_block_item(data: dict[str, Any]) -> dict[str, Any]:
     fft_size = max(1, int_or_default(data.get("fft_size"), 1024))
     num_symbols = max(1, int_or_default(data.get("num_symbols"), 100))
     sync_pos = int_or_default(data.get("sync_pos"), 0)
@@ -640,11 +671,27 @@ def default_data_resource_block_item(data: dict[str, Any]) -> dict[str, int]:
     symbol_count = min(4, len(data_symbol_candidates)) if data_symbol_candidates else 1
     subcarrier_count = min(128, fft_size)
     return {
+        "kind": "payload",
         "symbol_start": symbol_start,
         "symbol_count": max(1, symbol_count),
         "subcarrier_start": 0,
         "subcarrier_count": max(1, subcarrier_count),
     }
+
+
+def normalized_data_resource_block_items(items: list[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "kind": str(item.get("kind", "payload") or "payload"),
+            "symbol_start": int_or_zero(item.get("symbol_start")),
+            "symbol_count": int_or_zero(item.get("symbol_count")),
+            "subcarrier_start": int_or_zero(item.get("subcarrier_start")),
+            "subcarrier_count": int_or_zero(item.get("subcarrier_count")),
+        })
+    return normalized
 
 
 def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> list[dict[str, Any]]:
@@ -675,10 +722,18 @@ def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple
     if not isinstance(data, dict):
         data = {}
     layout = parse_layout(text)
+    for section in layout:
+        field_keys = {field.get("key") for field in section.get("fields", [])}
+        if "data_resource_blocks" in field_keys or "sensing_mask_blocks" in field_keys:
+            section["title"] = "Resource Preview"
     if "sensing_rx_channels" in data and not isinstance(data["sensing_rx_channels"], list):
         data["sensing_rx_channels"] = []
     if "data_resource_blocks" in data and not isinstance(data["data_resource_blocks"], list):
         data["data_resource_blocks"] = []
+    else:
+        data["data_resource_blocks"] = normalized_data_resource_block_items(data.get("data_resource_blocks", []))
+    if "sensing_mask_blocks" in data and not isinstance(data["sensing_mask_blocks"], list):
+        data["sensing_mask_blocks"] = []
     if "cpu_cores" in data and not isinstance(data["cpu_cores"], list):
         data["cpu_cores"] = []
     layout = append_missing_layout_fields(
@@ -687,6 +742,8 @@ def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple
         (
             "sensing_rx_channels",
             "data_resource_blocks",
+            "sensing_mask_blocks",
+            "sensing_output_mode",
             "range_fft_size",
             "doppler_fft_size",
             "sensing_symbol_num",
@@ -745,6 +802,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                     "item_fields": item_fields,
                     "items": items,
                     "allow_omit": bool(field.get("allow_omit", False)),
+                    "planner_kind": field.get("planner_kind", ""),
                 }
                 if key == "sensing_rx_channels":
                     base_item = items[0] if items else None
@@ -762,6 +820,10 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                         field_payload["mode"] = "custom"
                     else:
                         field_payload["mode"] = "disabled"
+                if key == "sensing_mask_blocks":
+                    field_payload["default_item"] = default_data_resource_block_item(data)
+                    sensing_mode = str(data.get("sensing_output_mode", "dense") or "dense").strip().lower()
+                    field_payload["mode"] = "custom" if sensing_mode == "compact_mask" else "strd"
                 section_payload["fields"].append(field_payload)
                 continue
 
@@ -940,7 +1002,15 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             elif mode == "disabled":
                 result[key] = []
             else:
+                result[key] = normalized_data_resource_block_items(normalized_items)
+            continue
+        if key == "sensing_mask_blocks":
+            if mode == "custom":
                 result[key] = normalized_items
+                result["sensing_output_mode"] = "compact_mask"
+            else:
+                result.pop(key, None)
+                result["sensing_output_mode"] = "dense"
             continue
         result[key] = normalized_items
 
@@ -1163,7 +1233,6 @@ class ConfigEditorApp:
                 default_command="./OFDMModulator",
                 presets=(
                     {"label": "CPU Modulator", "command": "./OFDMModulator"},
-                    {"label": "CUDA Modulator", "command": "./CUDAOFDMModulator"},
                 ),
                 sample_candidates=(
                     repo_root / "config" / "Modulator_X310.yaml",
@@ -1178,7 +1247,6 @@ class ConfigEditorApp:
                 default_command="./OFDMDemodulator",
                 presets=(
                     {"label": "CPU Demodulator", "command": "./OFDMDemodulator"},
-                    {"label": "CUDA Demodulator", "command": "./CUDAOFDMDemodulator"},
                 ),
                 sample_candidates=(
                     repo_root / "config" / "Demodulator_X310.yaml",

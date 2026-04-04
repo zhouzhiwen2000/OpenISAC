@@ -655,7 +655,18 @@ private:
     }
 
     void _register_commands() {
-        _control_handler.register_command("SKIP", [this](int32_t value) {
+        const bool compact_mask_mode = sensing_output_mode_is_compact_mask(cfg_);
+        const bool compact_mask_fft_controls_supported =
+            compact_mask_runtime_fft_controls_supported(cfg_);
+        const std::string compact_mask_reason =
+            compact_mask_runtime_fft_controls_reason(cfg_);
+
+        _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
+            if (compact_mask_mode && !compact_mask_fft_controls_supported) {
+                LOG_G_INFO() << "Ignoring SKIP command in compact_mask sensing mode: "
+                             << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
+                return;
+            }
             const bool new_skip = (value != 0);
             _schedule_shared_sensing_update([new_skip](SharedSensingRuntime& cfg) {
                 cfg.skip_sensing_fft = new_skip;
@@ -663,7 +674,11 @@ private:
             LOG_G_INFO() << "Received skip sensing FFT command: " << value;
         });
 
-        _control_handler.register_command("STRD", [this](int32_t value) {
+        _control_handler.register_command("STRD", [this, compact_mask_mode](int32_t value) {
+            if (compact_mask_mode) {
+                LOG_G_INFO() << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
+                return;
+            }
             const size_t stride = value <= 0 ? 1 : static_cast<size_t>(value);
             _schedule_shared_sensing_update([stride](SharedSensingRuntime& cfg) {
                 cfg.sensing_symbol_stride = stride;
@@ -684,7 +699,12 @@ private:
             LOG_G_INFO() << "Received alignment command: " << adjusted_value << " samples";
         });
 
-        _control_handler.register_command("MTI ", [this](int32_t value) {
+        _control_handler.register_command("MTI ", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
+            if (compact_mask_mode && !compact_mask_fft_controls_supported) {
+                LOG_G_INFO() << "Ignoring MTI command in compact_mask sensing mode: "
+                             << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
+                return;
+            }
             const bool enable = (value != 0);
             _schedule_shared_sensing_update([enable](SharedSensingRuntime& cfg) {
                 cfg.enable_mti = enable;
@@ -704,6 +724,27 @@ private:
             _switch_measurement_epoch(static_cast<uint32_t>(value));
             LOG_G_INFO() << "Measurement epoch reset to " << value;
         });
+
+        _control_handler.register_request("PARM", [this](int32_t) {
+            if (!cfg_.enable_bi_sensing) {
+                return;
+            }
+            SharedSensingRuntime snapshot;
+            {
+                std::lock_guard<std::mutex> lock(_shared_sensing_cfg_mutex);
+                snapshot = _shared_sensing_cfg;
+            }
+            const SensingViewerParamsPacket packet =
+                make_sensing_viewer_params_packet(
+                    cfg_,
+                    snapshot.skip_sensing_fft,
+                    snapshot.enable_mti,
+                    true);
+            _control_handler.send_sensing_viewer_params(
+                cfg_.bi_sensing_ip,
+                cfg_.bi_sensing_port,
+                packet);
+        });
     }
 
     void init_sensing() {
@@ -721,7 +762,11 @@ private:
             return;
         }
 
-        _shared_sensing_cfg.sensing_symbol_stride = cfg_.sensing_symbol_stride;
+        const CompactSensingMaskAnalysis compact_mask_analysis = analyze_compact_sensing_mask(cfg_);
+        _shared_sensing_cfg.sensing_symbol_stride =
+            compact_mask_analysis.local_delay_doppler_supported
+                ? compact_mask_analysis.implicit_symbol_stride
+                : cfg_.sensing_symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
         _shared_sensing_cfg.generation = 1;
@@ -1441,6 +1486,15 @@ private:
                         cfg_.pilot_positions,
                         sense_frame.tx_symbols[i]
                     );
+                    const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[symbol_idx];
+                    for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
+                        const size_t flat_idx = non_pilot_base + di;
+                        if (_data_resource_layout.sensing_pilot_mask[flat_idx] == 0) {
+                            continue;
+                        }
+                        const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
+                        sense_frame.tx_symbols[i][k] = zc_freq_[k];
+                    }
                 }
             }
         }

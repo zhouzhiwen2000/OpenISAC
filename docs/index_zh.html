@@ -543,6 +543,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">每帧 OFDM 符号数。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left">感知 UDP 输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>pilot_positions</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[571,...,451]</code></td>
@@ -553,6 +559,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">缺省</td>
 <td style="text-align:left">可选的 payload 资源矩形块。省略该键时保持旧版“全部非同步、非导频 RE 都承载 payload”的行为；设置为 <code>[]</code> 时表示完全禁用 payload RE。每个块使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>；只有选中的非同步、非导频 RE 会承载真实业务数据，其余非同步、非导频 RE 会发送预生成 QPSK。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">可选的紧凑感知 RE 矩形块。仅在 <code>sensing_output_mode=compact_mask</code> 时使用。块坐标使用绝对帧符号索引和原始 FFT bin 索引；允许覆盖同步/导频 RE，重叠区域会自动并集，输出顺序固定为“先符号后子载波”。如果每个被选中的符号都使用完全相同的子载波集合，且这些符号在环形帧轴上等间隔，则 compact 感知还可以启用运行时 MTI 和本地 Delay-Doppler 处理。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -725,6 +737,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </tbody>
 </table>
 <p>若启用 <code>data_resource_blocks</code>，请把相同的矩形块同步写入 <code>Demodulator.yaml</code>；当矩形块与 <code>sync_pos</code> 或 <code>pilot_positions</code> 重叠时，后两者优先。</p>
+<p>当 <code>sensing_output_mode=compact_mask</code> 时，感知会切换成“每个 OFDM 帧输出一个紧凑 UDP 帧”，只发送被选中的 RE 信道估计。<code>STRD</code> 仍然会被忽略，因为稀疏步长由 <code>sensing_mask_blocks</code> 隐式决定。若所选 mask 满足“每个符号的子载波集合完全相同”且“符号在环形帧轴上等间隔”，则运行时 <code>MTI</code> 与 <code>SKIP</code> 会被启用：<code>SKIP=1</code> 继续发送紧凑原始 RE 载荷，<code>SKIP=0</code> 会切换回现有 dense Delay-Doppler 输出。该规则 compact 模式下，配置归一化会把 <code>range_fft_size</code> 扩到至少“所选子载波数”，并把 <code>doppler_fft_size</code> 扩到至少“所选感知符号数”。紧凑感知 UDP 载荷头为 <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>，随后是固定顺序的 <code>re_count</code> 个原始 <code>complex&lt;float&gt;</code> 数据。现有 <code>plot_sensing*.py</code> 仍然不解析这种 compact 载荷。</p>
 <p><code>sensing_rx_channels</code> 子项字段：</p>
 <table>
 <thead>
@@ -922,6 +935,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">参与感知处理的符号数。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left">双站感知 UDP 输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>frame_queue_size</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8</code></td>
@@ -962,6 +981,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">缺省</td>
 <td style="text-align:left">可选的 payload 资源矩形块。省略该键时保持旧版“全部非同步、非导频 RE 都提取 payload”的行为；设置为 <code>[]</code> 时表示不提取任何 payload LLR。每个块使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>；实际 payload RE 会在移除 <code>sync_pos</code> 和 <code>pilot_positions</code> 后得到。启用时该配置必须与 <code>Modulator.yaml</code> 保持一致。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">可选的紧凑感知 RE 矩形块。仅在 <code>sensing_output_mode=compact_mask</code> 时使用。块坐标使用绝对帧符号索引和原始 FFT bin 索引；允许覆盖同步/导频 RE，重叠区域会自动并集，输出顺序固定为“先符号后子载波”。如果每个被选中的符号都使用完全相同的子载波集合，且这些符号在环形帧轴上等间隔，则 compact 感知还可以启用运行时 MTI 和本地 Delay-Doppler 处理。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -1249,6 +1274,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </table>
 <p>说明：</p>
 <ul>
+<li>当 <code>sensing_output_mode=compact_mask</code> 时，双站感知同样会切换成“每个 OFDM 帧输出一个紧凑 UDP 帧”，只发送被选中的 RE 信道估计。<code>STRD</code> 仍然会被忽略，因为稀疏步长由 <code>sensing_mask_blocks</code> 隐式决定。若所选 mask 满足“每个符号的子载波集合完全相同”且“符号在环形帧轴上等间隔”，则运行时 <code>MTI</code> 与 <code>SKIP</code> 会被启用：<code>SKIP=1</code> 继续发送紧凑原始 RE 载荷，<code>SKIP=0</code> 会切换回现有 dense Delay-Doppler 输出。该规则 compact 模式下，配置归一化会把 <code>range_fft_size</code> 扩到至少“所选子载波数”，并把 <code>doppler_fft_size</code> 扩到至少“所选感知符号数”。紧凑载荷与调制器侧使用相同的 <code>CompactSensingFrameHeader</code> 和固定 RE 顺序。 |</li>
 <li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
 <li>解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>
 <li>硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 <code>SYNC_SEARCH</code>。<code>reset_hold_s</code> 决定坏的 delay 条件需要持续多久才会触发这一动作。</li>

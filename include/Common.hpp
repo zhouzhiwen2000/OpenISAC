@@ -96,7 +96,7 @@ using SymbolVector = std::vector<AlignedVector>;
  * @brief Zero-copy view over frequency-domain TX symbols for sensing.
  *
  * Supports two storage backends:
- *   1. Flat contiguous buffer (CUDA pinned memory path):
+ *   1. Flat contiguous buffer:
  *      Symbols are stored as [num_symbols × fft_size] complex<float> in a
  *      single contiguous allocation.  operator[] extracts a copy of the
  *      requested symbol on demand — only the ~5 symbols per frame actually
@@ -111,7 +111,7 @@ class TxSymbolView {
 public:
     TxSymbolView() = default;
 
-    /** Construct from flat contiguous buffer (CUDA pinned memory path). */
+    /** Construct from flat contiguous buffer. */
     TxSymbolView(std::shared_ptr<const void> owner,
                  const std::complex<float>* flat_data,
                  size_t num_symbols, size_t fft_size)
@@ -177,12 +177,59 @@ struct SensingRxChannelConfig {
  * - symbol_start / symbol_count refer to OFDM symbols within one frame
  * - subcarrier_start / subcarrier_count refer to FFT-bin indices
  */
+enum class DataResourceBlockKind : uint8_t {
+    Payload = 0,
+    SensingPilot = 1,
+};
+
+inline constexpr const char* kDataResourceBlockKindPayload = "payload";
+inline constexpr const char* kDataResourceBlockKindSensingPilot = "sensing_pilot";
+
+inline const char* data_resource_block_kind_to_string(DataResourceBlockKind kind) {
+    switch (kind) {
+    case DataResourceBlockKind::Payload:
+        return kDataResourceBlockKindPayload;
+    case DataResourceBlockKind::SensingPilot:
+        return kDataResourceBlockKindSensingPilot;
+    default:
+        return kDataResourceBlockKindPayload;
+    }
+}
+
+inline bool parse_data_resource_block_kind_string(
+    const std::string& raw_kind,
+    DataResourceBlockKind& out_kind)
+{
+    std::string kind;
+    kind.reserve(raw_kind.size());
+    for (char ch : raw_kind) {
+        if (ch == '-' || ch == ' ') {
+            kind.push_back('_');
+        } else {
+            kind.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+    }
+    if (kind.empty() || kind == kDataResourceBlockKindPayload) {
+        out_kind = DataResourceBlockKind::Payload;
+        return true;
+    }
+    if (kind == kDataResourceBlockKindSensingPilot) {
+        out_kind = DataResourceBlockKind::SensingPilot;
+        return true;
+    }
+    return false;
+}
+
 struct DataResourceBlock {
+    DataResourceBlockKind kind = DataResourceBlockKind::Payload;
     size_t symbol_start = 0;
     size_t symbol_count = 0;
     size_t subcarrier_start = 0;
     size_t subcarrier_count = 0;
 };
+
+inline constexpr const char* kSensingOutputModeDense = "dense";
+inline constexpr const char* kSensingOutputModeCompactMask = "compact_mask";
 
 /**
  * @brief Shared payload-resource layout derived from Config.
@@ -201,6 +248,7 @@ struct DataResourceGridLayout {
     size_t num_non_pilot_subcarriers = 0;
     size_t non_pilot_re_count = 0;
     size_t payload_re_count = 0;
+    size_t sensing_pilot_re_count = 0;
 
     std::vector<int> data_symbol_to_actual_symbol;
     std::vector<int> actual_symbol_to_data_symbol;
@@ -208,12 +256,65 @@ struct DataResourceGridLayout {
     std::vector<int> subcarrier_to_non_pilot_index;
     std::vector<uint8_t> pilot_mask;
     std::vector<uint8_t> payload_mask;
+    std::vector<uint8_t> sensing_pilot_mask;
     std::vector<int> payload_rank;
     std::vector<size_t> payload_offsets;
     std::vector<size_t> non_pilot_offsets;
 
     size_t flat_non_pilot_index(size_t data_symbol_idx, size_t non_pilot_idx) const {
         return non_pilot_offsets[data_symbol_idx] + non_pilot_idx;
+    }
+};
+
+/**
+ * @brief Selected sensing RE layout for compact-mask sensing output.
+ *
+ * RE are stored in deterministic wire order:
+ *   1. OFDM symbol index ascending
+ *   2. FFT-bin index ascending within each symbol
+ */
+struct SensingMaskLayout {
+    size_t num_symbols = 0;
+    size_t fft_size = 0;
+    size_t total_re_count = 0;
+    uint32_t mask_hash = 0;
+
+    std::vector<int> selected_symbols;
+    std::vector<int> symbol_to_selected_rank;
+    std::vector<size_t> selected_symbol_offsets;
+    std::vector<int> flat_subcarrier_indices;
+
+    bool empty() const { return total_re_count == 0; }
+};
+
+/**
+ * @brief Structural analysis of a compact sensing mask.
+ *
+ * regular_subsampling_compatible means the compact mask selects:
+ *   1. The same subcarrier set for every selected OFDM symbol.
+ *   2. OFDM symbols that are equally spaced on the frame ring, including wrap-around.
+ *
+ * local_delay_doppler_supported is a stricter runtime gate used by the sensing
+ * pipelines. It additionally requires the selected symbol count to fit inside
+ * doppler_fft_size so the local slow-time FFT path can reuse the configured
+ * Doppler dimension safely.
+ */
+struct CompactSensingMaskAnalysis {
+    bool regular_subsampling_compatible = false;
+    bool local_delay_doppler_supported = false;
+    size_t selected_symbol_count = 0;
+    size_t common_subcarrier_count = 0;
+    size_t implicit_symbol_stride = 0;
+    std::vector<int> selected_symbols;
+    std::vector<int> common_subcarrier_indices;
+    std::string incompatibility_reason;
+    std::string runtime_restriction_reason;
+
+    std::string effective_reason() const {
+        if (!runtime_restriction_reason.empty()) {
+            return runtime_restriction_reason;
+        }
+        return incompatibility_reason;
     }
 };
 
@@ -520,8 +621,6 @@ struct Config {
     size_t cp_length = 128;            // Cyclic prefix length
     size_t num_symbols = 100;          // Number of symbols per frame
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
-    size_t cuda_mod_pipeline_slots = 2;   // Number of CUDA mod pipeline slots
-    size_t cuda_demod_pipeline_slots = 3; // Number of CUDA demod pipeline slots
     size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
     size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
     size_t sync_pos = 1;               // Synchronization symbol position
@@ -571,6 +670,8 @@ struct Config {
     std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     bool data_resource_blocks_configured = false;
     std::vector<DataResourceBlock> data_resource_blocks;
+    std::string sensing_output_mode = kSensingOutputModeDense;
+    std::vector<DataResourceBlock> sensing_mask_blocks;
     size_t payload_re_count = 0;
     size_t non_pilot_re_count = 0;
     std::string device_args = "";
@@ -663,6 +764,308 @@ struct Config {
     }
 };
 
+inline std::string normalize_sensing_output_mode_string(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode.empty()) {
+        return kSensingOutputModeDense;
+    }
+    if (mode == kSensingOutputModeDense || mode == kSensingOutputModeCompactMask) {
+        return mode;
+    }
+    throw std::runtime_error(
+        "Invalid sensing_output_mode='" + mode +
+        "'. Supported values: dense, compact_mask.");
+}
+
+inline bool sensing_output_mode_is_compact_mask(const Config& cfg) {
+    return cfg.sensing_output_mode == kSensingOutputModeCompactMask;
+}
+
+inline size_t raw_fft_bin_to_shifted_index(size_t subcarrier_index, size_t fft_size) {
+    const size_t half_fft = fft_size / 2;
+    return (subcarrier_index < half_fft) ? (subcarrier_index + half_fft) : (subcarrier_index - half_fft);
+}
+
+inline uint32_t sensing_mask_hash_from_layout(
+    size_t num_symbols,
+    size_t fft_size,
+    const std::vector<int>& selected_symbols,
+    const std::vector<size_t>& selected_symbol_offsets,
+    const std::vector<int>& flat_subcarrier_indices)
+{
+    uint32_t hash = 2166136261u; // FNV-1a
+    auto mix_u32 = [&hash](uint32_t value) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            hash ^= static_cast<uint8_t>((value >> shift) & 0xFFu);
+            hash *= 16777619u;
+        }
+    };
+
+    mix_u32(static_cast<uint32_t>(num_symbols));
+    mix_u32(static_cast<uint32_t>(fft_size));
+    for (size_t row = 0; row < selected_symbols.size(); ++row) {
+        mix_u32(static_cast<uint32_t>(selected_symbols[row]));
+        const size_t begin = selected_symbol_offsets[row];
+        const size_t end = selected_symbol_offsets[row + 1];
+        for (size_t idx = begin; idx < end; ++idx) {
+            mix_u32(static_cast<uint32_t>(flat_subcarrier_indices[idx]));
+        }
+    }
+    return hash;
+}
+
+inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
+    if (cfg.num_symbols == 0) {
+        throw std::runtime_error("num_symbols=0 is invalid for sensing mask layout.");
+    }
+    if (cfg.fft_size == 0) {
+        throw std::runtime_error("fft_size=0 is invalid for sensing mask layout.");
+    }
+
+    SensingMaskLayout layout;
+    layout.num_symbols = cfg.num_symbols;
+    layout.fft_size = cfg.fft_size;
+    layout.symbol_to_selected_rank.assign(cfg.num_symbols, -1);
+
+    std::vector<uint8_t> mask(cfg.num_symbols * cfg.fft_size, 0);
+    auto flat_index = [&cfg](size_t symbol_index, size_t subcarrier_index) {
+        return symbol_index * cfg.fft_size + subcarrier_index;
+    };
+
+    for (size_t block_idx = 0; block_idx < cfg.sensing_mask_blocks.size(); ++block_idx) {
+        const auto& block = cfg.sensing_mask_blocks[block_idx];
+        if (block.symbol_count == 0) {
+            throw std::runtime_error(
+                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "].symbol_count must be greater than 0.");
+        }
+        if (block.subcarrier_count == 0) {
+            throw std::runtime_error(
+                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "].subcarrier_count must be greater than 0.");
+        }
+        if (block.symbol_start >= cfg.num_symbols ||
+            block.symbol_start + block.symbol_count > cfg.num_symbols) {
+            throw std::runtime_error(
+                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "] exceeds the configured symbol range.");
+        }
+        if (block.subcarrier_start >= cfg.fft_size ||
+            block.subcarrier_start + block.subcarrier_count > cfg.fft_size) {
+            throw std::runtime_error(
+                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "] exceeds the configured subcarrier range.");
+        }
+
+        for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
+            for (size_t sc = block.subcarrier_start; sc < block.subcarrier_start + block.subcarrier_count; ++sc) {
+                mask[flat_index(sym, sc)] = 1;
+            }
+        }
+    }
+
+    layout.selected_symbol_offsets.push_back(0);
+    for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
+        size_t row_count = 0;
+        for (size_t sc = 0; sc < cfg.fft_size; ++sc) {
+            if (mask[flat_index(sym, sc)] == 0) {
+                continue;
+            }
+            if (layout.symbol_to_selected_rank[sym] < 0) {
+                layout.symbol_to_selected_rank[sym] =
+                    static_cast<int>(layout.selected_symbols.size());
+                layout.selected_symbols.push_back(static_cast<int>(sym));
+            }
+            layout.flat_subcarrier_indices.push_back(static_cast<int>(sc));
+            ++row_count;
+        }
+        if (row_count > 0) {
+            layout.selected_symbol_offsets.push_back(layout.flat_subcarrier_indices.size());
+        }
+    }
+
+    layout.total_re_count = layout.flat_subcarrier_indices.size();
+    if (layout.total_re_count == 0) {
+        throw std::runtime_error(
+            "compact_mask mode requires sensing_mask_blocks to select at least one RE.");
+    }
+    layout.mask_hash = sensing_mask_hash_from_layout(
+        layout.num_symbols,
+        layout.fft_size,
+        layout.selected_symbols,
+        layout.selected_symbol_offsets,
+        layout.flat_subcarrier_indices);
+    return layout;
+}
+
+inline CompactSensingMaskAnalysis analyze_compact_sensing_mask(const Config& cfg) {
+    CompactSensingMaskAnalysis analysis;
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return analysis;
+    }
+
+    const SensingMaskLayout layout = build_sensing_mask_layout(cfg);
+    analysis.selected_symbols = layout.selected_symbols;
+    analysis.selected_symbol_count = layout.selected_symbols.size();
+    if (layout.empty() || layout.selected_symbols.empty()) {
+        analysis.incompatibility_reason = "compact_mask does not select any sensing RE.";
+        return analysis;
+    }
+    if (cfg.num_symbols == 0) {
+        analysis.incompatibility_reason = "num_symbols=0 is invalid for compact_mask analysis.";
+        return analysis;
+    }
+
+    const size_t first_begin = layout.selected_symbol_offsets[0];
+    const size_t first_end = layout.selected_symbol_offsets[1];
+    analysis.common_subcarrier_indices.assign(
+        layout.flat_subcarrier_indices.begin() + static_cast<std::ptrdiff_t>(first_begin),
+        layout.flat_subcarrier_indices.begin() + static_cast<std::ptrdiff_t>(first_end));
+    analysis.common_subcarrier_count = analysis.common_subcarrier_indices.size();
+    if (analysis.common_subcarrier_count == 0) {
+        analysis.incompatibility_reason = "compact_mask selected symbols must include at least one subcarrier.";
+        return analysis;
+    }
+
+    for (size_t row = 1; row < layout.selected_symbols.size(); ++row) {
+        const size_t begin = layout.selected_symbol_offsets[row];
+        const size_t end = layout.selected_symbol_offsets[row + 1];
+        const size_t count = end - begin;
+        if (count != analysis.common_subcarrier_count) {
+            analysis.incompatibility_reason =
+                "Selected subcarrier count is not identical across compact_mask symbols.";
+            return analysis;
+        }
+        for (size_t idx = 0; idx < count; ++idx) {
+            if (layout.flat_subcarrier_indices[begin + idx] != analysis.common_subcarrier_indices[idx]) {
+                analysis.incompatibility_reason =
+                    "Selected subcarrier set is not identical across compact_mask symbols.";
+                return analysis;
+            }
+        }
+    }
+
+    size_t expected_gap = cfg.num_symbols;
+    if (analysis.selected_symbol_count > 1) {
+        const int first_gap = layout.selected_symbols[1] - layout.selected_symbols[0];
+        if (first_gap <= 0) {
+            analysis.incompatibility_reason =
+                "compact_mask selected symbols must be strictly increasing.";
+            return analysis;
+        }
+        expected_gap = static_cast<size_t>(first_gap);
+    }
+    if (expected_gap == 0) {
+        analysis.incompatibility_reason =
+            "compact_mask selected symbols must have a positive wrap-around stride.";
+        return analysis;
+    }
+
+    for (size_t row = 1; row < layout.selected_symbols.size(); ++row) {
+        const size_t gap = static_cast<size_t>(layout.selected_symbols[row] - layout.selected_symbols[row - 1]);
+        if (gap != expected_gap) {
+            analysis.incompatibility_reason =
+                "compact_mask selected symbols are not equally spaced across the frame.";
+            return analysis;
+        }
+    }
+
+    const size_t wrap_gap = static_cast<size_t>(
+        static_cast<int>(cfg.num_symbols) +
+        layout.selected_symbols.front() -
+        layout.selected_symbols.back());
+    if (wrap_gap != expected_gap) {
+        analysis.incompatibility_reason =
+            "compact_mask selected symbols are not equally spaced when wrap-around is included.";
+        return analysis;
+    }
+
+    analysis.regular_subsampling_compatible = true;
+    analysis.implicit_symbol_stride = expected_gap;
+
+    if (cfg.range_fft_size < analysis.common_subcarrier_count) {
+        analysis.runtime_restriction_reason =
+            "compact_mask regular sampling selects " + std::to_string(analysis.common_subcarrier_count) +
+            " subcarriers, which exceeds range_fft_size=" + std::to_string(cfg.range_fft_size) + '.';
+        return analysis;
+    }
+    if (analysis.selected_symbol_count > cfg.doppler_fft_size) {
+        analysis.runtime_restriction_reason =
+            "compact_mask regular sampling selects " + std::to_string(analysis.selected_symbol_count) +
+            " symbols, which exceeds doppler_fft_size=" + std::to_string(cfg.doppler_fft_size) + '.';
+        return analysis;
+    }
+
+    analysis.local_delay_doppler_supported = true;
+    return analysis;
+}
+
+inline bool compact_mask_runtime_fft_controls_supported(const Config& cfg) {
+    return analyze_compact_sensing_mask(cfg).local_delay_doppler_supported;
+}
+
+inline std::string compact_mask_runtime_fft_controls_reason(const Config& cfg) {
+    return analyze_compact_sensing_mask(cfg).effective_reason();
+}
+
+inline size_t required_sensing_range_bin_count(const Config& cfg) {
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return std::max<size_t>(cfg.fft_size, 1);
+    }
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    if (analysis.regular_subsampling_compatible) {
+        return std::max<size_t>(analysis.common_subcarrier_count, 1);
+    }
+    return 0;
+}
+
+inline size_t required_sensing_doppler_symbol_count(const Config& cfg) {
+    size_t required = std::max<size_t>(cfg.sensing_symbol_num, 1);
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return required;
+    }
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    if (analysis.regular_subsampling_compatible) {
+        required = std::max(required, analysis.selected_symbol_count);
+    }
+    return required;
+}
+
+inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
+    const size_t required_range = required_sensing_range_bin_count(cfg);
+    if (cfg.range_fft_size == 0) {
+        const size_t fallback_range = (required_range > 0) ? required_range : std::max<size_t>(cfg.fft_size, 1);
+        LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to " << fallback_range << '.';
+        cfg.range_fft_size = fallback_range;
+    }
+    if (required_range > 0 && cfg.range_fft_size < required_range) {
+        LOG_G_WARN() << "range_fft_size=" << cfg.range_fft_size
+                     << " is smaller than the required sensing subcarrier count=" << required_range
+                     << " for " << context_name
+                     << ". Expanding range_fft_size to keep delay FFT buffers consistent.";
+        cfg.range_fft_size = required_range;
+    }
+    if (cfg.doppler_fft_size == 0) {
+        LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
+        cfg.doppler_fft_size = 1;
+    }
+    if (cfg.sensing_symbol_num == 0) {
+        LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
+        cfg.sensing_symbol_num = 1;
+    }
+
+    const size_t required_doppler = required_sensing_doppler_symbol_count(cfg);
+    if (cfg.doppler_fft_size < required_doppler) {
+        LOG_G_WARN() << "doppler_fft_size=" << cfg.doppler_fft_size
+                     << " is smaller than the required sensing symbol count=" << required_doppler
+                     << " for " << context_name
+                     << ". Expanding doppler_fft_size to keep sensing buffers consistent.";
+        cfg.doppler_fft_size = required_doppler;
+    }
+}
+
 inline DataResourceGridLayout build_data_resource_grid_layout(
     const Config& cfg,
     bool log_warnings = false)
@@ -717,6 +1120,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     }
 
     layout.payload_mask.assign(layout.non_pilot_re_count, cfg.data_resource_blocks_configured ? 0 : 1);
+    layout.sensing_pilot_mask.assign(layout.non_pilot_re_count, 0);
     layout.payload_rank.assign(layout.non_pilot_re_count, -1);
     layout.non_pilot_offsets.resize(layout.data_symbol_count + 1, 0);
     layout.payload_offsets.resize(layout.data_symbol_count + 1, 0);
@@ -726,6 +1130,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
 
     size_t stripped_sync_re = 0;
     size_t stripped_pilot_re = 0;
+    size_t payload_sensing_pilot_overlap_re = 0;
     if (cfg.data_resource_blocks_configured) {
         for (size_t block_idx = 0; block_idx < cfg.data_resource_blocks.size(); ++block_idx) {
             const auto& block = cfg.data_resource_blocks[block_idx];
@@ -754,7 +1159,9 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
 
             for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
                 if (sym == cfg.sync_pos) {
-                    stripped_sync_re += block.subcarrier_count;
+                    if (block.kind == DataResourceBlockKind::Payload) {
+                        stripped_sync_re += block.subcarrier_count;
+                    }
                     continue;
                 }
                 const int data_sym = layout.actual_symbol_to_data_symbol[sym];
@@ -773,10 +1180,26 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
                     if (non_pilot_idx < 0) {
                         continue;
                     }
-                    layout.payload_mask[base + static_cast<size_t>(non_pilot_idx)] = 1;
+                    const size_t flat_idx = base + static_cast<size_t>(non_pilot_idx);
+                    if (block.kind == DataResourceBlockKind::SensingPilot) {
+                        layout.sensing_pilot_mask[flat_idx] = 1;
+                    } else {
+                        layout.payload_mask[flat_idx] = 1;
+                    }
                 }
             }
         }
+    }
+
+    for (size_t flat_idx = 0; flat_idx < layout.non_pilot_re_count; ++flat_idx) {
+        if (layout.sensing_pilot_mask[flat_idx] == 0) {
+            continue;
+        }
+        if (layout.payload_mask[flat_idx] != 0) {
+            ++payload_sensing_pilot_overlap_re;
+            layout.payload_mask[flat_idx] = 0;
+        }
+        ++layout.sensing_pilot_re_count;
     }
 
     size_t payload_rank = 0;
@@ -799,6 +1222,10 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
                      << " sync RE and " << stripped_pilot_re
                      << " pilot RE. sync_pos and pilot_positions take precedence.";
     }
+    if (log_warnings && payload_sensing_pilot_overlap_re > 0) {
+        LOG_G_WARN() << "data_resource_blocks contain " << payload_sensing_pilot_overlap_re
+                     << " RE selected as both payload and sensing_pilot. sensing_pilot takes precedence.";
+    }
 
     return layout;
 }
@@ -812,6 +1239,19 @@ inline void finalize_data_resource_grid_config(Config& cfg, const char* role_nam
             std::string(role_name) +
             " measurement_enable requires at least one payload RE. "
             "Omit data_resource_blocks for full payload coverage or configure a non-empty payload grid.");
+    }
+}
+
+inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
+    cfg.sensing_output_mode = normalize_sensing_output_mode_string(cfg.sensing_output_mode);
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return;
+    }
+    const SensingMaskLayout layout = build_sensing_mask_layout(cfg);
+    if (layout.empty()) {
+        throw std::runtime_error(
+            std::string(role_name) +
+            " compact_mask mode requires a non-empty sensing_mask_blocks selection.");
     }
 }
 
@@ -1021,14 +1461,19 @@ inline bool reject_legacy_key(const YAML::Node& config, const char* old_key, con
     return true;
 }
 
-inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
-    if (!cfg.data_resource_blocks_configured) {
-        return;
-    }
-
-    out << YAML::Key << "data_resource_blocks" << YAML::Value << YAML::BeginSeq;
-    for (const auto& block : cfg.data_resource_blocks) {
+inline void emit_resource_blocks_yaml(
+    YAML::Emitter& out,
+    const char* key,
+    const std::vector<DataResourceBlock>& blocks)
+{
+    out << YAML::Key << key << YAML::Value << YAML::BeginSeq;
+    for (const auto& block : blocks) {
         out << YAML::BeginMap;
+        if (std::strcmp(key, "data_resource_blocks") == 0 &&
+            block.kind != DataResourceBlockKind::Payload) {
+            out << YAML::Key << "kind" << YAML::Value
+                << data_resource_block_kind_to_string(block.kind);
+        }
         out << YAML::Key << "symbol_start" << YAML::Value << block.symbol_start;
         out << YAML::Key << "symbol_count" << YAML::Value << block.symbol_count;
         out << YAML::Key << "subcarrier_start" << YAML::Value << block.subcarrier_start;
@@ -1038,43 +1483,98 @@ inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg
     out << YAML::EndSeq;
 }
 
-inline bool load_data_resource_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
-    const YAML::Node blocks = config["data_resource_blocks"];
+inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
+    if (!cfg.data_resource_blocks_configured) {
+        return;
+    }
+    emit_resource_blocks_yaml(out, "data_resource_blocks", cfg.data_resource_blocks);
+}
+
+inline void emit_sensing_mask_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
+    if (cfg.sensing_mask_blocks.empty()) {
+        return;
+    }
+    emit_resource_blocks_yaml(out, "sensing_mask_blocks", cfg.sensing_mask_blocks);
+}
+
+inline bool load_resource_blocks_from_yaml(
+    std::vector<DataResourceBlock>& out_blocks,
+    const YAML::Node& config,
+    const char* key,
+    const char* context_name,
+    bool* key_present = nullptr)
+{
+    const YAML::Node blocks = config[key];
     if (!blocks) {
-        cfg.data_resource_blocks_configured = false;
-        cfg.data_resource_blocks.clear();
+        if (key_present != nullptr) {
+            *key_present = false;
+        }
+        out_blocks.clear();
         return true;
     }
     if (!blocks.IsSequence()) {
-        LOG_G_ERROR() << context_name << " key 'data_resource_blocks' must be a YAML sequence.";
+        LOG_G_ERROR() << context_name << " key '" << key << "' must be a YAML sequence.";
         return false;
     }
+    if (key_present != nullptr) {
+        *key_present = true;
+    }
 
-    cfg.data_resource_blocks_configured = true;
-    cfg.data_resource_blocks.clear();
-    cfg.data_resource_blocks.reserve(blocks.size());
+    out_blocks.clear();
+    out_blocks.reserve(blocks.size());
     for (size_t idx = 0; idx < blocks.size(); ++idx) {
         const YAML::Node& node = blocks[idx];
         if (!node.IsMap()) {
-            LOG_G_ERROR() << context_name << " data_resource_blocks[" << idx
+            LOG_G_ERROR() << context_name << ' ' << key << "[" << idx
                           << "] must be a YAML map.";
             return false;
         }
         if (!node["symbol_start"] || !node["symbol_count"] ||
             !node["subcarrier_start"] || !node["subcarrier_count"]) {
-            LOG_G_ERROR() << context_name << " data_resource_blocks[" << idx
+            LOG_G_ERROR() << context_name << ' ' << key << "[" << idx
                           << "] must define symbol_start, symbol_count, subcarrier_start, and subcarrier_count.";
             return false;
         }
 
         DataResourceBlock block;
+        if (std::strcmp(key, "data_resource_blocks") == 0 && node["kind"]) {
+            const std::string raw_kind = node["kind"].as<std::string>();
+            if (!parse_data_resource_block_kind_string(raw_kind, block.kind)) {
+                LOG_G_ERROR() << context_name << ' ' << key << "[" << idx
+                              << "] kind must be '" << kDataResourceBlockKindPayload
+                              << "' or '" << kDataResourceBlockKindSensingPilot << "'.";
+                return false;
+            }
+        }
         block.symbol_start = node["symbol_start"].as<size_t>();
         block.symbol_count = node["symbol_count"].as<size_t>();
         block.subcarrier_start = node["subcarrier_start"].as<size_t>();
         block.subcarrier_count = node["subcarrier_count"].as<size_t>();
-        cfg.data_resource_blocks.push_back(block);
+        out_blocks.push_back(block);
     }
     return true;
+}
+
+inline bool load_data_resource_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
+    bool key_present = false;
+    if (!load_resource_blocks_from_yaml(
+            cfg.data_resource_blocks,
+            config,
+            "data_resource_blocks",
+            context_name,
+            &key_present)) {
+        return false;
+    }
+    cfg.data_resource_blocks_configured = key_present;
+    return true;
+}
+
+inline bool load_sensing_mask_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
+    return load_resource_blocks_from_yaml(
+        cfg.sensing_mask_blocks,
+        config,
+        "sensing_mask_blocks",
+        context_name);
 }
 } // namespace config_detail
 
@@ -1091,7 +1591,7 @@ inline Config make_default_modulator_config() {
     cfg.zc_root = 29;
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     cfg.num_symbols = 100;
-    cfg.cuda_mod_pipeline_slots = 2;
+    cfg.sensing_output_mode = kSensingOutputModeDense;
     cfg.mono_sensing_output_enabled = true;
     cfg.mono_sensing_ip = "";
     cfg.mono_sensing_port = 8888;
@@ -1130,6 +1630,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
+    out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
     out << YAML::Key << "rx_device_args" << YAML::Value << cfg.rx_device_args;
@@ -1182,6 +1683,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
+    config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
     out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
     out << YAML::EndMap;
 
@@ -1220,8 +1722,8 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
         if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
         if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
-        if (config["cuda_mod_pipeline_slots"]) {
-            cfg.cuda_mod_pipeline_slots = config["cuda_mod_pipeline_slots"].as<size_t>();
+        if (config["sensing_output_mode"]) {
+            cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
         }
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["tx_device_args"]) cfg.tx_device_args = config["tx_device_args"].as<std::string>();
@@ -1294,6 +1796,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Modulator config")) {
             return false;
         }
+        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "Modulator config")) {
+            return false;
+        }
         if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
         return true;
     } catch (const YAML::Exception& e) {
@@ -1306,28 +1811,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
     if (cfg.default_ip.empty()) {
         cfg.default_ip = "127.0.0.1";
     }
-    if (cfg.range_fft_size == 0) {
-        LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to fft_size=" << cfg.fft_size << '.';
-        cfg.range_fft_size = cfg.fft_size;
-    }
-    if (cfg.doppler_fft_size == 0) {
-        LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
-        cfg.doppler_fft_size = 1;
-    }
-    if (cfg.sensing_symbol_num == 0) {
-        LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
-        cfg.sensing_symbol_num = 1;
-    }
-    if (cfg.doppler_fft_size < cfg.sensing_symbol_num) {
-        LOG_G_WARN() << "doppler_fft_size=" << cfg.doppler_fft_size
-                     << " is smaller than sensing_symbol_num=" << cfg.sensing_symbol_num
-                     << ". Expanding doppler_fft_size to sensing_symbol_num to keep sensing buffers consistent.";
-        cfg.doppler_fft_size = cfg.sensing_symbol_num;
-    }
-    if (cfg.cuda_mod_pipeline_slots == 0) {
-        LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
-        cfg.cuda_mod_pipeline_slots = 1;
-    }
+    normalize_sensing_fft_sizes(cfg, "modulator sensing");
     if (cfg.tx_circular_buffer_size == 0) {
         LOG_G_WARN() << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
         cfg.tx_circular_buffer_size = 1;
@@ -1365,6 +1849,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         }
     }
     finalize_data_resource_grid_config(cfg, "Modulator");
+    finalize_sensing_mask_config(cfg, "Modulator");
 
     auto make_default_ch0 = [&cfg]() {
         SensingRxChannelConfig ch;
@@ -1424,7 +1909,6 @@ inline Config make_default_demodulator_config() {
     cfg.doppler_fft_size = 100;
     cfg.num_symbols = 100;
     cfg.sensing_symbol_num = 100;
-    cfg.cuda_demod_pipeline_slots = 3;
     cfg.frame_queue_size = 8;
     cfg.sync_queue_size = 8;
     cfg.sync_pos = 1;
@@ -1467,6 +1951,7 @@ inline Config make_default_demodulator_config() {
     cfg.akf_q_rw_max = 1e1;
     cfg.akf_r_min = 1e-8;
     cfg.akf_r_max = 1e3;
+    cfg.sensing_output_mode = kSensingOutputModeDense;
     cfg.sensing_symbol_stride = 20;
     cfg.measurement_enable = false;
     cfg.measurement_mode = "";
@@ -1498,6 +1983,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
+    out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
     out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
     out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
     out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
@@ -1559,6 +2045,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
+    config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
     out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
     out << YAML::EndMap;
 
@@ -1605,8 +2092,8 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
         if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
         if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
-        if (config["cuda_demod_pipeline_slots"]) {
-            cfg.cuda_demod_pipeline_slots = config["cuda_demod_pipeline_slots"].as<size_t>();
+        if (config["sensing_output_mode"]) {
+            cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
         }
         if (config["frame_queue_size"]) cfg.frame_queue_size = config["frame_queue_size"].as<size_t>();
         if (config["sync_queue_size"]) cfg.sync_queue_size = config["sync_queue_size"].as<size_t>();
@@ -1680,6 +2167,9 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Demodulator config")) {
             return false;
         }
+        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "Demodulator config")) {
+            return false;
+        }
         if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
         return true;
     } catch (const YAML::Exception& e) {
@@ -1689,28 +2179,7 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
 }
 
 inline void finalize_demodulator_network_defaults(Config& cfg) {
-    if (cfg.range_fft_size == 0) {
-        LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to fft_size=" << cfg.fft_size << '.';
-        cfg.range_fft_size = cfg.fft_size;
-    }
-    if (cfg.doppler_fft_size == 0) {
-        LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
-        cfg.doppler_fft_size = 1;
-    }
-    if (cfg.sensing_symbol_num == 0) {
-        LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
-        cfg.sensing_symbol_num = 1;
-    }
-    if (cfg.doppler_fft_size < cfg.sensing_symbol_num) {
-        LOG_G_WARN() << "doppler_fft_size=" << cfg.doppler_fft_size
-                     << " is smaller than sensing_symbol_num=" << cfg.sensing_symbol_num
-                     << ". Expanding doppler_fft_size to sensing_symbol_num to keep sensing buffers consistent.";
-        cfg.doppler_fft_size = cfg.sensing_symbol_num;
-    }
-    if (cfg.cuda_demod_pipeline_slots == 0) {
-        LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
-        cfg.cuda_demod_pipeline_slots = 1;
-    }
+    normalize_sensing_fft_sizes(cfg, "demodulator sensing");
     if (cfg.frame_queue_size == 0) {
         LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.frame_queue_size = 1;
@@ -1761,6 +2230,7 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
         }
     }
     finalize_data_resource_grid_config(cfg, "Demodulator");
+    finalize_sensing_mask_config(cfg, "Demodulator");
     if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = cfg.default_ip;
     if (cfg.channel_ip.empty()) cfg.channel_ip = cfg.default_ip;
     if (cfg.pdf_ip.empty()) cfg.pdf_ip = cfg.default_ip;
@@ -2224,6 +2694,206 @@ struct SensingFrame {
     uint64_t generation = 0;
 };
 
+inline uint64_t host_to_network_u64(uint64_t value) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap64(value);
+#else
+    return value;
+#endif
+}
+
+#pragma pack(push, 1)
+struct CompactSensingFrameHeader {
+    uint32_t magic_version = 0;
+    uint32_t mask_hash = 0;
+    uint32_t re_count = 0;
+    uint64_t frame_start_symbol_index = 0;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(CompactSensingFrameHeader) == 20, "CompactSensingFrameHeader size mismatch");
+inline constexpr uint32_t kCompactSensingMagicVersion = 0x43534D31u; // "CSM1"
+
+enum class SensingViewerFrameFormat : uint32_t {
+    DenseChannelBuffer = 0,
+    CompactRaw = 1,
+    DenseRangeDoppler = 2,
+    CompactSparse = 3
+};
+
+inline constexpr uint32_t kSensingViewerParamsVersion = 1u;
+inline constexpr uint32_t kSensingViewerFlagCompactMask = 1u << 0;
+inline constexpr uint32_t kSensingViewerFlagCompactLocalDelayDoppler = 1u << 1;
+inline constexpr uint32_t kSensingViewerFlagSkipSensingFft = 1u << 2;
+inline constexpr uint32_t kSensingViewerFlagEnableMti = 1u << 3;
+inline constexpr uint32_t kSensingViewerFlagBistatic = 1u << 4;
+
+#pragma pack(push, 1)
+struct SensingViewerParamsPacket {
+    char header[4];
+    char command[4];
+    uint32_t version = 0;
+    uint32_t flags = 0;
+    uint32_t frame_format = 0;
+    uint32_t wire_rows = 0;
+    uint32_t wire_cols = 0;
+    uint32_t active_rows = 0;
+    uint32_t active_cols = 0;
+    uint32_t frame_symbol_period = 0;
+    uint32_t range_fft_size = 0;
+    uint32_t doppler_fft_size = 0;
+    uint32_t compact_mask_hash = 0;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(SensingViewerParamsPacket) == 52, "SensingViewerParamsPacket size mismatch");
+
+inline uint32_t sensing_viewer_active_flags(
+    const Config& cfg,
+    bool skip_sensing_fft,
+    bool enable_mti,
+    bool bistatic = false)
+{
+    uint32_t flags = 0;
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    if (sensing_output_mode_is_compact_mask(cfg)) {
+        flags |= kSensingViewerFlagCompactMask;
+    }
+    if (analysis.local_delay_doppler_supported) {
+        flags |= kSensingViewerFlagCompactLocalDelayDoppler;
+    }
+    if (skip_sensing_fft) {
+        flags |= kSensingViewerFlagSkipSensingFft;
+    }
+    if (enable_mti) {
+        flags |= kSensingViewerFlagEnableMti;
+    }
+    if (bistatic) {
+        flags |= kSensingViewerFlagBistatic;
+    }
+    return flags;
+}
+
+inline SensingViewerFrameFormat sensing_viewer_frame_format(
+    const Config& cfg,
+    bool skip_sensing_fft)
+{
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return skip_sensing_fft
+            ? SensingViewerFrameFormat::DenseChannelBuffer
+            : SensingViewerFrameFormat::DenseRangeDoppler;
+    }
+
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    if (!analysis.local_delay_doppler_supported) {
+        return SensingViewerFrameFormat::CompactSparse;
+    }
+    return skip_sensing_fft
+        ? SensingViewerFrameFormat::CompactRaw
+        : SensingViewerFrameFormat::DenseRangeDoppler;
+}
+
+inline size_t sensing_viewer_wire_rows(
+    const Config& cfg,
+    bool skip_sensing_fft)
+{
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
+    case SensingViewerFrameFormat::DenseChannelBuffer:
+    case SensingViewerFrameFormat::DenseRangeDoppler:
+        return cfg.doppler_fft_size;
+    case SensingViewerFrameFormat::CompactRaw:
+        return cfg.sensing_symbol_num;
+    case SensingViewerFrameFormat::CompactSparse:
+    default:
+        return 0;
+    }
+}
+
+inline size_t sensing_viewer_wire_cols(
+    const Config& cfg,
+    bool skip_sensing_fft)
+{
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
+    case SensingViewerFrameFormat::DenseChannelBuffer:
+    case SensingViewerFrameFormat::DenseRangeDoppler:
+        return cfg.range_fft_size;
+    case SensingViewerFrameFormat::CompactRaw:
+        return analysis.common_subcarrier_count;
+    case SensingViewerFrameFormat::CompactSparse:
+    default:
+        return 0;
+    }
+}
+
+inline size_t sensing_viewer_active_rows(
+    const Config& cfg,
+    bool skip_sensing_fft)
+{
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
+    case SensingViewerFrameFormat::DenseChannelBuffer:
+        return std::min(cfg.sensing_symbol_num, cfg.doppler_fft_size);
+    case SensingViewerFrameFormat::CompactRaw:
+        return cfg.sensing_symbol_num;
+    case SensingViewerFrameFormat::DenseRangeDoppler:
+        return cfg.doppler_fft_size;
+    case SensingViewerFrameFormat::CompactSparse:
+    default:
+        return 0;
+    }
+}
+
+inline size_t sensing_viewer_active_cols(
+    const Config& cfg,
+    bool skip_sensing_fft)
+{
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
+    case SensingViewerFrameFormat::DenseChannelBuffer:
+        return std::min(cfg.fft_size, cfg.range_fft_size);
+    case SensingViewerFrameFormat::CompactRaw:
+        return analysis.common_subcarrier_count;
+    case SensingViewerFrameFormat::DenseRangeDoppler:
+        return cfg.range_fft_size;
+    case SensingViewerFrameFormat::CompactSparse:
+    default:
+        return 0;
+    }
+}
+
+inline uint32_t sensing_viewer_mask_hash(const Config& cfg)
+{
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return 0;
+    }
+    return build_sensing_mask_layout(cfg).mask_hash;
+}
+
+inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
+    const Config& cfg,
+    bool skip_sensing_fft,
+    bool enable_mti,
+    bool bistatic = false)
+{
+    SensingViewerParamsPacket packet{};
+    std::memcpy(packet.header, "CTRL", 4);
+    std::memcpy(packet.command, "PARM", 4);
+    packet.version = htonl(kSensingViewerParamsVersion);
+    packet.flags = htonl(sensing_viewer_active_flags(cfg, skip_sensing_fft, enable_mti, bistatic));
+    packet.frame_format = htonl(static_cast<uint32_t>(sensing_viewer_frame_format(cfg, skip_sensing_fft)));
+    packet.wire_rows = htonl(static_cast<uint32_t>(sensing_viewer_wire_rows(cfg, skip_sensing_fft)));
+    packet.wire_cols = htonl(static_cast<uint32_t>(sensing_viewer_wire_cols(cfg, skip_sensing_fft)));
+    packet.active_rows = htonl(static_cast<uint32_t>(sensing_viewer_active_rows(cfg, skip_sensing_fft)));
+    packet.active_cols = htonl(static_cast<uint32_t>(sensing_viewer_active_cols(cfg, skip_sensing_fft)));
+    packet.frame_symbol_period = htonl(static_cast<uint32_t>(cfg.num_symbols));
+    packet.range_fft_size = htonl(static_cast<uint32_t>(cfg.range_fft_size));
+    packet.doppler_fft_size = htonl(static_cast<uint32_t>(cfg.doppler_fft_size));
+    packet.compact_mask_hash = htonl(sensing_viewer_mask_hash(cfg));
+    return packet;
+}
+
 /**
  * @brief Base Class for UDP Senders.
  * 
@@ -2362,12 +3032,19 @@ private:
  */
 class SensingDataSender : public UdpBaseSender {
 public:
+    enum class PayloadFormat {
+        Dense,
+        CompactMask
+    };
+
     struct FrameData {
         AlignedVector data;
         std::shared_ptr<const void> owner;
         const std::complex<float>* external_data = nullptr;
         size_t external_size = 0;
         uint64_t first_symbol_index = 0; // OFDM symbol index before sparse sampling
+        PayloadFormat format = PayloadFormat::Dense;
+        uint32_t mask_hash = 0;
     };
 
     SensingDataSender(const std::string& ip, int port, bool enabled = true) 
@@ -2404,9 +3081,7 @@ public:
         FrameData frame_data;
         frame_data.data = data;
         frame_data.first_symbol_index = first_symbol_index;
-        spsc_wait_push(_data_queue, std::move(frame_data), [this]() {
-            return !_running.load(std::memory_order_acquire);
-        });
+        _queue_frame(std::move(frame_data));
     }
 
     void push_data(AlignedVector&& data) {
@@ -2420,9 +3095,39 @@ public:
         FrameData frame_data;
         frame_data.data = std::move(data);
         frame_data.first_symbol_index = first_symbol_index;
-        spsc_wait_push(_data_queue, std::move(frame_data), [this]() {
-            return !_running.load(std::memory_order_acquire);
-        });
+        _queue_frame(std::move(frame_data));
+    }
+
+    void push_compact_data(
+        const AlignedVector& data,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled) return;
+        if (!_running.load()) return;
+
+        FrameData frame_data;
+        frame_data.data = data;
+        frame_data.first_symbol_index = frame_start_symbol_index;
+        frame_data.format = PayloadFormat::CompactMask;
+        frame_data.mask_hash = mask_hash;
+        _queue_frame(std::move(frame_data));
+    }
+
+    void push_compact_data(
+        AlignedVector&& data,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled) return;
+        if (!_running.load()) return;
+
+        FrameData frame_data;
+        frame_data.data = std::move(data);
+        frame_data.first_symbol_index = frame_start_symbol_index;
+        frame_data.format = PayloadFormat::CompactMask;
+        frame_data.mask_hash = mask_hash;
+        _queue_frame(std::move(frame_data));
     }
 
     void push_external(
@@ -2439,13 +3144,38 @@ public:
         frame_data.external_data = data;
         frame_data.external_size = count;
         frame_data.first_symbol_index = first_symbol_index;
+        _queue_frame(std::move(frame_data));
+    }
+
+    void push_compact_external(
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index
+    ) {
+        if (!_enabled) return;
+        if (!_running.load()) return;
+
+        FrameData frame_data;
+        frame_data.owner = std::move(owner);
+        frame_data.external_data = data;
+        frame_data.external_size = count;
+        frame_data.first_symbol_index = frame_start_symbol_index;
+        frame_data.format = PayloadFormat::CompactMask;
+        frame_data.mask_hash = mask_hash;
+        _queue_frame(std::move(frame_data));
+    }
+
+private:
+    bool _enabled = true;
+
+    void _queue_frame(FrameData&& frame_data) {
         spsc_wait_push(_data_queue, std::move(frame_data), [this]() {
             return !_running.load(std::memory_order_acquire);
         });
     }
 
-private:
-    bool _enabled = true;
     void run() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe();
@@ -2463,7 +3193,11 @@ private:
             const bool has_inline = !frame_data.data.empty();
             const bool has_external = frame_data.external_data != nullptr && frame_data.external_size > 0;
             if (has_inline || has_external) {
-                send_data_with_original_format(frame_data);
+                if (frame_data.format == PayloadFormat::CompactMask) {
+                    send_compact_format(frame_data);
+                } else {
+                    send_data_with_original_format(frame_data);
+                }
             }
         }
     }
@@ -2484,6 +3218,24 @@ private:
         send_data_with_original_format_impl(
             frame_data.data.data(),
             frame_data.data.size(),
+            frame_data.first_symbol_index
+        );
+    }
+
+    void send_compact_format(const FrameData& frame_data) {
+        if (frame_data.external_data != nullptr && frame_data.external_size > 0) {
+            send_compact_format_impl(
+                frame_data.external_data,
+                frame_data.external_size,
+                frame_data.mask_hash,
+                frame_data.first_symbol_index
+            );
+            return;
+        }
+        send_compact_format_impl(
+            frame_data.data.data(),
+            frame_data.data.size(),
+            frame_data.mask_hash,
             frame_data.first_symbol_index
         );
     }
@@ -2518,6 +3270,73 @@ private:
                   reinterpret_cast<const uint8_t*>(data_ptr) + offset,
                   current_chunk_size);
             
+            try {
+                send_raw(packet.data(), packet.size());
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "UDP send error: " << e.what();
+            }
+        }
+    }
+
+    void send_compact_format_impl(
+        const std::complex<float>* data_ptr,
+        size_t data_size,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index
+    ) {
+        if (data_ptr == nullptr || data_size == 0) {
+            return;
+        }
+        const size_t chunk_size = 60000;
+        const size_t payload_bytes = sizeof(CompactSensingFrameHeader) + data_size * sizeof(std::complex<float>);
+        const size_t total_chunks = (payload_bytes + chunk_size - 1) / chunk_size;
+        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
+
+        CompactSensingFrameHeader compact_header{};
+        compact_header.magic_version = htonl(kCompactSensingMagicVersion);
+        compact_header.mask_hash = htonl(mask_hash);
+        compact_header.re_count = htonl(static_cast<uint32_t>(data_size));
+        compact_header.frame_start_symbol_index = host_to_network_u64(frame_start_symbol_index);
+
+        const auto* compact_header_bytes =
+            reinterpret_cast<const uint8_t*>(&compact_header);
+        const auto* data_bytes =
+            reinterpret_cast<const uint8_t*>(data_ptr);
+
+        for (size_t i = 0; i < total_chunks; ++i) {
+            uint32_t header[3] = {
+                htonl(frame_id),
+                htonl(static_cast<uint32_t>(total_chunks)),
+                htonl(static_cast<uint32_t>(i))
+            };
+
+            const size_t payload_offset = i * chunk_size;
+            const size_t remaining = payload_bytes - payload_offset;
+            const size_t current_chunk_size = (remaining < chunk_size) ? remaining : chunk_size;
+            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
+            std::memcpy(packet.data(), header, sizeof(header));
+
+            size_t copied = 0;
+            if (payload_offset < sizeof(CompactSensingFrameHeader)) {
+                const size_t header_offset = payload_offset;
+                const size_t header_bytes_left = sizeof(CompactSensingFrameHeader) - header_offset;
+                copied = std::min(current_chunk_size, header_bytes_left);
+                std::memcpy(
+                    packet.data() + sizeof(header),
+                    compact_header_bytes + header_offset,
+                    copied);
+            }
+
+            if (copied < current_chunk_size) {
+                const size_t data_offset = (payload_offset + copied > sizeof(CompactSensingFrameHeader))
+                    ? (payload_offset + copied - sizeof(CompactSensingFrameHeader))
+                    : 0;
+                std::memcpy(
+                    packet.data() + sizeof(header) + copied,
+                    data_bytes + data_offset,
+                    current_chunk_size - copied);
+            }
+
             try {
                 send_raw(packet.data(), packet.size());
             } catch (const std::exception& e) {
@@ -2702,6 +3521,11 @@ public:
         _handlers[command] = std::move(callback);
     }
 
+    void register_request(const std::string& command, Callback callback) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _request_handlers[command] = std::move(callback);
+    }
+
     // Send heartbeat to the sensing receiver to maintain NAT mapping
     void send_heartbeat(const std::string& dest_ip, int dest_port) {
         if (_socket < 0) return;
@@ -2721,6 +3545,24 @@ public:
         hb.value = 0; // Value doesn't matter
 
         sendto(_socket, &hb, sizeof(hb), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+    }
+
+    void send_sensing_viewer_params(
+        const std::string& dest_ip,
+        int dest_port,
+        const SensingViewerParamsPacket& packet)
+    {
+        if (_socket < 0) return;
+
+        struct sockaddr_in dest_addr;
+        std::memset(&dest_addr, 0, sizeof(dest_addr));
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(dest_port);
+        if (inet_pton(AF_INET, dest_ip.c_str(), &dest_addr.sin_addr) <= 0) {
+            return;
+        }
+
+        sendto(_socket, &packet, sizeof(packet), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
     }
 
 private:
@@ -2776,8 +3618,13 @@ private:
                 continue;
             }
             
-            // Verify frame header
-            if (std::string(cmd.header, 4) != "CMD ") {
+            const std::string header_str(cmd.header, 4);
+            std::unordered_map<std::string, Callback>* handlers = nullptr;
+            if (header_str == "CMD ") {
+                handlers = &_handlers;
+            } else if (header_str == "REQ ") {
+                handlers = &_request_handlers;
+            } else {
                 LOG_G_WARN() << "Invalid command header received";
                 continue;
             }
@@ -2788,8 +3635,8 @@ private:
             // Find and execute handler
             {
                 std::lock_guard<std::mutex> lock(_mutex);
-                auto it = _handlers.find(command_str);
-                if (it != _handlers.end()) {
+                auto it = handlers->find(command_str);
+                if (it != handlers->end()) {
                     try {
                         it->second(value);
                     } catch (const std::exception& e) {
@@ -2809,6 +3656,7 @@ private:
     std::thread _thread;
     std::mutex _mutex;
     std::unordered_map<std::string, Callback> _handlers;
+    std::unordered_map<std::string, Callback> _request_handlers;
 };
 
 /**

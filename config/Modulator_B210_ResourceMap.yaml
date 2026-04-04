@@ -76,27 +76,60 @@ cpu_cores:
   - 6   # Main thread affinity
 
 # ===== Resource Preview =====
-# data_resource_blocks:          # Optional payload / sensing-pilot RE rectangles
-#   - kind: payload              # payload or sensing_pilot
-#     symbol_start: 0            # 0-based absolute frame symbol index
-#     symbol_count: 100
-#     subcarrier_start: 1        # 0-based FFT-bin index
-#     subcarrier_count: 489
-#   - kind: payload
-#     symbol_start: 0
-#     symbol_count: 100
-#     subcarrier_start: 535
-#     subcarrier_count: 489
-#   - kind: sensing_pilot
-#     symbol_start: 21           # Can overlap sync_pos; sync symbol still transmits normal sync content
-#     symbol_count: 1
-#     subcarrier_start: 0
-#     subcarrier_count: 1024
-#                              # Omit the whole key for legacy full-grid payload mapping
-#                              # Use [] to disable payload RE entirely
-# sensing_mask_blocks: []        # Optional compact sensing RE rectangles (safe to keep empty in dense mode)
-# # sensing_mask_blocks:         # Used only when sensing_output_mode=compact_mask
-# #   - symbol_start: 21
-# #     symbol_count: 1
-# #     subcarrier_start: 0
-# #     subcarrier_count: 1024
+data_resource_blocks:           # Example payload / sensing-pilot RE rectangles
+  - kind: payload              # payload or sensing_pilot
+    symbol_start: 0            # 0-based absolute frame symbol index
+    symbol_count: 100
+    subcarrier_start: 1        # 0-based FFT-bin index
+    subcarrier_count: 489
+  - kind: payload
+    symbol_start: 0
+    symbol_count: 100
+    subcarrier_start: 535
+    subcarrier_count: 489
+  - kind: sensing_pilot
+    symbol_start: 21           # Can overlap sync_pos; sync symbol still transmits normal sync content
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 41
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 61
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 81
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 1
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+sensing_mask_blocks:            # Example compact sensing RE rectangles
+  - symbol_start: 21
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 41
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 61
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 81
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 1
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024

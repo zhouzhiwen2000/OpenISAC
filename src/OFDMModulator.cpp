@@ -173,7 +173,11 @@ public:
                     ? std::string()
                     : (_cfg.measurement_output_dir + "/modulator_measurement_summary.csv"));
         }
-        _shared_sensing_cfg.sensing_symbol_stride = cfg.sensing_symbol_stride;
+        const CompactSensingMaskAnalysis compact_mask_analysis = analyze_compact_sensing_mask(_cfg);
+        _shared_sensing_cfg.sensing_symbol_stride =
+            compact_mask_analysis.local_delay_doppler_supported
+                ? compact_mask_analysis.implicit_symbol_stride
+                : cfg.sensing_symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
         _shared_sensing_cfg.generation = 1;
@@ -193,7 +197,8 @@ public:
         _build_symbol_templates();
         LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
-                     << " non-sync/non-pilot RE per frame"
+                     << " non-sync/non-pilot RE per frame, "
+                     << _data_resource_layout.sensing_pilot_re_count << " sensing-pilot RE"
                      << (_cfg.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
         if (!_measurement_enabled && _data_resource_layout.payload_re_count == 0) {
             LOG_G_WARN() << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
@@ -490,7 +495,34 @@ private:
         _sensing_channels[ch_id]->set_rx_gain(gain_db, nullptr);
     }
 
+    SharedSensingRuntime _viewer_params_snapshot() {
+        std::lock_guard<std::mutex> lock(_shared_sensing_cfg_mutex);
+        return _shared_sensing_cfg;
+    }
+
+    void _send_viewer_params() {
+        const SharedSensingRuntime snapshot = _viewer_params_snapshot();
+        const SensingViewerParamsPacket packet =
+            make_sensing_viewer_params_packet(
+                _cfg,
+                snapshot.skip_sensing_fft,
+                snapshot.enable_mti,
+                false);
+        for (const auto& ch_cfg : _cfg.sensing_rx_channels) {
+            _control_handler.send_sensing_viewer_params(
+                ch_cfg.sensing_ip,
+                ch_cfg.sensing_port,
+                packet);
+        }
+    }
+
     void _register_commands() {
+        const bool compact_mask_mode = sensing_output_mode_is_compact_mask(_cfg);
+        const bool compact_mask_fft_controls_supported =
+            compact_mask_runtime_fft_controls_supported(_cfg);
+        const std::string compact_mask_reason =
+            compact_mask_runtime_fft_controls_reason(_cfg);
+
         _control_handler.register_command("ALCH", [this](int32_t value) {
             if (value < 0) {
                 _align_target_channel.store(-1);
@@ -529,7 +561,12 @@ private:
                 static_cast<int32_t>(next_target));
         });
 
-        _control_handler.register_command("SKIP", [this](int32_t value) {
+        _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
+            if (compact_mask_mode && !compact_mask_fft_controls_supported) {
+                LOG_G_INFO() << "Ignoring SKIP command in compact_mask sensing mode: "
+                             << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
+                return;
+            }
             const bool new_skip = (value != 0);
             _schedule_shared_sensing_update([new_skip](SharedSensingRuntime& cfg) {
                 cfg.skip_sensing_fft = new_skip;
@@ -537,7 +574,11 @@ private:
             LOG_G_INFO() << "Received SKIP command: " << (new_skip ? 1 : 0);
         });
 
-        _control_handler.register_command("STRD", [this](int32_t value) {
+        _control_handler.register_command("STRD", [this, compact_mask_mode](int32_t value) {
+            if (compact_mask_mode) {
+                LOG_G_INFO() << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
+                return;
+            }
             size_t stride = value <= 0 ? 1 : static_cast<size_t>(value);
             _schedule_shared_sensing_update([stride](SharedSensingRuntime& cfg) {
                 cfg.sensing_symbol_stride = stride;
@@ -545,7 +586,12 @@ private:
             LOG_G_INFO() << "Received STRD command: " << stride;
         });
 
-        _control_handler.register_command("MTI ", [this](int32_t value) {
+        _control_handler.register_command("MTI ", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
+            if (compact_mask_mode && !compact_mask_fft_controls_supported) {
+                LOG_G_INFO() << "Ignoring MTI command in compact_mask sensing mode: "
+                             << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
+                return;
+            }
             const bool new_mti = (value != 0);
             _schedule_shared_sensing_update([new_mti](SharedSensingRuntime& cfg) {
                 cfg.enable_mti = new_mti;
@@ -609,6 +655,10 @@ private:
             }
 
             apply_one(static_cast<uint32_t>(target));
+        });
+
+        _control_handler.register_request("PARM", [this](int32_t) {
+            _send_viewer_params();
         });
     }
 
@@ -796,7 +846,10 @@ private:
             const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[data_symbol_idx];
             for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
                 const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
-                template_symbol[k] = _pregen_symbols[pregen_offset + di];
+                const size_t flat_idx = non_pilot_base + di;
+                template_symbol[k] = _data_resource_layout.sensing_pilot_mask[flat_idx] != 0
+                    ? _zc_seq[k]
+                    : _pregen_symbols[pregen_offset + di];
                 const int payload_rank = _data_resource_layout.payload_rank[non_pilot_base + di];
                 if (payload_rank >= 0) {
                     _payload_subcarrier_indices_flat.push_back(static_cast<int>(k));

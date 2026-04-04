@@ -1,4 +1,4 @@
-# OFDM Modulator Configuration (B210)
+# OFDM Modulator Configuration (X310)
 
 # ===== OFDM Frame =====
 fft_size: 1024                 # FFT size (subcarrier count)
@@ -22,7 +22,7 @@ tx_gain: 60                    # TX gain (dB)
 tx_channel: 0                  # TX channel index on USRP
 
 # ===== USRP Device Args =====
-device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # Shared fallback args
+device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # Shared fallback args
 tx_device_args: ""             # TX-specific args (empty = use device_args)
 rx_device_args: ""             # Default sensing RX args (empty = use device_args)
 
@@ -35,7 +35,7 @@ rx_clock_source: ""            # Sensing RX clock source override (optional)
 rx_time_source: ""             # Sensing RX time source override (optional)
 
 # ===== Wire Format =====
-wire_format_tx: sc8            # TX wire format: sc16/sc8
+wire_format_tx: sc16           # TX wire format: sc16/sc8
 wire_format_rx: sc16           # RX wire format: sc16/sc8
 
 # ===== Network Output =====
@@ -76,27 +76,60 @@ cpu_cores:
   - 6   # Main thread affinity
 
 # ===== Resource Preview =====
-# data_resource_blocks:          # Optional payload / sensing-pilot RE rectangles
-#   - kind: payload              # payload or sensing_pilot
-#     symbol_start: 0            # 0-based absolute frame symbol index
-#     symbol_count: 100
-#     subcarrier_start: 1        # 0-based FFT-bin index
-#     subcarrier_count: 489
-#   - kind: payload
-#     symbol_start: 0
-#     symbol_count: 100
-#     subcarrier_start: 535
-#     subcarrier_count: 489
-#   - kind: sensing_pilot
-#     symbol_start: 21           # Can overlap sync_pos; sync symbol still transmits normal sync content
-#     symbol_count: 1
-#     subcarrier_start: 0
-#     subcarrier_count: 1024
-#                              # Omit the whole key for legacy full-grid payload mapping
-#                              # Use [] to disable payload RE entirely
-# sensing_mask_blocks: []        # Optional compact sensing RE rectangles (safe to keep empty in dense mode)
-# # sensing_mask_blocks:         # Used only when sensing_output_mode=compact_mask
-# #   - symbol_start: 21
-# #     symbol_count: 1
-# #     subcarrier_start: 0
-# #     subcarrier_count: 1024
+data_resource_blocks:           # Example payload / sensing-pilot RE rectangles
+  - kind: payload              # payload or sensing_pilot
+    symbol_start: 0            # 0-based absolute frame symbol index
+    symbol_count: 100
+    subcarrier_start: 1        # 0-based FFT-bin index
+    subcarrier_count: 489
+  - kind: payload
+    symbol_start: 0
+    symbol_count: 100
+    subcarrier_start: 535
+    subcarrier_count: 489
+  - kind: sensing_pilot
+    symbol_start: 21           # Can overlap sync_pos; sync symbol still transmits normal sync content
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 41
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 61
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 81
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 1
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+sensing_mask_blocks:            # Example compact sensing RE rectangles
+  - symbol_start: 21
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 41
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 61
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 81
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 1
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024

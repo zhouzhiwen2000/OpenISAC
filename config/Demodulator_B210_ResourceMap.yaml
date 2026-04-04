@@ -1,4 +1,4 @@
-# OFDM Demodulator Configuration (X310)
+# OFDM Demodulator Configuration (B210)
 
 # ===== OFDM Frame =====
 fft_size: 1024                 # FFT size (subcarrier count)
@@ -30,7 +30,7 @@ rx_agc_update_frames: 4        # Apply AGC at most once every N processed frames
 rx_channel: 0                  # RX channel index on USRP
 
 # ===== USRP Device / Link =====
-device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # USRP args
+device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # USRP args
 clock_source: external         # Clock source: internal/external/gpsdo
 wire_format_rx: sc16           # RX wire format: sc16/sc8
 
@@ -93,27 +93,60 @@ cpu_cores:
 sensing_rx_channels: []
 
 # ===== Resource Preview =====
-# data_resource_blocks:          # Optional payload / sensing-pilot RE rectangles; must match Modulator.yaml when enabled
-#   - kind: payload              # payload or sensing_pilot
-#     symbol_start: 0            # 0-based absolute frame symbol index
-#     symbol_count: 100
-#     subcarrier_start: 1        # 0-based FFT-bin index
-#     subcarrier_count: 489
-#   - kind: payload
-#     symbol_start: 0
-#     symbol_count: 100
-#     subcarrier_start: 535
-#     subcarrier_count: 489
-#   - kind: sensing_pilot
-#     symbol_start: 21
-#     symbol_count: 1
-#     subcarrier_start: 0
-#     subcarrier_count: 1024
-#                              # Omit the whole key for legacy full-grid payload extraction
-#                              # Use [] to disable payload LLR extraction entirely
-# sensing_mask_blocks: []        # Optional compact sensing RE rectangles (safe to keep empty in dense mode)
-# # sensing_mask_blocks:         # Used only when sensing_output_mode=compact_mask
-# #   - symbol_start: 21
-# #     symbol_count: 1
-# #     subcarrier_start: 0
-# #     subcarrier_count: 1024
+data_resource_blocks:           # Example payload / sensing-pilot RE rectangles; must match Modulator.yaml when enabled
+  - kind: payload              # payload or sensing_pilot
+    symbol_start: 0            # 0-based absolute frame symbol index
+    symbol_count: 100
+    subcarrier_start: 1        # 0-based FFT-bin index
+    subcarrier_count: 489
+  - kind: payload
+    symbol_start: 0
+    symbol_count: 100
+    subcarrier_start: 535
+    subcarrier_count: 489
+  - kind: sensing_pilot
+    symbol_start: 21
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 41
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 61
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 81
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - kind: sensing_pilot
+    symbol_start: 1
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+sensing_mask_blocks:            # Example compact sensing RE rectangles
+  - symbol_start: 21
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 41
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 61
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 81
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024
+  - symbol_start: 1
+    symbol_count: 1
+    subcarrier_start: 0
+    subcarrier_count: 1024

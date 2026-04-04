@@ -115,6 +115,14 @@ int32_t compute_rx_frame_boundary_error_samples(
 
 constexpr uint64_t kSystemDelayEstimationFrameInterval = 434;
 
+size_t sensing_symbol_capacity(const Config& cfg) {
+    const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    if (!analysis.local_delay_doppler_supported) {
+        return cfg.sensing_symbol_num;
+    }
+    return std::max(cfg.sensing_symbol_num, analysis.selected_symbol_count);
+}
+
 }
 
 class SensingChannel::PairedFrameQueue {
@@ -313,15 +321,43 @@ SensingChannel::RxIoContext::~RxIoContext() = default;
 SensingChannel::SensingComputeContext::SensingComputeContext(const Config& cfg, const SensingRxChannelConfig& c)
   : demod_fft_in(cfg.fft_size),
     demod_fft_out(cfg.fft_size),
-    sensing_core({cfg.fft_size, cfg.range_fft_size, cfg.doppler_fft_size, cfg.sensing_symbol_num}),
+    sensing_core({cfg.fft_size, std::max(cfg.range_fft_size, cfg.fft_size), cfg.doppler_fft_size, sensing_symbol_capacity(cfg)}),
     sensing_sender(c.sensing_ip, c.sensing_port, c.enable_sensing_output),
     next_hb_time(std::chrono::steady_clock::now()) {
     accumulated_rx_symbols.reserve(cfg.sensing_symbol_num);
     accumulated_tx_symbols.reserve(cfg.sensing_symbol_num);
+    if (sensing_output_mode_is_compact_mask(cfg)) {
+        sensing_mask_layout = build_sensing_mask_layout(cfg);
+        compact_mask_analysis = analyze_compact_sensing_mask(cfg);
+        compact_mask_local_delay_doppler_supported = compact_mask_analysis.local_delay_doppler_supported;
+        compact_channel_output.resize(sensing_mask_layout.total_re_count);
+        compact_selected_tx_symbols.reserve(cfg.sensing_symbol_num);
+        compact_shifted_subcarrier_indices.reserve(compact_mask_analysis.common_subcarrier_count);
+        for (size_t sc_idx = 0; sc_idx < compact_mask_analysis.common_subcarrier_count; ++sc_idx) {
+            compact_shifted_subcarrier_indices.push_back(
+                static_cast<int>(raw_fft_bin_to_shifted_index(sc_idx, compact_mask_analysis.common_subcarrier_count)));
+        }
+        if (compact_mask_local_delay_doppler_supported) {
+            compact_sensing_core = std::make_unique<SensingProcessor>(SensingProcessor::Params{
+                compact_mask_analysis.common_subcarrier_count,
+                cfg.range_fft_size,
+                cfg.doppler_fft_size,
+                cfg.sensing_symbol_num,
+            });
+        }
+    }
     range_window.resize(cfg.fft_size);
     WindowGenerator::generate_hamming(range_window, cfg.fft_size);
     doppler_window.resize(cfg.sensing_symbol_num);
     WindowGenerator::generate_hamming(doppler_window, cfg.sensing_symbol_num);
+    if (compact_mask_local_delay_doppler_supported) {
+        compact_range_window.resize(compact_mask_analysis.common_subcarrier_count);
+        WindowGenerator::generate_hamming(
+            compact_range_window,
+            compact_mask_analysis.common_subcarrier_count);
+        compact_doppler_window.resize(cfg.sensing_symbol_num);
+        WindowGenerator::generate_hamming(compact_doppler_window, cfg.sensing_symbol_num);
+    }
     actual_subcarrier_indices.resize(cfg.fft_size);
     subcarrier_phases_unit_delay.resize(cfg.fft_size);
     const size_t half_fft = cfg.fft_size / 2;
@@ -389,6 +425,22 @@ SensingChannel::SensingChannel(
     _rx_io.paired_queue->set_rx_recycler([this](AlignedVector&& frame) {
         this->_rx_io.rx_frame_pool.release(std::move(frame));
     });
+
+    if (sensing_output_mode_is_compact_mask(_cfg)) {
+        if (_compute.compact_mask_local_delay_doppler_supported) {
+            LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
+                         << "] compact_mask regular sampling enables MTI/local Delay-Doppler"
+                         << " (symbols=" << _compute.compact_mask_analysis.selected_symbol_count
+                         << ", stride=" << _compute.compact_mask_analysis.implicit_symbol_stride
+                         << ", subcarriers=" << _compute.compact_mask_analysis.common_subcarrier_count
+                         << ")";
+        } else {
+            const std::string reason = _compute.compact_mask_analysis.effective_reason();
+            LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
+                         << "] compact_mask stays in raw compact-only mode: "
+                         << (reason.empty() ? "mask is not regular-sampling compatible" : reason);
+        }
+    }
 
     if (_compute.delay_estimation_enabled && _compute.sensing_pipeline_disabled_by_mode) {
         LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
@@ -474,6 +526,15 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
 
     const size_t symbols_in_frame = std::min(frame.rx_symbols.size(), frame.tx_symbols.size());
     if (symbols_in_frame == 0) {
+        return;
+    }
+    if (sensing_output_mode_is_compact_mask(_cfg)) {
+        _apply_shared_sensing_if_due(frame_start_symbol_index);
+        if (_compute.compact_mask_local_delay_doppler_supported) {
+            _process_regular_compact_bistatic_frame(frame, frame_start_symbol_index);
+        } else {
+            _process_compact_bistatic_frame(frame, frame_start_symbol_index);
+        }
         return;
     }
 
@@ -1012,6 +1073,16 @@ void SensingChannel::_sensing_loop() {
             _rx_io.rx_frame_pool.release(std::move(rx_frame_data));
             continue;
         }
+        if (sensing_output_mode_is_compact_mask(_cfg)) {
+            _apply_shared_sensing_if_due(tx_frame.frame_start_symbol_index);
+            if (_compute.compact_mask_local_delay_doppler_supported) {
+                _process_regular_compact_monostatic_frame(rx_frame_data, tx_frame);
+            } else {
+                _process_compact_monostatic_frame(rx_frame_data, tx_frame);
+            }
+            _rx_io.rx_frame_pool.release(std::move(rx_frame_data));
+            continue;
+        }
 
         const auto& tx_symbols = *tx_frame.symbols;
         const uint64_t frame_start = tx_frame.frame_start_symbol_index;
@@ -1128,6 +1199,292 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
                   << ", interval=" << kSystemDelayEstimationFrameInterval;
 }
 
+void SensingChannel::_process_compact_monostatic_frame(
+    const AlignedVector& rx_frame_data,
+    const TxSymbolsFrame& tx_frame)
+{
+    const auto& layout = _compute.sensing_mask_layout;
+    if (layout.empty() || tx_frame.symbols == nullptr) {
+        return;
+    }
+
+    const auto& tx_symbols = *tx_frame.symbols;
+    auto& compact_output = _compute.compact_channel_output;
+    for (size_t row = 0; row < layout.selected_symbols.size(); ++row) {
+        const size_t symbol_idx = static_cast<size_t>(layout.selected_symbols[row]);
+        if (symbol_idx >= tx_symbols.size()) {
+            continue;
+        }
+        const size_t symbol_start = symbol_idx * (_cfg.fft_size + _cfg.cp_length) + _cfg.cp_length;
+        std::copy(
+            rx_frame_data.begin() + symbol_start,
+            rx_frame_data.begin() + symbol_start + _cfg.fft_size,
+            _compute.demod_fft_in.begin());
+        fftwf_execute(_compute.demod_fft_plan);
+
+        const auto& tx_symbol = tx_symbols[symbol_idx];
+        const size_t begin = layout.selected_symbol_offsets[row];
+        const size_t end = layout.selected_symbol_offsets[row + 1];
+        for (size_t idx = begin; idx < end; ++idx) {
+            const size_t sc = static_cast<size_t>(layout.flat_subcarrier_indices[idx]);
+            compact_output[idx] = _compute.demod_fft_out[sc] * std::conj(tx_symbol[sc]);
+        }
+    }
+
+    _compute.sensing_sender.push_compact_data(
+        compact_output,
+        layout.mask_hash,
+        tx_frame.frame_start_symbol_index);
+}
+
+void SensingChannel::_process_compact_bistatic_frame(
+    const SensingFrame& frame,
+    uint64_t frame_start_symbol_index)
+{
+    const auto& layout = _compute.sensing_mask_layout;
+    if (layout.empty()) {
+        return;
+    }
+
+    auto& compact_output = _compute.compact_channel_output;
+    const size_t symbols_in_frame = std::min(frame.rx_symbols.size(), frame.tx_symbols.size());
+    for (size_t row = 0; row < layout.selected_symbols.size(); ++row) {
+        const size_t symbol_idx = static_cast<size_t>(layout.selected_symbols[row]);
+        if (symbol_idx >= symbols_in_frame) {
+            continue;
+        }
+
+        AlignedVector rx_symbol = frame.rx_symbols[symbol_idx];
+        const int relative_symbol_index = static_cast<int>(symbol_idx) - static_cast<int>(_cfg.sync_pos);
+        const float phase_diff_cfo = frame.CFO * static_cast<float>(relative_symbol_index);
+        const size_t phase_bins = std::min(rx_symbol.size(), _compute.actual_subcarrier_indices.size());
+        #pragma omp simd simdlen(16)
+        for (size_t j = 0; j < phase_bins; ++j) {
+            const float phase_diff_sfo =
+                frame.SFO * static_cast<float>(_compute.actual_subcarrier_indices[j]) *
+                static_cast<float>(relative_symbol_index);
+            const float phase_diff_delay = _compute.subcarrier_phases_unit_delay[j] * frame.delay_offset;
+            const float phase_diff_total = phase_diff_delay + phase_diff_sfo + phase_diff_cfo;
+            const std::complex<float> phase = std::polar(1.0f, -phase_diff_total);
+            rx_symbol[j] *= phase;
+        }
+
+        const auto& tx_symbol = frame.tx_symbols[symbol_idx];
+        const size_t begin = layout.selected_symbol_offsets[row];
+        const size_t end = layout.selected_symbol_offsets[row + 1];
+        for (size_t idx = begin; idx < end; ++idx) {
+            const size_t sc = static_cast<size_t>(layout.flat_subcarrier_indices[idx]);
+            compact_output[idx] = rx_symbol[sc] * std::conj(tx_symbol[sc]);
+        }
+    }
+
+    _compute.sensing_sender.push_compact_data(
+        compact_output,
+        layout.mask_hash,
+        frame_start_symbol_index);
+}
+
+void SensingChannel::_process_regular_compact_monostatic_frame(
+    const AlignedVector& rx_frame_data,
+    const TxSymbolsFrame& tx_frame)
+{
+    const auto& analysis = _compute.compact_mask_analysis;
+    if (!analysis.local_delay_doppler_supported || tx_frame.symbols == nullptr) {
+        _process_compact_monostatic_frame(rx_frame_data, tx_frame);
+        return;
+    }
+
+    const auto& tx_symbols = *tx_frame.symbols;
+    if (analysis.selected_symbols.empty()) {
+        return;
+    }
+
+    if (!_compute.compact_sensing_core) {
+        return;
+    }
+
+    auto& compact_core = *_compute.compact_sensing_core;
+    auto& channel_buf = compact_core.channel_buffer();
+    const size_t range_stride = compact_core.params().range_fft_size;
+
+    if (_compute.compact_selected_tx_symbols.empty()) {
+        compact_core.clear_channel_buffer();
+    }
+
+    for (size_t selected_row = 0; selected_row < analysis.selected_symbols.size(); ++selected_row) {
+        const size_t symbol_idx = static_cast<size_t>(analysis.selected_symbols[selected_row]);
+        if (symbol_idx >= tx_symbols.size()) {
+            return;
+        }
+        if (_compute.compact_selected_tx_symbols.size() >= _cfg.sensing_symbol_num) {
+            _process_regular_compact_buffer(
+                _compute.compact_selected_tx_symbols,
+                _compute.current_batch_first_symbol);
+            _compute.compact_selected_tx_symbols.clear();
+            _compute.batch_has_first_symbol = false;
+            compact_core.clear_channel_buffer();
+        }
+
+        const size_t batch_row = _compute.compact_selected_tx_symbols.size();
+        if (!_compute.batch_has_first_symbol) {
+            _compute.current_batch_first_symbol =
+                tx_frame.frame_start_symbol_index + static_cast<uint64_t>(symbol_idx);
+            _compute.batch_has_first_symbol = true;
+        }
+
+        const size_t symbol_start = symbol_idx * (_cfg.fft_size + _cfg.cp_length) + _cfg.cp_length;
+        if (symbol_start + _cfg.fft_size > rx_frame_data.size()) {
+            return;
+        }
+        std::copy(
+            rx_frame_data.begin() + static_cast<std::ptrdiff_t>(symbol_start),
+            rx_frame_data.begin() + static_cast<std::ptrdiff_t>(symbol_start + _cfg.fft_size),
+            _compute.demod_fft_in.begin());
+        fftwf_execute(_compute.demod_fft_plan);
+
+        auto* row_out = channel_buf.data() + batch_row * range_stride;
+        AlignedVector compact_tx_symbol(analysis.common_subcarrier_count);
+        for (size_t sub_idx = 0; sub_idx < analysis.common_subcarrier_count; ++sub_idx) {
+            const size_t sc_idx = static_cast<size_t>(analysis.common_subcarrier_indices[sub_idx]);
+            row_out[sub_idx] = _compute.demod_fft_out[sc_idx];
+            compact_tx_symbol[sub_idx] = tx_symbols[symbol_idx][sc_idx];
+        }
+        _compute.compact_selected_tx_symbols.push_back(std::move(compact_tx_symbol));
+        if (_compute.compact_selected_tx_symbols.size() >= _cfg.sensing_symbol_num) {
+            _process_regular_compact_buffer(
+                _compute.compact_selected_tx_symbols,
+                _compute.current_batch_first_symbol);
+            _compute.compact_selected_tx_symbols.clear();
+            _compute.batch_has_first_symbol = false;
+            compact_core.clear_channel_buffer();
+        }
+    }
+}
+
+void SensingChannel::_process_regular_compact_bistatic_frame(
+    const SensingFrame& frame,
+    uint64_t frame_start_symbol_index)
+{
+    const auto& analysis = _compute.compact_mask_analysis;
+    if (!analysis.local_delay_doppler_supported || analysis.selected_symbols.empty()) {
+        _process_compact_bistatic_frame(frame, frame_start_symbol_index);
+        return;
+    }
+
+    const size_t symbols_in_frame = std::min(frame.rx_symbols.size(), frame.tx_symbols.size());
+    if (symbols_in_frame == 0) {
+        return;
+    }
+
+    if (!_compute.compact_sensing_core) {
+        return;
+    }
+
+    auto& compact_core = *_compute.compact_sensing_core;
+    auto& channel_buf = compact_core.channel_buffer();
+    const size_t range_stride = compact_core.params().range_fft_size;
+
+    if (_compute.compact_selected_tx_symbols.empty()) {
+        compact_core.clear_channel_buffer();
+    }
+
+    for (size_t selected_row = 0; selected_row < analysis.selected_symbols.size(); ++selected_row) {
+        const size_t symbol_idx = static_cast<size_t>(analysis.selected_symbols[selected_row]);
+        if (symbol_idx >= symbols_in_frame) {
+            return;
+        }
+        if (_compute.compact_selected_tx_symbols.size() >= _cfg.sensing_symbol_num) {
+            _process_regular_compact_buffer(
+                _compute.compact_selected_tx_symbols,
+                _compute.current_batch_first_symbol);
+            _compute.compact_selected_tx_symbols.clear();
+            _compute.batch_has_first_symbol = false;
+            compact_core.clear_channel_buffer();
+        }
+
+        const size_t batch_row = _compute.compact_selected_tx_symbols.size();
+        if (!_compute.batch_has_first_symbol) {
+            _compute.current_batch_first_symbol =
+                frame_start_symbol_index + static_cast<uint64_t>(symbol_idx);
+            _compute.batch_has_first_symbol = true;
+        }
+
+        const int relative_symbol_index = static_cast<int>(symbol_idx) - static_cast<int>(_cfg.sync_pos);
+        const float phase_diff_cfo = frame.CFO * static_cast<float>(relative_symbol_index);
+        auto* row_out = channel_buf.data() + batch_row * range_stride;
+        AlignedVector compact_tx_symbol(analysis.common_subcarrier_count);
+        for (size_t sub_idx = 0; sub_idx < analysis.common_subcarrier_count; ++sub_idx) {
+            const size_t sc_idx = static_cast<size_t>(analysis.common_subcarrier_indices[sub_idx]);
+            const float phase_diff_sfo =
+                frame.SFO * static_cast<float>(_compute.actual_subcarrier_indices[sc_idx]) *
+                static_cast<float>(relative_symbol_index);
+            const float phase_diff_delay =
+                _compute.subcarrier_phases_unit_delay[sc_idx] * frame.delay_offset;
+            const float phase_diff_total = phase_diff_delay + phase_diff_sfo + phase_diff_cfo;
+            const std::complex<float> phase = std::polar(1.0f, -phase_diff_total);
+            row_out[sub_idx] = frame.rx_symbols[symbol_idx][sc_idx] * phase;
+            compact_tx_symbol[sub_idx] = frame.tx_symbols[symbol_idx][sc_idx];
+        }
+        _compute.compact_selected_tx_symbols.push_back(std::move(compact_tx_symbol));
+        if (_compute.compact_selected_tx_symbols.size() >= _cfg.sensing_symbol_num) {
+            _process_regular_compact_buffer(
+                _compute.compact_selected_tx_symbols,
+                _compute.current_batch_first_symbol);
+            _compute.compact_selected_tx_symbols.clear();
+            _compute.batch_has_first_symbol = false;
+            compact_core.clear_channel_buffer();
+        }
+    }
+}
+
+void SensingChannel::_process_regular_compact_buffer(
+    const std::vector<AlignedVector>& tx_symbols,
+    uint64_t frame_start_symbol_index)
+{
+    const auto& analysis = _compute.compact_mask_analysis;
+    if (!analysis.local_delay_doppler_supported || tx_symbols.empty()) {
+        return;
+    }
+
+    if (!_compute.compact_sensing_core) {
+        return;
+    }
+
+    auto& compact_core = *_compute.compact_sensing_core;
+    auto& channel_buf = compact_core.channel_buffer();
+    const size_t symbol_count = tx_symbols.size();
+    const size_t range_stride = compact_core.params().range_fft_size;
+
+    compact_core.channel_estimate_with_shift(tx_symbols, symbol_count);
+    compact_core.apply_mti(_compute.active_enable_mti, symbol_count);
+
+    if (_compute.active_skip_sensing_fft) {
+        AlignedVector compact_output(symbol_count * analysis.common_subcarrier_count);
+        for (size_t row = 0; row < symbol_count; ++row) {
+            for (size_t sub_idx = 0; sub_idx < analysis.common_subcarrier_count; ++sub_idx) {
+                const size_t compact_idx = row * analysis.common_subcarrier_count + sub_idx;
+                const size_t shifted_sc = static_cast<size_t>(_compute.compact_shifted_subcarrier_indices[sub_idx]);
+                compact_output[compact_idx] = channel_buf[row * range_stride + shifted_sc];
+            }
+        }
+        _compute.sensing_sender.push_compact_data(
+            compact_output,
+            _compute.sensing_mask_layout.mask_hash,
+            frame_start_symbol_index);
+        return;
+    }
+
+    compact_core.apply_windows(
+        channel_buf,
+        _compute.compact_range_window,
+        _compute.compact_doppler_window,
+        symbol_count);
+    compact_core.execute_range_ifft();
+    compact_core.execute_doppler_fft();
+    _compute.sensing_sender.push_data(channel_buf, frame_start_symbol_index);
+    compact_core.clear_channel_buffer();
+}
+
 void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
     using ProfileClock = std::chrono::steady_clock;
     auto& channel_buf = _compute.sensing_core.channel_buffer();
@@ -1136,6 +1493,9 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
     const size_t doppler_slots = sensing_params.doppler_fft_size;
 
     const size_t symbol_count = std::min(frame.rx_symbols.size(), _cfg.sensing_symbol_num);
+    if (symbol_count < sensing_params.sensing_symbol_num) {
+        _compute.sensing_core.clear_channel_buffer();
+    }
     const int plan_input_alignment = fftwf_alignment_of(
         reinterpret_cast<float*>(_compute.demod_fft_in.data())
     );
@@ -1174,40 +1534,49 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
 
     const double prep_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - prep_start).count();
-    _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us);
+    _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us, symbol_count);
 }
 
 void SensingChannel::_sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
     using ProfileClock = std::chrono::steady_clock;
+    const size_t symbol_count = std::min(frame.rx_symbols.size(), _cfg.sensing_symbol_num);
+    if (symbol_count < _compute.sensing_core.params().sensing_symbol_num) {
+        _compute.sensing_core.clear_channel_buffer();
+    }
     const auto prep_start = ProfileClock::now();
-    _compute.sensing_core.copy_symbols_to_buffer(frame.rx_symbols);
+    _compute.sensing_core.copy_symbols_to_buffer(frame.rx_symbols, symbol_count);
     const double prep_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - prep_start).count();
-    _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us);
+    _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us, symbol_count);
 }
 
 void SensingChannel::_sensing_process_finalize(
     const std::vector<AlignedVector>& tx_symbols,
     uint64_t first_symbol_index,
     double gather_us,
-    double prep_us
+    double prep_us,
+    size_t symbol_count
 ) {
     using ProfileClock = std::chrono::steady_clock;
     const bool do_prof = should_profile_sensing(_cfg);
     auto& channel_buf = _compute.sensing_core.channel_buffer();
     const auto chest_start = ProfileClock::now();
-    _compute.sensing_core.channel_estimate_with_shift(tx_symbols);
+    _compute.sensing_core.channel_estimate_with_shift(tx_symbols, symbol_count);
     const double chest_shift_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - chest_start).count();
     const auto mti_start = ProfileClock::now();
-    _compute.sensing_core.apply_mti(_compute.active_enable_mti);
+    _compute.sensing_core.apply_mti(_compute.active_enable_mti, symbol_count);
     const double mti_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - mti_start).count();
 
     double windows_fft_us = 0.0;
     if (!_compute.active_skip_sensing_fft) {
         const auto fft_start = ProfileClock::now();
-        _compute.sensing_core.apply_windows(channel_buf, _compute.range_window, _compute.doppler_window);
+        _compute.sensing_core.apply_windows(
+            channel_buf,
+            _compute.range_window,
+            _compute.doppler_window,
+            symbol_count);
         _compute.sensing_core.execute_range_ifft();
         _compute.sensing_core.execute_doppler_fft();
         windows_fft_us = std::chrono::duration<double, std::micro>(
