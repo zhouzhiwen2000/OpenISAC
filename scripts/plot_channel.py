@@ -14,8 +14,7 @@ sock.bind((UDP_IP, UDP_PORT))
 sock.settimeout(0.2)
 
 # Create plotting window with three subplots
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
-plt.subplots_adjust(hspace=0.3)
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 13), constrained_layout=True)
 x = np.arange(FFT_SIZE)
 
 # Real part subplot
