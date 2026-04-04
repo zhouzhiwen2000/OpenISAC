@@ -8,6 +8,41 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-04-04 - 资源映射与紧凑感知更新
+
+### Summary
+
+本次更新围绕通信/感知资源映射、紧凑感知输出，以及配套文档可读性展开，重点是让资源配置更明确、compact sensing 更易用。
+
+### Changes
+
+- `data_resource_blocks` 新增 `kind` 概念，支持 `payload` 与 `sensing_pilot` 两类资源块。
+  影响：可以在同一帧内显式区分“真正承载通信数据的 RE”和“保留给感知参考的已知 RE”，更方便做通信/感知资源共存实验。
+
+- 新增 `sensing_mask_blocks`，并配合 `sensing_output_mode=compact_mask` 用矩形块定义单站/双站感知真正导出的 RE。
+  影响：感知输出不再只能走 dense 全缓冲模式，可以只发送感兴趣的 RE，降低输出带宽并提高配置灵活性。
+
+- 当 `sensing_mask_blocks` 满足规则采样条件时，运行时 `MTI` 和本地 Delay-Doppler 处理可以开启。
+  影响：规则 compact 配置既能保留紧凑原始 RE 输出，也能在本地继续生成 Delay-Doppler 结果。
+
+- 新增 `config/*_ResourceMap.yaml` 示例配置，展示 `data_resource_blocks`、`sensing_pilot` 与 `sensing_mask_blocks` 的典型写法。
+  影响：不再需要完全从零手写复杂 YAML，复现实验配置更直接。
+
+- Web 配置工具新增 `Sensing Resource Map` 视图，并增强 `Resource Planner`，让 `data_resource_blocks` 与 `sensing_mask_blocks` 都可以在时频平面中可视化编辑。
+  影响：资源规划从“手写坐标”进一步变成“可视化拖拽”，减少配置错误。
+
+- 新增 `scripts/sensing_runtime_protocol.py`，并让 fast viewer 使用运行时参数握手来识别 compact sensing 输出元数据。
+  影响：后端与前端之间对 compact sensing 的元数据约定更清晰，后续扩展 viewer 更容易。
+
+- README 与文档页补回 changelog 链接，并澄清 `data_resource_blocks` / `sensing_mask_blocks` 的职责区别，以及当前 viewer 对非规则 compact payload 的限制。
+  影响：新用户更容易理解两个资源映射参数分别控制什么，以及当前前端能处理到什么程度。
+
+### Notes
+
+- `data_resource_blocks` 在 TX 与 RX 侧应保持一致，包括每个块的 `kind`。
+- `sensing_mask_blocks` 仅在 `sensing_output_mode=compact_mask` 时生效。
+- 当前 `plot_sensing*.py` 与 `plot_bi_sensing*.py` 只能处理“规则”的 compact payload；非规则选择仍需自行解析。
+
 ## 2026-04-02 - fe0ee68
 
 ### Summary
