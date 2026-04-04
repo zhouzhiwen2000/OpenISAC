@@ -1152,8 +1152,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <p>说明：</p>
 <ul>
 <li><code>data_resource_blocks</code> 通常应与发射端完全一致，包括 <code>kind</code>。</li>
-<li>当 <code>sensing_output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 <code>sensing_mask_blocks</code> 选中的 RE。</li>
-<li>此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
+<li>当 <code>sensing_output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 <code>sensing_mask_blocks</code> 选中的 RE；此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
 <li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
 <li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
 <li>解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>

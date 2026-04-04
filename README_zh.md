@@ -338,8 +338,14 @@ pip install -r requirements.txt
 *   **Windows:** 从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载并添加到 PATH，或将可执行文件放置在工作目录中。
  
 #### 启用 GPU 加速 (可选)
+ 
+如果有 Nvidia GPU，请安装 `cupy-cuda12x` 以启用 GPU 加速：
 
-部分快速绘图脚本可以在当前 Python 环境提供可选 GPU 数组后端时启用加速；如果未安装相关后端，则会自动回退到 CPU 执行。
+> **注意:** 安装 CuPy 之前，请务必先安装 CUDA Toolkit。
+ 
+```bash
+pip install cupy-cuda12x
+```
 
 #### 启用 Intel 集成显卡加速 (可选)
 
@@ -375,9 +381,9 @@ python -c "import dpctl; print(dpctl.get_devices())"
 
 ##### 4. 使用说明
 
-OpenISAC 前端会自动检测可用的数组后端。优先级顺序为：
-1. CuPy 后端
-2. dpnp 后端
+OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：
+1. Nvidia GPU (CUDA)
+2. Intel iGPU (dpnp)
 3. CPU (回退选项)
 
 无需修改代码，系统会自动选择最佳可用后端。
@@ -461,12 +467,12 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 * 为 `cpu_cores` 提供专门的 CPU 绑定编辑器，可按线程名填写 CPU，并自动生成对应注释。
 * 保存当前表单后，可在 `build/` 目录中启动/停止调制与解调进程。
 * 提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。
-* 每个 tab 都提供命令预设，也支持自定义启动命令。
+* 每个 tab 都提供 CPU/CUDA 预设命令，也支持自定义启动命令。
 * 可以在较大的时频资源网格画布上直接绘制 `data_resource_blocks` 的 payload / sensing-pilot 矩形块，或绘制 `sensing_mask_blocks` 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。
 * 内置 `Guard Band Grid` 预设，规则与 `scripts/plot_const.py` 一致：默认仅保留 `1..489` 和 `535..N-1` 这两段子载波，然后再继续套用 sync / pilot 的剔除规则。
 
 说明：
-* 默认命令分别是 `./OFDMModulator` 和 `./OFDMDemodulator`。
+* 默认命令分别是 `./OFDMModulator` 和 `./OFDMDemodulator`；如果需要 CUDA 版本，可在下拉框里切换。
 * 编辑器当前直接面向 `build/` 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 `Modulator.yaml` / `Demodulator.yaml`。
 * `Resource Planner` 用来编辑 `data_resource_blocks`：它决定哪些 RE 承载 payload，哪些 RE 作为 `sensing_pilot` 保留给感知参考。
 * `Sensing Resource Map` 用来编辑 `sensing_mask_blocks`：它决定 `sensing_output_mode=compact_mask` 时哪些 RE 会被送到感知输出。
@@ -498,6 +504,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `zc_root` | `int` | `29` | Zadoff-Chu 根序号。 |
 | `num_symbols` | `int` | `100` | 每帧 OFDM 符号数。 |
 | `sensing_output_mode` | `string` | `dense` | 感知 UDP 输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
+| `cuda_mod_pipeline_slots` | `int` | `2` | CUDA 调制流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
 | `pilot_positions` | `int[]` | `[571,...,451]` | 导频子载波索引列表。 |
 | `data_resource_blocks` | `object[]` | 缺省 | 可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除同步和导频外的所有 RE 都承载 payload。设为 `[]` 表示完全不发送 payload。每个块是一个矩形，使用 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`，并可选 `kind`。`kind: payload` 表示这些 RE 承载真实业务数据；`kind: sensing_pilot` 表示这些 RE 不承载 payload，而是发送已知同步序列的取值，便于感知侧把这些 RE 当作确定参考。未被 `payload` 块选中的其余非同步、非导频 RE 会发送预生成 QPSK。 |
 | `sensing_mask_blocks` | `object[]` | 缺省 | 可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 `sensing_output_mode=compact_mask` 时生效；`dense` 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许覆盖同步 / 导频 RE，重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启。 |
@@ -520,7 +527,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `sensing_rx_channels` | `object[]` | `[]` | 感知 RX 每通道详细配置，字段见下表。 |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | 默认目标 IP；未单独配置的输出 IP 使用该值。 |
 | `control_port` | `int` | `9999` | 控制命令 UDP 端口（心跳/MTI 等）。 |
-| `measurement_enable` | `bool` | `false` | 启用 CPU 版内部测量模式。启用后，`OFDMModulator` 不再监听 `udp_input_*`，而是内部生成确定性的 PRBS 载荷；`OFDMDemodulator` 会把测量载荷转入 BER/BLER/EVM 统计。 |
+| `measurement_enable` | `bool` | `false` | 启用 CPU 版内部测量模式。启用后，`OFDMModulator` 不再监听 `udp_input_*`，而是内部生成确定性的 PRBS 载荷；`OFDMDemodulator` 会把测量载荷转入 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。 |
 | `measurement_mode` | `string` | `internal_prbs` | 测量模式选择。目前仅支持 `internal_prbs`；非法值会在配置归一化阶段自动关闭测量模式。 |
 | `measurement_run_id` | `string` | `""` | 写入测量 CSV 汇总的运行 ID。 |
 | `measurement_output_dir` | `string` | `""` | CPU 测量汇总文件输出目录。 |
@@ -587,6 +594,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `num_symbols` | `int` | `100` | 每帧 OFDM 符号数。 |
 | `sensing_symbol_num` | `int` | `100` | 参与感知处理的符号数。 |
 | `sensing_output_mode` | `string` | `dense` | 双站感知 UDP 输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
+| `cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
 | `frame_queue_size` | `int` | `8` | 解调器 RX 帧队列容量。小于 `1` 时会钳制到 `1`。 |
 | `sync_queue_size` | `int` | `8` | 同步搜索批队列容量。小于 `1` 时会钳制到 `1`。 |
 | `reset_hold_s` | `float` / s | `0.5` | 在强制回到同步搜索前，坏的 delay 条件必须持续累积的时间。内部会按 `samples_per_frame / sample_rate` 换算成帧数阈值。小于 `0` 时会钳制到 `0.5`。 |
@@ -618,7 +626,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `akf_r_max` | `float` | `1e3` | 观测噪声方差 `R` 上界。 |
 | `ppm_adjust_factor` | `float` | `0.05` | 频偏补偿调节系数。 |
 | `desired_peak_pos` | `int` | `20` | 时延峰目标位置（用于对齐策略）。 |
-| `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链和 UDP 输出；设为 `false` 时解调器不会启动双站感知通道。 |
+| `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链和 UDP 输出；设为 `false` 时 `OFDMDemodulator` 与 `CUDAOFDMDemodulator` 均不会启动双站感知通道。 |
 | `bi_sensing_ip` | `string` / IPv4 | `127.0.0.1` | 双站感知输出目标 IP。 |
 | `bi_sensing_port` | `int` | `8889` | 双站感知输出目标端口。 |
 | `channel_ip` | `string` / IPv4 | `127.0.0.1` | 信道估计输出 IP。 |
@@ -633,7 +641,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `udp_output_port` | `int` | `50001` | 解码后业务数据输出端口。 |
 | `default_ip` | `string` / IPv4 | `127.0.0.1` | 默认输出 IP；其他输出 IP 留空时使用该值。 |
 | `control_port` | `int` | `9999` | 控制命令 UDP 端口。 |
-| `measurement_enable` | `bool` | `false` | 启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 `udp_output_*`，而是直接用于 BER/BLER/EVM 统计。 |
+| `measurement_enable` | `bool` | `false` | 启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 `udp_output_*`，而是直接用于 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。 |
 | `measurement_mode` | `string` | `internal_prbs` | 测量模式选择。目前仅支持 `internal_prbs`；非法值会在配置归一化阶段自动关闭测量模式。 |
 | `measurement_run_id` | `string` | `""` | 写入测量 CSV 汇总的运行 ID。 |
 | `measurement_output_dir` | `string` | `""` | CPU 测量汇总文件输出目录。 |
@@ -645,9 +653,8 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 
 说明：
 * `data_resource_blocks` 通常应与发射端完全一致，包括 `kind`。
-* 当 `sensing_output_mode=compact_mask` 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 `sensing_mask_blocks` 选中的 RE。
-* 此时 `STRD` 会被忽略，因为 mask 已经定义了采样图样。
-* 紧凑载荷格式与发射端一致：`CompactSensingFrameHeader` 后面跟固定顺序的原始 `complex<float>` 数据。 |
+* 当 `sensing_output_mode=compact_mask` 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 `sensing_mask_blocks` 选中的 RE；此时 `STRD` 会被忽略，因为 mask 已经定义了采样图样。
+* 紧凑载荷格式与发射端一致：`CompactSensingFrameHeader` 后面跟固定顺序的原始 `complex<float>` 数据。
 * RX AGC 分为两个阶段。`SYNC_SEARCH` 阶段会先把增益恢复到配置的 `rx_gain`，然后进行粗搜索扫描（每 10 个帧增加 `1 dB`，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 `rx_agc_low_threshold_db` / `rx_agc_high_threshold_db` 定义的窗口来细调增益。
 * 解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。
 * 硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 `SYNC_SEARCH`。`reset_hold_s` 决定坏的 delay 条件需要持续多久才会触发这一动作。
