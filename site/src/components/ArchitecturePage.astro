@@ -1,14 +1,26 @@
 ---
 import { architectureContent, navItems } from "../data/site.js";
 import DocsLayout from "../layouts/DocsLayout.astro";
-import SectionBlock from "./SectionBlock.astro";
 
 const { locale } = Astro.props;
 const content = architectureContent[locale];
 const layoutLang = locale === "zh" ? "zh-CN" : "en";
 const languageSwitch = locale === "zh"
-  ? { href: "architecture.html", label: "EN" }
+  ? { href: "architecture.html", label: "En" }
   : { href: "architecture_zh.html", label: "中文" };
+const hero = locale === "zh"
+  ? {
+      title: "从 BS 到 UE 的系统架构",
+      lead: "聚焦 OpenISAC 的系统层组织方式，包括硬件角色划分、BS/UE 运行时流水线，以及通信与感知任务如何在平台里配合。",
+      back: "返回首页",
+      homeHref: "index_zh.html",
+    }
+  : {
+      title: "System architecture from BS to UE",
+      lead: "Focused on how OpenISAC is organized at the system level: hardware roles, BS/UE runtime pipelines, and the split between communication and sensing tasks.",
+      back: "Back to Home",
+      homeHref: "index.html",
+    };
 ---
 
 <DocsLayout
@@ -19,15 +31,23 @@ const languageSwitch = locale === "zh"
   navItems={navItems[locale]}
   langSwitch={languageSwitch}
 >
-  <div class="container page-stack">
-    {content.sections.map((section) => (
-      <SectionBlock
-        id={section.id}
-        title={section.title}
-        className="section-prose"
-      >
-        <div class="rich-article" set:html={section.html}></div>
-      </SectionBlock>
-    ))}
+  <div class="page-hero">
+    <div class="page-hero-panel">
+      <span class="eyebrow">Architecture</span>
+      <h1>{hero.title}</h1>
+      <p class="page-hero-lead">{hero.lead}</p>
+      <div class="link-row">
+        <a href={hero.homeHref} class="button-secondary">{hero.back}</a>
+      </div>
+    </div>
   </div>
+
+  <main>
+    {content.sections.map((section) => (
+      <section id={section.id}>
+        <h2>{section.title}</h2>
+        <div set:html={section.html}></div>
+      </section>
+    ))}
+  </main>
 </DocsLayout>

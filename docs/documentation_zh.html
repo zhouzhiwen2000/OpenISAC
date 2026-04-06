@@ -1,0 +1,1137 @@
+<!DOCTYPE html><html lang="zh-CN"> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>文档中心 - OpenISAC</title><meta name="description" content="OpenISAC 文档中心"><meta name="theme-color" content="#0f6b6a"><link rel="icon" type="image/svg+xml" href="images/icon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="/_astro/DocsLayout.D3cK1go2.css"></head> <body class="docs-page lang-zh"> <header> <nav> <a href="index_zh.html" class="logo"> <img src="images/logo.svg" alt="OpenISAC"> </a> <ul class="nav-links" aria-label="主导航"> <li> <a href="index_zh.html"> 首页 </a> </li><li> <a href="documentation_zh.html" class="active"> 文档 </a> </li><li> <a href="architecture_zh.html"> 架构 </a> </li><li> <a href="signal_processing_zh.html"> 信号处理 </a> </li><li> <a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank" rel="noreferrer noopener"> GitHub </a> </li><li> <a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank" rel="noreferrer noopener"> QQ群 </a> </li> <li><a href="documentation.html">En</a></li> </ul> </nav> </header>  <div class="page-hero"> <div class="page-hero-panel"> <span class="eyebrow">Documentation</span> <h1>安装教程、运行示例与参数说明</h1> <p class="page-hero-lead">汇总安装部署说明、典型运行示例，以及运行参数解释。</p> <div class="link-row"> <a href="index_zh.html" class="button-secondary">返回首页</a> </div> </div> </div> <main> <section> <h2>文档导航</h2> <div class="resource-grid"> <div class="resource-card"> <span class="tag">大标题</span> <h3>硬件准备</h3> <p>查看后端与前端所需硬件、节点连接方式，以及接口要求。</p> <a href="#硬件准备" class="doc-link">跳到硬件准备</a> </div><div class="resource-card"> <span class="tag">大标题</span> <h3>软件安装</h3> <p>查看系统环境、依赖安装、构建流程，以及性能调优相关说明。</p> <a href="#软件安装" class="doc-link">跳到软件安装</a> </div><div class="resource-card"> <span class="tag">大标题</span> <h3>典型使用示例</h3> <p>查看 BS、UE、前端可视化和网页配置控制台的典型运行方式。</p> <a href="#典型使用示例" class="doc-link">跳到典型使用示例</a> </div><div class="resource-card"> <span class="tag">大标题</span> <h3>参数说明</h3> <p>查看 OFDM 调制器与 OFDM 解调器的参数表，以及对应的 YAML 配置解释。</p> <a href="#参数说明" class="doc-link">跳到参数说明</a> </div> </div> </section> <section id="reference-manual"> <div><h2 id="硬件准备">硬件准备</h2>
+<h3 id="后端-c">后端 (C++)</h3>
+<p>要设置完整的系统，您需要以下硬件：</p>
+<ul>
+<li><strong>USRP 设备</strong>: 2 台 (例如 USRP X310, B210 等)</li>
+<li><strong>计算机</strong>: 2 台 (推荐使用高主频CPU)</li>
+<li><strong>天线</strong>: 3 根</li>
+<li><strong>OCXO/GPSDO</strong>: 2 个 (两台 USRP 都需要)</li>
+</ul>
+<h4 id="连接设置">连接设置</h4>
+<p>该系统由两个主要节点组成：</p>
+<ol>
+<li>
+<p><strong>基站 (BS) 节点</strong></p>
+<ul>
+<li><strong>硬件</strong>: 1x 计算机, 1x USRP。</li>
+<li><strong>天线</strong>: 连接 2 根天线到此 USRP (1 发送, 1 接收)。</li>
+<li><strong>时钟</strong>: 将 OCXO 或 GPSDO 连接到 USRP 的 REFIN 端口。</li>
+<li><strong>功能</strong>: 发送 OFDM 信号并接收雷达回波。</li>
+</ul>
+</li>
+<li>
+<p><strong>用户 (UE) 节点</strong></p>
+<ul>
+<li><strong>硬件</strong>: 1x 计算机, 1x USRP。</li>
+<li><strong>天线</strong>: 连接 1 根天线到此 USRP 的 RX 端口。</li>
+<li><strong>时钟</strong>: 将 OCXO 或 GPSDO 连接到 USRP 的 REFIN 端口。</li>
+<li><strong>高精度 DAC (可选)</strong>: 使用高精度 DAC 来微调 OCXO。</li>
+<li><strong>功能</strong>: 接收 OFDM 信号用于通信和双站感知。</li>
+</ul>
+</li>
+</ol>
+<h4 id="接口要求">接口要求</h4>
+<p>为了支持高带宽和采样率，请确保计算机和 USRP 之间的连接使用：</p>
+<ul>
+<li><strong>&gt;= 10 Gigabit Ethernet (10GbE)</strong> (X 系列)</li>
+<li><strong>USB 3.0</strong> (B 系列)</li>
+</ul>
+<h3 id="前端-python">前端 (Python)</h3>
+<ul>
+<li><strong>计算机</strong>: 1x 计算机 (Windows 或 Linux)。
+<ul>
+<li>可以是后端计算机之一，也可以是单独的机器。</li>
+</ul>
+</li>
+<li><strong>CPU</strong>: 如果没有 GPU，建议使用高性能 CPU (i7 10700 或更高)。</li>
+<li><strong>GPU</strong>: 建议使用 Nvidia GPU 进行加速。</li>
+</ul>
+<h2 id="软件安装">软件安装</h2>
+<h3 id="后端-c-2">后端 (C++)</h3>
+<h4 id="操作系统">操作系统</h4>
+<ul>
+<li><strong>Ubuntu 24.04 LTS</strong>
+<ul>
+<li>下载: <a href="http://www.ubuntu.com/download/desktop">http://www.ubuntu.com/download/desktop</a></li>
+</ul>
+</li>
+<li><strong>macOS (Apple Silicon，仅建议用于本地开发 / 演示)</strong>
+<ul>
+<li>教程: <a href="https://github.com/zhouzhiwen2000/UHD_OFDM/blob/OpenISAC_MultiChannel/docs/macos_build_zh.md">独立 macOS 构建教程</a></li>
+</ul>
+</li>
+</ul>
+<h4 id="依赖项和安装">依赖项和安装</h4>
+<h4 id="1-uhd-usrp-硬件驱动程序">1. UHD (USRP 硬件驱动程序)</h4>
+<p>按照 Ettus 官方指南安装 UHD 工具链 (请遵循 Ubuntu 24.04 的教程):</p>
+<ul>
+<li><a href="https://kb.ettus.com/Building_and_Installing_the_USRP_Open-Source_Toolchain_(UHD_and_GNU_Radio)_on_Linux#Update_and_Install_dependencies">在 Linux 上构建和安装 USRP 开源工具链</a></li>
+</ul>
+<blockquote>
+<p><strong>注意:</strong> 此代码已在 UHD v4.9.0.1 上测试。您可以使用 <code>git checkout v4.9.0.1</code> 检出此版本。</p>
+</blockquote>
+<h4 id="2-安装-aff3ct">2. 安装 Aff3ct</h4>
+<p>本项目使用 Aff3ct 库进行前向纠错 (FEC)。从源码安装：</p>
+<pre><code class="language-bash">sudo apt-get install nlohmann-json3-dev
+git clone https://github.com/aff3ct/aff3ct.git
+cd aff3ct
+git submodule update --init --recursive
+mkdir build
+cd build
+cmake .. -G&quot;Unix Makefiles&quot; -DCMAKE_CXX_COMPILER=&quot;g++&quot; -DCMAKE_BUILD_TYPE=&quot;Release&quot; -DCMAKE_CXX_FLAGS=&quot;-funroll-loops -march=native&quot; -DAFF3CT_COMPILE_EXE=&quot;OFF&quot; -DAFF3CT_COMPILE_SHARED_LIB=&quot;ON&quot; -DSPU_STACKTRACE=&quot;OFF&quot; -DSPU_STACKTRACE_SEGFAULT=&quot;OFF&quot; -DCMAKE_CXX_FLAGS=&quot;${CMAKE_CXX_FLAGS} -faligned-new&quot;
+make -j$(nproc)
+sudo make install
+</code></pre>
+<h4 id="3-克隆仓库">3. 克隆仓库</h4>
+<p>克隆 OpenISAC 仓库：</p>
+<pre><code class="language-bash">cd ~
+git clone https://github.com/zhouzhiwen2000/OpenISAC.git
+</code></pre>
+<h4 id="4-构建-openisac">4. 构建 OpenISAC</h4>
+<p>使用 CMake 构建项目：</p>
+<pre><code class="language-bash"># 安装 libyaml-cpp-dev
+sudo apt-get install libyaml-cpp-dev
+
+cd OpenISAC
+mkdir build
+cd build
+cmake ..
+make -j$(nproc)
+</code></pre>
+<h4 id="5-系统性能调优">5. 系统性能调优</h4>
+<p>运行提供的脚本以优化您的系统设置，以满足实时处理需求：</p>
+<pre><code class="language-bash">cd ~/OpenISAC
+chmod +x scripts/set_performance.bash
+./scripts/set_performance.bash
+</code></pre>
+<blockquote>
+<p><strong>注意:</strong> 如果您需要启用 <code>RT_RUNTIME_SHARE</code> 功能，则需要在 BIOS 设置中关闭 <code>secure_boot</code>。</p>
+</blockquote>
+<p>当 UHD 生成新线程时，它可能会尝试提高线程的调度优先级。如果设置新优先级失败，UHD 软件将向控制台打印警告，如下所示：</p>
+<pre><code class="language-text">[WARNING] [UHD] Failed to set desired affinity for thread
+</code></pre>
+<p>为了解决这个问题，需要给予非特权 (非 root) 用户更改调度优先级的特殊权限。这可以通过创建一个组 <code>usrp</code>，将您的用户添加到该组，然后将行 <code>@usrp - rtprio 99</code> 追加到文件 <code>/etc/security/limits.conf</code> 来启用。</p>
+<pre><code class="language-bash">sudo groupadd usrp
+sudo usermod -aG usrp $USER
+</code></pre>
+<p>然后将以下行添加到文件 <code>/etc/security/limits.conf</code> 的末尾：</p>
+<pre><code class="language-text">@usrp - rtprio  99
+</code></pre>
+<p>您必须注销并重新登录帐户才能使设置生效。在大多数 Linux 发行版中，组和组成员列表可以在 <code>/etc/group</code> 文件中找到。</p>
+<h4 id="6-cpu-隔离和执行">6. CPU 隔离和执行</h4>
+<p>为了确保稳定的实时性能，可使用 <code>scripts/isolate_cpus.bash</code> 将系统服务 (<code>system.slice</code>、<code>user.slice</code>、<code>init.scope</code>) 限制到指定 CPU，并将其余 CPU 保留给应用程序。</p>
+<p>以下命令都需要 root 权限（<code>sudo</code>）：</p>
+<pre><code class="language-bash">cd ~/OpenISAC
+chmod +x scripts/isolate_cpus.bash
+sudo ./scripts/isolate_cpus.bash --help
+</code></pre>
+<p><strong>默认隔离策略</strong></p>
+<pre><code class="language-bash">sudo ./scripts/isolate_cpus.bash
+</code></pre>
+<ul>
+<li>默认给应用预留前 8 个核心（<code>0-7</code>）。</li>
+<li>系统服务会被限制到其余核心。</li>
+<li>如果总核心数 <code>&lt;= 8</code>，则无法有效隔离，应用与系统都会使用全部核心。</li>
+</ul>
+<p><strong>自定义应用 CPU 集合</strong></p>
+<pre><code class="language-bash">sudo ./scripts/isolate_cpus.bash 4          # 应用使用 0-3
+sudo ./scripts/isolate_cpus.bash 8-15       # 应用使用 8-15
+sudo ./scripts/isolate_cpus.bash 0,2,4,6    # 应用使用显式核心列表
+</code></pre>
+<p>脚本会将应用核心配置保存到 <code>/tmp/isolate_cpus_app.conf</code>。</p>
+<p><strong>CPU 绑核优先级（当核心数量紧张时）</strong></p>
+<ul>
+<li>首先给主线程预留一个专用核心。</li>
+<li>其次优先保证 TX/RX 实时线程。</li>
+<li>最后再分配调制/解调线程和感知/信号处理线程，因为这些计算线程通常对应更大的缓冲区，可以吸收一定的调度抖动。</li>
+</ul>
+<p>在网页 CPU 绑核编辑器里，通常意味着优先保证 <code>main thread affinity</code>，其次是 <code>_tx_proc</code> / <code>rx_proc</code> 和各通道 RX loop，最后再考虑调制、解调和感知处理相关线程。</p>
+<p><strong>在预留核心上运行应用</strong></p>
+<pre><code class="language-bash">cd build
+sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
+</code></pre>
+<ul>
+<li><code>run</code> 会优先读取 <code>/tmp/isolate_cpus_app.conf</code> 中保存的应用核心配置。</li>
+<li>若没有保存配置，<code>run</code> 会回退到默认应用核心集合。</li>
+</ul>
+<blockquote>
+<p><strong>注意:</strong> 完成隔离后，请始终使用 <code>sudo ../scripts/isolate_cpus.bash run ...</code> 启动应用程序。直接执行或手动使用 <code>taskset</code> 可能因 slice 亲和性限制而失败。</p>
+</blockquote>
+<p><strong>重置配置（可选）</strong></p>
+<pre><code class="language-bash">sudo ./scripts/isolate_cpus.bash reset
+</code></pre>
+<p>该命令会移除隔离设置，并将系统 slice 恢复为可使用全部 CPU。</p>
+<h4 id="7-配置">7. 配置</h4>
+<p>系统使用 YAML 文件管理参数。</p>
+<ul>
+<li><strong>配置文件名</strong>: <code>OFDMModulator</code> 读取 <code>Modulator.yaml</code>，<code>OFDMDemodulator</code> 读取 <code>Demodulator.yaml</code>。</li>
+<li><strong>首次运行</strong>: 模板 YAML 统一放在 <code>config/</code> 目录。请将 <code>config/Modulator_X310.yaml</code> / <code>config/Modulator_B210.yaml</code> 或
+<code>config/Demodulator_X310.yaml</code> / <code>config/Demodulator_B210.yaml</code> 复制为 <code>Modulator.yaml</code> / <code>Demodulator.yaml</code>，再按需修改。</li>
+</ul>
+<h3 id="前端-python-2">前端 (Python)</h3>
+<p>建议使用 <strong>Python 3.13</strong> 的 <code>conda</code> 或 <code>venv</code> 环境。</p>
+<p><strong>Miniconda 安装教程:</strong></p>
+<ul>
+<li><strong>Windows:</strong> <a href="https://www.anaconda.com/docs/getting-started/miniconda/install#windows-powershell">Miniconda Windows 安装教程</a></li>
+<li><strong>Linux:</strong> <a href="https://www.anaconda.com/docs/getting-started/miniconda/install#linux-2">Miniconda Linux 安装教程</a></li>
+</ul>
+<p><strong>新建 conda 环境:</strong></p>
+<pre><code class="language-bash">conda create -n OpenISAC python=3.13
+conda activate OpenISAC
+</code></pre>
+<h4 id="安装依赖项">安装依赖项</h4>
+<pre><code class="language-bash">pip install -r requirements.txt
+</code></pre>
+<p><strong>注意:</strong> 视频流演示需要 <code>ffmpeg</code>。</p>
+<ul>
+<li><strong>Ubuntu:</strong> <code>sudo apt install ffmpeg</code></li>
+<li><strong>Windows:</strong> 从 <a href="https://ffmpeg.org/download.html">ffmpeg.org</a> 下载并添加到 PATH，或将可执行文件放置在工作目录中。</li>
+</ul>
+<h4 id="启用-gpu-加速-可选">启用 GPU 加速 (可选)</h4>
+<p>如果有 Nvidia GPU，请安装 <code>cupy-cuda12x</code> 以启用 GPU 加速：</p>
+<blockquote>
+<p><strong>注意:</strong> 安装 CuPy 之前，请务必先安装 CUDA Toolkit。</p>
+</blockquote>
+<pre><code class="language-bash">pip install cupy-cuda12x
+</code></pre>
+<h4 id="启用-intel-集成显卡加速-可选">启用 Intel 集成显卡加速 (可选)</h4>
+<p>如果您的设备配备 Intel 集成显卡（如 Intel UHD Graphics、Intel Iris Xe 等），可以通过 <code>dpctl</code> 和 <code>dpnp</code> 启用 GPU 加速。这对于没有 Nvidia 独立显卡的笔记本电脑和台式机特别有用。</p>
+<h5>1. 安装 Intel 显卡官方驱动</h5>
+<p>首先确保您的系统已安装最新的 Intel 显卡驱动：</p>
+<ul>
+<li><strong>Windows:</strong> 从 Intel 官方下载中心下载并安装最新驱动: <a href="https://www.intel.com/content/www/us/en/download-center/home.html">https://www.intel.com/content/www/us/en/download-center/home.html</a></li>
+<li><strong>Ubuntu:</strong> 安装 Intel compute-runtime:<pre><code class="language-bash">sudo apt install intel-opencl-icd libze-intel-gpu1 libze1 intel-media-va-driver-non-free
+</code></pre>
+</li>
+</ul>
+<h5>2. 安装 Python 依赖</h5>
+<pre><code class="language-bash">pip install dpctl dpnp
+</code></pre>
+<h5>3. 验证安装</h5>
+<p>运行以下命令检查 Intel GPU 是否被正确识别：</p>
+<pre><code class="language-bash">python -c &quot;import dpctl; print(dpctl.get_devices())&quot;
+</code></pre>
+<p>如果安装成功，您应该能看到类似以下的输出：</p>
+<pre><code>[&lt;dpctl.SyclDevice [backend_type.level_zero, device_type.gpu, Intel(R) UHD Graphics] at 0x...&gt;]
+</code></pre>
+<h5>4. 使用说明</h5>
+<p>OpenISAC 前端会自动检测可用的 GPU 后端。优先级顺序为：</p>
+<ol>
+<li>Nvidia GPU (CUDA)</li>
+<li>Intel iGPU (dpnp)</li>
+<li>CPU (回退选项)</li>
+</ol>
+<p>无需修改代码，系统会自动选择最佳可用后端。</p>
+<h2 id="典型使用示例">典型使用示例</h2>
+<h3 id="1-启动-bs-基站">1. 启动 BS (基站)</h3>
+<pre><code class="language-bash">sudo -s
+cd build
+# 对于 X310:
+cp ../config/Modulator_X310.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
+
+# 对于 B210:
+cp ../config/Modulator_B210.yaml Modulator.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
+</code></pre>
+<p><em>如果您使用单独的计算机作为前端，请在 <code>Modulator.yaml</code> 中将 <code>default_ip</code> 设置为前端 IP。</em></p>
+<h3 id="2-启动-ue-用户端">2. 启动 UE (用户端)</h3>
+<pre><code class="language-bash">sudo -s
+cd build
+# 对于 X310:
+cp ../config/Demodulator_X310.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
+
+# 对于 B210:
+cp ../config/Demodulator_B210.yaml Demodulator.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
+</code></pre>
+<p><em>如果您使用单独的计算机作为前端，请在 <code>Demodulator.yaml</code> 中将 <code>default_ip</code> 设置为前端 IP。</em></p>
+<h3 id="3-将视频流传输到-bs">3. 将视频流传输到 BS</h3>
+<pre><code class="language-bash">ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 3000k -minrate 3000k -maxrate 3000k -bufsize 1M -f rtp -sdp_file video.sdp &quot;rtp://&lt;your IP of the BS&gt;:50000&quot;
+</code></pre>
+<p><em>如果您在BS本地传输视频流，BS 的 IP 可以设置为 127.0.0.1。</em></p>
+<h3 id="4-从-ue-播放视频">4. 从 UE 播放视频</h3>
+<p>将 <code>video.sdp</code> 复制到视频接收端，将 <code>m=video 50000 RTP/AVP 96</code> 修改为 <code>m=video 50001 RTP/AVP 96</code>。</p>
+<pre><code class="language-bash">ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
+</code></pre>
+<p><em>注意：此命令应在前端运行。</em></p>
+<h3 id="5-运行单站感知前端">5. 运行单站感知前端</h3>
+<pre><code class="language-bash">python3 ./scripts/plot_sensing.py
+</code></pre>
+<p>如果您的计算机配备了 NVIDIA 显卡，可以使用以下脚本以获得更好的实时显示性能：</p>
+<pre><code class="language-bash">python3 ./scripts/plot_sensing_fast.py
+</code></pre>
+<h3 id="6-运行双站感知前端">6. 运行双站感知前端</h3>
+<pre><code class="language-bash">python3 ./scripts/plot_bi_sensing.py
+</code></pre>
+<p>如果您的计算机配备了 NVIDIA 显卡，可以使用以下脚本以获得更好的实时显示性能：</p>
+<pre><code class="language-bash">python3 ./scripts/plot_bi_sensing_fast.py
+</code></pre>
+<h3 id="7-网页配置控制台">7. 网页配置控制台</h3>
+<p>如果希望通过浏览器远程修改配置并控制进程，可运行：</p>
+<pre><code class="language-bash">python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
+</code></pre>
+<p>随后在浏览器打开 <code>http://&lt;your-host&gt;:8765</code>。</p>
+<p>功能：</p>
+<ul>
+<li>调制端和解调端使用不同 tab 分开管理，并额外提供 <code>Resource Planner</code> 和 <code>Sensing Resource Map</code> 两个规划 tab，分别对应 <code>data_resource_blocks</code> 与 <code>sensing_mask_blocks</code>。</li>
+<li>以“参数 / 值”表单方式编辑 <code>build/Modulator.yaml</code> 和 <code>build/Demodulator.yaml</code>，而不是原始 YAML 文本框。</li>
+<li>为 <code>cpu_cores</code> 提供专门的 CPU 绑定编辑器，可按线程名填写 CPU，并自动生成对应注释。</li>
+<li>保存当前表单后，可在 <code>build/</code> 目录中启动/停止调制与解调进程。</li>
+<li>提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。</li>
+<li>每个 tab 都提供 CPU/CUDA 预设命令，也支持自定义启动命令。</li>
+<li>可以在较大的时频资源网格画布上直接绘制 <code>data_resource_blocks</code> 的 payload / sensing-pilot 矩形块，或绘制 <code>sensing_mask_blocks</code> 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。</li>
+<li>内置 <code>Guard Band Grid</code> 预设，规则与 <code>scripts/plot_const.py</code> 一致：默认仅保留 <code>1..489</code> 和 <code>535..N-1</code> 这两段子载波，然后再继续套用 sync / pilot 的剔除规则。</li>
+</ul>
+<p>说明：</p>
+<ul>
+<li>默认命令分别是 <code>./OFDMModulator</code> 和 <code>./OFDMDemodulator</code>；如果需要 CUDA 版本，可在下拉框里切换。</li>
+<li>编辑器当前直接面向 <code>build/</code> 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 <code>Modulator.yaml</code> / <code>Demodulator.yaml</code>。</li>
+<li><code>Resource Planner</code> 用来编辑 <code>data_resource_blocks</code>：它决定哪些 RE 承载 payload，哪些 RE 作为 <code>sensing_pilot</code> 保留给感知参考。</li>
+<li><code>Sensing Resource Map</code> 用来编辑 <code>sensing_mask_blocks</code>：它决定 <code>sensing_output_mode=compact_mask</code> 时哪些 RE 会被送到感知输出。</li>
+<li>两个 planner 都可以分别应用到发射端或接收端。实验时 TX 和 RX 可以暂时不同，但正常收发时 <code>data_resource_blocks</code> 仍应保持一致。</li>
+<li>当 CPU 核心不足时，建议先给 <code>main thread affinity</code> 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。</li>
+<li>若开启 <code>Enable runtime CPU isolation</code>，控制台会根据当前 <code>cpu_cores</code> 计算默认 isolate CPU 列表，并在启动前调用 <code>scripts/isolate_cpus.bash</code>。</li>
+<li>若再开启 <code>Override CPU isolation list</code>，右侧文本框会先用默认 isolate 列表初始化，然后允许按本次启动需要手工修改。</li>
+<li>若关闭 <code>Enable runtime CPU isolation</code>，控制台仍会通过特权运行路径启动选中的命令，但不会调用 <code>scripts/isolate_cpus.bash</code>。</li>
+<li>运行面板还提供可选的 sudo 密码输入框，以及 <code>Reset CPU isolation</code> 操作。</li>
+<li>该控制台可以执行网页中输入的启动命令，因此只应绑定到可信网络，或者保持默认 <code>127.0.0.1</code>。</li>
+</ul>
+<h2 id="参数说明">参数说明</h2>
+<h3 id="ofdm-调制器-ofdmmodulator">OFDM 调制器 (OFDMModulator)</h3>
+<p><code>OFDMModulator</code> (BS 节点) 使用 <code>Modulator.yaml</code> 配置。
+可使用 <code>config/Modulator_X310.yaml</code> 或 <code>config/Modulator_B210.yaml</code> 作为模板。</p>
+<p><code>Modulator.yaml</code> 参数说明：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">OFDM FFT 点数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cp_length</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>128</code></td>
+<td style="text-align:left">循环前缀长度（采样点）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_pos</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">同步符号在帧内的位置索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sample_rate</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>50000000</code></td>
+<td style="text-align:left">基带采样率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>bandwidth</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>50000000</code></td>
+<td style="text-align:left">模拟带宽。通常与 <code>sample_rate</code> 保持一致。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2400000000</code></td>
+<td style="text-align:left">射频中心频率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>30</code></td>
+<td style="text-align:left">发射增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">TX 通道索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>zc_root</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>29</code></td>
+<td style="text-align:left">Zadoff-Chu 根序号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>num_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">每帧 OFDM 符号数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left">感知 UDP 输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda_mod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>2</code></td>
+<td style="text-align:left">CUDA 调制流水线 slot 数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>pilot_positions</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[571,...,451]</code></td>
+<td style="text-align:left">导频子载波索引列表。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除同步和导频外的所有 RE 都承载 payload。设为 <code>[]</code> 表示完全不发送 payload。每个块是一个矩形，使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>，并可选 <code>kind</code>。<code>kind: payload</code> 表示这些 RE 承载真实业务数据；<code>kind: sensing_pilot</code> 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 <code>sensing_pilot</code> 误判成专用同步符号。未被 <code>payload</code> 块选中的其余非同步、非导频 RE 会发送预生成 QPSK。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 <code>sensing_output_mode=compact_mask</code> 时生效；<code>dense</code> 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许覆盖同步 / 导频 RE，重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">通用 USRP 参数（TX/RX 兜底）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">TX 专用 USRP 参数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">感知 RX 默认 USRP 参数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal/external/gpsdo</code></td>
+<td style="text-align:left">全局时钟源。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">全局时间/PPS 源；空字符串表示跟随 <code>clock_source</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">TX 时钟源覆盖项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">TX 时间源覆盖项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">感知 RX 默认时钟源覆盖项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">感知 RX 默认时间源覆盖项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>wire_format_tx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>wire_format_rx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">调制器接收业务 UDP 的绑定地址。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50000</code></td>
+<td style="text-align:left">调制器接收业务 UDP 的端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>mono_sensing_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">单站感知输出目标 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>mono_sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8888</code></td>
+<td style="text-align:left">单站感知输出目标端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_rx_channel_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">感知 RX 通道数量（<code>0</code> 表示关闭感知 RX）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_rx_channels</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">感知 RX 每通道详细配置，字段见下表。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>default_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">默认目标 IP；未单独配置的输出 IP 使用该值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>9999</code></td>
+<td style="text-align:left">控制命令 UDP 端口（心跳/MTI 等）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用 CPU 版内部测量模式。启用后，<code>OFDMModulator</code> 不再监听 <code>udp_input_*</code>，而是内部生成确定性的 PRBS 载荷；<code>OFDMDemodulator</code> 会把测量载荷转入 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">测量模式选择。目前仅支持 <code>internal_prbs</code>；非法值会在配置归一化阶段自动关闭测量模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">写入测量 CSV 汇总的运行 ID。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">CPU 测量汇总文件输出目录。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">每个内部测量载荷的字节数。若小于内部测量头长度，会自动钳制到最小合法值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">用于生成确定性 PRBS 载荷内容的基础种子。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每个在线 <code>MRST</code> epoch 要发送的测量载荷数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>profiling_modules</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>data_ingest</code>、<code>sensing_proc</code>、<code>sensing_process</code>；<code>all</code> 表示全部。调制器端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[0,1,2,3,4,5]</code></td>
+<td style="text-align:left">允许使用的 CPU 核列表。建议按 TX 线程、调制线程、数据输入线程、每个已启用感知通道的 RX/感知线程，以及主线程来预留。若核心数量有限，应先给主线程保留一个专用核心，其次优先 TX 和感知 RX 线程，最后再考虑调制、数据输入和感知处理线程，因为后者有更深的缓冲区。</td>
+</tr>
+</tbody>
+</table>
+<p>快速理解：</p>
+<ul>
+<li><code>data_resource_blocks</code> 决定“通信数据放在哪里”。</li>
+<li><code>sensing_mask_blocks</code> 决定“compact 感知时哪些 RE 要导出”。</li>
+<li>前者影响 payload 映射，后者只影响感知输出，两者不是互相替代的关系。</li>
+</ul>
+<p>若启用 <code>data_resource_blocks</code>，请把相同的矩形块和 <code>kind</code> 同步写入 <code>Demodulator.yaml</code>。如果与 <code>sync_pos</code> 或 <code>pilot_positions</code> 重叠，内置的同步 / 导频 RE 仍然优先。优先级始终是“同步符号 &gt; 导频 &gt; sensing_pilot &gt; payload/预生成 QPSK”。</p>
+<p>当 <code>sensing_output_mode=compact_mask</code> 时，感知会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，其中只包含 <code>sensing_mask_blocks</code> 选中的 RE。此时 <code>STRD</code> 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启：<code>SKIP=1</code> 保持输出紧凑原始 RE，<code>SKIP=0</code> 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 <code>range_fft_size</code> 和 <code>doppler_fft_size</code>，确保它们能覆盖所选子载波数和符号数。紧凑感知 UDP 载荷格式为 <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>，后面跟着固定顺序的 <code>re_count</code> 个原始 <code>complex&lt;float&gt;</code> 数据。当前 <code>plot_sensing*.py</code> 还不能处理非“规则”的 compact 载荷。</p>
+<p><code>sensing_rx_channels</code> 子项字段：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段</th>
+<th style="text-align:left">类型</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>usrp_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">对应 USRP RX 通道号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">该通道专用 USRP 参数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">该通道专用时钟源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">该通道专用时间源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>wire_format_rx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">该通道专用 RX 数据格式覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_gain</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>30</code></td>
+<td style="text-align:left">该通道 RX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>alignment</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>63</code></td>
+<td style="text-align:left">该通道对齐偏移（采样点）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_antenna</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">该通道天线口，如 <code>TX/RX</code>、<code>RX1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>enable_system_delay_estimation</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">若为 <code>true</code>，该通道会在启动时执行一次基于 ZC 相关的系统时延估计，之后每隔 434 个帧再执行一次；同时继续消耗帧数据，但保持常规感知处理链停用。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_ip</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">该通道感知输出目标 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8888</code></td>
+<td style="text-align:left">该通道感知输出目标端口。</td>
+</tr>
+</tbody>
+</table>
+<p>说明：</p>
+<ul>
+<li>当 <code>sensing_rx_channels</code> 为空且 <code>sensing_rx_channel_count &gt; 0</code> 时，程序按通道号 <code>0..N-1</code> 自动补齐默认项。</li>
+<li>若两者数量不一致，程序会按 <code>sensing_rx_channel_count</code> 对通道列表做裁剪或扩展。</li>
+<li>当某通道设置 <code>enable_system_delay_estimation=true</code> 时，该通道会在启动附近执行一次系统时延估计，之后每隔 434 个帧重复执行一次，同时继续消耗帧数据；常规感知处理和感知 UDP 输出保持停用。</li>
+<li><code>device_args</code>、<code>wire_format_*</code>、每通道天线口和输出 IP 等字段通常与硬件平台和部署环境强相关；样本 YAML 只是起点，不应把不同机器/射频平台的值机械互换。</li>
+</ul>
+<h3 id="ofdm-解调器-ofdmdemodulator">OFDM 解调器 (OFDMDemodulator)</h3>
+<p><code>OFDMDemodulator</code> (UE 节点) 使用 <code>Demodulator.yaml</code> 配置。
+可使用 <code>config/Demodulator_X310.yaml</code> 或 <code>config/Demodulator_B210.yaml</code> 作为模板。</p>
+<p><code>Demodulator.yaml</code> 参数说明：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">OFDM FFT 点数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cp_length</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>128</code></td>
+<td style="text-align:left">循环前缀长度（采样点）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_pos</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">同步符号在帧内的位置索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sample_rate</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>50000000</code></td>
+<td style="text-align:left">基带采样率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>bandwidth</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>50000000</code></td>
+<td style="text-align:left">模拟带宽。通常与 <code>sample_rate</code> 保持一致。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2400000000</code></td>
+<td style="text-align:left">射频中心频率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>50</code></td>
+<td style="text-align:left">接收增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用硬件 RX AGC。跟踪阶段 AGC 基于滤波后的 <code>delay_spectrum</code> 主峰调节 USRP 的 RX 增益，并使用与对齐/频偏调整相同的时间戳门控丢弃旧帧 AGC 动作；若同步符号接近 ADC 满幅，还会强制降增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>11.0</code></td>
+<td style="text-align:left">跟踪阶段 AGC 窗口下界。只有当滤波后的 <code>delay_spectrum</code> 主峰低于该阈值时，才提高 RX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>13.0</code></td>
+<td style="text-align:left">跟踪阶段 AGC 窗口上界。只有当滤波后的 <code>delay_spectrum</code> 主峰高于该阈值时，才降低 RX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>3.0</code></td>
+<td style="text-align:left">单次 AGC 更新允许的最大 RX 增益步进。饱和保护强制降增益时也使用这个步进上限。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">跟踪阶段两次 AGC 更新之间最少处理的帧数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">RX 通道索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>zc_root</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>29</code></td>
+<td style="text-align:left">Zadoff-Chu 根序号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>num_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">每帧 OFDM 符号数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_symbol_num</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">参与感知处理的符号数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left">双站感知 UDP 输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA 解调流水线 slot 数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>frame_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8</code></td>
+<td style="text-align:left">解调器 RX 帧队列容量。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8</code></td>
+<td style="text-align:left">同步搜索批队列容量。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>reset_hold_s</code></td>
+<td style="text-align:left"><code>float</code> / s</td>
+<td style="text-align:left"><code>0.5</code></td>
+<td style="text-align:left">在强制回到同步搜索前，坏的 delay 条件必须持续累积的时间。内部会按 <code>samples_per_frame / sample_rate</code> 换算成帧数阈值。小于 <code>0</code> 时会钳制到 <code>0.5</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>range_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">距离向 FFT 点数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>doppler_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">多普勒向 FFT 点数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>pilot_positions</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[571,...,451]</code></td>
+<td style="text-align:left">导频子载波索引列表。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步和导频外的所有 RE 都参与 payload 提取。设为 <code>[]</code> 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 <code>kind</code>。其中 <code>kind: payload</code> 的块会产生 payload LLR，<code>kind: sensing_pilot</code> 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">缺省</td>
+<td style="text-align:left">接收侧的紧凑感知资源映射，用来回答“在 <code>compact_mask</code> 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许覆盖同步 / 导频 RE，重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 <code>MTI</code> 和本地 Delay-Doppler 处理。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">USRP 参数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal/external/gpsdo</code></td>
+<td style="text-align:left">时钟源。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>wire_format_rx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>software_sync</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">启用软件同步跟踪。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>hardware_sync</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用硬件同步。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>hardware_sync_tty</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>/dev/ttyUSB0</code></td>
+<td style="text-align:left">硬件同步控制串口设备。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ocxo_pi_switch_abs_error_ppm</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.0002</code></td>
+<td style="text-align:left">当 <code>error_ppm</code> 绝对值持续低于该阈值时切换到慢速 OCXO PI 阶段。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">启用硬件同步 <code>error_ppm</code> 的自适应卡尔曼滤波（AKF）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_bootstrap_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">AKF 进入正常 KF 更新前的冷启动帧数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_innovation_window</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">用于新息自相关/最小二乘自适应的窗口长度。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_max_lag</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">最小二乘拟合使用的新息自相关最大滞后阶。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_adapt_interval</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">自适应更新 <code>Q/R</code> 的帧间隔。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_gate_sigma</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>3.0</code></td>
+<td style="text-align:left">新息门限系数（sigma）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_tikhonov_lambda</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-3</code></td>
+<td style="text-align:left">最小二乘自适应的 Tikhonov 正则项权重。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_update_smooth</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.2</code></td>
+<td style="text-align:left"><code>Q/R</code> 更新的指数平滑系数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_q_wf_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-10</code></td>
+<td style="text-align:left">白频率噪声系数下界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_q_wf_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e2</code></td>
+<td style="text-align:left">白频率噪声系数上界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_q_rw_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-12</code></td>
+<td style="text-align:left">随机游走频率噪声系数下界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_q_rw_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e1</code></td>
+<td style="text-align:left">随机游走频率噪声系数上界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_r_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-8</code></td>
+<td style="text-align:left">观测噪声方差 <code>R</code> 下界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>akf_r_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e3</code></td>
+<td style="text-align:left">观测噪声方差 <code>R</code> 上界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ppm_adjust_factor</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.05</code></td>
+<td style="text-align:left">频偏补偿调节系数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>desired_peak_pos</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>20</code></td>
+<td style="text-align:left">时延峰目标位置（用于对齐策略）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>enable_bi_sensing</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">启用双站感知处理链和 UDP 输出；设为 <code>false</code> 时 <code>OFDMDemodulator</code> 与 <code>CUDAOFDMDemodulator</code> 均不会启动双站感知通道。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>bi_sensing_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">双站感知输出目标 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>bi_sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8889</code></td>
+<td style="text-align:left">双站感知输出目标端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">信道估计输出 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12348</code></td>
+<td style="text-align:left">信道估计输出端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">PDP/PDF 输出 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12349</code></td>
+<td style="text-align:left">PDP/PDF 输出端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>constellation_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">星座图输出 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>constellation_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12346</code></td>
+<td style="text-align:left">星座图输出端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>vofa_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">VOFA+ 调试输出 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>vofa_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12347</code></td>
+<td style="text-align:left">VOFA+ 调试输出端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">解码后业务数据输出 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50001</code></td>
+<td style="text-align:left">解码后业务数据输出端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>default_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">默认输出 IP；其他输出 IP 留空时使用该值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>9999</code></td>
+<td style="text-align:left">控制命令 UDP 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 <code>udp_output_*</code>，而是直接用于 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">测量模式选择。目前仅支持 <code>internal_prbs</code>；非法值会在配置归一化阶段自动关闭测量模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">写入测量 CSV 汇总的运行 ID。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">CPU 测量汇总文件输出目录。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">每个测量载荷期望的字节数。若小于内部测量头长度，会自动钳制到最小合法值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">用于重建确定性 PRBS 测量载荷的基础种子。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每个在线 <code>MRST</code> epoch 期望统计的测量载荷数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>profiling_modules</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>agc</code>、<code>align</code>、<code>snr</code>；<code>all</code> 表示全部。<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前解调路径的 <code>_snr_db / _noise_var / _llr_scale</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[0,1,2,3,4,5]</code></td>
+<td style="text-align:left">允许使用的 CPU 核列表。若核心数量有限，应先给主线程保留一个专用核心，其次优先 <code>rx_proc</code>，最后再考虑 <code>process_proc</code>、<code>sensing_process_proc</code> 和 <code>bit_processing_proc</code>，因为这些后级处理线程通常有更大的缓冲区，能更好吸收短时调度抖动。</td>
+</tr>
+</tbody>
+</table>
+<p>说明：</p>
+<ul>
+<li><code>data_resource_blocks</code> 通常应与发射端完全一致，包括 <code>kind</code>。</li>
+<li>如果资源块与 <code>sync_pos</code> 或 <code>pilot_positions</code> 重叠，内置的同步 / 导频 RE 仍然优先。优先级是“同步符号 &gt; 导频 &gt; sensing_pilot &gt; payload/预生成 QPSK”。</li>
+<li>当 <code>sensing_output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一个紧凑 UDP 包”，只包含 <code>sensing_mask_blocks</code> 选中的 RE；此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
+<li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
+<li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
+<li>解调器还会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>
+<li>硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 <code>SYNC_SEARCH</code>。<code>reset_hold_s</code> 决定坏的 delay 条件需要持续多久才会触发这一动作。</li>
+</ul></div> </section> </main>  <footer class="site-footer"> <div class="footer-panel"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p><strong>作者:</strong> 周智文 (zhiwen_zhou@seu.edu.cn), 张超越 (chaoyue_zhang@seu.edu.cn), 徐晓莉 (xiaolixu@seu.edu.cn), 曾勇 (yong_zeng@seu.edu.cn)</p> </div> </footer> </body></html>

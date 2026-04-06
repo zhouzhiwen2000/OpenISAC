@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Signal Processing - OpenISAC</title><meta name="description" content="Signal processing overview of OpenISAC."><meta name="theme-color" content="#0f6b6a"><link rel="icon" type="image/svg+xml" href="images/icon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script>
+<!DOCTYPE html><html lang="en"> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Signal Processing - OpenISAC</title><meta name="description" content="Signal processing overview of OpenISAC."><meta name="theme-color" content="#0f6b6a"><link rel="icon" type="image/svg+xml" href="images/icon.svg"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script><script>
           document.addEventListener("DOMContentLoaded", function () {
             if (typeof renderMathInElement === "function") {
               renderMathInElement(document.body, {
@@ -12,7 +12,7 @@
               });
             }
           });
-        </script><link rel="stylesheet" href="/_astro/SectionBlock.DSiaPWvP.css"></head> <body class="site-body page-signal"> <div class="site-chroma" aria-hidden="true"></div> <header class="site-header"> <div class="container header-shell"> <div class="header-inner"> <a href="index.html" class="brand"> <img src="images/logo.svg" alt="OpenISAC" width="164" height="54"> </a> <nav class="site-nav" aria-label="Main navigation"> <a href="index.html" class="nav-link"> Home </a><a href="architecture.html" class="nav-link"> Architecture </a><a href="signal_processing.html" class="nav-link active"> Signal Processing </a><a href="https://github.com/zhouzhiwen2000/OpenISAC" class="nav-link" target="_blank" rel="noreferrer noopener"> GitHub </a><a href="https://qm.qq.com/q/NIQRNGb0kY" class="nav-link" target="_blank" rel="noreferrer noopener"> QQ Group </a> </nav> <div class="header-actions"> <a class="lang-switch" href="signal_processing_zh.html"> 中文 </a> </div> </div> </div> </header> <main class="page-frame">  <div class="container page-stack"> <section id="signal-model" class="section-block animate section-prose"> <div class="section-header">  <h2 class="section-title">Signal Model</h2>  </div> <div class="section-body">  <div class="rich-article"><p>The BS-UE channel is modeled as:</p>
+        </script><link rel="stylesheet" href="/_astro/DocsLayout.D3cK1go2.css"></head> <body class="article-page"> <header> <nav> <a href="index.html" class="logo"> <img src="images/logo.svg" alt="OpenISAC"> </a> <ul class="nav-links" aria-label="Main navigation"> <li> <a href="index.html"> Home </a> </li><li> <a href="documentation.html"> Documentation </a> </li><li> <a href="architecture.html"> Architecture </a> </li><li> <a href="signal_processing.html" class="active"> Signal Processing </a> </li><li> <a href="https://github.com/zhouzhiwen2000/OpenISAC" target="_blank" rel="noreferrer noopener"> GitHub </a> </li><li> <a href="https://qm.qq.com/q/NIQRNGb0kY" target="_blank" rel="noreferrer noopener"> QQ Group </a> </li> <li><a href="signal_processing_zh.html">中文</a></li> </ul> </nav> </header>  <div class="page-hero"> <div class="page-hero-panel"> <span class="eyebrow">Signal Processing</span> <h1>PHY and sensing signal processing</h1> <p class="page-hero-lead">Signal model, monostatic sensing pipeline, UE reception, and bistatic OTA synchronization details used by OpenISAC.</p> <div class="link-row"> <a href="index.html" class="button-secondary">Back to Home</a> </div> </div> </div> <main> <section id="signal-model"> <h2>Signal Model</h2> <div><p>The BS-UE channel is modeled as:</p>
 <div class="equation">$$ {h}_{\mathrm{UE}}\left( t,\tau \right) =\sum_{l=1}^L{\alpha _l\delta \left( \tau -\tau _l-\tau _d \right)
 e^{j2\pi \left( f_{D,l}+\Delta f_c \right) t}} $$</div>
 <p>where \(L\) is the number of multi-path components, \(\tau_d\) is the timing offset, and \(\Delta f_c\) is the carrier-frequency offset.</p>
@@ -24,7 +24,7 @@ e^{j2\pi f_{D,s,p} t}} $$</div>
 <figure class="inline-figure">
   <img src="images/PacketVSCW.png" alt="Packet Radio vs Continuous Wave">
   <figcaption>Fig. 4. Comparison between packet radio and continuous wave radio.</figcaption>
-</figure></div>  </div> </section><section id="monostatic-sensing" class="section-block animate section-prose"> <div class="section-header">  <h2 class="section-title">Monostatic Sensing</h2>  </div> <div class="section-body">  <div class="rich-article"><figure class="inline-figure">
+</figure></div> </section><section id="monostatic-sensing"> <h2>Monostatic Sensing</h2> <div><figure class="inline-figure">
   <img src="images/FlowGraph.png" alt="Monostatic Sensing Flow Graph">
   <figcaption>Fig. 5. Signal processing procedure for monostatic sensing.</figcaption>
 </figure>
@@ -57,7 +57,7 @@ e^{j2\pi f_{D,s,p} t}} $$</div>
     <div class="equation">$$ \left( \mathrm{SPT} \right) _{m,k_f}=\frac{1}{M_w}\left| \left( \boldsymbol{G} \right) _{m,k_f}
     \right|^2 $$</div>
   </li>
-</ol></div>  </div> </section><section id="ue-reception" class="section-block animate section-prose"> <div class="section-header">  <h2 class="section-title">UE Communication Reception</h2>  </div> <div class="section-body">  <div class="rich-article"><figure class="inline-figure">
+</ol></div> </section><section id="ue-reception"> <h2>UE Communication Reception</h2> <div><figure class="inline-figure">
   <img src="images/FlowGraph_UE.png" alt="UE Processing Flow Graph">
   <figcaption>Fig. 6. Block diagram of UE communication reception.</figcaption>
 </figure>
@@ -103,7 +103,7 @@ e^{j2\pi f_{D,s,p} t}} $$</div>
     _{n,m}}{(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m}} $$</div>
     <p>Then, LLRs are computed, descrambled, and LDPC-decoded to recover the payload.</p>
   </li>
-</ol></div>  </div> </section><section id="ue-bistatic-sensing" class="section-block animate section-prose"> <div class="section-header">  <h2 class="section-title">UE Bistatic Sensing</h2>  </div> <div class="section-body">  <div class="rich-article"><p>Signal processing for bistatic sensing involves reconstructing unknown modulation symbols and performing Over-the-Air (OTA) synchronization.</p>
+</ol></div> </section><section id="ue-bistatic-sensing"> <h2>UE Bistatic Sensing</h2> <div><p>Signal processing for bistatic sensing involves reconstructing unknown modulation symbols and performing Over-the-Air (OTA) synchronization.</p>
 <h3>Modulation Symbol Reconstruction</h3>
 <p>The reconstructed QPSK data symbol is obtained by making hard decisions on the equalized symbols \(\hat{b}_{n,m,\gamma}\):</p>
 <div class="equation">$$ \tilde{b}_{n,m,\gamma} = \frac{1}{\sqrt{2}}\big( \operatorname{sgn}(\mathrm{Re}\{\hat{b}_{n,m,\gamma}\})
@@ -127,4 +127,4 @@ e^{j2\pi f_{D,s,p} t}} $$</div>
     \boldsymbol{F}_{\mathrm{UE},\gamma} \right) _{n,m} e^{j2\pi n\Delta f\left( \hat{k}_{\tau
     ,\gamma}^{\mathrm{sens}}+mN_s\Delta \hat{T}_{as,w-1} \right)} $$</div>
   </li>
-</ol></div>  </div> </section> </div>  </main> <footer class="site-footer"> <div class="container footer-inner"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p> <strong>Authors:</strong>   Zhiwen Zhou (zhiwen_zhou@seu.edu.cn), Chaoyue Zhang (chaoyue_zhang@seu.edu.cn), Xiaoli Xu (xiaolixu@seu.edu.cn), Yong Zeng (yong_zeng@seu.edu.cn) </p> </div> </footer> </body></html>
+</ol></div> </section> </main>  <footer class="site-footer"> <div class="footer-panel"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p><strong>Authors:</strong> Zhiwen Zhou (zhiwen_zhou@seu.edu.cn), Chaoyue Zhang (chaoyue_zhang@seu.edu.cn), Xiaoli Xu (xiaolixu@seu.edu.cn), Yong Zeng (yong_zeng@seu.edu.cn)</p> </div> </footer> </body></html>

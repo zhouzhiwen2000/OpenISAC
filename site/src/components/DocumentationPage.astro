@@ -1,0 +1,132 @@
+---
+import readmeSections from "../generated/readme_sections.json";
+import { navItems } from "../data/site.js";
+import DocsLayout from "../layouts/DocsLayout.astro";
+
+const { locale } = Astro.props;
+const isZh = locale === "zh";
+const lang = isZh ? "zh-CN" : "en";
+const languageSwitch = isZh
+  ? { href: "documentation.html", label: "En" }
+  : { href: "documentation_zh.html", label: "中文" };
+
+const content = isZh
+  ? {
+      title: "文档中心 - OpenISAC",
+      description: "OpenISAC 文档中心",
+      heroTitle: "安装教程、运行示例与参数说明",
+      heroLead: "汇总安装部署说明、典型运行示例，以及运行参数解释。",
+      backLabel: "返回首页",
+      navTitle: "文档导航",
+      cards: [
+        {
+          tag: "大标题",
+          title: "硬件准备",
+          body: "查看后端与前端所需硬件、节点连接方式，以及接口要求。",
+          href: "#硬件准备",
+          cta: "跳到硬件准备",
+        },
+        {
+          tag: "大标题",
+          title: "软件安装",
+          body: "查看系统环境、依赖安装、构建流程，以及性能调优相关说明。",
+          href: "#软件安装",
+          cta: "跳到软件安装",
+        },
+        {
+          tag: "大标题",
+          title: "典型使用示例",
+          body: "查看 BS、UE、前端可视化和网页配置控制台的典型运行方式。",
+          href: "#典型使用示例",
+          cta: "跳到典型使用示例",
+        },
+        {
+          tag: "大标题",
+          title: "参数说明",
+          body: "查看 OFDM 调制器与 OFDM 解调器的参数表，以及对应的 YAML 配置解释。",
+          href: "#参数说明",
+          cta: "跳到参数说明",
+        },
+      ],
+      readmeHtml: readmeSections.zh.html,
+    }
+  : {
+      title: "Documentation - OpenISAC",
+      description: "OpenISAC documentation",
+      heroTitle: "Installation guide, run examples, and parameter reference",
+      heroLead: "Installation steps, typical run examples, and runtime parameter explanations.",
+      backLabel: "Back to Home",
+      navTitle: "Documentation Map",
+      cards: [
+        {
+          tag: "Top-level Section",
+          title: "Hardware Setup",
+          body: "See backend and frontend hardware requirements, node connections, and interface requirements.",
+          href: "#hardware-setup",
+          cta: "Jump to Hardware Setup",
+        },
+        {
+          tag: "Top-level Section",
+          title: "Software Installation",
+          body: "See supported environments, dependency installation, build steps, and performance tuning notes.",
+          href: "#software-installation",
+          cta: "Jump to Software Installation",
+        },
+        {
+          tag: "Top-level Section",
+          title: "Typical Usage Example",
+          body: "See typical BS, UE, frontend visualization, and web-console execution examples.",
+          href: "#typical-usage-example",
+          cta: "Jump to Typical Usage Example",
+        },
+        {
+          tag: "Top-level Section",
+          title: "Parameter Reference",
+          body: "Read the OFDM modulator and demodulator parameter tables together with their YAML meanings.",
+          href: "#parameter-reference",
+          cta: "Jump to Parameter Reference",
+        },
+      ],
+      readmeHtml: readmeSections.en.html,
+    };
+---
+
+<DocsLayout
+  title={content.title}
+  description={content.description}
+  lang={lang}
+  pageKey="documentation"
+  navItems={navItems[locale]}
+  langSwitch={languageSwitch}
+>
+  <div class="page-hero">
+    <div class="page-hero-panel">
+      <span class="eyebrow">Documentation</span>
+      <h1>{content.heroTitle}</h1>
+      <p class="page-hero-lead">{content.heroLead}</p>
+      <div class="link-row">
+        <a href={isZh ? "index_zh.html" : "index.html"} class="button-secondary">{content.backLabel}</a>
+      </div>
+    </div>
+  </div>
+
+  <main>
+    <section>
+      <h2>{content.navTitle}</h2>
+      <div class="resource-grid">
+        {content.cards.map((card) => (
+          <div class="resource-card">
+            <span class="tag">{card.tag}</span>
+            <h3>{card.title}</h3>
+            <p>{card.body}</p>
+            <a href={card.href} class="doc-link">{card.cta}</a>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section id="reference-manual">
+      <div set:html={content.readmeHtml}></div>
+    </section>
+  </main>
+</DocsLayout>

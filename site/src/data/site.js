@@ -8,6 +8,7 @@ export const footerAuthors = [
 export const navItems = {
   en: [
     { key: "home", href: "index.html", label: "Home" },
+    { key: "documentation", href: "documentation.html", label: "Documentation" },
     { key: "architecture", href: "architecture.html", label: "Architecture" },
     { key: "signal", href: "signal_processing.html", label: "Signal Processing" },
     {
@@ -25,6 +26,7 @@ export const navItems = {
   ],
   zh: [
     { key: "home", href: "index_zh.html", label: "首页" },
+    { key: "documentation", href: "documentation_zh.html", label: "文档" },
     { key: "architecture", href: "architecture_zh.html", label: "架构" },
     { key: "signal", href: "signal_processing_zh.html", label: "信号处理" },
     {

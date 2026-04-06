@@ -1,101 +1,388 @@
 ---
-import { homeContent, navItems } from "../data/site.js";
+import { navItems } from "../data/site.js";
 import DocsLayout from "../layouts/DocsLayout.astro";
-import ReadmeContent from "./ReadmeContent.astro";
-import SectionBlock from "./SectionBlock.astro";
 
-const { locale, readmeHtml } = Astro.props;
-const content = homeContent[locale];
+const { locale } = Astro.props;
 const isZh = locale === "zh";
-const layoutLang = isZh ? "zh-CN" : "en";
+const lang = isZh ? "zh-CN" : "en";
 const languageSwitch = isZh
-  ? { href: "index.html", label: "EN" }
+  ? { href: "index.html", label: "En" }
   : { href: "index_zh.html", label: "中文" };
+
+const content = isZh
+  ? {
+      title: "OpenISAC - 实时 OFDM 通信感知一体化平台",
+      description: "OpenISAC 项目首页",
+      heroTitle: "面向实时 OTA 实验的 OFDM 通信感知平台",
+      stats: [
+        {
+          value: "≥100 MHz",
+          label: "实时带宽能力",
+          detail: "面向高吞吐 OTA 实验与实时无线链路验证。",
+        },
+        {
+          value: "单站 + 双站",
+          label: "两类感知模式",
+          detail: "同一套平台既支持 BS 侧单站感知，也支持 UE 侧双站感知。",
+        },
+        {
+          value: "OTA 同步",
+          label: "分布式实验能力",
+          detail: "双站实验无需依赖有线同步链路。",
+        },
+      ],
+      actions: [
+        { href: "documentation_zh.html", label: "进入文档中心", kind: "primary" },
+        { href: "architecture_zh.html", label: "查看系统架构", kind: "secondary" },
+      ],
+      overview: {
+        kicker: "Why OpenISAC",
+        title: "面向高带宽 OTA 实验的 OFDM ISAC 平台",
+        lead:
+          "OpenISAC 适合需要真实空口实验的研究团队，在尽量保持代码可读、易改和贴近 PHY 的前提下，提供高带宽通信与感知能力。",
+        cards: [
+          {
+            title: "为 OTA 实验而不是纯仿真设计",
+            body: "OpenISAC 处在“仿真代码”和“完整标准栈”之间，让研究者更快把想法跑到真实 USRP 链路上。",
+          },
+          {
+            title: "实时链路与前端工具分工清晰",
+            body: "C++ 负责实时 PHY 与感知主链路，Python 负责可视化、分析和网页配置等外围工具。",
+          },
+          {
+            title: "运行配置成本低",
+            body: "YAML 驱动运行时配置，仓库内已有 X310/B210 模板，同时提供 CPU 隔离和网页配置工具。",
+          },
+        ],
+      },
+      docs: {
+        kicker: "Documentation",
+        title: "按工作流组织的文档入口",
+        lead: "安装部署、系统架构、信号处理说明和完整参考手册统一整理在文档中心，方便按任务快速进入。",
+        cards: [
+          {
+            tag: "快速开始",
+            title: "安装、调优与首次 OTA 运行",
+            body: "覆盖硬件准备、软件安装、性能调优和端到端运行前检查。",
+            href: "documentation_zh.html",
+            cta: "打开文档中心",
+          },
+          {
+            tag: "系统设计",
+            title: "系统架构与软件架构",
+            body: "查看系统架构以及 BS、UE 两侧的软件架构。",
+            href: "architecture_zh.html",
+            cta: "查看系统架构",
+          },
+          {
+            tag: "信号处理",
+            title: "PHY 与感知处理链",
+            body: "查看信号模型、单站感知流程、UE 接收链，以及双站 OTA 同步的处理细节。",
+            href: "signal_processing_zh.html",
+            cta: "查看信号处理",
+          },
+          {
+            tag: "源码与工具",
+            title: "GitHub、前端脚本与配置台",
+            body: "聚合仓库入口、绘图脚本、网页配置工具与运行辅助脚本。",
+            href: "https://github.com/zhouzhiwen2000/OpenISAC",
+            cta: "打开 GitHub",
+            external: true,
+          },
+        ],
+      },
+      demosTitle: "真实通信与感知演示",
+      demos: [
+        {
+          title: "时延-多普勒感知",
+          body: "运动无人机的实时时延-多普勒图。",
+          videoUrl: "https://vids.zzw123app.top/videos/Drone_Moving.mp4",
+        },
+        {
+          title: "杂波抑制",
+          body: "MTI 杂波抑制滤波器开启与关闭对比。",
+          videoUrl: "https://vids.zzw123app.top/videos/MTI_on_vs_off.mp4",
+        },
+        {
+          title: "微多普勒感知",
+          body: "无人机上升和下降的微多普勒特征。",
+          videoUrl: "https://vids.zzw123app.top/videos/MicroDoppler_Up_Down.mp4",
+        },
+        {
+          title: "实时通信",
+          body: "同一平台支持基于 ISAC 链路的实时视频流传输。",
+          videoUrl: "https://vids.zzw123app.top/videos/Communication.mp4",
+        },
+      ],
+      meta: {
+        title: "论文、机构与社区",
+        citationTitle: "论文引用",
+        citationBody:
+          'Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," <i>arXiv preprint</i> arXiv:2601.03535, Jan. 2026.',
+        citationHref: "https://arxiv.org/pdf/2601.03535",
+        citationCta: "打开 arXiv",
+        affiliationTitle: "所属机构",
+        affiliationBody: "东南大学移动通信国家重点实验室 & 紫金山实验室 曾勇课题组",
+        communityTitle: "社区",
+        communityLinks: [
+          { href: "https://qm.qq.com/q/NIQRNGb0kY", label: "加入 QQ 群" },
+          { href: "https://space.bilibili.com/627920129", label: "Bilibili 频道" },
+        ],
+        wechatTitle: "微信公众号",
+      },
+      videoFallback: "您的浏览器不支持 video 标签。",
+    }
+  : {
+      title: "OpenISAC - Real-Time OFDM ISAC Platform",
+      description: "OpenISAC landing page",
+      heroTitle: "Real-time OFDM sensing and communication for OTA experiments",
+      stats: [
+        {
+          value: "≥100 MHz",
+          label: "Real-time bandwidth",
+          detail: "For high-throughput OTA experiments and real-time radio validation.",
+        },
+        {
+          value: "Monostatic + Bistatic",
+          label: "Sensing modes",
+          detail: "Support both BS-side monostatic sensing and UE-side bistatic sensing in one platform.",
+        },
+        {
+          value: "OTA Sync",
+          label: "Distributed operation",
+          detail: "Run bistatic experiments without depending on wired synchronization links.",
+        },
+      ],
+      actions: [
+        { href: "documentation.html", label: "Open Documentation", kind: "primary" },
+        { href: "architecture.html", label: "See System Architecture", kind: "secondary" },
+      ],
+      overview: {
+        kicker: "Why OpenISAC",
+        title: "Built for high-bandwidth OTA ISAC experiments",
+        lead:
+          "OpenISAC is a high-bandwidth OFDM ISAC platform for teams that need real OTA experiments with a stack that stays readable, modifiable, and close to the physical layer.",
+        cards: [
+          {
+            title: "Built for OTA experiments",
+            body: "OpenISAC sits between simulation code and full standards stacks, so teams can move from idea to real hardware faster.",
+          },
+          {
+            title: "Real-time radio path",
+            body: "C++ handles the real-time PHY and sensing path, while Python tools cover visualization, analysis, and control workflows.",
+          },
+          {
+            title: "Minimal configuration friction",
+            body: "Runtime behavior is YAML-driven, with templates for X310 and B210 plus utilities for CPU isolation and web-based config editing.",
+          },
+        ],
+      },
+      docs: {
+        kicker: "Documentation",
+        title: "Documentation organized by workflow",
+        lead:
+          "Setup, architecture, signal-processing notes, and the full reference manual are organized into a dedicated documentation entry.",
+        cards: [
+          {
+            tag: "Getting Started",
+            title: "Setup and first OTA run",
+            body: "Hardware setup, software installation, performance tuning, and runtime preparation for end-to-end deployment.",
+            href: "documentation.html",
+            cta: "Go to Documentation",
+          },
+          {
+            tag: "System Design",
+            title: "System and software architecture",
+            body: "Read the overall system architecture together with the BS-side and UE-side software architecture.",
+            href: "architecture.html",
+            cta: "View Architecture",
+          },
+          {
+            tag: "Signal Processing",
+            title: "PHY and sensing pipeline",
+            body: "Read the signal model, monostatic sensing flow, UE reception, and bistatic OTA synchronization details.",
+            href: "signal_processing.html",
+            cta: "Open Signal Processing",
+          },
+          {
+            tag: "Source",
+            title: "Repository and tooling",
+            body: "GitHub, plotting tools, config editor, and runtime scripts for everyday experimentation workflows.",
+            href: "https://github.com/zhouzhiwen2000/OpenISAC",
+            cta: "Open GitHub",
+            external: true,
+          },
+        ],
+      },
+      demosTitle: "Real sensing and communication examples",
+      demos: [
+        {
+          title: "Delay-Doppler sensing",
+          body: "Real-time delay-Doppler map of a moving drone.",
+          videoUrl: "https://vids.zzw123app.top/videos/Drone_Moving.mp4",
+        },
+        {
+          title: "Clutter rejection",
+          body: "Comparison of MTI clutter rejection with the filter enabled and disabled.",
+          videoUrl: "https://vids.zzw123app.top/videos/MTI_on_vs_off.mp4",
+        },
+        {
+          title: "Micro-Doppler sensing",
+          body: "Micro-Doppler signatures of a drone ascending and descending.",
+          videoUrl: "https://vids.zzw123app.top/videos/MicroDoppler_Up_Down.mp4",
+        },
+        {
+          title: "Real-time communication",
+          body: "Video streaming over the ISAC link using the same platform.",
+          videoUrl: "https://vids.zzw123app.top/videos/Communication.mp4",
+        },
+      ],
+      meta: {
+        title: "Research context and community",
+        citationTitle: "Citation",
+        citationBody:
+          'Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," <i>arXiv preprint</i> arXiv:2601.03535, Jan. 2026.',
+        citationHref: "https://arxiv.org/pdf/2601.03535",
+        citationCta: "Open arXiv",
+        affiliationTitle: "Affiliation",
+        affiliationBody:
+          "Yong Zeng Group at the National Mobile Communications Research Laboratory, Southeast University and the Purple Mountain Laboratories",
+        communityTitle: "Community",
+        communityLinks: [
+          { href: "https://qm.qq.com/q/NIQRNGb0kY", label: "Join the QQ Group" },
+          { href: "https://space.bilibili.com/627920129", label: "Bilibili Channel" },
+        ],
+        wechatTitle: "WeChat",
+      },
+      videoFallback: "Your browser does not support the video tag.",
+    };
 ---
 
 <DocsLayout
   title={content.title}
   description={content.description}
-  lang={layoutLang}
+  lang={lang}
   pageKey="home"
   navItems={navItems[locale]}
   langSwitch={languageSwitch}
 >
-  <div class="container page-stack">
-    <section class="home-hero animate">
-      <img src="images/logo_main.svg" alt="OpenISAC" class="home-hero-logo" />
-      <p>{content.hero.tagline}</p>
-      <a href={content.hero.ctaHref} class="hero-action">{content.hero.ctaLabel}</a>
-    </section>
-
-    <SectionBlock id="about" title={content.about.title} className="section-prose">
-      <div class="generated-prose" set:html={content.about.html}></div>
-    </SectionBlock>
-
-    <SectionBlock id="affiliation" title={content.affiliation.title} className="section-community">
-      <div class="generated-prose" set:html={content.affiliation.html}></div>
-    </SectionBlock>
-
-    <SectionBlock id="community" title={content.community.title} className="section-community">
-      <div class="community-card">
-        <ul class="link-list">
-          {content.community.links.map((item) => (
-            <li>
-              <a href={item.href} target="_blank" rel="noreferrer noopener">
-                {item.label}
+  <div class="hero">
+    <div class="hero-panel">
+      <div class="hero-layout">
+        <div class="hero-copy">
+          <span class="eyebrow">Open-source OFDM ISAC platform</span>
+          <img src="images/logo_light.svg" alt="OpenISAC" class="hero-logo" />
+          <h1 class:list={["hero-title", isZh ? "hero-title-zh" : "hero-title-en"]}>{content.heroTitle}</h1>
+          <div class="hero-stats">
+            {content.stats.map((item) => (
+              <div class="stat-card">
+                <span class="stat-value">{item.value}</span>
+                <div class="stat-label">{item.label}</div>
+                <div class="stat-detail">{item.detail}</div>
+              </div>
+            ))}
+          </div>
+          <div class="hero-actions">
+            {content.actions.map((action) => (
+              <a href={action.href} class={action.kind === "primary" ? "button" : "button-secondary"}>
+                {action.label}
               </a>
-            </li>
-          ))}
-        </ul>
-        <div class="wechat-block">
-          <p>{content.community.wechatLabel}</p>
-          <img src="images/WeChat.jpg" alt={content.community.wechatAlt} />
+            ))}
+          </div>
         </div>
       </div>
-    </SectionBlock>
+    </div>
+  </div>
 
-    <SectionBlock id="scope" title={content.scope.title} className="section-prose">
-      <div class="generated-prose" set:html={content.scope.html}></div>
-    </SectionBlock>
-
-    <SectionBlock id="sensing-demo" title={content.sensingDemo.title} className="section-demo">
-      <div class="showcase-grid">
-        {content.sensingDemo.items.map((item) => (
-          <article class="media-card">
-            <div class="video-frame">
-              <video controls muted loop playsinline preload="metadata">
-                <source src={item.videoUrl} type="video/mp4" />
-                {isZh ? "您的浏览器不支持 video 标签。" : "Your browser does not support the video tag."}
-              </video>
-            </div>
-            <h3>{item.title}</h3>
-            <p>{item.body}</p>
-          </article>
+  <main>
+    <section>
+      <p class="section-kicker">{content.overview.kicker}</p>
+      <h2>{content.overview.title}</h2>
+      <p class="section-lead">{content.overview.lead}</p>
+      <div class="feature-grid">
+        {content.overview.cards.map((card) => (
+          <div class="feature-card">
+            <h3>{card.title}</h3>
+            <p>{card.body}</p>
+          </div>
         ))}
-      </div>
-    </SectionBlock>
-
-    <SectionBlock id="comm-demo" title={content.commDemo.title} className="section-demo">
-      <div class="showcase-grid showcase-grid-single">
-        {content.commDemo.items.map((item) => (
-          <article class="media-card">
-            <div class="video-frame">
-              <video controls muted loop playsinline preload="metadata">
-                <source src={item.videoUrl} type="video/mp4" />
-                {isZh ? "您的浏览器不支持 video 标签。" : "Your browser does not support the video tag."}
-              </video>
-            </div>
-            <h3>{item.title}</h3>
-            <p>{item.body}</p>
-          </article>
-        ))}
-      </div>
-    </SectionBlock>
-
-    <section id="hardware" class="section-block animate section-guide">
-      <div class="section-body">
-        <ReadmeContent html={readmeHtml} />
       </div>
     </section>
-  </div>
+
+    <section>
+      <p class="section-kicker">{content.docs.kicker}</p>
+      <h2>{content.docs.title}</h2>
+      <p class="section-lead">{content.docs.lead}</p>
+      <div class="docs-grid">
+        {content.docs.cards.map((card) => (
+          <div class="docs-card">
+            <span class="tag">{card.tag}</span>
+            <h3>{card.title}</h3>
+            <p>{card.body}</p>
+            <a
+              href={card.href}
+              class="doc-link"
+              target={card.external ? "_blank" : undefined}
+              rel={card.external ? "noreferrer noopener" : undefined}
+            >
+              {card.cta}
+            </a>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section id="sensing-demo">
+      <p class="section-kicker">Demos</p>
+      <h2>{content.demosTitle}</h2>
+      <div class="demo-grid">
+        {content.demos.map((item) => (
+          <div class="demo-card">
+            <div class="video-wrapper">
+              <video controls muted loop playsinline preload="metadata">
+                <source src={item.videoUrl} type="video/mp4" />
+                {content.videoFallback}
+              </video>
+            </div>
+            <h3>{item.title}</h3>
+            <p>{item.body}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+
+    <section>
+      <p class="section-kicker">Paper and Community</p>
+      <h2>{content.meta.title}</h2>
+      <div class="meta-grid">
+        <div class="meta-card">
+          <h3>{content.meta.citationTitle}</h3>
+          <p set:html={content.meta.citationBody}></p>
+          <a href={content.meta.citationHref} target="_blank" rel="noreferrer noopener" class="doc-link">
+            {content.meta.citationCta}
+          </a>
+        </div>
+        <div class="meta-card">
+          <h3>{content.meta.affiliationTitle}</h3>
+          <div class="affiliation-logos">
+            <img src="images/SEUlogo.png" alt="SEU Logo" />
+            <img src="images/PML.png" alt="PML Logo" />
+          </div>
+          <p><strong>{content.meta.affiliationBody}</strong></p>
+        </div>
+        <div class="meta-card">
+          <h3>{content.meta.communityTitle}</h3>
+          <ul>
+            {content.meta.communityLinks.map((item) => (
+              <li><a href={item.href} target="_blank" rel="noreferrer noopener">{item.label}</a></li>
+            ))}
+          </ul>
+        </div>
+        <div class="meta-card">
+          <h3>{content.meta.wechatTitle}</h3>
+          <img src="images/WeChat.jpg" alt="WeChat QR Code" width="170" />
+        </div>
+      </div>
+    </section>
+  </main>
 </DocsLayout>

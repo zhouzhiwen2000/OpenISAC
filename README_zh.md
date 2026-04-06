@@ -484,6 +484,8 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 * 运行面板还提供可选的 sudo 密码输入框，以及 `Reset CPU isolation` 操作。
 * 该控制台可以执行网页中输入的启动命令，因此只应绑定到可信网络，或者保持默认 `127.0.0.1`。
 
+## 参数说明
+
 ### OFDM 调制器 (OFDMModulator)
 
 `OFDMModulator` (BS 节点) 使用 `Modulator.yaml` 配置。

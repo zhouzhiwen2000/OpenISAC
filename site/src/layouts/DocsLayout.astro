@@ -18,6 +18,12 @@ const pageDescription =
   description ??
   (isZh ? "OpenISAC 文档站点" : "OpenISAC documentation site");
 const year = 2025;
+const bodyClass =
+  pageKey === "home"
+    ? "home-page"
+    : pageKey === "documentation"
+      ? "docs-page"
+      : "article-page";
 ---
 
 <!doctype html>
@@ -32,7 +38,7 @@ const year = 2025;
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
     {math && (
@@ -64,17 +70,14 @@ const year = 2025;
       </>
     )}
   </head>
-  <body class:list={["site-body", pageKey ? `page-${pageKey}` : "", { "lang-zh": isZh }]}>
-    <div class="site-chroma" aria-hidden="true"></div>
+  <body class:list={[bodyClass, { "lang-zh": isZh }]}>
     <SiteHeader
       navItems={navItems}
       pageKey={pageKey}
       langSwitch={langSwitch}
       lang={lang}
     />
-    <main class="page-frame">
-      <slot />
-    </main>
+    <slot />
     <SiteFooter lang={lang} year={year} />
   </body>
 </html>

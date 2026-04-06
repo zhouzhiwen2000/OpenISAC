@@ -484,6 +484,8 @@ Notes:
 * The runtime panel also provides an optional sudo-password field and a `Reset CPU isolation` action.
 * Because the console can launch arbitrary commands entered in the web UI, bind it only to trusted networks or keep the default `127.0.0.1`.
 
+## Parameter Reference
+
 ### OFDM Modulator
 
 `OFDMModulator` is configured through `Modulator.yaml`.

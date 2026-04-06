@@ -1,34 +1,26 @@
 ---
 const { navItems, pageKey, langSwitch, lang } = Astro.props;
-const isZh = String(lang).startsWith("zh");
-const homeHref = isZh ? "index_zh.html" : "index.html";
 ---
 
-<header class="site-header">
-  <div class="container header-shell">
-    <div class="header-inner">
-      <a href={homeHref} class="brand">
-        <img src="images/logo.svg" alt="OpenISAC" width="164" height="54" />
-      </a>
-
-      <nav class="site-nav" aria-label={isZh ? "主导航" : "Main navigation"}>
-        {navItems.map((item) => (
+<header>
+  <nav>
+    <a href={String(lang).startsWith("zh") ? "index_zh.html" : "index.html"} class="logo">
+      <img src="images/logo.svg" alt="OpenISAC" />
+    </a>
+    <ul class="nav-links" aria-label={String(lang).startsWith("zh") ? "主导航" : "Main navigation"}>
+      {navItems.map((item) => (
+        <li>
           <a
             href={item.href}
-            class:list={["nav-link", { active: item.key === pageKey }]}
+            class:list={{ active: item.key === pageKey }}
             target={item.external ? "_blank" : undefined}
             rel={item.external ? "noreferrer noopener" : undefined}
           >
             {item.label}
           </a>
-        ))}
-      </nav>
-
-      <div class="header-actions">
-        <a class="lang-switch" href={langSwitch.href}>
-          {langSwitch.label}
-        </a>
-      </div>
-    </div>
-  </div>
+        </li>
+      ))}
+      <li><a href={langSwitch.href}>{langSwitch.label}</a></li>
+    </ul>
+  </nav>
 </header>
