@@ -225,6 +225,8 @@ cfar_alpha_db = float(10.0 * np.log10(50.0))
 cfar_min_range_bin = 0
 cfar_dc_exclusion_bins = 0
 cfar_max_points = 256
+target_cluster_doppler_gap = 2
+target_cluster_range_gap = 2
 
 LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
     version=0,
@@ -519,6 +521,69 @@ def run_ca_cfar_2d(
         'nonpositive_cells': nonpositive_cells,
     }
     return points, raw_hits, shown_hits, backend_name, stats
+
+
+def cluster_detected_targets(cfar_points, rd_data):
+    if cfar_points is None:
+        return []
+
+    points = np.asarray(cfar_points, dtype=np.int32)
+    if points.size == 0 or rd_data is None:
+        return []
+
+    n_points = points.shape[0]
+    visited = np.zeros(n_points, dtype=bool)
+    clusters = []
+
+    for seed_idx in range(n_points):
+        if visited[seed_idx]:
+            continue
+
+        queue = [seed_idx]
+        visited[seed_idx] = True
+        cluster_indices = []
+
+        while queue:
+            cur_idx = queue.pop()
+            cluster_indices.append(cur_idx)
+            cur_d = points[cur_idx, 0]
+            cur_r = points[cur_idx, 1]
+
+            for nbr_idx in range(n_points):
+                if visited[nbr_idx]:
+                    continue
+                if (
+                    abs(int(points[nbr_idx, 0]) - int(cur_d)) <= target_cluster_doppler_gap
+                    and abs(int(points[nbr_idx, 1]) - int(cur_r)) <= target_cluster_range_gap
+                ):
+                    visited[nbr_idx] = True
+                    queue.append(nbr_idx)
+
+        cluster_points = points[np.asarray(cluster_indices, dtype=np.int32)]
+        strengths_db = rd_data[cluster_points[:, 0], cluster_points[:, 1]]
+        peak_idx = int(np.argmax(strengths_db))
+        peak_point = cluster_points[peak_idx]
+        peak_strength_db = float(strengths_db[peak_idx])
+        linear_weights = np.power(10.0, strengths_db.astype(np.float64) / 20.0)
+        weight_sum = float(np.sum(linear_weights))
+        if weight_sum > 0.0:
+            centroid_d = float(np.sum(cluster_points[:, 0] * linear_weights) / weight_sum)
+            centroid_r = float(np.sum(cluster_points[:, 1] * linear_weights) / weight_sum)
+        else:
+            centroid_d = float(np.mean(cluster_points[:, 0]))
+            centroid_r = float(np.mean(cluster_points[:, 1]))
+
+        clusters.append({
+            'peak_doppler_idx': int(peak_point[0]),
+            'peak_range_idx': int(peak_point[1]),
+            'peak_strength_db': peak_strength_db,
+            'cluster_size': int(cluster_points.shape[0]),
+            'centroid_doppler_idx': centroid_d,
+            'centroid_range_idx': centroid_r,
+        })
+
+    clusters.sort(key=lambda item: item['peak_strength_db'], reverse=True)
+    return clusters
 
 
 def reset_processing_state():
@@ -985,6 +1050,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1600, 900)
         self._control_panel_width = 420
         self._status_label_text_width = self._control_panel_width - 24
+        self.targets_window = QtWidgets.QWidget()
+        self.targets_window.setWindowTitle("OpenISAC Bi-Sensing Targets")
+        self.targets_window.resize(520, 220)
+        targets_layout = QtWidgets.QVBoxLayout(self.targets_window)
+        self.targets_text = QtWidgets.QPlainTextEdit()
+        self.targets_text.setReadOnly(True)
+        self.targets_text.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        targets_layout.addWidget(self.targets_text)
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -1051,6 +1124,8 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setFont(fixed_font)
             lbl.setFixedWidth(self._status_label_text_width)
             self._set_status_label_text(lbl, lbl.text())
+        self.targets_text.setFont(fixed_font)
+        self.targets_text.setPlainText("Top Targets: waiting CFAR detections")
         control_layout.addSpacing(20)
 
         # Range Bin
@@ -1215,6 +1290,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_update_time = time.time()
         self.frame_count = 0
         self.total_dsp_time = 0.0
+        self.targets_window.show()
 
     def _set_status_label_text(self, label, text):
         elided = label.fontMetrics().elidedText(
@@ -1227,6 +1303,37 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_toggle_style(self, btn, state):
         btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
+
+    def update_top_targets_text(self, latest):
+        if latest is None:
+            self.targets_text.setPlainText("Top Targets: N/A")
+            return
+
+        rd_data = latest.get('rd')
+        cfar_points = latest.get('cfar_points')
+        if rd_data is None or cfar_points is None or len(cfar_points) == 0:
+            self.targets_text.setPlainText("Top Targets: none")
+            return
+
+        clusters = cluster_detected_targets(cfar_points, rd_data)
+        if not clusters:
+            self.targets_text.setPlainText("Top Targets: none")
+            return
+
+        frame_id = latest.get('frame_id', -1)
+        lines = [f"Top Targets F{frame_id}"]
+        for rank, cluster in enumerate(clusters[:5], start=1):
+            d_idx = int(cluster['peak_doppler_idx'])
+            r_idx = int(cluster['peak_range_idx'])
+            strength_db = float(cluster['peak_strength_db'])
+            centroid_d = float(cluster['centroid_doppler_idx'])
+            centroid_r = float(cluster['centroid_range_idx'])
+            lines.append(
+                f"{rank}. R={r_idx:4d} D={d_idx:+5d} "
+                f"S={strength_db:6.1f}dB N={int(cluster['cluster_size']):2d} "
+                f"C=({centroid_r:5.1f},{centroid_d:5.1f})"
+            )
+        self.targets_text.setPlainText("\n".join(lines))
 
     def set_range_bin(self):
         global selected_range_bin
@@ -1391,8 +1498,8 @@ class MainWindow(QtWidgets.QMainWindow):
             cfar_points = latest.get('cfar_points')
             if cfar_points is not None and len(cfar_points) > 0:
                 self.rd_cfar_marker.setData(
-                    cfar_points[:, 1].astype(np.float32),
                     cfar_points[:, 0].astype(np.float32),
+                    cfar_points[:, 1].astype(np.float32),
                 )
             else:
                 self.rd_cfar_marker.setData([], [])
@@ -1427,6 +1534,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_label_text(self.lbl_cfar, cfar_status_short)
             self.lbl_cfar.setToolTip(cfar_status)
 
+        self.update_top_targets_text(current_display_data if current_display_data else latest)
+
         current_time = time.time()
         elapsed = current_time - self.last_update_time
         if elapsed > 0.5:
@@ -1439,6 +1548,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.last_update_time = current_time
 
     def closeEvent(self, event):
+        self.targets_window.close()
         print("Closing application...")
         event.accept()
 
