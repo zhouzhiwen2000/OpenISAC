@@ -231,6 +231,17 @@ LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
 enable_mti = True
 enable_range_window = True
 enable_doppler_window = True
+cfar_enabled = False
+cfar_train_doppler = 20
+cfar_train_range = 20
+cfar_guard_doppler = 10
+cfar_guard_range = 10
+cfar_alpha_db = float(10.0 * np.log10(50.0))
+cfar_min_range_bin = 0
+cfar_dc_exclusion_bins = 0
+cfar_max_points = 256
+target_cluster_doppler_gap = 2
+target_cluster_range_gap = 2
 
 RAW_QUEUE_SIZE = 20
 DISPLAY_QUEUE_SIZE = 5
@@ -262,6 +273,323 @@ def get_display_range_bin_limit():
 
 def get_display_doppler_bin_limit():
     return max(1, int(DISPLAY_DOPPLER_BIN_LIMIT))
+
+
+def _integral_image_2d(arr, backend):
+    rows, cols = arr.shape
+    if backend == "cupy":
+        integral = cp.cumsum(cp.cumsum(arr, axis=0), axis=1)
+        out = cp.zeros((rows + 1, cols + 1), dtype=arr.dtype)
+        out[1:, 1:] = integral
+        return out
+    if backend == "mlx":
+        integral = mx.cumsum(mx.cumsum(arr, axis=0), axis=1)
+        out = mx.zeros((rows + 1, cols + 1), dtype=arr.dtype)
+        out[1:, 1:] = integral
+        return out
+    integral = np.cumsum(np.cumsum(arr, axis=0), axis=1, dtype=arr.dtype)
+    out = np.zeros((rows + 1, cols + 1), dtype=arr.dtype)
+    out[1:, 1:] = integral
+    return out
+
+
+def _window_sum_from_integral(integral, top, left, bottom, right):
+    return (
+        integral[bottom + 1, right + 1]
+        - integral[top, right + 1]
+        - integral[bottom + 1, left]
+        + integral[top, left]
+    )
+
+
+def _compute_cfar_points_from_mask(mask, rd_db, backend_name):
+    if backend_name in {"cupy", "mlx"}:
+        mask_cpu = to_numpy(mask).astype(bool, copy=False)
+    else:
+        mask_cpu = np.asarray(mask, dtype=bool)
+
+    hit_idx = np.argwhere(mask_cpu)
+    if hit_idx.size == 0:
+        return np.empty((0, 2), dtype=np.int32), 0, 0
+
+    raw_hit_count = int(hit_idx.shape[0])
+    values = rd_db[mask_cpu]
+    order = np.argsort(values)[::-1]
+    hit_idx = hit_idx[order]
+    if hit_idx.shape[0] > cfar_max_points:
+        hit_idx = hit_idx[:cfar_max_points]
+    shown_hit_count = int(hit_idx.shape[0])
+    return hit_idx.astype(np.int32, copy=False), raw_hit_count, shown_hit_count
+
+
+def build_cfar_views(rd_db, display_range_bins, display_doppler_bins, downsample):
+    rows, cols = rd_db.shape
+    ds = max(1, int(downsample))
+    outer_h = max(0, int(cfar_train_doppler)) + max(0, int(cfar_guard_doppler))
+    outer_w = max(0, int(cfar_train_range)) + max(0, int(cfar_guard_range))
+    extra_rows = outer_h * ds
+    extra_cols = outer_w * ds
+
+    display_col_stop = min(max(1, int(display_range_bins)), cols)
+    center_idx = rows // 2
+    display_row_start = max(0, center_idx - max(1, int(display_doppler_bins)) // 2)
+    display_row_stop = min(rows, display_row_start + max(1, int(display_doppler_bins)))
+
+    display_row_indices = np.arange(display_row_start, display_row_stop, ds, dtype=np.int32)
+    display_col_indices = np.arange(0, display_col_stop, ds, dtype=np.int32)
+    if display_row_indices.size == 0 or display_col_indices.size == 0:
+        empty = np.empty((0, 0), dtype=rd_db.dtype)
+        return empty, empty, 0, 0
+
+    wide_row_start = max(0, display_row_start - extra_rows)
+    wide_row_stop = min(rows, display_row_stop + extra_rows)
+    wide_row_indices = np.arange(wide_row_start, wide_row_stop, ds, dtype=np.int32)
+    raw_wide_col_indices = np.arange(-extra_cols, display_col_stop + extra_cols, ds, dtype=np.int32)
+    wide_col_indices = np.mod(raw_wide_col_indices, cols).astype(np.int32, copy=False)
+
+    display_view = rd_db[np.ix_(display_row_indices, display_col_indices)]
+    wide_view = rd_db[np.ix_(wide_row_indices, wide_col_indices)]
+    row_offset = int(np.searchsorted(wide_row_indices, display_row_indices[0]))
+    col_offset = int(np.count_nonzero(raw_wide_col_indices < 0))
+    return display_view, wide_view, row_offset, col_offset
+
+
+def run_ca_cfar_2d(
+    rd_db,
+    active_row_start=None,
+    active_row_stop=None,
+    active_col_start=None,
+    active_col_stop=None,
+    dc_center_row=None,
+):
+    rows, cols = rd_db.shape
+    td = max(0, int(cfar_train_doppler))
+    tr = max(0, int(cfar_train_range))
+    gd = max(0, int(cfar_guard_doppler))
+    gr = max(0, int(cfar_guard_range))
+    alpha_db = float(cfar_alpha_db)
+    alpha = max(1e-12, float(np.power(10.0, alpha_db / 10.0)))
+    min_range = max(0, int(cfar_min_range_bin))
+    dc_excl = max(0, int(cfar_dc_exclusion_bins))
+    eps = 1e-12
+
+    outer_h = td + gd
+    outer_w = tr + gr
+    if rows == 0 or cols == 0 or rows <= 2 * outer_h or cols <= 2 * outer_w:
+        return np.empty((0, 2), dtype=np.int32), 0, 0, "off", {
+            'noise_min': 0.0,
+            'noise_max': 0.0,
+            'thresh_min': 0.0,
+            'thresh_max': 0.0,
+            'invalid_cells': 0,
+            'nonfinite_cells': 0,
+            'nonpositive_cells': 0,
+        }
+
+    backend_name = "cpu"
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
+        backend_name = "cupy"
+        rd_db_backend = cp.asarray(rd_db, dtype=cp.float64)
+        power = cp.power(cp.float64(10.0), rd_db_backend / cp.float64(10.0))
+        integral = _integral_image_2d(power, backend_name)
+        mask = cp.zeros((rows, cols), dtype=cp.bool_)
+    elif USE_APPLE_GPU:
+        try:
+            backend_name = "mlx"
+            rd_db_backend = mx.array(rd_db, dtype=mx.float64)
+            power = mx.power(mx.array(10.0, dtype=mx.float64), rd_db_backend / 10.0)
+            integral = _integral_image_2d(power, backend_name)
+            mask = mx.zeros((rows, cols), dtype=mx.bool_)
+        except Exception:
+            backend_name = "cpu"
+            power = np.power(np.float64(10.0), rd_db.astype(np.float64) / np.float64(10.0), dtype=np.float64)
+            integral = _integral_image_2d(power, backend_name)
+            mask = np.zeros((rows, cols), dtype=bool)
+    else:
+        power = np.power(np.float64(10.0), rd_db.astype(np.float64) / np.float64(10.0), dtype=np.float64)
+        integral = _integral_image_2d(power, backend_name)
+        mask = np.zeros((rows, cols), dtype=bool)
+
+    outer_cells = (2 * outer_h + 1) * (2 * outer_w + 1)
+    guard_cells = (2 * gd + 1) * (2 * gr + 1)
+    training_cells = max(1, outer_cells - guard_cells)
+
+    row_start = outer_h if active_row_start is None else max(outer_h, int(active_row_start))
+    row_stop = (rows - outer_h) if active_row_stop is None else min(rows - outer_h, int(active_row_stop))
+    col_start = outer_w if active_col_start is None else max(outer_w, int(active_col_start))
+    col_stop = (cols - outer_w) if active_col_stop is None else min(cols - outer_w, int(active_col_stop))
+    if row_start >= row_stop or col_start >= col_stop:
+        return np.empty((0, 2), dtype=np.int32), 0, 0, backend_name, {
+            'noise_min': 0.0,
+            'noise_max': 0.0,
+            'thresh_min': 0.0,
+            'thresh_max': 0.0,
+            'invalid_cells': 0,
+            'nonfinite_cells': 0,
+            'nonpositive_cells': 0,
+        }
+
+    outer_row_top = row_start - outer_h
+    outer_row_bottom = row_stop + outer_h + 1
+    outer_col_left = col_start - outer_w
+    outer_col_right = col_stop + outer_w + 1
+    outer_sum = (
+        integral[(outer_row_top + 2 * outer_h + 1):outer_row_bottom, (outer_col_left + 2 * outer_w + 1):outer_col_right]
+        - integral[outer_row_top:(row_stop - outer_h), (outer_col_left + 2 * outer_w + 1):outer_col_right]
+        - integral[(outer_row_top + 2 * outer_h + 1):outer_row_bottom, outer_col_left:(col_stop - outer_w)]
+        + integral[outer_row_top:(row_stop - outer_h), outer_col_left:(col_stop - outer_w)]
+    )
+
+    guard_row_top = row_start - gd
+    guard_row_bottom = row_stop + gd + 1
+    guard_col_left = col_start - gr
+    guard_col_right = col_stop + gr + 1
+    guard_sum = (
+        integral[(guard_row_top + 2 * gd + 1):guard_row_bottom, (guard_col_left + 2 * gr + 1):guard_col_right]
+        - integral[guard_row_top:(row_stop - gd), (guard_col_left + 2 * gr + 1):guard_col_right]
+        - integral[(guard_row_top + 2 * gd + 1):guard_row_bottom, guard_col_left:(col_stop - gr)]
+        + integral[guard_row_top:(row_stop - gd), guard_col_left:(col_stop - gr)]
+    )
+    noise_mean = (outer_sum - guard_sum) / training_cells
+    cut_power = power[row_start:row_stop, col_start:col_stop]
+    if backend_name == "cupy":
+        finite_mask = cp.isfinite(noise_mean) & cp.isfinite(cut_power)
+        positive_mask = noise_mean > cp.float64(eps)
+        compare_mask = finite_mask & positive_mask
+        safe_noise_mean = cp.where(compare_mask, noise_mean, cp.float64(eps))
+        threshold = cp.float64(alpha) * safe_noise_mean
+        valid_mask = compare_mask & (cut_power > threshold)
+        nonfinite_cells = int(cp.count_nonzero(~finite_mask).item())
+        nonpositive_cells = int(cp.count_nonzero(finite_mask & (~positive_mask)).item())
+        invalid_cells = nonfinite_cells + nonpositive_cells
+        noise_valid = cp.where(compare_mask, safe_noise_mean, cp.nan)
+        thresh_valid = cp.where(compare_mask, threshold, cp.nan)
+        noise_min = float(cp.nanmin(noise_valid).item()) if invalid_cells < noise_valid.size else 0.0
+        noise_max = float(cp.nanmax(noise_valid).item()) if invalid_cells < noise_valid.size else 0.0
+        thresh_min = float(cp.nanmin(thresh_valid).item()) if invalid_cells < thresh_valid.size else 0.0
+        thresh_max = float(cp.nanmax(thresh_valid).item()) if invalid_cells < thresh_valid.size else 0.0
+    elif backend_name == "mlx":
+        noise_mean_np = np.asarray(to_numpy(noise_mean), dtype=np.float64)
+        cut_power_np = np.asarray(to_numpy(cut_power), dtype=np.float64)
+        compare_mask_np = np.isfinite(noise_mean_np) & np.isfinite(cut_power_np) & (noise_mean_np > eps)
+        finite_mask_np = np.isfinite(noise_mean_np) & np.isfinite(cut_power_np)
+        positive_mask_np = noise_mean_np > eps
+        safe_noise_mean_np = np.where(compare_mask_np, noise_mean_np, eps).astype(np.float64, copy=False)
+        threshold_np = (float(alpha) * safe_noise_mean_np).astype(np.float64, copy=False)
+        valid_mask_np = compare_mask_np & (cut_power_np > threshold_np)
+        nonfinite_cells = int((~finite_mask_np).sum())
+        nonpositive_cells = int((finite_mask_np & (~positive_mask_np)).sum())
+        invalid_cells = nonfinite_cells + nonpositive_cells
+        noise_vals = safe_noise_mean_np[compare_mask_np]
+        thresh_vals = threshold_np[compare_mask_np]
+        noise_min = float(noise_vals.min()) if noise_vals.size > 0 else 0.0
+        noise_max = float(noise_vals.max()) if noise_vals.size > 0 else 0.0
+        thresh_min = float(thresh_vals.min()) if thresh_vals.size > 0 else 0.0
+        thresh_max = float(thresh_vals.max()) if thresh_vals.size > 0 else 0.0
+        valid_mask = mx.array(valid_mask_np)
+    else:
+        compare_mask = np.isfinite(noise_mean) & np.isfinite(cut_power) & (noise_mean > eps)
+        finite_mask = np.isfinite(noise_mean) & np.isfinite(cut_power)
+        positive_mask = noise_mean > eps
+        safe_noise_mean = np.where(compare_mask, noise_mean, eps).astype(np.float64, copy=False)
+        threshold = (float(alpha) * safe_noise_mean).astype(np.float64, copy=False)
+        valid_mask = compare_mask & (cut_power > threshold)
+        nonfinite_cells = int((~finite_mask).sum())
+        nonpositive_cells = int((finite_mask & (~positive_mask)).sum())
+        invalid_cells = nonfinite_cells + nonpositive_cells
+        noise_vals = safe_noise_mean[compare_mask]
+        thresh_vals = threshold[compare_mask]
+        noise_min = float(noise_vals.min()) if noise_vals.size > 0 else 0.0
+        noise_max = float(noise_vals.max()) if noise_vals.size > 0 else 0.0
+        thresh_min = float(thresh_vals.min()) if thresh_vals.size > 0 else 0.0
+        thresh_max = float(thresh_vals.max()) if thresh_vals.size > 0 else 0.0
+
+    if min_range > 0:
+        valid_mask[:, :min(valid_mask.shape[1], min_range)] = False
+
+    center_row = (rows // 2) if dc_center_row is None else int(dc_center_row)
+    center_row_local = center_row - row_start
+    if dc_excl > 0 and 0 <= center_row_local < valid_mask.shape[0]:
+        lo = max(0, center_row_local - dc_excl)
+        hi = min(valid_mask.shape[0], center_row_local + dc_excl + 1)
+        valid_mask[lo:hi, :] = False
+
+    mask[row_start:row_stop, col_start:col_stop] = valid_mask
+
+    points, raw_hits, shown_hits = _compute_cfar_points_from_mask(mask, rd_db, backend_name)
+    stats = {
+        'noise_min': noise_min,
+        'noise_max': noise_max,
+        'thresh_min': thresh_min,
+        'thresh_max': thresh_max,
+        'invalid_cells': invalid_cells,
+        'nonfinite_cells': nonfinite_cells,
+        'nonpositive_cells': nonpositive_cells,
+    }
+    return points, raw_hits, shown_hits, backend_name, stats
+
+
+def cluster_detected_targets(cfar_points, rd_data):
+    if cfar_points is None:
+        return []
+
+    points = np.asarray(cfar_points, dtype=np.int32)
+    if points.size == 0 or rd_data is None:
+        return []
+
+    n_points = points.shape[0]
+    visited = np.zeros(n_points, dtype=bool)
+    clusters = []
+
+    for seed_idx in range(n_points):
+        if visited[seed_idx]:
+            continue
+
+        queue = [seed_idx]
+        visited[seed_idx] = True
+        cluster_indices = []
+
+        while queue:
+            cur_idx = queue.pop()
+            cluster_indices.append(cur_idx)
+            cur_d = points[cur_idx, 0]
+            cur_r = points[cur_idx, 1]
+
+            for nbr_idx in range(n_points):
+                if visited[nbr_idx]:
+                    continue
+                if (
+                    abs(int(points[nbr_idx, 0]) - int(cur_d)) <= target_cluster_doppler_gap
+                    and abs(int(points[nbr_idx, 1]) - int(cur_r)) <= target_cluster_range_gap
+                ):
+                    visited[nbr_idx] = True
+                    queue.append(nbr_idx)
+
+        cluster_points = points[np.asarray(cluster_indices, dtype=np.int32)]
+        strengths_db = rd_data[cluster_points[:, 0], cluster_points[:, 1]]
+        peak_idx = int(np.argmax(strengths_db))
+        peak_point = cluster_points[peak_idx]
+        peak_strength_db = float(strengths_db[peak_idx])
+        linear_weights = np.power(10.0, strengths_db.astype(np.float64) / 20.0)
+        weight_sum = float(np.sum(linear_weights))
+        if weight_sum > 0.0:
+            centroid_d = float(np.sum(cluster_points[:, 0] * linear_weights) / weight_sum)
+            centroid_r = float(np.sum(cluster_points[:, 1] * linear_weights) / weight_sum)
+        else:
+            centroid_d = float(np.mean(cluster_points[:, 0]))
+            centroid_r = float(np.mean(cluster_points[:, 1]))
+
+        clusters.append({
+            'peak_doppler_idx': int(peak_point[0]),
+            'peak_range_idx': int(peak_point[1]),
+            'peak_strength_db': peak_strength_db,
+            'cluster_size': int(cluster_points.shape[0]),
+            'centroid_doppler_idx': centroid_d,
+            'centroid_range_idx': centroid_r,
+        })
+
+    clusters.sort(key=lambda item: item['peak_strength_db'], reverse=True)
+    return clusters
 
 
 def reset_processing_state():
@@ -765,23 +1093,30 @@ def _process_one_raw_item(ch, raw_item):
     display_range_bins = get_display_range_bin_limit()
     display_doppler_bins = get_display_doppler_bin_limit()
 
-    if rd_spectrum.shape[1] > display_range_bins:
-        rd_spectrum = rd_spectrum[:, :display_range_bins]
-        rd_complex = rd_complex[:, :display_range_bins]
+    rd_spectrum_plot, rd_spectrum_cfar, cfar_row_offset, cfar_col_offset = build_cfar_views(
+        rd_spectrum, display_range_bins, display_doppler_bins, DISPLAY_DOWNSAMPLE
+    )
+    rd_complex_plot, _, _, _ = build_cfar_views(
+        rd_complex, display_range_bins, display_doppler_bins, DISPLAY_DOWNSAMPLE
+    )
+    rd_complex_plot = rd_complex_plot.astype(np.complex64, copy=False)
 
-    center_idx = rd_spectrum.shape[0] // 2
-    start_idx = max(0, center_idx - display_doppler_bins // 2)
-    end_idx = min(rd_spectrum.shape[0], start_idx + display_doppler_bins)
-    rd_spectrum = rd_spectrum[start_idx:end_idx, :]
-    rd_complex = rd_complex[start_idx:end_idx, :]
-
-    # Keep matrix orientation consistent with DSP output (no transpose)
-    rd_spectrum_plot = rd_spectrum
-    rd_complex_plot = rd_complex.astype(np.complex64, copy=False)
-
-    if DISPLAY_DOWNSAMPLE > 1:
-        rd_spectrum_plot = rd_spectrum_plot[::DISPLAY_DOWNSAMPLE, ::DISPLAY_DOWNSAMPLE]
-        rd_complex_plot = rd_complex_plot[::DISPLAY_DOWNSAMPLE, ::DISPLAY_DOWNSAMPLE]
+    cfar_points = np.empty((0, 2), dtype=np.int32)
+    cfar_hits = 0
+    cfar_shown_hits = 0
+    cfar_backend = "off"
+    cfar_stats = None
+    if cfar_enabled and rd_spectrum_plot.size > 0:
+        cfar_points, cfar_hits, cfar_shown_hits, cfar_backend, cfar_stats = run_ca_cfar_2d(
+            rd_spectrum_cfar,
+            active_row_start=cfar_row_offset,
+            active_row_stop=cfar_row_offset + rd_spectrum_plot.shape[0],
+            active_col_start=cfar_col_offset,
+            active_col_stop=cfar_col_offset + rd_spectrum_plot.shape[1],
+            dc_center_row=cfar_row_offset + (rd_spectrum_plot.shape[0] // 2),
+        )
+        if cfar_points.size > 0:
+            cfar_points = cfar_points - np.array([cfar_row_offset, cfar_col_offset], dtype=np.int32)
 
     md_spectrum = None
     md_extent = None
@@ -805,6 +1140,11 @@ def _process_one_raw_item(ch, raw_item):
         'raw': raw_frame,
         'rd': rd_spectrum_plot,
         'rd_complex': rd_complex_plot,
+        'cfar_points': cfar_points,
+        'cfar_hits': cfar_hits,
+        'cfar_shown_hits': cfar_shown_hits,
+        'cfar_backend': cfar_backend,
+        'cfar_stats': cfar_stats,
         'md': md_spectrum,
         'md_extent': md_extent,
         'dsp_time': dsp_time,
@@ -965,6 +1305,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clicked_doppler_idx = None
         self.rd_doppler_min = 0.0
         self.rd_doppler_span = 1.0
+        self.targets_window = QtWidgets.QWidget()
+        self.targets_window.setWindowTitle("OpenISAC Top Targets")
+        self.targets_window.resize(520, 220)
+        targets_layout = QtWidgets.QVBoxLayout(self.targets_window)
+        self.targets_text = QtWidgets.QPlainTextEdit()
+        self.targets_text.setReadOnly(True)
+        self.targets_text.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        targets_layout.addWidget(self.targets_text)
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
@@ -987,6 +1335,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rd_colorbar.setImageItem(self.rd_img, insert_in=self.rd_plot.plotItem)
 
         self.rd_click_marker = pg.ScatterPlotItem([], [], symbol='x', size=12, pen=pg.mkPen('w', width=2))
+        self.rd_cfar_marker = pg.ScatterPlotItem(
+            [], [], symbol='o', size=7,
+            pen=pg.mkPen('#00e5ff', width=1.5),
+            brush=pg.mkBrush(0, 229, 255, 70)
+        )
+        self.rd_plot.addItem(self.rd_cfar_marker)
         self.rd_plot.addItem(self.rd_click_marker)
         self.rd_plot.scene().sigMouseClicked.connect(self.on_rd_mouse_clicked)
 
@@ -1032,6 +1386,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_sender = QtWidgets.QLabel("Sender: Detecting...")
         self.lbl_params = QtWidgets.QLabel("Params: waiting...")
         self.lbl_buffer = QtWidgets.QLabel("MD Buffer: 0/5000")
+        self.lbl_cfar = QtWidgets.QLabel("CFAR: off")
         self.lbl_phase_sync = QtWidgets.QLabel("Phase Sync: waiting same frame across channels")
         self.lbl_phase_clicked = QtWidgets.QLabel("Phase@Clicked: click RD map to query")
         self.lbl_aoa_status = QtWidgets.QLabel("AoA: waiting calibration/click")
@@ -1043,6 +1398,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_sender,
             self.lbl_params,
             self.lbl_buffer,
+            self.lbl_cfar,
             self.lbl_phase_sync,
             self.lbl_phase_clicked,
             self.lbl_aoa_status,
@@ -1060,6 +1416,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_sender,
             self.lbl_params,
             self.lbl_buffer,
+            self.lbl_cfar,
             self.lbl_phase_sync,
             self.lbl_phase_clicked,
             self.lbl_aoa_status,
@@ -1067,6 +1424,8 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setFont(fixed_font)
             lbl.setFixedWidth(self._status_label_text_width)
             self._set_status_label_text(lbl, lbl.text())
+        self.targets_text.setFont(fixed_font)
+        self.targets_text.setPlainText("Top Targets: waiting CFAR detections")
 
         control_layout.addSpacing(16)
 
@@ -1134,6 +1493,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_md.clicked.connect(self.toggle_micro_doppler)
         self.btn_md.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
         control_layout.addWidget(self.btn_md)
+        control_layout.addSpacing(12)
+
+        self.btn_cfar = QtWidgets.QPushButton("CA-CFAR: OFF")
+        self.btn_cfar.setCheckable(True)
+        self.btn_cfar.setChecked(False)
+        self.btn_cfar.clicked.connect(self.toggle_cfar)
+        control_layout.addWidget(self.btn_cfar)
+
+        cfar_train_layout = QtWidgets.QHBoxLayout()
+        cfar_train_layout.addWidget(QtWidgets.QLabel("Train D:"))
+        self.txt_cfar_train_d = QtWidgets.QLineEdit(str(cfar_train_doppler))
+        cfar_train_layout.addWidget(self.txt_cfar_train_d)
+        cfar_train_layout.addWidget(QtWidgets.QLabel("Train R:"))
+        self.txt_cfar_train_r = QtWidgets.QLineEdit(str(cfar_train_range))
+        cfar_train_layout.addWidget(self.txt_cfar_train_r)
+        control_layout.addLayout(cfar_train_layout)
+
+        cfar_guard_layout = QtWidgets.QHBoxLayout()
+        cfar_guard_layout.addWidget(QtWidgets.QLabel("Guard D:"))
+        self.txt_cfar_guard_d = QtWidgets.QLineEdit(str(cfar_guard_doppler))
+        cfar_guard_layout.addWidget(self.txt_cfar_guard_d)
+        cfar_guard_layout.addWidget(QtWidgets.QLabel("Guard R:"))
+        self.txt_cfar_guard_r = QtWidgets.QLineEdit(str(cfar_guard_range))
+        cfar_guard_layout.addWidget(self.txt_cfar_guard_r)
+        control_layout.addLayout(cfar_guard_layout)
+
+        cfar_misc_layout = QtWidgets.QHBoxLayout()
+        cfar_misc_layout.addWidget(QtWidgets.QLabel("Alpha(dB):"))
+        self.txt_cfar_alpha = QtWidgets.QLineEdit(f"{cfar_alpha_db:.2f}")
+        cfar_misc_layout.addWidget(self.txt_cfar_alpha)
+        cfar_misc_layout.addWidget(QtWidgets.QLabel("Min R:"))
+        self.txt_cfar_min_range = QtWidgets.QLineEdit(str(cfar_min_range_bin))
+        cfar_misc_layout.addWidget(self.txt_cfar_min_range)
+        control_layout.addLayout(cfar_misc_layout)
+
+        cfar_dc_layout = QtWidgets.QHBoxLayout()
+        cfar_dc_layout.addWidget(QtWidgets.QLabel("DC Excl:"))
+        self.txt_cfar_dc_excl = QtWidgets.QLineEdit(str(cfar_dc_exclusion_bins))
+        btn_cfar_apply = QtWidgets.QPushButton("Apply CFAR")
+        btn_cfar_apply.clicked.connect(self.apply_cfar_settings)
+        cfar_dc_layout.addWidget(self.txt_cfar_dc_excl)
+        cfar_dc_layout.addWidget(btn_cfar_apply)
+        control_layout.addLayout(cfar_dc_layout)
         control_layout.addSpacing(20)
 
         # Alignment
@@ -1231,6 +1633,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_update_time = time.time()
         self.frame_count = 0
         self.total_dsp_time = 0.0
+        self.targets_window.show()
 
         threading.Thread(target=send_skip_command, daemon=True).start()
 
@@ -1363,6 +1766,35 @@ class MainWindow(QtWidgets.QMainWindow):
         show_micro_doppler = self.btn_md.isChecked()
         self.btn_md.setText(f"Micro-Doppler: {'ON' if show_micro_doppler else 'OFF'}")
 
+    def toggle_cfar(self):
+        global cfar_enabled
+        cfar_enabled = self.btn_cfar.isChecked()
+        self.btn_cfar.setText(f"CA-CFAR: {'ON' if cfar_enabled else 'OFF'}")
+        self.btn_cfar.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
+
+    def apply_cfar_settings(self):
+        global cfar_train_doppler, cfar_train_range
+        global cfar_guard_doppler, cfar_guard_range
+        global cfar_alpha_db, cfar_min_range_bin, cfar_dc_exclusion_bins
+        try:
+            cfar_train_doppler = max(0, int(self.txt_cfar_train_d.text()))
+            cfar_train_range = max(0, int(self.txt_cfar_train_r.text()))
+            cfar_guard_doppler = max(0, int(self.txt_cfar_guard_d.text()))
+            cfar_guard_range = max(0, int(self.txt_cfar_guard_r.text()))
+            cfar_alpha_db = float(self.txt_cfar_alpha.text())
+            cfar_min_range_bin = max(0, int(self.txt_cfar_min_range.text()))
+            cfar_dc_exclusion_bins = max(0, int(self.txt_cfar_dc_excl.text()))
+            alpha_linear = float(np.power(10.0, cfar_alpha_db / 10.0))
+            print(
+                "CA-CFAR updated: "
+                f"train=({cfar_train_doppler},{cfar_train_range}) "
+                f"guard=({cfar_guard_doppler},{cfar_guard_range}) "
+                f"alpha_db={cfar_alpha_db:.2f} alpha_linear={alpha_linear:.3f} "
+                f"min_range={cfar_min_range_bin} dc_excl={cfar_dc_exclusion_bins}"
+            )
+        except ValueError:
+            print("Invalid CA-CFAR settings")
+
     def apply_alignment(self):
         try:
             send_alignment_command(int(self.txt_delay.text()))
@@ -1461,14 +1893,19 @@ class MainWindow(QtWidgets.QMainWindow):
             or self.clicked_doppler_idx is None
         ):
             return None
+        return self._compute_phase_vectors_at(self.clicked_doppler_idx, self.clicked_range_idx)
+
+    def _compute_phase_vectors_at(self, doppler_idx, range_idx):
+        if not self.phase_ready or self.synced_rd_complex is None:
+            return None
 
         rd_ref = self.synced_rd_complex[0]
         if rd_ref is None or rd_ref.size == 0:
             return None
 
         rows, cols = rd_ref.shape
-        d_idx = int(np.clip(self.clicked_doppler_idx, 0, rows - 1))
-        r_idx = int(np.clip(self.clicked_range_idx, 0, cols - 1))
+        d_idx = int(np.clip(doppler_idx, 0, rows - 1))
+        r_idx = int(np.clip(range_idx, 0, cols - 1))
         doppler_bin = self.rd_doppler_min + d_idx
 
         z = np.asarray([rd[d_idx, r_idx] for rd in self.synced_rd_complex], dtype=np.complex64)
@@ -1511,6 +1948,62 @@ class MainWindow(QtWidgets.QMainWindow):
         sin_theta = np.clip(slope * wavelength / (2.0 * np.pi * ANTENNA_SPACING_M), -1.0, 1.0)
         aoa_deg = float(np.degrees(np.arcsin(sin_theta)))
         return aoa_deg, slope
+
+    def update_top_targets_text(self, ch, latest_disp):
+        if ch is None or latest_disp is None:
+            self.targets_text.setPlainText("Top Targets: N/A")
+            return
+
+        rd_data = latest_disp.get('rd')
+        cfar_points = latest_disp.get('cfar_points')
+        if rd_data is None or cfar_points is None or len(cfar_points) == 0:
+            self.targets_text.setPlainText("Top Targets: none")
+            return
+
+        clusters = cluster_detected_targets(cfar_points, rd_data)
+        if not clusters:
+            self.targets_text.setPlainText("Top Targets: none")
+            return
+
+        frame_id = latest_disp.get('frame_id', -1)
+        have_auto_aoa = (
+            len(CHANNELS) >= 2
+            and self.phase_ready
+            and self.synced_frame_id is not None
+            and int(frame_id) == int(self.synced_frame_id)
+        )
+
+        lines = [f"Top Targets CH{ch.ch_id + 1} F{frame_id}"]
+        for rank, cluster in enumerate(clusters[:5], start=1):
+            d_idx = int(cluster['peak_doppler_idx'])
+            r_idx = int(cluster['peak_range_idx'])
+            strength_db = float(cluster['peak_strength_db'])
+            doppler_bin = self.rd_doppler_min + d_idx
+            centroid_d = float(cluster['centroid_doppler_idx'])
+            centroid_r = float(cluster['centroid_range_idx'])
+            line = (
+                f"{rank}. R={r_idx:4d} D={doppler_bin:+5.0f}"
+                f" S={strength_db:6.1f}dB N={int(cluster['cluster_size']):2d}"
+                f" C=({centroid_r:5.1f},{centroid_d:5.1f})"
+            )
+
+            if have_auto_aoa:
+                phase_result = self._compute_phase_vectors_at(d_idx, r_idx)
+                if phase_result is not None:
+                    _, _, _, _, phase_comp = phase_result
+                    aoa_deg, _ = self._estimate_aoa_from_phase(phase_comp)
+                    if aoa_deg is not None:
+                        line += f" AoA={aoa_deg:+6.1f}deg"
+                    else:
+                        line += " AoA= n/a"
+                else:
+                    line += " AoA=wait"
+            elif len(CHANNELS) >= 2:
+                line += " AoA=wait"
+
+            lines.append(line)
+
+        self.targets_text.setPlainText("\n".join(lines))
 
     def toggle_mti(self):
         global enable_mti
@@ -1700,11 +2193,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_label_text(self.lbl_sender, "Sender: N/A")
             self._set_status_label_text(self.lbl_params, "Params: N/A")
             self._set_status_label_text(self.lbl_buffer, "MD Buffer: N/A")
+            self._set_status_label_text(self.lbl_cfar, "CFAR: N/A")
             self.rd_click_marker.setData([], [])
+            self.rd_cfar_marker.setData([], [])
+            self.update_top_targets_text(None, None)
         else:
             latest_disp = ch.current_display_data
             rd_data = latest_disp.get('rd')
             md_data = latest_disp.get('md')
+            cfar_points = latest_disp.get('cfar_points')
 
             if rd_data is not None:
                 self.rd_img.setImage(rd_data, autoLevels=False)
@@ -1712,6 +2209,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.rd_doppler_min = -0.5 * float(rows)
                 self.rd_doppler_span = float(rows)
                 self.rd_img.setRect(QtCore.QRectF(self.rd_doppler_min, 0.0, self.rd_doppler_span, float(cols)))
+                if cfar_points is not None and len(cfar_points) > 0:
+                    x_pts = self.rd_doppler_min + cfar_points[:, 0].astype(np.float32)
+                    y_pts = cfar_points[:, 1].astype(np.float32)
+                    self.rd_cfar_marker.setData(x_pts, y_pts)
+                else:
+                    self.rd_cfar_marker.setData([], [])
                 if self.clicked_range_idx is not None and self.clicked_doppler_idx is not None:
                     d_idx = int(np.clip(self.clicked_doppler_idx, 0, rows - 1))
                     r_idx = int(np.clip(self.clicked_range_idx, 0, cols - 1))
@@ -1750,6 +2253,29 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.lbl_buffer,
                     f"MD Buffer(CH{ch.ch_id + 1}): {len(ch.micro_doppler_buffer)}/{BUFFER_LENGTH}"
                 )
+            cfar_status = f"CFAR(CH{ch.ch_id + 1}): {'on' if cfar_enabled else 'off'}"
+            if cfar_enabled:
+                cfar_stats = latest_disp.get('cfar_stats') or {}
+                cfar_status += (
+                    f" raw={int(latest_disp.get('cfar_hits', 0))}"
+                    f" shown={int(latest_disp.get('cfar_shown_hits', 0))}"
+                    f" backend={latest_disp.get('cfar_backend', 'cpu')}"
+                    f" invalid={int(cfar_stats.get('invalid_cells', 0))}"
+                    f" nonpos={int(cfar_stats.get('nonpositive_cells', 0))}"
+                    f" nonfinite={int(cfar_stats.get('nonfinite_cells', 0))}"
+                    f" noise=[{cfar_stats.get('noise_min', 0.0):.2e},{cfar_stats.get('noise_max', 0.0):.2e}]"
+                )
+            cfar_status_short = f"CFAR(CH{ch.ch_id + 1}): {'on' if cfar_enabled else 'off'}"
+            if cfar_enabled:
+                cfar_stats = latest_disp.get('cfar_stats') or {}
+                cfar_status_short += (
+                    f" raw={int(latest_disp.get('cfar_hits', 0))}"
+                    f" sh={int(latest_disp.get('cfar_shown_hits', 0))}"
+                    f" inv={int(cfar_stats.get('invalid_cells', 0))}"
+                )
+            self._set_status_label_text(self.lbl_cfar, cfar_status_short)
+            self.lbl_cfar.setToolTip(cfar_status)
+            self.update_top_targets_text(ch, latest_disp)
 
         self.update_phase_probe_text()
         self.refresh_display_button_text()
@@ -1777,6 +2303,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         global running
         running = False
+        self.targets_window.close()
         print("Closing application...")
         event.accept()
 
