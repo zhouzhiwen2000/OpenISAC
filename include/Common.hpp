@@ -629,6 +629,7 @@ struct Config {
     int delay_adjust_step = 2;         // Delay adjustment step
     double reset_hold_s = 0.5;         // Time window of persistent invalid delay before forcing a hard reset
     int desired_peak_pos = 20;         // Desired delay peak position to include non-causal components
+    bool predictive_delay = true;      // Enable CFO-based predictive delay compensation during alignment/tracking
     double sample_rate = 50e6;         // Sample rate
     double bandwidth = 50e6;           // Bandwidth
     double center_freq = 2.4e9;        // Center frequency
@@ -1952,6 +1953,7 @@ inline Config make_default_demodulator_config() {
     cfg.vofa_debug_port = 12347;
     cfg.udp_output_ip = "";
     cfg.software_sync = true;
+    cfg.predictive_delay = true;
     cfg.akf_enable = true;
     cfg.akf_bootstrap_frames = 64;
     cfg.akf_innovation_window = 64;
@@ -2031,6 +2033,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "measurement_packets_per_point" << YAML::Value << cfg.measurement_packets_per_point;
     out << YAML::Key << "measurement_max_packets_per_frame" << YAML::Value << cfg.measurement_max_packets_per_frame;
     out << YAML::Key << "software_sync" << YAML::Value << cfg.software_sync;
+    out << YAML::Key << "predictive_delay" << YAML::Value << cfg.predictive_delay;
     out << YAML::Key << "hardware_sync" << YAML::Value << cfg.hardware_sync;
     out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
@@ -2147,6 +2150,7 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
             cfg.measurement_max_packets_per_frame = config["measurement_max_packets_per_frame"].as<size_t>();
         }
         if (config["software_sync"]) cfg.software_sync = config["software_sync"].as<bool>();
+        if (config["predictive_delay"]) cfg.predictive_delay = config["predictive_delay"].as<bool>();
         if (config["hardware_sync"]) cfg.hardware_sync = config["hardware_sync"].as<bool>();
         if (config["hardware_sync_tty"]) cfg.hardware_sync_tty = config["hardware_sync_tty"].as<std::string>();
         if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
@@ -2272,6 +2276,8 @@ inline void log_demodulator_sync_mode(const Config& cfg) {
     } else {
         LOG_G_WARN() << "Both software_sync and hardware_sync are disabled.";
     }
+    LOG_G_INFO() << "Predictive delay compensation "
+                 << (cfg.predictive_delay ? "enabled." : "disabled.");
 }
 
 inline void log_demodulator_agc_mode(const Config& cfg) {

@@ -609,6 +609,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `clock_source` | `string` | `internal/external/gpsdo` | 时钟源。 |
 | `wire_format_rx` | `string` | `sc16` | RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
 | `software_sync` | `bool` | `true` | 启用软件同步跟踪。 |
+| `predictive_delay` | `bool` | `true` | 启用基于 CFO 的预测性时延补偿，用于初始对齐和跟踪阶段的时延修正。仅当采样时钟和载波频率来自同一个参考源，且信号链路在 USRP 外没有二级变频时才应启用。 |
 | `hardware_sync` | `bool` | `false` | 启用硬件同步。 |
 | `hardware_sync_tty` | `string` | `/dev/ttyUSB0` | 硬件同步控制串口设备。 |
 | `ocxo_pi_switch_abs_error_ppm` | `float` | `0.0002` | 当 `error_ppm` 绝对值持续低于该阈值时切换到慢速 OCXO PI 阶段。 |

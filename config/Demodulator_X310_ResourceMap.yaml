@@ -36,6 +36,7 @@ wire_format_rx: sc16           # RX wire format: sc16/sc8
 
 # ===== Sync / Tracking =====
 software_sync: true            # Enable software sync tracking
+predictive_delay: true         # Enable CFO-based predictive delay compensation during alignment/tracking
 hardware_sync: false           # Enable hardware sync mode
 hardware_sync_tty: /dev/ttyUSB0  # Serial device used by hardware sync controller
 ocxo_pi_kp_fast: 30.0          # Fast-stage OCXO PI proportional gain (Kp)

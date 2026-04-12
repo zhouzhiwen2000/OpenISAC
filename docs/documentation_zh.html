@@ -866,6 +866,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left">启用软件同步跟踪。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>predictive_delay</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">启用基于 CFO 的预测性时延补偿，用于初始对齐和跟踪阶段的时延修正。仅当采样时钟和载波频率来自同一个参考源，且信号链路在 USRP 外没有二级变频时才应启用。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>hardware_sync</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>

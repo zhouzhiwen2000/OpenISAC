@@ -609,6 +609,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
 | `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
 | `software_sync` | `bool` | `true` | Enable software synchronization tracking. |
+| `predictive_delay` | `bool` | `true` | Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP. |
 | `hardware_sync` | `bool` | `false` | Enable hardware synchronization. |
 | `hardware_sync_tty` | `string` | `/dev/ttyUSB0` | TTY device used by hardware sync controller. |
 | `ocxo_pi_switch_abs_error_ppm` | `float` | `0.0002` | Switch to slow-stage OCXO PI when absolute `error_ppm` stays below this threshold. |

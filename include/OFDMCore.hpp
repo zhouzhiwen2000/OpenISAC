@@ -76,7 +76,8 @@ inline int _predictive_delay_samples_from_cfo(const Config& cfg,
                                               double actual_rx_rf_freq_hz,
                                               double actual_rx_dsp_freq_hz,
                                               int64_t now_ns) {
-    if (source_frame_time_ns < 0 || !std::isfinite(detected_freq_offset_hz) ||
+    if (!cfg.predictive_delay || source_frame_time_ns < 0 ||
+        !std::isfinite(detected_freq_offset_hz) ||
         cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0 ||
         std::abs(cfg.center_freq) <= 0.0) {
         return 0;

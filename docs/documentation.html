@@ -866,6 +866,12 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left">Enable software synchronization tracking.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>predictive_delay</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>hardware_sync</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>

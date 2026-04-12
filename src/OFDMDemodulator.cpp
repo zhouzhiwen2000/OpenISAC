@@ -1097,19 +1097,23 @@ private:
                 LOG_RT_INFO() << "CFO estimate: " << cfo << " Hz (using " << available_symbols
                               << " symbols)";
 
-                const int frame_start_offset_samples = max_pos - static_cast<int>(cfg_.sync_pos * symbol_len);
-                const int64_t detected_frame_time_ns =
-                    sync_time_ns +
-                    static_cast<int64_t>(std::llround(
-                        static_cast<double>(frame_start_offset_samples) * 1.0e9 / cfg_.sample_rate));
-                const int predictive_delay_samples =
-                    _predictive_delay_samples_from_cfo(
-                        cfg_,
-                        detected_frame_time_ns,
-                        cfo,
-                        current_rx_tune_.actual_rf_freq,
-                        current_rx_tune_.actual_dsp_freq,
-                        time_spec_to_ns(usrp_->get_time_now()));
+                int predictive_delay_samples = 0;
+                if (cfg_.predictive_delay) {
+                    const int frame_start_offset_samples =
+                        max_pos - static_cast<int>(cfg_.sync_pos * symbol_len);
+                    const int64_t detected_frame_time_ns =
+                        sync_time_ns +
+                        static_cast<int64_t>(std::llround(
+                            static_cast<double>(frame_start_offset_samples) * 1.0e9 / cfg_.sample_rate));
+                    predictive_delay_samples =
+                        _predictive_delay_samples_from_cfo(
+                            cfg_,
+                            detected_frame_time_ns,
+                            cfo,
+                            current_rx_tune_.actual_rf_freq,
+                            current_rx_tune_.actual_dsp_freq,
+                            time_spec_to_ns(usrp_->get_time_now()));
+                }
                 
                 // Perform initial CFO correction
                 if (cfg_.software_sync && allow_freq_adjust){
@@ -1557,14 +1561,17 @@ private:
             sync_symbol_td_count = sync_symbol_len;
         }
         auto delay_offset = sfo_estimator.get_sensing_delay_offset();
-        const int predictive_delay_samples =
-            _predictive_delay_samples_from_cfo(
-                cfg_,
-                frame.usrp_time_ns,
-                detected_freq_offset,
-                current_rx_tune_.actual_rf_freq,
-                current_rx_tune_.actual_dsp_freq,
-                time_spec_to_ns(usrp_->get_time_now()));
+        int predictive_delay_samples = 0;
+        if (cfg_.predictive_delay) {
+            predictive_delay_samples =
+                _predictive_delay_samples_from_cfo(
+                    cfg_,
+                    frame.usrp_time_ns,
+                    detected_freq_offset,
+                    current_rx_tune_.actual_rf_freq,
+                    current_rx_tune_.actual_dsp_freq,
+                    time_spec_to_ns(usrp_->get_time_now()));
+        }
         int delay_index_err =
             adjusted_index - cfg_.desired_peak_pos + predictive_delay_samples;
         if (allow_rx_gain_adjust) {
