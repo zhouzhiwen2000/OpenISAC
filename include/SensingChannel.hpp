@@ -28,12 +28,18 @@ class SensingChannel {
 public:
     using HeartbeatCallback = std::function<void(const std::string&, int)>;
     using CoreResolver = std::function<size_t(size_t)>;
+    using BatchResetRequester = std::function<void()>;
 
     SensingChannel(
         const Config& cfg,
         const SensingRxChannelConfig& channel_cfg,
+        const std::string& output_ip,
+        int output_port,
         uint32_t logical_id,
         std::atomic<bool>& running_ref,
+        std::shared_ptr<AggregatedSensingDataSender> aggregated_sender,
+        std::shared_ptr<std::atomic<uint64_t>> batch_reset_symbol,
+        BatchResetRequester batch_reset_requester,
         HeartbeatCallback heartbeat_sender,
         CoreResolver core_resolver
     );
@@ -145,7 +151,7 @@ private:
         fftwf_plan demod_fft_plan = nullptr;
         SensingProcessor sensing_core;
         std::unique_ptr<SensingProcessor> compact_sensing_core;
-        SensingDataSender sensing_sender;
+        SensingOutputDispatcher sensing_sender;
         AlignedFloatVector range_window;
         AlignedFloatVector compact_range_window;
         AlignedFloatVector doppler_window;
@@ -164,7 +170,13 @@ private:
         uint64_t prof_batch_count = 0;
         std::thread sensing_thread;
 
-        SensingComputeContext(const Config& cfg, const SensingRxChannelConfig& c);
+        SensingComputeContext(
+            const Config& cfg,
+            const SensingRxChannelConfig& c,
+            uint32_t logical_id,
+            std::shared_ptr<AggregatedSensingDataSender> aggregated_sender,
+            const std::string& output_ip,
+            int output_port);
         ~SensingComputeContext();
 
         SensingComputeContext(const SensingComputeContext&) = delete;
@@ -198,11 +210,18 @@ private:
         size_t symbol_count
     );
     void _apply_shared_sensing_if_due(uint64_t symbol_index);
+    void _request_shared_batch_reset();
+    void _apply_batch_reset_if_due(uint64_t frame_start_symbol_index);
 
     const Config& _cfg;
     std::atomic<bool>& _running_ref;
+    std::string _output_ip;
+    int _output_port = 0;
+    std::shared_ptr<std::atomic<uint64_t>> _shared_batch_reset_symbol;
+    BatchResetRequester _batch_reset_requester;
     HeartbeatCallback _heartbeat_sender;
     CoreResolver _core_resolver;
+    uint64_t _applied_batch_reset_symbol = 0;
 
     RxIoContext _rx_io;
     SensingComputeContext _compute;

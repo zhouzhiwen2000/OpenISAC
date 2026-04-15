@@ -571,8 +571,6 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `alignment` | `int` | `63` | 该通道对齐偏移（采样点）。 |
 | `rx_antenna` | `string` | `""` | 该通道天线口，如 `TX/RX`、`RX1`。 |
 | `enable_system_delay_estimation` | `bool` | `false` | 若为 `true`，该通道会在启动时执行一次基于 ZC 相关的系统时延估计，之后每隔 434 个帧再执行一次；同时继续消耗帧数据，但保持常规感知处理链停用。 |
-| `sensing_ip` | `string` | `127.0.0.1` | 该通道感知输出目标 IP。 |
-| `sensing_port` | `int` | `8888` | 该通道感知输出目标端口。 |
 
 说明：
 * 当 `sensing_rx_channels` 为空且 `sensing_rx_channel_count > 0` 时，程序按通道号 `0..N-1` 自动补齐默认项。

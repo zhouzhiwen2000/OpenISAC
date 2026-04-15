@@ -16,6 +16,7 @@
 #include <deque>
 #include <numeric>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -166,8 +167,6 @@ struct SensingRxChannelConfig {
     std::string rx_antenna = "";        // RX antenna for this channel (e.g., TX/RX, RX1)
     bool enable_system_delay_estimation = false; // Enable per-channel system delay estimation mode
     bool enable_sensing_output = true;  // Enable UDP output for this sensing channel
-    std::string sensing_ip = "127.0.0.1";
-    int sensing_port = 8888;
 };
 
 /**
@@ -1671,8 +1670,6 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
         out << YAML::Key << "rx_antenna" << YAML::Value << ch.rx_antenna;
         out << YAML::Key << "enable_system_delay_estimation" << YAML::Value << ch.enable_system_delay_estimation;
         out << YAML::Key << "enable_sensing_output" << YAML::Value << ch.enable_sensing_output;
-        out << YAML::Key << "sensing_ip" << YAML::Value << ch.sensing_ip;
-        out << YAML::Key << "sensing_port" << YAML::Value << ch.sensing_port;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;
@@ -1783,8 +1780,6 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
                 if (node["enable_sensing_output"]) {
                     ch.enable_sensing_output = node["enable_sensing_output"].as<bool>();
                 }
-                if (node["sensing_ip"]) ch.sensing_ip = node["sensing_ip"].as<std::string>();
-                if (node["sensing_port"]) ch.sensing_port = node["sensing_port"].as<int>();
                 cfg.sensing_rx_channels.push_back(ch);
             }
             if (!has_sensing_count_key) {
@@ -1876,8 +1871,6 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         ch.wire_format_rx = "";
         ch.enable_system_delay_estimation = false;
         ch.enable_sensing_output = cfg.mono_sensing_output_enabled;
-        ch.sensing_ip = cfg.mono_sensing_ip.empty() ? cfg.default_ip : cfg.mono_sensing_ip;
-        ch.sensing_port = cfg.mono_sensing_port;
         return ch;
     };
     if (cfg.sensing_rx_channels.empty() && cfg.sensing_rx_channel_count > 0) {
@@ -1902,16 +1895,16 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         }
     }
 
-    for (auto& ch : cfg.sensing_rx_channels) {
-        if (ch.sensing_ip.empty()) ch.sensing_ip = cfg.default_ip;
+    if (cfg.mono_sensing_ip.empty()) {
+        cfg.mono_sensing_ip = cfg.default_ip;
+    }
+    if (cfg.mono_sensing_port <= 0) {
+        LOG_G_WARN() << "mono_sensing_port=" << cfg.mono_sensing_port
+                     << " is invalid. Falling back to 8888.";
+        cfg.mono_sensing_port = 8888;
     }
 
     cfg.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing_rx_channels.size());
-    if (cfg.sensing_rx_channel_count > 0) {
-        const auto& ch0 = cfg.sensing_rx_channels.front();
-        cfg.mono_sensing_ip = ch0.sensing_ip;
-        cfg.mono_sensing_port = ch0.sensing_port;
-    }
 }
 
 inline Config make_default_demodulator_config() {
@@ -2743,6 +2736,19 @@ struct CompactSensingFrameHeader {
 static_assert(sizeof(CompactSensingFrameHeader) == 20, "CompactSensingFrameHeader size mismatch");
 inline constexpr uint32_t kCompactSensingMagicVersion = 0x43534D31u; // "CSM1"
 
+#pragma pack(push, 1)
+struct AggregatedSensingFrameHeader {
+    uint32_t magic_version = 0;
+    uint32_t channel_count = 0;
+    uint32_t channel_payload_bytes = 0;
+    uint32_t channel_mask = 0;
+    uint64_t frame_start_symbol_index = 0;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(AggregatedSensingFrameHeader) == 24, "AggregatedSensingFrameHeader size mismatch");
+inline constexpr uint32_t kAggregatedSensingMagicVersion = 0x41534731u; // "ASG1"
+
 enum class SensingViewerFrameFormat : uint32_t {
     DenseChannelBuffer = 0,
     CompactRaw = 1,
@@ -2750,12 +2756,13 @@ enum class SensingViewerFrameFormat : uint32_t {
     CompactSparse = 3
 };
 
-inline constexpr uint32_t kSensingViewerParamsVersion = 1u;
+inline constexpr uint32_t kSensingViewerParamsVersion = 2u;
 inline constexpr uint32_t kSensingViewerFlagCompactMask = 1u << 0;
 inline constexpr uint32_t kSensingViewerFlagCompactLocalDelayDoppler = 1u << 1;
 inline constexpr uint32_t kSensingViewerFlagSkipSensingFft = 1u << 2;
 inline constexpr uint32_t kSensingViewerFlagEnableMti = 1u << 3;
 inline constexpr uint32_t kSensingViewerFlagBistatic = 1u << 4;
+inline constexpr uint32_t kSensingViewerFlagAggregatedStream = 1u << 5;
 
 #pragma pack(push, 1)
 struct SensingViewerParamsPacket {
@@ -2772,10 +2779,12 @@ struct SensingViewerParamsPacket {
     uint32_t range_fft_size = 0;
     uint32_t doppler_fft_size = 0;
     uint32_t compact_mask_hash = 0;
+    uint32_t stream_channel_count = 0;
+    uint32_t stream_channel_mask = 0;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SensingViewerParamsPacket) == 52, "SensingViewerParamsPacket size mismatch");
+static_assert(sizeof(SensingViewerParamsPacket) == 60, "SensingViewerParamsPacket size mismatch");
 
 inline uint32_t sensing_viewer_active_flags(
     const Config& cfg,
@@ -2904,13 +2913,20 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     const Config& cfg,
     bool skip_sensing_fft,
     bool enable_mti,
-    bool bistatic = false)
+    bool bistatic = false,
+    uint32_t stream_channel_count = 1,
+    uint32_t stream_channel_mask = 0x1u,
+    bool aggregated_stream = false)
 {
     SensingViewerParamsPacket packet{};
     std::memcpy(packet.header, "CTRL", 4);
     std::memcpy(packet.command, "PARM", 4);
     packet.version = htonl(kSensingViewerParamsVersion);
-    packet.flags = htonl(sensing_viewer_active_flags(cfg, skip_sensing_fft, enable_mti, bistatic));
+    uint32_t flags = sensing_viewer_active_flags(cfg, skip_sensing_fft, enable_mti, bistatic);
+    if (aggregated_stream) {
+        flags |= kSensingViewerFlagAggregatedStream;
+    }
+    packet.flags = htonl(flags);
     packet.frame_format = htonl(static_cast<uint32_t>(sensing_viewer_frame_format(cfg, skip_sensing_fft)));
     packet.wire_rows = htonl(static_cast<uint32_t>(sensing_viewer_wire_rows(cfg, skip_sensing_fft)));
     packet.wire_cols = htonl(static_cast<uint32_t>(sensing_viewer_wire_cols(cfg, skip_sensing_fft)));
@@ -2920,6 +2936,8 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     packet.range_fft_size = htonl(static_cast<uint32_t>(cfg.range_fft_size));
     packet.doppler_fft_size = htonl(static_cast<uint32_t>(cfg.doppler_fft_size));
     packet.compact_mask_hash = htonl(sensing_viewer_mask_hash(cfg));
+    packet.stream_channel_count = htonl(stream_channel_count);
+    packet.stream_channel_mask = htonl(stream_channel_mask);
     return packet;
 }
 
@@ -3377,6 +3395,475 @@ private:
     std::atomic<bool> _running{false};
     SPSCRingBuffer<FrameData> _data_queue;
     std::thread _send_thread;
+};
+
+/**
+ * @brief Aggregates per-channel sensing frames and emits a single UDP stream.
+ *
+ * Each channel owns one SPSC queue into this sender. The background thread
+ * waits for matching `first_symbol_index` values across all enabled channels,
+ * serializes the per-channel payloads in logical-channel order, and sends a
+ * single aggregated chunk stream to the viewer.
+ */
+class AggregatedSensingDataSender : public UdpBaseSender {
+public:
+    using FrameData = SensingDataSender::FrameData;
+
+    AggregatedSensingDataSender(
+        const std::string& ip,
+        int port,
+        std::vector<uint32_t> channel_ids,
+        bool enabled = true,
+        size_t per_channel_queue_size = 8)
+        : UdpBaseSender(ip, static_cast<uint16_t>(port)),
+          _enabled(enabled && !channel_ids.empty()),
+          _channel_ids(std::move(channel_ids)),
+          _channel_queues(_channel_ids.size())
+    {
+        uint32_t max_channel_id = 0;
+        for (uint32_t channel_id : _channel_ids) {
+            max_channel_id = std::max(max_channel_id, channel_id);
+            if (channel_id < 32) {
+                _channel_mask |= (1u << channel_id);
+            }
+        }
+        _channel_index_by_id.assign(static_cast<size_t>(max_channel_id) + 1, -1);
+        for (size_t i = 0; i < _channel_ids.size(); ++i) {
+            _channel_queues[i].reset(per_channel_queue_size, []() {
+                return FrameData{};
+            });
+            _channel_index_by_id[_channel_ids[i]] = static_cast<int32_t>(i);
+        }
+    }
+
+    ~AggregatedSensingDataSender() {
+        stop();
+    }
+
+    void start() {
+        if (!_enabled) return;
+        if (_running.exchange(true, std::memory_order_acq_rel)) return;
+        _send_thread = std::thread(&AggregatedSensingDataSender::run, this);
+    }
+
+    void stop() {
+        if (!_running.exchange(false, std::memory_order_acq_rel)) return;
+        if (_send_thread.joinable()) {
+            _send_thread.join();
+        }
+    }
+
+    uint32_t channel_count() const {
+        return static_cast<uint32_t>(_channel_ids.size());
+    }
+
+    uint32_t channel_mask() const {
+        return _channel_mask;
+    }
+
+    bool has_channel(uint32_t channel_id) const {
+        return _channel_index(channel_id) >= 0;
+    }
+
+    void push_data(uint32_t channel_id, const AlignedVector& data, uint64_t first_symbol_index) {
+        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        FrameData frame_data;
+        frame_data.data = data;
+        frame_data.first_symbol_index = first_symbol_index;
+        _queue_frame(channel_id, std::move(frame_data));
+    }
+
+    void push_data(uint32_t channel_id, AlignedVector&& data, uint64_t first_symbol_index) {
+        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        FrameData frame_data;
+        frame_data.data = std::move(data);
+        frame_data.first_symbol_index = first_symbol_index;
+        _queue_frame(channel_id, std::move(frame_data));
+    }
+
+    void push_compact_data(
+        uint32_t channel_id,
+        const AlignedVector& data,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        FrameData frame_data;
+        frame_data.data = data;
+        frame_data.first_symbol_index = frame_start_symbol_index;
+        frame_data.format = SensingDataSender::PayloadFormat::CompactMask;
+        frame_data.mask_hash = mask_hash;
+        _queue_frame(channel_id, std::move(frame_data));
+    }
+
+    void push_compact_data(
+        uint32_t channel_id,
+        AlignedVector&& data,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        FrameData frame_data;
+        frame_data.data = std::move(data);
+        frame_data.first_symbol_index = frame_start_symbol_index;
+        frame_data.format = SensingDataSender::PayloadFormat::CompactMask;
+        frame_data.mask_hash = mask_hash;
+        _queue_frame(channel_id, std::move(frame_data));
+    }
+
+    void push_external(
+        uint32_t channel_id,
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint64_t first_symbol_index)
+    {
+        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        FrameData frame_data;
+        frame_data.owner = std::move(owner);
+        frame_data.external_data = data;
+        frame_data.external_size = count;
+        frame_data.first_symbol_index = first_symbol_index;
+        _queue_frame(channel_id, std::move(frame_data));
+    }
+
+    void push_compact_external(
+        uint32_t channel_id,
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        FrameData frame_data;
+        frame_data.owner = std::move(owner);
+        frame_data.external_data = data;
+        frame_data.external_size = count;
+        frame_data.first_symbol_index = frame_start_symbol_index;
+        frame_data.format = SensingDataSender::PayloadFormat::CompactMask;
+        frame_data.mask_hash = mask_hash;
+        _queue_frame(channel_id, std::move(frame_data));
+    }
+
+private:
+    struct PendingAggregateFrame {
+        std::vector<FrameData> frames;
+        std::vector<uint8_t> present;
+        size_t received_channels = 0;
+        PendingAggregateFrame() = default;
+        explicit PendingAggregateFrame(size_t channel_count)
+            : frames(channel_count),
+              present(channel_count, 0) {}
+    };
+
+    static constexpr size_t kChunkSizeBytes = 60000;
+    static constexpr size_t kMaxPendingAggregateFrames = 4;
+
+    int32_t _channel_index(uint32_t channel_id) const {
+        if (channel_id >= _channel_index_by_id.size()) {
+            return -1;
+        }
+        return _channel_index_by_id[channel_id];
+    }
+
+    void _queue_frame(uint32_t channel_id, FrameData&& frame_data) {
+        const int32_t channel_index = _channel_index(channel_id);
+        if (channel_index < 0) {
+            LOG_G_WARN() << "Ignoring aggregated sensing frame for unknown channel id=" << channel_id;
+            return;
+        }
+        auto& queue = _channel_queues[static_cast<size_t>(channel_index)];
+        spsc_wait_push(queue, std::move(frame_data), [this]() {
+            return !_running.load(std::memory_order_acquire);
+        });
+    }
+
+    static size_t _payload_complex_count(const FrameData& frame_data) {
+        if (frame_data.external_data != nullptr && frame_data.external_size > 0) {
+            return frame_data.external_size;
+        }
+        return frame_data.data.size();
+    }
+
+    static const std::complex<float>* _payload_data_ptr(const FrameData& frame_data) {
+        if (frame_data.external_data != nullptr && frame_data.external_size > 0) {
+            return frame_data.external_data;
+        }
+        return frame_data.data.data();
+    }
+
+    static size_t _wire_payload_bytes(const FrameData& frame_data) {
+        const size_t complex_bytes = _payload_complex_count(frame_data) * sizeof(std::complex<float>);
+        if (frame_data.format == SensingDataSender::PayloadFormat::CompactMask) {
+            return sizeof(CompactSensingFrameHeader) + complex_bytes;
+        }
+        return complex_bytes;
+    }
+
+    static void _append_wire_payload(std::vector<uint8_t>& packet, const FrameData& frame_data) {
+        const auto* payload_data = reinterpret_cast<const uint8_t*>(_payload_data_ptr(frame_data));
+        const size_t payload_complex_count = _payload_complex_count(frame_data);
+        const size_t payload_bytes = payload_complex_count * sizeof(std::complex<float>);
+        if (frame_data.format == SensingDataSender::PayloadFormat::CompactMask) {
+            CompactSensingFrameHeader compact_header{};
+            compact_header.magic_version = htonl(kCompactSensingMagicVersion);
+            compact_header.mask_hash = htonl(frame_data.mask_hash);
+            compact_header.re_count = htonl(static_cast<uint32_t>(payload_complex_count));
+            compact_header.frame_start_symbol_index = host_to_network_u64(frame_data.first_symbol_index);
+            const auto* header_bytes = reinterpret_cast<const uint8_t*>(&compact_header);
+            packet.insert(packet.end(), header_bytes, header_bytes + sizeof(compact_header));
+        }
+        packet.insert(packet.end(), payload_data, payload_data + payload_bytes);
+    }
+
+    void _drop_oldest_pending_frame() {
+        if (_pending_frames.empty()) {
+            return;
+        }
+        const auto it = _pending_frames.begin();
+        LOG_RT_WARN_HZ(5) << "[Sensing Aggregate] dropping incomplete frame start_symbol="
+                          << it->first << " after collecting "
+                          << it->second.received_channels << "/" << _channel_ids.size()
+                          << " channels";
+        _pending_frames.erase(it);
+    }
+
+    void _send_pending_frame(uint64_t frame_start_symbol_index, const PendingAggregateFrame& pending) {
+        if (pending.frames.empty()) {
+            return;
+        }
+
+        const size_t channel_count = _channel_ids.size();
+        const size_t channel_payload_bytes = _wire_payload_bytes(pending.frames.front());
+        std::vector<uint8_t> payload;
+        payload.reserve(sizeof(AggregatedSensingFrameHeader) + channel_count * channel_payload_bytes);
+
+        AggregatedSensingFrameHeader aggregate_header{};
+        aggregate_header.magic_version = htonl(kAggregatedSensingMagicVersion);
+        aggregate_header.channel_count = htonl(static_cast<uint32_t>(channel_count));
+        aggregate_header.channel_payload_bytes = htonl(static_cast<uint32_t>(channel_payload_bytes));
+        aggregate_header.channel_mask = htonl(_channel_mask);
+        aggregate_header.frame_start_symbol_index = host_to_network_u64(frame_start_symbol_index);
+        const auto* header_bytes = reinterpret_cast<const uint8_t*>(&aggregate_header);
+        payload.insert(payload.end(), header_bytes, header_bytes + sizeof(aggregate_header));
+
+        for (size_t i = 0; i < channel_count; ++i) {
+            const size_t payload_bytes = _wire_payload_bytes(pending.frames[i]);
+            if (payload_bytes != channel_payload_bytes) {
+                LOG_G_WARN() << "[Sensing Aggregate] channel payload size mismatch for frame "
+                             << frame_start_symbol_index << ": expected " << channel_payload_bytes
+                             << " bytes, got " << payload_bytes << " bytes on channel "
+                             << _channel_ids[i];
+                return;
+            }
+            _append_wire_payload(payload, pending.frames[i]);
+        }
+
+        const size_t total_chunks = (payload.size() + kChunkSizeBytes - 1) / kChunkSizeBytes;
+        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
+        for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
+            uint32_t header[3] = {
+                htonl(frame_id),
+                htonl(static_cast<uint32_t>(total_chunks)),
+                htonl(static_cast<uint32_t>(chunk_idx))
+            };
+            const size_t offset = chunk_idx * kChunkSizeBytes;
+            const size_t remaining = payload.size() - offset;
+            const size_t current_chunk_size = std::min(remaining, kChunkSizeBytes);
+            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
+            std::memcpy(packet.data(), header, sizeof(header));
+            std::memcpy(packet.data() + sizeof(header), payload.data() + offset, current_chunk_size);
+            try {
+                send_raw(packet.data(), packet.size());
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "Aggregated sensing UDP send error: " << e.what();
+            }
+        }
+    }
+
+    void run() {
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
+        uhd::set_thread_priority_safe();
+        SPSCBackoff backoff;
+
+        while (_running.load(std::memory_order_acquire)) {
+            bool did_work = false;
+            for (size_t channel_index = 0; channel_index < _channel_queues.size(); ++channel_index) {
+                FrameData frame_data;
+                if (!_channel_queues[channel_index].try_pop(frame_data)) {
+                    continue;
+                }
+
+                did_work = true;
+                const uint64_t frame_start_symbol_index = frame_data.first_symbol_index;
+                auto [it, inserted] = _pending_frames.emplace(
+                    frame_start_symbol_index,
+                    PendingAggregateFrame(_channel_queues.size()));
+                auto& pending = it->second;
+                if (!pending.present[channel_index]) {
+                    pending.present[channel_index] = 1;
+                    pending.received_channels++;
+                }
+                pending.frames[channel_index] = std::move(frame_data);
+
+                if (pending.received_channels == _channel_queues.size()) {
+                    _send_pending_frame(frame_start_symbol_index, pending);
+                    _pending_frames.erase(it);
+                }
+            }
+
+            while (_pending_frames.size() > kMaxPendingAggregateFrames) {
+                _drop_oldest_pending_frame();
+            }
+
+            if (!did_work) {
+                backoff.pause();
+            } else {
+                backoff.reset();
+            }
+        }
+
+        _pending_frames.clear();
+    }
+
+    bool _enabled = true;
+    std::vector<uint32_t> _channel_ids;
+    std::vector<int32_t> _channel_index_by_id;
+    uint32_t _channel_mask = 0;
+    std::vector<SPSCRingBuffer<FrameData>> _channel_queues;
+    std::map<uint64_t, PendingAggregateFrame> _pending_frames;
+    std::atomic<bool> _running{false};
+    std::thread _send_thread;
+};
+
+class SensingOutputDispatcher {
+public:
+    SensingOutputDispatcher(
+        const std::string& ip,
+        int port,
+        bool enabled,
+        uint32_t channel_id = 0,
+        std::shared_ptr<AggregatedSensingDataSender> aggregated_sender = nullptr)
+        : _enabled(enabled),
+          _channel_id(channel_id),
+          _aggregated_sender(std::move(aggregated_sender))
+    {
+        if (_aggregated_sender == nullptr) {
+            _direct_sender = std::make_unique<SensingDataSender>(ip, port, enabled);
+        }
+    }
+
+    void start() {
+        if (_direct_sender) {
+            _direct_sender->start();
+        }
+    }
+
+    void stop() {
+        if (_direct_sender) {
+            _direct_sender->stop();
+        }
+    }
+
+    void push_data(const AlignedVector& data, uint64_t first_symbol_index) {
+        if (!_enabled) return;
+        if (_aggregated_sender) {
+            _aggregated_sender->push_data(_channel_id, data, first_symbol_index);
+            return;
+        }
+        _direct_sender->push_data(data, first_symbol_index);
+    }
+
+    void push_data(AlignedVector&& data, uint64_t first_symbol_index) {
+        if (!_enabled) return;
+        if (_aggregated_sender) {
+            _aggregated_sender->push_data(_channel_id, std::move(data), first_symbol_index);
+            return;
+        }
+        _direct_sender->push_data(std::move(data), first_symbol_index);
+    }
+
+    void push_compact_data(
+        const AlignedVector& data,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled) return;
+        if (_aggregated_sender) {
+            _aggregated_sender->push_compact_data(_channel_id, data, mask_hash, frame_start_symbol_index);
+            return;
+        }
+        _direct_sender->push_compact_data(data, mask_hash, frame_start_symbol_index);
+    }
+
+    void push_compact_data(
+        AlignedVector&& data,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled) return;
+        if (_aggregated_sender) {
+            _aggregated_sender->push_compact_data(
+                _channel_id,
+                std::move(data),
+                mask_hash,
+                frame_start_symbol_index);
+            return;
+        }
+        _direct_sender->push_compact_data(std::move(data), mask_hash, frame_start_symbol_index);
+    }
+
+    void push_external(
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint64_t first_symbol_index)
+    {
+        if (!_enabled) return;
+        if (_aggregated_sender) {
+            _aggregated_sender->push_external(
+                _channel_id,
+                std::move(owner),
+                data,
+                count,
+                first_symbol_index);
+            return;
+        }
+        _direct_sender->push_external(std::move(owner), data, count, first_symbol_index);
+    }
+
+    void push_compact_external(
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint32_t mask_hash,
+        uint64_t frame_start_symbol_index)
+    {
+        if (!_enabled) return;
+        if (_aggregated_sender) {
+            _aggregated_sender->push_compact_external(
+                _channel_id,
+                std::move(owner),
+                data,
+                count,
+                mask_hash,
+                frame_start_symbol_index);
+            return;
+        }
+        _direct_sender->push_compact_external(
+            std::move(owner),
+            data,
+            count,
+            mask_hash,
+            frame_start_symbol_index);
+    }
+
+private:
+    bool _enabled = true;
+    uint32_t _channel_id = 0;
+    std::shared_ptr<AggregatedSensingDataSender> _aggregated_sender;
+    std::unique_ptr<SensingDataSender> _direct_sender;
 };
 
 /**

@@ -61,8 +61,6 @@ FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
                     "comment": "If true, this channel runs delay estimation only and disables sensing pipeline",
                     "kind": "bool",
                 },
-                {"key": "sensing_ip", "comment": "Per-channel sensing output IP", "kind": "string"},
-                {"key": "sensing_port", "comment": "Per-channel sensing output port", "kind": "int"},
             ],
         },
     },
@@ -629,19 +627,8 @@ def default_sensing_channel_item(
         "alignment": 63,
         "rx_antenna": "RX2",
         "enable_system_delay_estimation": False,
-        "sensing_ip": "127.0.0.1",
-        "sensing_port": 8888,
     }
     base_usrp_channel = int_or_default(base.get("usrp_channel"), fallback_item["usrp_channel"])
-    default_ip = str(
-        base.get("sensing_ip")
-        or data.get("mono_sensing_ip")
-        or data.get("default_ip")
-        or fallback_item["sensing_ip"]
-    )
-    sensing_port_raw = base.get("sensing_port")
-    if sensing_port_raw in (None, ""):
-        sensing_port_raw = data.get("mono_sensing_port", fallback_item["sensing_port"])
     usrp_channel = base_usrp_channel if preserve_usrp_channel else base_usrp_channel + index
 
     return {
@@ -657,8 +644,6 @@ def default_sensing_channel_item(
             "enable_system_delay_estimation",
             fallback_item["enable_system_delay_estimation"],
         )),
-        "sensing_ip": default_ip,
-        "sensing_port": int_or_default(sensing_port_raw, fallback_item["sensing_port"]),
     }
 
 

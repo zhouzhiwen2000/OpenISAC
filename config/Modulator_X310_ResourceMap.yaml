@@ -59,8 +59,6 @@ sensing_rx_channels:
     alignment: 63              # Per-channel timing alignment offset (samples)
     rx_antenna: "RX2"          # RX antenna port (e.g. RX1/RX2/TX/RX)
     enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
-    sensing_ip: "127.0.0.1"    # Per-channel sensing output IP
-    sensing_port: 8888         # Per-channel sensing output port
 
 # ===== Runtime / Debug =====
 tx_circular_buffer_size: 32    # Modulator frame circular buffer capacity

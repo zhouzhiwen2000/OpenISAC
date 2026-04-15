@@ -318,11 +318,17 @@ SensingChannel::RxIoContext::RxIoContext(const Config& cfg, const SensingRxChann
 
 SensingChannel::RxIoContext::~RxIoContext() = default;
 
-SensingChannel::SensingComputeContext::SensingComputeContext(const Config& cfg, const SensingRxChannelConfig& c)
+SensingChannel::SensingComputeContext::SensingComputeContext(
+    const Config& cfg,
+    const SensingRxChannelConfig& c,
+    uint32_t logical_id,
+    std::shared_ptr<AggregatedSensingDataSender> aggregated_sender,
+    const std::string& output_ip,
+    int output_port)
   : demod_fft_in(cfg.fft_size),
     demod_fft_out(cfg.fft_size),
     sensing_core({cfg.fft_size, std::max(cfg.range_fft_size, cfg.fft_size), cfg.doppler_fft_size, sensing_symbol_capacity(cfg)}),
-    sensing_sender(c.sensing_ip, c.sensing_port, c.enable_sensing_output),
+    sensing_sender(output_ip, output_port, c.enable_sensing_output, logical_id, std::move(aggregated_sender)),
     next_hb_time(std::chrono::steady_clock::now()) {
     accumulated_rx_symbols.reserve(cfg.sensing_symbol_num);
     accumulated_tx_symbols.reserve(cfg.sensing_symbol_num);
@@ -411,17 +417,26 @@ SensingChannel::SensingComputeContext::~SensingComputeContext() {
 SensingChannel::SensingChannel(
     const Config& cfg,
     const SensingRxChannelConfig& channel_cfg,
+    const std::string& output_ip,
+    int output_port,
     uint32_t logical_id,
     std::atomic<bool>& running_ref,
+    std::shared_ptr<AggregatedSensingDataSender> aggregated_sender,
+    std::shared_ptr<std::atomic<uint64_t>> batch_reset_symbol,
+    BatchResetRequester batch_reset_requester,
     HeartbeatCallback heartbeat_sender,
     CoreResolver core_resolver
 )
   : _cfg(cfg),
     _running_ref(running_ref),
+    _output_ip(output_ip),
+    _output_port(output_port),
+    _shared_batch_reset_symbol(std::move(batch_reset_symbol)),
+    _batch_reset_requester(std::move(batch_reset_requester)),
     _heartbeat_sender(std::move(heartbeat_sender)),
     _core_resolver(std::move(core_resolver)),
     _rx_io(cfg, channel_cfg, logical_id),
-    _compute(cfg, channel_cfg) {
+    _compute(cfg, channel_cfg, logical_id, std::move(aggregated_sender), _output_ip, _output_port) {
     _rx_io.paired_queue->set_rx_recycler([this](AlignedVector&& frame) {
         this->_rx_io.rx_frame_pool.release(std::move(frame));
     });
@@ -518,6 +533,7 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
     if (!_compute.bistatic_active) {
         return;
     }
+    _apply_batch_reset_if_due(frame_start_symbol_index);
     const auto now = std::chrono::steady_clock::now();
     _send_heartbeat_if_due(now);
     if (_compute.sensing_pipeline_disabled_by_mode) {
@@ -622,6 +638,7 @@ void SensingChannel::set_alignment(int32_t samples) {
     }
     _rx_io.discard_samples.store(samples);
     _rx_io.rx_state.store(RxState::ALIGNMENT);
+    _request_shared_batch_reset();
     LOG_G_INFO() << "Set ALGN for channel " << _rx_io.logical_id
               << ": " << samples << " samples";
 }
@@ -651,6 +668,42 @@ void SensingChannel::apply_shared_cfg(const SharedSensingRuntime& snapshot) {
     std::lock_guard<std::mutex> lock(_shared_cfg_mutex);
     _pending_shared_cfg = snapshot;
     _has_pending_shared_cfg = true;
+}
+
+void SensingChannel::_request_shared_batch_reset() {
+    if (_batch_reset_requester) {
+        _batch_reset_requester();
+    }
+}
+
+void SensingChannel::_apply_batch_reset_if_due(uint64_t frame_start_symbol_index) {
+    if (!_shared_batch_reset_symbol) {
+        return;
+    }
+    const uint64_t reset_symbol = _shared_batch_reset_symbol->load(std::memory_order_relaxed);
+    if (reset_symbol == 0 || reset_symbol == _applied_batch_reset_symbol) {
+        return;
+    }
+    if (frame_start_symbol_index < reset_symbol) {
+        return;
+    }
+
+    _compute.accumulated_rx_symbols.clear();
+    _compute.accumulated_tx_symbols.clear();
+    _compute.compact_selected_tx_symbols.clear();
+    _compute.pending_batch_gather_us = 0.0;
+    _compute.batch_has_first_symbol = false;
+    _compute.current_batch_first_symbol = frame_start_symbol_index;
+    _compute.next_symbol_to_sample = frame_start_symbol_index;
+    _compute.sensing_core.clear_channel_buffer();
+    if (_compute.compact_sensing_core) {
+        _compute.compact_sensing_core->clear_channel_buffer();
+    }
+
+    _applied_batch_reset_symbol = reset_symbol;
+    LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
+                 << "] applied shared batch reset at frame_start_symbol="
+                 << frame_start_symbol_index;
 }
 
 uint32_t SensingChannel::logical_id() const {
@@ -1022,9 +1075,8 @@ void SensingChannel::_handle_normal_rx() {
                               << ", target_ALGN=" << desired_alignment
                               << ", last_ALGN=" << current_alignment
                               << ", correction=" << correction;
+            // Keep the current frame paired; apply the corrected ALGN starting from the next frame.
             set_alignment(correction);
-            _rx_io.rx_frame_pool.release(std::move(rx_frame));
-            return;
         }
     }
 
@@ -1062,6 +1114,8 @@ void SensingChannel::_sensing_loop() {
         if (!_rx_io.paired_queue->pop_pair(rx_frame_data, tx_frame)) {
             break;
         }
+
+        _apply_batch_reset_if_due(tx_frame.frame_start_symbol_index);
 
         const auto now = std::chrono::steady_clock::now();
         _send_heartbeat_if_due(now);
@@ -1146,7 +1200,7 @@ void SensingChannel::_send_heartbeat_if_due(const std::chrono::steady_clock::tim
         return;
     }
     if (_heartbeat_sender) {
-        _heartbeat_sender(_rx_io.channel_cfg.sensing_ip, _rx_io.channel_cfg.sensing_port);
+        _heartbeat_sender(_output_ip, _output_port);
     }
     _compute.next_hb_time = now + std::chrono::seconds(1);
 }

@@ -656,18 +656,6 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>false</code></td>
 <td style="text-align:left">若为 <code>true</code>，该通道会在启动时执行一次基于 ZC 相关的系统时延估计，之后每隔 434 个帧再执行一次；同时继续消耗帧数据，但保持常规感知处理链停用。</td>
 </tr>
-<tr>
-<td style="text-align:left"><code>sensing_ip</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">该通道感知输出目标 IP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sensing_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8888</code></td>
-<td style="text-align:left">该通道感知输出目标端口。</td>
-</tr>
 </tbody>
 </table>
 <p>说明：</p>

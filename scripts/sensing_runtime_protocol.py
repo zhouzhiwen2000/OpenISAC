@@ -13,6 +13,7 @@ READY_COMMAND = b"RDY "
 PARAMS_COMMAND = b"PARM"
 
 COMPACT_MAGIC_VERSION = 0x43534D31  # "CSM1"
+AGGREGATE_MAGIC_VERSION = 0x41534731  # "ASG1"
 
 FRAME_FORMAT_DENSE_CHANNEL_BUFFER = 0
 FRAME_FORMAT_COMPACT_RAW = 1
@@ -24,9 +25,12 @@ FLAG_COMPACT_LOCAL_DELAY_DOPPLER = 1 << 1
 FLAG_SKIP_SENSING_FFT = 1 << 2
 FLAG_ENABLE_MTI = 1 << 3
 FLAG_BISTATIC = 1 << 4
+FLAG_AGGREGATED_STREAM = 1 << 5
 
-PARAMS_PACKET_STRUCT = struct.Struct("!4s4s11I")
+PARAMS_PACKET_STRUCT_V1 = struct.Struct("!4s4s11I")
+PARAMS_PACKET_STRUCT = struct.Struct("!4s4s13I")
 COMPACT_HEADER_STRUCT = struct.Struct("!IIIQ")
+AGGREGATE_HEADER_STRUCT = struct.Struct("!IIIIQ")
 REQUEST_PACKET_STRUCT = struct.Struct("!4s4si")
 
 
@@ -43,6 +47,8 @@ class ViewerRuntimeParams:
     range_fft_size: int = 1024
     doppler_fft_size: int = 100
     compact_mask_hash: int = 0
+    stream_channel_count: int = 1
+    stream_channel_mask: int = 1
 
     def is_compact_mask(self) -> bool:
         return bool(self.flags & FLAG_COMPACT_MASK)
@@ -70,6 +76,9 @@ class ViewerRuntimeParams:
 
     def skip_sensing_fft(self) -> bool:
         return bool(self.flags & FLAG_SKIP_SENSING_FFT)
+
+    def aggregated_stream(self) -> bool:
+        return bool(self.flags & FLAG_AGGREGATED_STREAM)
 
     def max_strd_value(self) -> int:
         return max(1, int(self.frame_symbol_period))
@@ -99,6 +108,8 @@ class ViewerRuntimeParams:
             extras.append("regular")
         if self.skip_sensing_fft():
             extras.append("skip=1")
+        if self.aggregated_stream():
+            extras.append(f"agg={max(1, int(self.stream_channel_count))}ch")
         return (
             f"{fmt} wire={self.wire_rows}x{self.wire_cols} "
             f"active={self.active_rows}x{self.active_cols} "
@@ -120,23 +131,44 @@ def build_params_request(value: int = 0) -> bytes:
 
 
 def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
-    if len(data) < PARAMS_PACKET_STRUCT.size:
+    if len(data) < PARAMS_PACKET_STRUCT_V1.size:
         return None
-    (
-        header,
-        command,
-        version,
-        flags,
-        frame_format,
-        wire_rows,
-        wire_cols,
-        active_rows,
-        active_cols,
-        frame_symbol_period,
-        range_fft_size,
-        doppler_fft_size,
-        compact_mask_hash,
-    ) = PARAMS_PACKET_STRUCT.unpack_from(data)
+    if len(data) >= PARAMS_PACKET_STRUCT.size:
+        (
+            header,
+            command,
+            version,
+            flags,
+            frame_format,
+            wire_rows,
+            wire_cols,
+            active_rows,
+            active_cols,
+            frame_symbol_period,
+            range_fft_size,
+            doppler_fft_size,
+            compact_mask_hash,
+            stream_channel_count,
+            stream_channel_mask,
+        ) = PARAMS_PACKET_STRUCT.unpack_from(data)
+    else:
+        (
+            header,
+            command,
+            version,
+            flags,
+            frame_format,
+            wire_rows,
+            wire_cols,
+            active_rows,
+            active_cols,
+            frame_symbol_period,
+            range_fft_size,
+            doppler_fft_size,
+            compact_mask_hash,
+        ) = PARAMS_PACKET_STRUCT_V1.unpack_from(data)
+        stream_channel_count = 1
+        stream_channel_mask = 1
     if header != CTRL_HEADER or command != PARAMS_COMMAND:
         return None
     return ViewerRuntimeParams(
@@ -151,6 +183,8 @@ def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
         range_fft_size=int(range_fft_size),
         doppler_fft_size=int(doppler_fft_size),
         compact_mask_hash=int(compact_mask_hash),
+        stream_channel_count=max(1, int(stream_channel_count)),
+        stream_channel_mask=int(stream_channel_mask) if int(stream_channel_mask) != 0 else 1,
     )
 
 
@@ -198,6 +232,11 @@ def decode_sensing_payload(
     if rows <= 0 or cols <= 0:
         raise ValueError("Viewer params do not yet describe a valid dense wire shape.")
     expected_count = rows * cols
+    element_size = np.dtype(np.complex64).itemsize
+    if len(payload) % element_size != 0:
+        raise ValueError(
+            f"Dense payload byte size {len(payload)} is not a multiple of complex64 size {element_size}."
+        )
     data = np.frombuffer(payload, dtype=np.complex64)
     if data.size != expected_count:
         raise ValueError(
@@ -207,3 +246,62 @@ def decode_sensing_payload(
         frame_id=int(frame_id_hint),
         matrix=data.reshape((rows, cols)),
     )
+
+
+def _expand_channel_ids(channel_count: int, channel_mask: int) -> list[int]:
+    if channel_mask:
+        channel_ids = [bit for bit in range(32) if channel_mask & (1 << bit)]
+        if len(channel_ids) == channel_count:
+            return channel_ids
+    return list(range(channel_count))
+
+
+def decode_aggregate_sensing_payload(
+    frame_id_hint: int,
+    payload: bytes,
+    params: ViewerRuntimeParams,
+) -> tuple[int, list[tuple[int, DecodedSensingFrame]]]:
+    if len(payload) < AGGREGATE_HEADER_STRUCT.size:
+        raise ValueError("Aggregate sensing payload is shorter than the aggregate header.")
+
+    (
+        magic_version,
+        channel_count,
+        channel_payload_bytes,
+        channel_mask,
+        frame_start_symbol_index,
+    ) = AGGREGATE_HEADER_STRUCT.unpack_from(payload)
+    if magic_version != AGGREGATE_MAGIC_VERSION:
+        raise ValueError(
+            f"Unexpected aggregate magic 0x{magic_version:08x}; expected 0x{AGGREGATE_MAGIC_VERSION:08x}."
+        )
+
+    channel_count = int(channel_count)
+    channel_payload_bytes = int(channel_payload_bytes)
+    if channel_count <= 0 or channel_payload_bytes <= 0:
+        raise ValueError("Aggregate sensing header describes an empty channel payload.")
+
+    expected_size = AGGREGATE_HEADER_STRUCT.size + channel_count * channel_payload_bytes
+    if len(payload) != expected_size:
+        raise ValueError(
+            f"Aggregate payload byte size mismatch: got {len(payload)}, expected {expected_size}."
+        )
+
+    channel_ids = _expand_channel_ids(channel_count, int(channel_mask))
+    decoded_frames: list[tuple[int, DecodedSensingFrame]] = []
+    offset = AGGREGATE_HEADER_STRUCT.size
+    inner_frame_hint = int(frame_start_symbol_index & 0xFFFFFFFF)
+    for ch_id in channel_ids:
+        ch_payload = payload[offset:offset + channel_payload_bytes]
+        decoded = decode_sensing_payload(inner_frame_hint, ch_payload, params)
+        if not decoded.used_compact_header:
+            decoded = DecodedSensingFrame(
+                frame_id=int(frame_start_symbol_index),
+                matrix=decoded.matrix,
+                compact_mask_hash=decoded.compact_mask_hash,
+                used_compact_header=False,
+            )
+        decoded_frames.append((int(ch_id), decoded))
+        offset += channel_payload_bytes
+
+    return int(frame_start_symbol_index), decoded_frames

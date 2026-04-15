@@ -785,14 +785,17 @@ private:
         _next_bistatic_frame_start_symbol.store(0, std::memory_order_relaxed);
 
         SensingRxChannelConfig bistatic_cfg;
-        bistatic_cfg.sensing_ip = cfg_.bi_sensing_ip;
-        bistatic_cfg.sensing_port = cfg_.bi_sensing_port;
         bistatic_cfg.enable_system_delay_estimation = false;
         _bistatic_sensing_channel = std::make_unique<SensingChannel>(
             cfg_,
             bistatic_cfg,
+            cfg_.bi_sensing_ip,
+            cfg_.bi_sensing_port,
             0,
             running_,
+            nullptr,
+            nullptr,
+            nullptr,
             [this](const std::string& ip, int port) {
                 _control_handler.send_heartbeat(ip, port);
             },

@@ -271,6 +271,9 @@ public:
             _tx_async_thread = std::thread(&OFDMISACEngine::_tx_async_event_proc, this);
         }
 
+        if (_aggregated_sensing_sender) {
+            _aggregated_sensing_sender->start();
+        }
         for (auto& ch : _sensing_channels) {
             ch->start(_start_time);
         }
@@ -296,6 +299,9 @@ public:
 
         for (auto& ch : _sensing_channels) {
             ch->join();
+        }
+        if (_aggregated_sensing_sender) {
+            _aggregated_sensing_sender->stop();
         }
     }
 
@@ -392,6 +398,9 @@ private:
     SPSCRingBuffer<PktTimestamps> _data_packet_ingest_ts; // Timestamps paired with _data_packet_buffer
     LatencyAccumulator _latency_accumulator;
     std::vector<std::unique_ptr<SensingChannel>> _sensing_channels;
+    std::shared_ptr<AggregatedSensingDataSender> _aggregated_sensing_sender;
+    std::shared_ptr<std::atomic<uint64_t>> _shared_batch_reset_symbol =
+        std::make_shared<std::atomic<uint64_t>>(0);
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
 
@@ -420,15 +429,59 @@ private:
     }
 
     void _build_sensing_channels() {
+        _aggregated_sensing_sender.reset();
+        std::vector<uint32_t> aggregate_channel_ids;
+        aggregate_channel_ids.reserve(_cfg.sensing_rx_channels.size());
+        for (uint32_t i = 0; i < _cfg.sensing_rx_channels.size(); ++i) {
+            const auto& ch_cfg = _cfg.sensing_rx_channels[i];
+            if (!ch_cfg.enable_sensing_output || ch_cfg.enable_system_delay_estimation) {
+                continue;
+            }
+            aggregate_channel_ids.push_back(i);
+        }
+        if (!aggregate_channel_ids.empty()) {
+            _aggregated_sensing_sender = std::make_shared<AggregatedSensingDataSender>(
+                _cfg.mono_sensing_ip,
+                _cfg.mono_sensing_port,
+                std::move(aggregate_channel_ids),
+                true);
+            LOG_G_INFO() << "[Sensing Aggregate] enabled for "
+                         << _aggregated_sensing_sender->channel_count()
+                         << " channels -> " << _cfg.mono_sensing_ip
+                         << ':' << _cfg.mono_sensing_port;
+        }
+
         _sensing_channels.clear();
         _sensing_channels.reserve(_cfg.sensing_rx_channels.size());
         for (uint32_t i = 0; i < _cfg.sensing_rx_channels.size(); ++i) {
             auto channel = std::make_unique<SensingChannel>(
                 _cfg,
                 _cfg.sensing_rx_channels[i],
+                _cfg.mono_sensing_ip,
+                _cfg.mono_sensing_port,
                 i,
                 _running,
+                _aggregated_sensing_sender,
+                _shared_batch_reset_symbol,
+                [this]() {
+                    const uint64_t frame_len = (_cfg.num_symbols == 0) ? 1u : static_cast<uint64_t>(_cfg.num_symbols);
+                    constexpr uint64_t kResetLeadFrames = 4;
+                    const uint64_t reset_symbol =
+                        _next_frame_start_symbol.load(std::memory_order_relaxed) +
+                        kResetLeadFrames * frame_len;
+                    uint64_t current = _shared_batch_reset_symbol->load(std::memory_order_relaxed);
+                    while (current < reset_symbol &&
+                           !_shared_batch_reset_symbol->compare_exchange_weak(
+                               current, reset_symbol, std::memory_order_relaxed)) {
+                    }
+                    LOG_G_WARN() << "[Sensing Aggregate] scheduled batch reset at symbol "
+                                 << _shared_batch_reset_symbol->load(std::memory_order_relaxed);
+                },
                 [this](const std::string& ip, int port) {
+                    if (_aggregated_sensing_sender) {
+                        _control_handler.send_heartbeat(_cfg.mono_sensing_ip, _cfg.mono_sensing_port);
+                        return;
+                    }
                     _control_handler.send_heartbeat(ip, port);
                 },
                 [this](size_t hint) {
@@ -509,18 +562,32 @@ private:
 
     void _send_viewer_params() {
         const SharedSensingRuntime snapshot = _viewer_params_snapshot();
-        const SensingViewerParamsPacket packet =
-            make_sensing_viewer_params_packet(
-                _cfg,
-                snapshot.skip_sensing_fft,
-                snapshot.enable_mti,
-                false);
-        for (const auto& ch_cfg : _cfg.sensing_rx_channels) {
+        const bool aggregated_stream = static_cast<bool>(_aggregated_sensing_sender);
+        const uint32_t stream_channel_count = aggregated_stream
+            ? _aggregated_sensing_sender->channel_count()
+            : 1u;
+        const uint32_t stream_channel_mask = aggregated_stream
+            ? _aggregated_sensing_sender->channel_mask()
+            : 0x1u;
+        const SensingViewerParamsPacket packet = make_sensing_viewer_params_packet(
+            _cfg,
+            snapshot.skip_sensing_fft,
+            snapshot.enable_mti,
+            false,
+            stream_channel_count,
+            stream_channel_mask,
+            aggregated_stream);
+        if (aggregated_stream) {
             _control_handler.send_sensing_viewer_params(
-                ch_cfg.sensing_ip,
-                ch_cfg.sensing_port,
+                _cfg.mono_sensing_ip,
+                _cfg.mono_sensing_port,
                 packet);
+            return;
         }
+        _control_handler.send_sensing_viewer_params(
+            _cfg.mono_sensing_ip,
+            _cfg.mono_sensing_port,
+            packet);
     }
 
     void _register_commands() {

@@ -571,8 +571,6 @@ When `sensing_output_mode=compact_mask`, sensing sends one compact UDP packet pe
 | `alignment` | `int` | `63` | Per-channel alignment offset (samples). |
 | `rx_antenna` | `string` | `""` | RX antenna name, e.g. `TX/RX`, `RX1`. |
 | `enable_system_delay_estimation` | `bool` | `false` | If `true`, this channel performs a ZC-based system delay estimation at startup and then once every 434 frames, while keeping the sensing pipeline disabled and continuing to drain frames. |
-| `sensing_ip` | `string` | `127.0.0.1` | Per-channel sensing destination IP. |
-| `sensing_port` | `int` | `8888` | Per-channel sensing destination port. |
 
 Notes:
 * If `sensing_rx_channels` is empty and `sensing_rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
