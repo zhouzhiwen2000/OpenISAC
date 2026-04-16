@@ -54,8 +54,8 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 
 | Goal | Backend program | Typical config | Typical frontend |
 | :--- | :--- | :--- | :--- |
-| Run the BS side | `OFDMModulator` | `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` | `plot_sensing.py` / `plot_sensing_fast.py` |
-| Run the UE side | `OFDMDemodulator` | `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` | `plot_bi_sensing.py` / `plot_bi_sensing_fast.py` |
+| Run the BS side | `OFDMModulator` | `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` | `plot_sensing_fast.py` |
+| Run the UE side | `OFDMDemodulator` | `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` | `plot_bi_sensing_fast.py` |
 | Tune parameters from a browser | `scripts/config_web_editor.py` | Reads `build/Modulator.yaml` and `build/Demodulator.yaml` | Browser at `http://<host>:8765` |
 
 ## Before the First OTA Run
@@ -447,21 +447,15 @@ ffplay rtp://0.0.0.0:50001
 
 ### 5. Run monostatic frontend
 ```bash
-python3 ./scripts/plot_sensing.py
-```
-For better real-time performance (if an NVIDIA GPU is available):
-```bash
 python3 ./scripts/plot_sensing_fast.py
 ```
+This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.
 
 ### 6. Run bistatic frontend
 ```bash
-python3 ./scripts/plot_bi_sensing.py
-```
-For better real-time performance (if an NVIDIA GPU is available):
-```bash
 python3 ./scripts/plot_bi_sensing_fast.py
 ```
+This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.
 
 ### 7. Web Config Console
 For remote-friendly configuration editing and process control, run:

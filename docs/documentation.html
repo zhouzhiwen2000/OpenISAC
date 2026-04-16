@@ -267,17 +267,13 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <pre><code class="language-bash">ffplay rtp://0.0.0.0:50001
 </code></pre>
 <h3 id="5-run-monostatic-frontend">5. Run monostatic frontend</h3>
-<pre><code class="language-bash">python3 ./scripts/plot_sensing.py
-</code></pre>
-<p>For better real-time performance (if an NVIDIA GPU is available):</p>
 <pre><code class="language-bash">python3 ./scripts/plot_sensing_fast.py
 </code></pre>
+<p>This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.</p>
 <h3 id="6-run-bistatic-frontend">6. Run bistatic frontend</h3>
-<pre><code class="language-bash">python3 ./scripts/plot_bi_sensing.py
-</code></pre>
-<p>For better real-time performance (if an NVIDIA GPU is available):</p>
 <pre><code class="language-bash">python3 ./scripts/plot_bi_sensing_fast.py
 </code></pre>
+<p>This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.</p>
 <h3 id="7-web-config-console">7. Web Config Console</h3>
 <p>For remote-friendly configuration editing and process control, run:</p>
 <pre><code class="language-bash">python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
