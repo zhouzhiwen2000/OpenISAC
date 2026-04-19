@@ -267,6 +267,8 @@ PROCESS_RANGE_FFT_SIZE = RANGE_FFT_SIZE
 PROCESS_DOPPLER_FFT_SIZE = DOPPLER_FFT_SIZE
 DISPLAY_RANGE_BIN_LIMIT = MAX_RANGE_BIN
 DISPLAY_DOPPLER_BIN_LIMIT = MAX_DOPPLER_BINS
+DISPLAY_DB_MIN = 0.0
+DISPLAY_DB_MAX = 60.0
 
 LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
     version=0,
@@ -350,6 +352,22 @@ def get_display_range_bin_limit():
 
 def get_display_doppler_bin_limit():
     return max(1, int(DISPLAY_DOPPLER_BIN_LIMIT))
+
+
+def sanitize_display_db_range(low_db, high_db):
+    low = float(low_db)
+    high = float(high_db)
+    if not np.isfinite(low) or not np.isfinite(high):
+        raise ValueError("Display dB range must be finite")
+    if high < low:
+        low, high = high, low
+    if np.isclose(high, low):
+        high = low + 1.0
+    return float(low), float(high)
+
+
+def get_display_db_range():
+    return sanitize_display_db_range(DISPLAY_DB_MIN, DISPLAY_DB_MAX)
 
 
 def get_local_detector_label():
@@ -801,6 +819,18 @@ def parse_args():
         default=DEFAULT_CONTROL_PORT,
         help="Fallback control port before heartbeat detection",
     )
+    parser.add_argument(
+        "--display-db-min",
+        type=float,
+        default=DISPLAY_DB_MIN,
+        help="Default display color scale minimum in dB",
+    )
+    parser.add_argument(
+        "--display-db-max",
+        type=float,
+        default=DISPLAY_DB_MAX,
+        help="Default display color scale maximum in dB",
+    )
     return parser.parse_args()
 
 
@@ -859,6 +889,7 @@ class ChannelRuntime:
 
 args = parse_args()
 UDP_PORT = int(args.port)
+DISPLAY_DB_MIN, DISPLAY_DB_MAX = sanitize_display_db_range(args.display_db_min, args.display_db_max)
 initial_channel_count = max(1, int(args.channels))
 CHANNELS = [ChannelRuntime(idx, UDP_PORT, args.control_port) for idx in range(initial_channel_count)]
 if not CHANNELS:
@@ -2127,8 +2158,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rd_plot.setLabel('left', 'Range Bin')
         self.rd_plot.setLabel('bottom', 'Doppler Bin')
         self.rd_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
-        self.rd_colorbar = pg.ColorBarItem(values=(0, 60), colorMap=pg.colormap.get('turbo'), interactive=False)
+        default_db_levels = get_display_db_range()
+        self.rd_colorbar = pg.ColorBarItem(values=default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
         self.rd_colorbar.setImageItem(self.rd_img, insert_in=self.rd_plot.plotItem)
+        self.rd_img.setLevels(default_db_levels)
 
         self.rd_click_marker = pg.ScatterPlotItem([], [], symbol='x', size=12, pen=pg.mkPen('w', width=2))
         self.rd_cfar_marker = pg.ScatterPlotItem(
@@ -2150,8 +2183,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.md_plot.setLabel('left', 'Doppler')
         self.md_plot.setLabel('bottom', 'Time')
         self.md_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
-        self.md_colorbar = pg.ColorBarItem(values=(0, 60), colorMap=pg.colormap.get('turbo'), interactive=False)
+        self.md_colorbar = pg.ColorBarItem(values=default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
         self.md_colorbar.setImageItem(self.md_img, insert_in=self.md_plot.plotItem)
+        self.md_img.setLevels(default_db_levels)
         plot_layout.addWidget(self.md_plot)
 
         # Phase-Channel Curve Plot
@@ -2289,6 +2323,45 @@ class MainWindow(QtWidgets.QMainWindow):
         doppler_view_layout.addWidget(btn_doppler_view)
         control_layout.addLayout(doppler_view_layout)
 
+        display_db_layout = QtWidgets.QHBoxLayout()
+        display_db_layout.addWidget(QtWidgets.QLabel("Display dB:"))
+        self.txt_display_db_min = QtWidgets.QLineEdit(f"{DISPLAY_DB_MIN:.1f}")
+        self.txt_display_db_min.setPlaceholderText("Min")
+        self.txt_display_db_max = QtWidgets.QLineEdit(f"{DISPLAY_DB_MAX:.1f}")
+        self.txt_display_db_max.setPlaceholderText("Max")
+        btn_display_db = QtWidgets.QPushButton("Apply")
+        btn_display_db.clicked.connect(self.apply_display_db_range)
+        display_db_layout.addWidget(self.txt_display_db_min)
+        display_db_layout.addWidget(self.txt_display_db_max)
+        display_db_layout.addWidget(btn_display_db)
+        control_layout.addLayout(display_db_layout)
+
+        self.superres_controls = QtWidgets.QWidget()
+        superres_layout = QtWidgets.QVBoxLayout(self.superres_controls)
+        superres_layout.setContentsMargins(0, 0, 0, 0)
+        superres_layout.setSpacing(6)
+
+        superres_mode_layout = QtWidgets.QHBoxLayout()
+        superres_mode_layout.addWidget(QtWidgets.QLabel("Delay Estimator:"))
+        self.combo_delay_estimator = QtWidgets.QComboBox()
+        self.combo_delay_estimator.addItem("FFT", DELAY_ESTIMATOR_FFT)
+        self.combo_delay_estimator.addItem("MUSIC", DELAY_ESTIMATOR_MUSIC)
+        self.combo_delay_estimator.addItem("CAPON", DELAY_ESTIMATOR_CAPON)
+        self.combo_delay_estimator.addItem("ROOTMUSIC", DELAY_ESTIMATOR_ROOTMUSIC)
+        self.combo_delay_estimator.addItem("ESPRIT", DELAY_ESTIMATOR_ESPRIT)
+        self.combo_delay_estimator.currentIndexChanged.connect(self.on_delay_estimator_changed)
+        superres_mode_layout.addWidget(self.combo_delay_estimator)
+        superres_layout.addLayout(superres_mode_layout)
+
+        superres_threshold_layout = QtWidgets.QHBoxLayout()
+        superres_threshold_layout.addWidget(QtWidgets.QLabel("Peak Rel(dB):"))
+        self.txt_superres_peak_rel = QtWidgets.QLineEdit(f"{superres_peak_rel_threshold_db:.1f}")
+        btn_superres_apply = QtWidgets.QPushButton("Apply")
+        btn_superres_apply.clicked.connect(self.apply_superres_settings)
+        superres_threshold_layout.addWidget(self.txt_superres_peak_rel)
+        superres_threshold_layout.addWidget(btn_superres_apply)
+        superres_layout.addLayout(superres_threshold_layout)
+        control_layout.addWidget(self.superres_controls)
         # Micro-Doppler Toggle
         self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
         self.btn_md.setCheckable(True)
@@ -2596,34 +2669,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def refresh_detector_controls(self, force=False):
         changed_windows = self._enforce_clean_window_policy(announce=force)
-        self.combo_local_detector.blockSignals(True)
-        combo_idx = self.combo_local_detector.findData(local_detector_mode)
-        if combo_idx >= 0:
-            self.combo_local_detector.setCurrentIndex(combo_idx)
-        self.combo_local_detector.blockSignals(False)
-        self.txt_clean_loop_gain.setText(f"{clean_loop_gain:.2f}")
-        self.txt_clean_max_targets.setText(str(clean_max_targets))
-        self.txt_clean_min_range.setText(str(cfar_min_range_bin))
-        self.txt_clean_min_power.setText(f"{clean_min_power_db:.1f}")
-        self.txt_clean_dc_excl.setText(str(cfar_dc_exclusion_bins))
+        using_superres = delay_estimator_uses_superres()
+        if force:
+            self.combo_local_detector.blockSignals(True)
+            combo_idx = self.combo_local_detector.findData(local_detector_mode)
+            if combo_idx >= 0:
+                self.combo_local_detector.setCurrentIndex(combo_idx)
+            self.combo_local_detector.blockSignals(False)
+            self.combo_delay_estimator.blockSignals(True)
+            estimator_idx = self.combo_delay_estimator.findData(delay_estimator_mode)
+            if estimator_idx >= 0:
+                self.combo_delay_estimator.setCurrentIndex(estimator_idx)
+            self.combo_delay_estimator.blockSignals(False)
+            self.txt_superres_peak_rel.setText(f"{superres_peak_rel_threshold_db:.1f}")
+            self.txt_clean_loop_gain.setText(f"{clean_loop_gain:.2f}")
+            self.txt_clean_max_targets.setText(str(clean_max_targets))
+            self.txt_clean_min_range.setText(str(cfar_min_range_bin))
+            self.txt_clean_min_power.setText(f"{clean_min_power_db:.1f}")
+            self.txt_clean_dc_excl.setText(str(cfar_dc_exclusion_bins))
         self.lbl_dbscan_eps.setText(f"D={get_dbscan_eps_doppler()} R={get_dbscan_eps_range()}")
-        self.txt_cluster_min_samples.setText(str(target_dbscan_min_samples))
-        self.txt_local_cfar_rank.setText(f"{cfar_os_rank_percent:.0f}")
-        self.txt_local_cfar_train_d.setText(str(cfar_train_doppler))
-        self.txt_local_cfar_train_r.setText(str(cfar_train_range))
-        self.txt_local_cfar_guard_d.setText(str(cfar_guard_doppler))
-        self.txt_local_cfar_guard_r.setText(str(cfar_guard_range))
-        self.txt_local_cfar_suppress_d.setText(str(cfar_os_suppress_doppler))
-        self.txt_local_cfar_suppress_r.setText(str(cfar_os_suppress_range))
-        self.txt_local_cfar_alpha.setText(f"{cfar_alpha_db:.2f}")
-        self.txt_local_cfar_min_range.setText(str(cfar_min_range_bin))
-        self.txt_local_cfar_min_power.setText(f"{cfar_min_power_db:.1f}")
-        self.txt_local_cfar_dc_excl.setText(str(cfar_dc_exclusion_bins))
-        self.local_detector_controls.setVisible(True)
-        self.local_detector_selector.setVisible(True)
-        self.local_clean_controls.setVisible(local_detector_mode == LOCAL_DETECTOR_CLEAN)
-        self.local_os_cfar_controls.setVisible(local_detector_mode == LOCAL_DETECTOR_OS_CFAR)
-        self.btn_cfar.setText(f"{get_local_detector_label()}: {'ON' if cfar_enabled else 'OFF'}")
+        if force:
+            self.txt_cluster_min_samples.setText(str(target_dbscan_min_samples))
+            self.txt_local_cfar_rank.setText(f"{cfar_os_rank_percent:.0f}")
+            self.txt_local_cfar_train_d.setText(str(cfar_train_doppler))
+            self.txt_local_cfar_train_r.setText(str(cfar_train_range))
+            self.txt_local_cfar_guard_d.setText(str(cfar_guard_doppler))
+            self.txt_local_cfar_guard_r.setText(str(cfar_guard_range))
+            self.txt_local_cfar_suppress_d.setText(str(cfar_os_suppress_doppler))
+            self.txt_local_cfar_suppress_r.setText(str(cfar_os_suppress_range))
+            self.txt_local_cfar_alpha.setText(f"{cfar_alpha_db:.2f}")
+            self.txt_local_cfar_min_range.setText(str(cfar_min_range_bin))
+            self.txt_local_cfar_min_power.setText(f"{cfar_min_power_db:.1f}")
+            self.txt_local_cfar_dc_excl.setText(str(cfar_dc_exclusion_bins))
+        self.superres_controls.setVisible(True)
+        self.local_detector_controls.setVisible(not using_superres)
+        self.local_detector_selector.setVisible(not using_superres)
+        self.cluster_controls.setVisible(not using_superres)
+        self.btn_cfar.setVisible(not using_superres)
+        self.local_clean_controls.setVisible((not using_superres) and local_detector_mode == LOCAL_DETECTOR_CLEAN)
+        self.local_os_cfar_controls.setVisible((not using_superres) and local_detector_mode == LOCAL_DETECTOR_OS_CFAR)
+        detector_label = get_local_detector_label() if not using_superres else get_delay_estimator_label()
+        detector_state = cfar_enabled if not using_superres else True
+        self.btn_cfar.setText(f"{detector_label}: {'ON' if detector_state else 'OFF'}")
         self.btn_cfar.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
         if changed_windows:
             reset_processing_state()
@@ -2754,6 +2841,26 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"Doppler display bins set to: {DISPLAY_DOPPLER_BIN_LIMIT}")
         except ValueError:
             print("Invalid doppler display bins")
+
+    def apply_display_db_range(self):
+        global DISPLAY_DB_MIN, DISPLAY_DB_MAX
+        try:
+            DISPLAY_DB_MIN, DISPLAY_DB_MAX = sanitize_display_db_range(
+                self.txt_display_db_min.text(),
+                self.txt_display_db_max.text(),
+            )
+            self.txt_display_db_min.setText(f"{DISPLAY_DB_MIN:.1f}")
+            self.txt_display_db_max.setText(f"{DISPLAY_DB_MAX:.1f}")
+            levels = get_display_db_range()
+            self.rd_img.setLevels(levels)
+            self.rd_colorbar.setLevels(values=levels)
+            self.md_img.setLevels(levels)
+            self.md_colorbar.setLevels(values=levels)
+            self._force_ui_refresh = True
+            self._last_rendered_display_key = None
+            print(f"Display dB range set to: {DISPLAY_DB_MIN:.1f} to {DISPLAY_DB_MAX:.1f}")
+        except ValueError:
+            print("Invalid display dB range")
 
     def toggle_micro_doppler(self):
         global show_micro_doppler
@@ -4006,6 +4113,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if rd_data is not None and redraw_display:
                 self.rd_img.setImage(rd_data, autoLevels=False)
+                rd_levels = latest_disp.get('rd_levels')
+                if isinstance(rd_levels, (tuple, list)) and len(rd_levels) == 2:
+                    low_level = float(rd_levels[0])
+                    high_level = float(rd_levels[1])
+                else:
+                    low_level, high_level = get_display_db_range()
+                self.rd_img.setLevels((low_level, high_level))
+                self.rd_colorbar.setLevels(values=(low_level, high_level))
                 rows, cols = rd_data.shape  # rows=doppler, cols=range
                 self.rd_doppler_min = -0.5 * float(rows)
                 self.rd_doppler_span = float(rows)
@@ -4024,6 +4139,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_rendered_display_key = display_render_key
             if md_data is not None and redraw_display:
                 self.md_img.setImage(md_data, autoLevels=False)
+                md_low_level, md_high_level = get_display_db_range()
+                self.md_img.setLevels((md_low_level, md_high_level))
+                self.md_colorbar.setLevels(values=(md_low_level, md_high_level))
                 md_extent = latest_disp.get('md_extent')
                 if md_extent is not None and len(md_extent) == 4:
                     x0, x1, y0, y1 = [float(v) for v in md_extent]
