@@ -308,6 +308,26 @@ CLEAN_MIN_HALF_WIDTH = 3
 LOCAL_DETECTOR_CLEAN = "clean"
 LOCAL_DETECTOR_OS_CFAR = "os_cfar"
 local_detector_mode = LOCAL_DETECTOR_OS_CFAR
+DELAY_ESTIMATOR_FFT = "fft"
+DELAY_ESTIMATOR_MUSIC = "music"
+DELAY_ESTIMATOR_CAPON = "capon"
+DELAY_ESTIMATOR_ROOTMUSIC = "rootmusic"
+DELAY_ESTIMATOR_ESPRIT = "esprit"
+DELAY_ESTIMATOR_CHOICES = (
+    DELAY_ESTIMATOR_FFT,
+    DELAY_ESTIMATOR_MUSIC,
+    DELAY_ESTIMATOR_CAPON,
+    DELAY_ESTIMATOR_ROOTMUSIC,
+    DELAY_ESTIMATOR_ESPRIT,
+)
+delay_estimator_mode = DELAY_ESTIMATOR_FFT
+superres_peak_rel_threshold_db = -12.0
+SUPERRES_DIAGONAL_LOADING = 1e-3
+SUPERRES_MIN_SUBARRAY_LEN = 8
+SUPERRES_MAX_SUBARRAY_LEN = 128
+SUPERRES_MAX_POINTS = 256
+SUPERRES_POINT_MAX_ROWS = 96
+SUPERRES_POINT_MAX_ROWS_PER_K = 32
 target_dbscan_min_samples = 1
 PHASE_CALIBRATION_TARGET_SAMPLES = 300
 PHASE_CALIBRATION_PROGRESS_INTERVAL = 25
@@ -336,6 +356,7 @@ show_micro_doppler = True
 display_channel = 0
 
 running = True
+processing_generation = 0
 
 
 def get_processing_range_fft_size():
@@ -377,7 +398,39 @@ def get_local_detector_label():
 
 
 def local_clean_disables_windows():
-    return local_detector_mode == LOCAL_DETECTOR_CLEAN
+    return (
+        delay_estimator_mode == DELAY_ESTIMATOR_FFT
+        and local_detector_mode == LOCAL_DETECTOR_CLEAN
+    )
+
+
+def get_delay_estimator_label():
+    labels = {
+        DELAY_ESTIMATOR_FFT: "FFT",
+        DELAY_ESTIMATOR_MUSIC: "MUSIC",
+        DELAY_ESTIMATOR_CAPON: "CAPON",
+        DELAY_ESTIMATOR_ROOTMUSIC: "ROOTMUSIC",
+        DELAY_ESTIMATOR_ESPRIT: "ESPRIT",
+    }
+    return labels.get(delay_estimator_mode, str(delay_estimator_mode).upper())
+
+
+def delay_estimator_uses_superres():
+    return delay_estimator_mode != DELAY_ESTIMATOR_FFT
+
+
+def delay_estimator_outputs_spectrum():
+    return delay_estimator_mode in {DELAY_ESTIMATOR_MUSIC, DELAY_ESTIMATOR_CAPON}
+
+
+def next_processing_generation():
+    global processing_generation
+    processing_generation += 1
+    return int(processing_generation)
+
+
+def get_processing_generation():
+    return int(processing_generation)
 
 
 def get_dbscan_eps_doppler():
@@ -774,6 +827,7 @@ def build_direct_targets(points, rd_data, point_strengths_db=None):
 
 def reset_processing_state():
     global latest_phase_bundle_frame_id, latest_phase_bundle_rd_complex
+    next_processing_generation()
     for ch in CHANNELS:
         with ch.range_time_lock:
             ch.range_time_data = None
@@ -1574,6 +1628,1016 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
     return results
 
 
+def _display_doppler_row_bounds(total_rows, display_doppler_bins, downsample=1):
+    total_rows = max(0, int(total_rows))
+    if total_rows <= 0:
+        return 0, 0, max(1, int(downsample))
+    ds = max(1, int(downsample))
+    visible_rows = max(1, int(display_doppler_bins))
+    center_idx = total_rows // 2
+    row_start = max(0, center_idx - visible_rows // 2)
+    row_stop = min(total_rows, row_start + visible_rows)
+    return row_start, row_stop, ds
+
+
+def process_doppler_frequency_input(frame_data, viewer_params):
+    if backend_stream_unsupported(viewer_params):
+        raise ValueError("Backend sensing output is not supported in plot_sensing_fast.py")
+    if viewer_params.is_dense_range_doppler():
+        return None
+    if not viewer_params.raw_fft_locally_supported():
+        raise ValueError(f"Unsupported sensing frame format: {viewer_params.describe()}")
+
+    raw_rows = max(1, int(viewer_params.active_rows))
+    raw_cols = max(1, int(viewer_params.active_cols))
+    doppler_fft_size = max(raw_rows, get_processing_doppler_fft_size())
+    raw_frame = np.asarray(frame_data[:raw_rows, :raw_cols], dtype=np.complex64)
+    range_window_active = enable_range_window and not local_clean_disables_windows()
+    doppler_window_active = enable_doppler_window and not local_clean_disables_windows()
+
+    if USE_NVIDIA_GPU or USE_INTEL_GPU:
+        range_win = get_range_window(raw_cols) if range_window_active else cp.ones((1, raw_cols), dtype=cp.float32)
+        doppler_win = get_doppler_window(raw_rows) if doppler_window_active else cp.ones((raw_rows, 1), dtype=cp.float32)
+        frame_gpu = cp.asarray(raw_frame, dtype=cp.complex64)
+        shifted_data = cp.fft.fftshift(frame_gpu, axes=1)
+        freq_windowed = shifted_data * range_win
+        doppler_input = freq_windowed * doppler_win
+        doppler_shifted = cp.fft.fftshift(cp.fft.fft(doppler_input, n=doppler_fft_size, axis=0), axes=0)
+        if USE_NVIDIA_GPU:
+            return doppler_shifted.astype(cp.complex64, copy=False)
+        return to_cpu_array(doppler_shifted, dtype=np.complex64)
+
+    if USE_APPLE_GPU:
+        range_win = get_range_window(raw_cols) if range_window_active else mx.ones((1, raw_cols), dtype=mx.float32)
+        doppler_win = get_doppler_window(raw_rows) if doppler_window_active else mx.ones((raw_rows, 1), dtype=mx.float32)
+        frame_gpu = mx.array(raw_frame, dtype=mx.complex64)
+        shifted_data = mx.fft.fftshift(frame_gpu, axes=(1,))
+        freq_windowed = shifted_data * range_win
+        doppler_input = freq_windowed * doppler_win
+        doppler_shifted = mx.fft.fftshift(mx.fft.fft(doppler_input, n=doppler_fft_size, axis=0), axes=(0,))
+        return np.asarray(doppler_shifted, dtype=np.complex64)
+
+    range_win = get_range_window(raw_cols) if range_window_active else np.ones((1, raw_cols), dtype=np.float32)
+    doppler_win = get_doppler_window(raw_rows) if doppler_window_active else np.ones((raw_rows, 1), dtype=np.float32)
+    shifted_data = np.fft.fftshift(raw_frame, axes=1)
+    freq_windowed = shifted_data * range_win
+    doppler_input = freq_windowed * doppler_win
+    doppler_shifted = np.fft.fftshift(np.fft.fft(doppler_input, n=doppler_fft_size, axis=0), axes=0)
+    return doppler_shifted.astype(np.complex64, copy=False)
+
+
+def _build_local_max_mask_2d(values):
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 2 or values.size == 0:
+        return np.zeros_like(values, dtype=bool)
+
+    rows, cols = values.shape
+    maxima = np.isfinite(values)
+    strict = np.zeros((rows, cols), dtype=bool)
+    neg_inf = float("-inf")
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            if dr == 0 and dc == 0:
+                continue
+            shifted = np.full((rows, cols), neg_inf, dtype=np.float64)
+            src_r0 = max(0, -dr)
+            src_r1 = min(rows, rows - dr) if dr >= 0 else rows
+            src_c0 = max(0, -dc)
+            src_c1 = min(cols, cols - dc) if dc >= 0 else cols
+            dst_r0 = max(0, dr)
+            dst_r1 = dst_r0 + (src_r1 - src_r0)
+            dst_c0 = max(0, dc)
+            dst_c1 = dst_c0 + (src_c1 - src_c0)
+            if src_r1 > src_r0 and src_c1 > src_c0:
+                shifted[dst_r0:dst_r1, dst_c0:dst_c1] = values[src_r0:src_r1, src_c0:src_c1]
+            maxima &= values >= shifted
+            strict |= values > shifted
+    return maxima & strict
+
+
+def _is_cupy_array(arr):
+    if cp is None:
+        return False
+    return isinstance(arr, cp.ndarray)
+
+
+def _select_superres_subarray_length(vector_len):
+    vector_len = max(0, int(vector_len))
+    if vector_len < SUPERRES_MIN_SUBARRAY_LEN:
+        return 0
+    upper = min(SUPERRES_MAX_SUBARRAY_LEN, vector_len - 1)
+    if upper < SUPERRES_MIN_SUBARRAY_LEN:
+        return 0
+    return int(np.clip(vector_len // 2, SUPERRES_MIN_SUBARRAY_LEN, upper))
+
+
+def _build_spatially_smoothed_covariance(row_vector):
+    row_vector = np.asarray(row_vector, dtype=np.complex128).reshape(-1)
+    vector_len = int(row_vector.size)
+    subarray_len = _select_superres_subarray_length(vector_len)
+    if subarray_len <= 0:
+        return None
+
+    subarrays = np.lib.stride_tricks.sliding_window_view(row_vector, subarray_len)
+    snapshot_count = int(subarrays.shape[0])
+    if snapshot_count < 2:
+        return None
+
+    covariance_f = (subarrays.T @ np.conjugate(subarrays)) / float(snapshot_count)
+    if not np.all(np.isfinite(covariance_f)):
+        return None
+
+    reversal = np.eye(subarray_len, dtype=np.complex128)[:, ::-1]
+    covariance_fb = 0.5 * (covariance_f + reversal @ np.conjugate(covariance_f) @ reversal)
+    trace_scale = float(np.real(np.trace(covariance_fb))) / max(1, subarray_len)
+    if not np.isfinite(trace_scale) or trace_scale <= 0.0:
+        trace_scale = 1.0
+    covariance = covariance_fb + (
+        SUPERRES_DIAGONAL_LOADING * trace_scale * np.eye(subarray_len, dtype=np.complex128)
+    )
+    if not np.all(np.isfinite(covariance)):
+        return None
+
+    return covariance, subarray_len, snapshot_count
+
+
+def _estimate_mdl_source_count(eigenvalues, snapshot_count):
+    eigenvalues = np.asarray(np.real(eigenvalues), dtype=np.float64).reshape(-1)
+    order = np.argsort(eigenvalues)[::-1]
+    sorted_values = np.maximum(eigenvalues[order], 1e-12)
+    dim = int(sorted_values.size)
+    if dim <= 1:
+        return 0, sorted_values, np.full((dim,), np.inf, dtype=np.float64)
+
+    snapshot_count = max(1, int(snapshot_count))
+    mdl_scores = np.full((dim,), np.inf, dtype=np.float64)
+    log_snapshot_count = np.log(float(snapshot_count))
+    for source_count in range(dim):
+        noise_count = dim - source_count
+        if noise_count <= 0:
+            continue
+        noise_eigs = sorted_values[source_count:]
+        arithmetic_mean = float(np.mean(noise_eigs))
+        geometric_mean = float(np.exp(np.mean(np.log(np.maximum(noise_eigs, 1e-12)))))
+        if arithmetic_mean <= 0.0 or geometric_mean <= 0.0:
+            continue
+        ratio = geometric_mean / arithmetic_mean
+        if not np.isfinite(ratio) or ratio <= 0.0:
+            continue
+        mdl_scores[source_count] = (
+            -snapshot_count * noise_count * np.log(ratio)
+            + 0.5 * source_count * (2 * dim - source_count) * log_snapshot_count
+        )
+    best_source_count = int(np.argmin(mdl_scores))
+    return max(0, min(best_source_count, dim - 1)), sorted_values, mdl_scores
+
+
+def _estimate_mdl_source_count_batch_gpu(eigenvalues_desc, snapshot_count):
+    eigenvalues_desc = cp.asarray(cp.real(eigenvalues_desc), dtype=cp.float64)
+    row_count, dim = eigenvalues_desc.shape
+    if dim <= 1:
+        return cp.zeros((row_count,), dtype=cp.int32), eigenvalues_desc, cp.full((row_count, dim), cp.inf)
+
+    snapshot_count = max(1, int(snapshot_count))
+    safe_eigs = cp.maximum(eigenvalues_desc, 1e-12)
+    mdl_scores = cp.full((row_count, dim), cp.inf, dtype=cp.float64)
+    log_snapshot_count = float(np.log(float(snapshot_count)))
+    for source_count in range(dim):
+        noise_count = dim - source_count
+        if noise_count <= 0:
+            continue
+        noise_eigs = safe_eigs[:, source_count:]
+        arithmetic_mean = cp.mean(noise_eigs, axis=1)
+        geometric_mean = cp.exp(cp.mean(cp.log(cp.maximum(noise_eigs, 1e-12)), axis=1))
+        ratio = geometric_mean / cp.maximum(arithmetic_mean, 1e-12)
+        ratio = cp.maximum(ratio, 1e-12)
+        mdl_scores[:, source_count] = (
+            -snapshot_count * noise_count * cp.log(ratio)
+            + 0.5 * source_count * (2 * dim - source_count) * log_snapshot_count
+        )
+    best_source_counts = cp.argmin(mdl_scores, axis=1).astype(cp.int32, copy=False)
+    return cp.clip(best_source_counts, 0, dim - 1), safe_eigs, mdl_scores
+
+
+def _quadratic_form_fft_grid(matrix, fft_size):
+    matrix = np.asarray(matrix, dtype=np.complex128)
+    rows, cols = matrix.shape
+    if rows == 0 or cols == 0 or rows != cols:
+        return np.empty((0,), dtype=np.float64)
+    fft_size = max(1, int(fft_size))
+    coeffs = np.zeros((fft_size,), dtype=np.complex128)
+    for offset in range(-(rows - 1), rows):
+        coeffs[offset % fft_size] += np.trace(matrix, offset=offset)
+    values = np.fft.fft(coeffs)
+    return np.maximum(np.real(values), 1e-12)
+
+
+def _quadratic_form_fft_grid_batch_gpu(matrices, fft_size):
+    matrices = cp.asarray(matrices, dtype=cp.complex128)
+    batch_size, rows, cols = matrices.shape
+    if batch_size == 0 or rows == 0 or cols == 0 or rows != cols:
+        return cp.empty((batch_size, 0), dtype=cp.float64)
+    fft_size = max(1, int(fft_size))
+    coeffs = cp.zeros((batch_size, fft_size), dtype=cp.complex128)
+    for offset in range(-(rows - 1), rows):
+        diagonal = cp.diagonal(matrices, offset=offset, axis1=1, axis2=2)
+        coeffs[:, offset % fft_size] += cp.sum(diagonal, axis=1)
+    values = cp.fft.fft(coeffs, axis=1)
+    return cp.maximum(cp.real(values), 1e-12)
+
+
+def _trace_coeffs_from_matrix_batch_gpu(matrices):
+    matrices = cp.asarray(matrices, dtype=cp.complex128)
+    batch_size, rows, cols = matrices.shape
+    if batch_size == 0 or rows == 0 or cols == 0 or rows != cols:
+        return cp.empty((batch_size, 0), dtype=cp.complex128)
+    coeffs = cp.zeros((batch_size, 2 * rows - 1), dtype=cp.complex128)
+    base_idx = rows - 1
+    for offset in range(-(rows - 1), rows):
+        diagonal = cp.diagonal(matrices, offset=offset, axis1=1, axis2=2)
+        coeffs[:, base_idx + offset] = cp.sum(diagonal, axis=1)
+    return coeffs
+
+
+def _limit_point_algorithm_rows_by_power(row_powers, candidate_indices, max_rows):
+    candidate_indices = np.asarray(candidate_indices, dtype=np.int32).reshape(-1)
+    if candidate_indices.size == 0:
+        return candidate_indices
+    max_rows = max(1, int(max_rows))
+    if candidate_indices.size <= max_rows:
+        return candidate_indices
+    row_powers = np.asarray(row_powers, dtype=np.float64).reshape(-1)
+    valid_indices = candidate_indices[
+        (candidate_indices >= 0) & (candidate_indices < row_powers.shape[0])
+    ]
+    if valid_indices.size == 0:
+        return np.empty((0,), dtype=np.int32)
+    order = np.argsort(row_powers[valid_indices])[::-1][:max_rows]
+    return valid_indices[order].astype(np.int32, copy=False)
+
+
+def _prepare_delay_superresolution_gpu_common(
+    doppler_frequency_matrix,
+    display_doppler_bins,
+):
+    if not USE_NVIDIA_GPU or cp is None or not _is_cupy_array(doppler_frequency_matrix):
+        return None
+
+    try:
+        total_rows = int(doppler_frequency_matrix.shape[0])
+        vector_len = int(doppler_frequency_matrix.shape[1])
+        row_start, row_stop, row_step = _display_doppler_row_bounds(
+            total_rows,
+            display_doppler_bins,
+            DISPLAY_DOWNSAMPLE,
+        )
+        display_rows = doppler_frequency_matrix[row_start:row_stop:row_step, :]
+        row_count = int(display_rows.shape[0])
+        if row_count <= 0:
+            return None
+
+        row_powers = cp.sum(cp.abs(display_rows) ** 2, axis=1)
+        subarray_len = _select_superres_subarray_length(vector_len)
+        if subarray_len <= 0:
+            return None
+
+        subarrays = cp.lib.stride_tricks.sliding_window_view(display_rows, subarray_len, axis=1)
+        snapshot_count = int(subarrays.shape[1])
+        if snapshot_count < 2:
+            return None
+
+        subarrays = cp.asarray(subarrays, dtype=cp.complex64)
+        covariance_f = cp.einsum("rml,rmk->rlk", subarrays, cp.conjugate(subarrays)) / float(snapshot_count)
+        reversal = cp.eye(subarray_len, dtype=cp.complex64)[:, ::-1]
+        covariance_fb = 0.5 * (
+            covariance_f + reversal[None, :, :] @ cp.conjugate(covariance_f) @ reversal[None, :, :]
+        )
+        trace_scale = cp.real(cp.trace(covariance_fb, axis1=1, axis2=2)) / max(1, subarray_len)
+        trace_scale = cp.where(cp.isfinite(trace_scale) & (trace_scale > 0.0), trace_scale, 1.0)
+        eye = cp.eye(subarray_len, dtype=cp.complex64)[None, :, :]
+        covariance = covariance_fb + (SUPERRES_DIAGONAL_LOADING * trace_scale[:, None, None] * eye)
+        finite_covariance = cp.all(cp.isfinite(covariance.reshape(row_count, -1)), axis=1)
+
+        eigenvalues, eigenvectors = cp.linalg.eigh(covariance)
+        order = cp.argsort(cp.real(eigenvalues), axis=1)[:, ::-1]
+        eigenvalues_desc = cp.take_along_axis(cp.real(eigenvalues), order, axis=1)
+        eigenvectors_desc = cp.take_along_axis(eigenvectors, order[:, None, :], axis=2)
+        source_counts, _, _ = _estimate_mdl_source_count_batch_gpu(eigenvalues_desc, snapshot_count)
+        valid_rows = finite_covariance & (source_counts > 0) & (source_counts < subarray_len)
+        source_counts_cpu = cp.asnumpy(source_counts).astype(np.int32, copy=False)
+        valid_rows_cpu = cp.asnumpy(valid_rows).astype(bool, copy=False)
+        return {
+            'display_rows': display_rows,
+            'row_count': row_count,
+            'vector_len': vector_len,
+            'row_powers_cpu': cp.asnumpy(row_powers).astype(np.float64, copy=False),
+            'subarray_len': subarray_len,
+            'snapshot_count': snapshot_count,
+            'covariance': covariance,
+            'eigenvectors_desc': eigenvectors_desc,
+            'source_counts_cpu': source_counts_cpu,
+            'valid_rows_cpu': valid_rows_cpu,
+        }
+    except Exception:
+        return None
+
+
+def _delays_from_rootmusic_coeffs(coeffs, source_count, fft_size):
+    coeffs = np.asarray(coeffs, dtype=np.complex128).reshape(-1)
+    dim = (coeffs.size + 1) // 2
+    if source_count <= 0 or dim <= 1 or coeffs.size == 0:
+        return np.empty((0,), dtype=np.float64)
+    if not np.any(np.abs(coeffs) > 1e-12):
+        return np.empty((0,), dtype=np.float64)
+    try:
+        roots = np.roots(coeffs)
+    except Exception:
+        return np.empty((0,), dtype=np.float64)
+    if roots.size == 0:
+        return np.empty((0,), dtype=np.float64)
+
+    inside_roots = roots[np.abs(roots) < 1.0 + 1e-6]
+    if inside_roots.size == 0:
+        inside_roots = roots
+    order = np.argsort(np.abs(np.abs(inside_roots) - 1.0))
+    chosen_delays = []
+    for root in inside_roots[order]:
+        delay_bin = float((-np.angle(root) * float(fft_size) / (2.0 * np.pi)) % float(fft_size))
+        if any(abs(delay_bin - prev) < 0.5 for prev in chosen_delays):
+            continue
+        chosen_delays.append(delay_bin)
+        if len(chosen_delays) >= int(source_count):
+            break
+    return np.asarray(chosen_delays, dtype=np.float64)
+
+
+def _run_delay_superresolution_gpu_spectrum(
+    precomputed,
+    range_fft_size,
+    display_range_bins,
+    peak_threshold_db,
+    processing_generation_snapshot=None,
+):
+    if precomputed is None:
+        return None
+    if delay_estimator_mode not in {DELAY_ESTIMATOR_MUSIC, DELAY_ESTIMATOR_CAPON}:
+        return None
+
+    try:
+        if (
+            processing_generation_snapshot is not None
+            and get_processing_generation() != int(processing_generation_snapshot)
+        ):
+            return None
+        row_count = int(precomputed['row_count'])
+        vector_len = int(precomputed['vector_len'])
+        subarray_len = int(precomputed['subarray_len'])
+        covariance = precomputed['covariance']
+        eigenvectors_desc = precomputed['eigenvectors_desc']
+        source_counts_cpu = precomputed['source_counts_cpu']
+        valid_rows_cpu = precomputed['valid_rows_cpu']
+
+        spectrum_db_gpu = cp.full((row_count, display_range_bins), -cp.inf, dtype=cp.float32)
+        for source_count in sorted(set(source_counts_cpu[valid_rows_cpu].tolist())):
+            if int(source_count) <= 0 or int(source_count) >= subarray_len:
+                continue
+            if (
+                processing_generation_snapshot is not None
+                and get_processing_generation() != int(processing_generation_snapshot)
+            ):
+                return None
+            group_indices_cpu = np.flatnonzero(valid_rows_cpu & (source_counts_cpu == int(source_count)))
+            if group_indices_cpu.size == 0:
+                continue
+            group_indices_gpu = cp.asarray(group_indices_cpu, dtype=cp.int32)
+            covariance_group = covariance[group_indices_gpu]
+            if delay_estimator_mode == DELAY_ESTIMATOR_MUSIC:
+                noise_subspace = eigenvectors_desc[group_indices_gpu][:, :, int(source_count):]
+                projector = noise_subspace @ cp.conjugate(cp.transpose(noise_subspace, (0, 2, 1)))
+                denominator = _quadratic_form_fft_grid_batch_gpu(projector, range_fft_size)[:, :display_range_bins]
+            else:
+                inverse_covariance = cp.linalg.inv(covariance_group)
+                denominator = _quadratic_form_fft_grid_batch_gpu(inverse_covariance, range_fft_size)[:, :display_range_bins]
+            spectrum_group = 20.0 * cp.log10(1.0 / cp.maximum(denominator, 1e-12))
+            spectrum_db_gpu[group_indices_gpu] = spectrum_group.astype(cp.float32, copy=False)
+
+        spectrum_db = to_cpu_array(spectrum_db_gpu, dtype=np.float32)
+        finite_mask = np.isfinite(spectrum_db)
+        if np.any(finite_mask):
+            peak_db = float(np.max(spectrum_db[finite_mask]))
+            relative_db = np.where(finite_mask, spectrum_db - peak_db, -np.inf).astype(np.float32, copy=False)
+            detection_mask = _build_local_max_mask_2d(relative_db) & (relative_db >= float(peak_threshold_db))
+            candidate_points = np.argwhere(detection_mask)
+            candidate_strengths = (
+                relative_db[candidate_points[:, 0], candidate_points[:, 1]].astype(np.float32, copy=False)
+                if candidate_points.size > 0
+                else np.empty((0,), dtype=np.float32)
+            )
+            detected_points, detected_strengths_db = _limit_ranked_points(
+                candidate_points.astype(np.int32, copy=False),
+                candidate_strengths,
+                SUPERRES_MAX_POINTS,
+            )
+            display_floor = min(-60.0, float(peak_threshold_db) - 24.0)
+            display_image = np.where(finite_mask, np.maximum(relative_db, display_floor), display_floor)
+            rd_display = display_image.astype(np.float32, copy=False)
+            rd_levels = (float(display_floor), 0.0)
+        else:
+            detected_points = np.empty((0, 2), dtype=np.int32)
+            detected_strengths_db = np.empty((0,), dtype=np.float32)
+            rd_display = np.full((row_count, display_range_bins), -60.0, dtype=np.float32)
+            rd_levels = (-60.0, 0.0)
+
+        rows_detected = int(len(np.unique(detected_points[:, 0]))) if detected_points.size > 0 else 0
+        source_counts_valid = source_counts_cpu[valid_rows_cpu]
+        summary = {
+            'mode': get_delay_estimator_label(),
+            'rows_total': int(row_count),
+            'rows_processed': int(np.count_nonzero(valid_rows_cpu)),
+            'rows_skipped': int(row_count - np.count_nonzero(valid_rows_cpu)),
+            'rows_detected': int(rows_detected),
+            'source_count_max': int(np.max(source_counts_valid)) if source_counts_valid.size > 0 else 0,
+            'source_count_mean': float(np.mean(source_counts_valid)) if source_counts_valid.size > 0 else 0.0,
+            'threshold_db': float(peak_threshold_db),
+            'subcarrier_count': int(vector_len),
+            'compute_backend': 'gpu-cupy',
+        }
+        return {
+            'rd': rd_display,
+            'rd_levels': rd_levels,
+            'superres_rd': rd_display,
+            'points': detected_points,
+            'strengths_db': detected_strengths_db.astype(np.float32, copy=False),
+            'summary': summary,
+        }
+    except Exception:
+        return None
+
+
+def _run_delay_superresolution_gpu_points(
+    precomputed,
+    range_fft_size,
+    display_range_bins,
+    peak_threshold_db,
+    processing_generation_snapshot=None,
+):
+    if precomputed is None:
+        return None
+    if delay_estimator_mode not in {DELAY_ESTIMATOR_ROOTMUSIC, DELAY_ESTIMATOR_ESPRIT}:
+        return None
+
+    try:
+        if (
+            processing_generation_snapshot is not None
+            and get_processing_generation() != int(processing_generation_snapshot)
+        ):
+            return None
+        display_rows = precomputed['display_rows']
+        row_count = int(precomputed['row_count'])
+        vector_len = int(precomputed['vector_len'])
+        row_powers_cpu = precomputed['row_powers_cpu']
+        subarray_len = int(precomputed['subarray_len'])
+        eigenvectors_desc = precomputed['eigenvectors_desc']
+        source_counts_cpu = precomputed['source_counts_cpu']
+        valid_rows_cpu = precomputed['valid_rows_cpu']
+
+        point_candidates = []
+        point_strength_candidates = []
+        total_cpu_rows_fetched = 0
+        rows_capped = 0
+        for source_count in sorted(set(source_counts_cpu[valid_rows_cpu].tolist())):
+            if int(source_count) <= 0 or int(source_count) >= subarray_len:
+                continue
+            group_indices_cpu = np.flatnonzero(valid_rows_cpu & (source_counts_cpu == int(source_count)))
+            if group_indices_cpu.size == 0:
+                continue
+            limited_group_indices_cpu = _limit_point_algorithm_rows_by_power(
+                row_powers_cpu,
+                group_indices_cpu,
+                SUPERRES_POINT_MAX_ROWS_PER_K,
+            )
+            rows_capped += max(0, int(group_indices_cpu.size - limited_group_indices_cpu.size))
+            group_indices_cpu = limited_group_indices_cpu
+            if group_indices_cpu.size == 0:
+                continue
+            if (
+                processing_generation_snapshot is not None
+                and get_processing_generation() != int(processing_generation_snapshot)
+            ):
+                return None
+            group_indices_gpu = cp.asarray(group_indices_cpu, dtype=cp.int32)
+            candidate_row_indices = []
+            candidate_delay_sets = []
+            if delay_estimator_mode == DELAY_ESTIMATOR_ROOTMUSIC:
+                noise_subspace = eigenvectors_desc[group_indices_gpu][:, :, int(source_count):]
+                coeffs_cpu = cp.asnumpy(
+                    _trace_coeffs_from_matrix_batch_gpu(
+                        noise_subspace @ cp.conjugate(cp.transpose(noise_subspace, (0, 2, 1)))
+                    )
+                ).astype(np.complex128, copy=False)
+                for local_idx, coeffs in enumerate(coeffs_cpu):
+                    delays = _delays_from_rootmusic_coeffs(coeffs, int(source_count), range_fft_size)
+                    valid_delays = [
+                        float(delay_value)
+                        for delay_value in delays.tolist()
+                        if np.isfinite(delay_value) and 0.0 <= delay_value < float(display_range_bins)
+                    ]
+                    if not valid_delays:
+                        continue
+                    candidate_row_indices.append(int(group_indices_cpu[local_idx]))
+                    candidate_delay_sets.append(valid_delays)
+            else:
+                signal_subspaces_cpu = cp.asnumpy(
+                    eigenvectors_desc[group_indices_gpu][:, :, :int(source_count)]
+                ).astype(np.complex128, copy=False)
+                for local_idx, signal_subspace in enumerate(signal_subspaces_cpu):
+                    delays = _delays_from_esprit(signal_subspace, int(source_count), range_fft_size)
+                    valid_delays = [
+                        float(delay_value)
+                        for delay_value in delays.tolist()
+                        if np.isfinite(delay_value) and 0.0 <= delay_value < float(display_range_bins)
+                    ]
+                    if not valid_delays:
+                        continue
+                    candidate_row_indices.append(int(group_indices_cpu[local_idx]))
+                    candidate_delay_sets.append(valid_delays)
+
+            if not candidate_row_indices:
+                continue
+
+            candidate_row_indices = _limit_point_algorithm_rows_by_power(
+                row_powers_cpu,
+                np.asarray(candidate_row_indices, dtype=np.int32),
+                SUPERRES_POINT_MAX_ROWS_PER_K,
+            ).tolist()
+            if not candidate_row_indices:
+                continue
+            if (
+                processing_generation_snapshot is not None
+                and get_processing_generation() != int(processing_generation_snapshot)
+            ):
+                return None
+            allowed_rows = set(int(row_idx) for row_idx in candidate_row_indices)
+            filtered_delay_sets = []
+            for row_idx, delays in zip(
+                [int(idx) for idx in np.asarray(group_indices_cpu, dtype=np.int32).tolist()],
+                candidate_delay_sets,
+            ):
+                if row_idx in allowed_rows:
+                    filtered_delay_sets.append((row_idx, delays))
+            candidate_row_indices = [row_idx for row_idx, _ in filtered_delay_sets]
+            candidate_delay_sets = [delays for _, delays in filtered_delay_sets]
+            if not candidate_row_indices:
+                continue
+            needed_indices_gpu = cp.asarray(candidate_row_indices, dtype=cp.int32)
+            row_vectors_cpu = cp.asnumpy(display_rows[needed_indices_gpu]).astype(np.complex64, copy=False)
+            total_cpu_rows_fetched += int(len(candidate_row_indices))
+            for row_idx_cpu, row_vector, delays in zip(candidate_row_indices, row_vectors_cpu, candidate_delay_sets):
+                if (
+                    processing_generation_snapshot is not None
+                    and get_processing_generation() != int(processing_generation_snapshot)
+                ):
+                    return None
+                strengths_db = _estimate_point_strengths(row_vector, delays, range_fft_size)
+                for delay_value, strength_db in zip(delays, strengths_db.tolist()):
+                    if not np.isfinite(strength_db):
+                        continue
+                    point_candidates.append((
+                        int(row_idx_cpu),
+                        int(np.clip(round(delay_value), 0, display_range_bins - 1)),
+                    ))
+                    point_strength_candidates.append(float(strength_db))
+
+        if point_candidates:
+            points_arr = np.asarray(point_candidates, dtype=np.int32)
+            strengths_arr = np.asarray(point_strength_candidates, dtype=np.float64)
+            peak_strength_db = float(np.max(strengths_arr))
+            relative_strengths = (strengths_arr - peak_strength_db).astype(np.float32, copy=False)
+            keep_mask = relative_strengths >= float(peak_threshold_db)
+            points_arr = points_arr[keep_mask]
+            relative_strengths = relative_strengths[keep_mask]
+            if points_arr.size > 0:
+                unique_strengths = {}
+                for point, strength_db in zip(points_arr.tolist(), relative_strengths.tolist()):
+                    point_key = (int(point[0]), int(point[1]))
+                    prev = unique_strengths.get(point_key)
+                    if prev is None or float(strength_db) > prev:
+                        unique_strengths[point_key] = float(strength_db)
+                sorted_items = sorted(unique_strengths.items(), key=lambda item: item[1], reverse=True)
+                points_arr = np.asarray([item[0] for item in sorted_items], dtype=np.int32)
+                relative_strengths = np.asarray([item[1] for item in sorted_items], dtype=np.float32)
+            detected_points, detected_strengths_db = _limit_ranked_points(
+                points_arr,
+                relative_strengths,
+                SUPERRES_MAX_POINTS,
+            )
+        else:
+            detected_points = np.empty((0, 2), dtype=np.int32)
+            detected_strengths_db = np.empty((0,), dtype=np.float32)
+
+        rows_detected = int(len(np.unique(detected_points[:, 0]))) if detected_points.size > 0 else 0
+        source_counts_valid = source_counts_cpu[valid_rows_cpu]
+        summary = {
+            'mode': get_delay_estimator_label(),
+            'rows_total': int(row_count),
+            'rows_processed': int(np.count_nonzero(valid_rows_cpu)),
+            'rows_skipped': int(row_count - np.count_nonzero(valid_rows_cpu)),
+            'rows_detected': int(rows_detected),
+            'source_count_max': int(np.max(source_counts_valid)) if source_counts_valid.size > 0 else 0,
+            'source_count_mean': float(np.mean(source_counts_valid)) if source_counts_valid.size > 0 else 0.0,
+            'threshold_db': float(peak_threshold_db),
+            'subcarrier_count': int(vector_len),
+            'compute_backend': 'gpu-cupy-partial',
+            'cpu_rows_fetched': int(total_cpu_rows_fetched),
+            'rows_capped': int(rows_capped),
+        }
+        return {
+            'rd': np.zeros((row_count, display_range_bins), dtype=np.float32),
+            'rd_levels': (0.0, 1.0),
+            'superres_rd': None,
+            'points': detected_points,
+            'strengths_db': detected_strengths_db.astype(np.float32, copy=False),
+            'summary': summary,
+        }
+    except Exception:
+        return None
+
+
+def _delays_from_rootmusic(noise_projector, source_count, fft_size):
+    noise_projector = np.asarray(noise_projector, dtype=np.complex128)
+    dim = noise_projector.shape[0]
+    if source_count <= 0 or dim <= 1:
+        return np.empty((0,), dtype=np.float64)
+
+    coeffs = np.asarray(
+        [np.trace(noise_projector, offset=offset) for offset in range(-(dim - 1), dim)],
+        dtype=np.complex128,
+    )
+    if not np.any(np.abs(coeffs) > 1e-12):
+        return np.empty((0,), dtype=np.float64)
+
+    try:
+        roots = np.roots(coeffs)
+    except Exception:
+        return np.empty((0,), dtype=np.float64)
+    if roots.size == 0:
+        return np.empty((0,), dtype=np.float64)
+
+    inside_roots = roots[np.abs(roots) < 1.0 + 1e-6]
+    if inside_roots.size == 0:
+        inside_roots = roots
+    order = np.argsort(np.abs(np.abs(inside_roots) - 1.0))
+    chosen_delays = []
+    for root in inside_roots[order]:
+        delay_bin = float((-np.angle(root) * float(fft_size) / (2.0 * np.pi)) % float(fft_size))
+        if any(abs(delay_bin - prev) < 0.5 for prev in chosen_delays):
+            continue
+        chosen_delays.append(delay_bin)
+        if len(chosen_delays) >= int(source_count):
+            break
+    return np.asarray(chosen_delays, dtype=np.float64)
+
+
+def _delays_from_esprit(signal_subspace, source_count, fft_size):
+    signal_subspace = np.asarray(signal_subspace, dtype=np.complex128)
+    rows, cols = signal_subspace.shape
+    if source_count <= 0 or rows < 2 or cols <= 0:
+        return np.empty((0,), dtype=np.float64)
+
+    upper = signal_subspace[:-1, :]
+    lower = signal_subspace[1:, :]
+    try:
+        psi = np.linalg.pinv(upper) @ lower
+        eigenvalues = np.linalg.eigvals(psi)
+    except Exception:
+        return np.empty((0,), dtype=np.float64)
+    if eigenvalues.size == 0:
+        return np.empty((0,), dtype=np.float64)
+
+    order = np.argsort(np.abs(np.abs(eigenvalues) - 1.0))
+    chosen_delays = []
+    for eigenvalue in eigenvalues[order]:
+        delay_bin = float((-np.angle(eigenvalue) * float(fft_size) / (2.0 * np.pi)) % float(fft_size))
+        if any(abs(delay_bin - prev) < 0.5 for prev in chosen_delays):
+            continue
+        chosen_delays.append(delay_bin)
+        if len(chosen_delays) >= int(source_count):
+            break
+    return np.asarray(chosen_delays, dtype=np.float64)
+
+
+def _estimate_point_strengths(row_vector, delays, fft_size):
+    row_vector = np.asarray(row_vector, dtype=np.complex128).reshape(-1)
+    delays = np.asarray(delays, dtype=np.float64).reshape(-1)
+    if row_vector.size == 0 or delays.size == 0:
+        return np.empty((0,), dtype=np.float64)
+
+    sample_idx = np.arange(row_vector.size, dtype=np.float64)
+    steering = np.exp(
+        -2j * np.pi * np.outer(sample_idx, delays.astype(np.float64)) / float(max(1, int(fft_size)))
+    )
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(steering, row_vector, rcond=None)
+        strengths = np.abs(coeffs)
+    except Exception:
+        strengths = np.abs(np.conjugate(steering).T @ row_vector) / max(1.0, float(row_vector.size))
+    return 20.0 * np.log10(np.maximum(strengths, 1e-12))
+
+
+def _limit_ranked_points(points, strengths_db, max_points):
+    points = np.asarray(points, dtype=np.int32)
+    strengths_db = np.asarray(strengths_db, dtype=np.float32)
+    if points.size == 0 or strengths_db.size == 0:
+        return np.empty((0, 2), dtype=np.int32), np.empty((0,), dtype=np.float32)
+    if points.shape[0] != strengths_db.shape[0]:
+        limit = min(points.shape[0], strengths_db.shape[0])
+        points = points[:limit]
+        strengths_db = strengths_db[:limit]
+    order = np.argsort(strengths_db)[::-1]
+    if points.shape[0] > int(max_points):
+        order = order[:int(max_points)]
+    return points[order], strengths_db[order]
+
+
+def run_delay_superresolution(
+    doppler_frequency_matrix,
+    range_fft_size,
+    display_range_bins,
+    display_doppler_bins,
+    processing_generation_snapshot=None,
+):
+    display_range_bins = max(1, int(display_range_bins))
+    display_doppler_bins = max(1, int(display_doppler_bins))
+    range_fft_size = max(1, int(range_fft_size))
+    peak_threshold_db = float(superres_peak_rel_threshold_db)
+
+    if doppler_frequency_matrix is None:
+        blank = np.zeros((display_doppler_bins, display_range_bins), dtype=np.float32)
+        return {
+            'rd': blank,
+            'rd_levels': (0.0, 1.0),
+            'superres_rd': None,
+            'points': np.empty((0, 2), dtype=np.int32),
+            'strengths_db': np.empty((0,), dtype=np.float32),
+            'summary': {
+                'mode': get_delay_estimator_label(),
+                'rows_total': 0,
+                'rows_processed': 0,
+                'rows_skipped': 0,
+                'rows_detected': 0,
+                'source_count_max': 0,
+                'source_count_mean': 0.0,
+                'threshold_db': peak_threshold_db,
+                'reason': 'unsupported_frame_format',
+            },
+        }
+
+    gpu_precomputed = _prepare_delay_superresolution_gpu_common(
+        doppler_frequency_matrix,
+        display_doppler_bins,
+    )
+    if gpu_precomputed is not None:
+        gpu_result = _run_delay_superresolution_gpu_spectrum(
+            gpu_precomputed,
+            range_fft_size,
+            display_range_bins,
+            peak_threshold_db,
+            processing_generation_snapshot=processing_generation_snapshot,
+        )
+        if gpu_result is not None:
+            return gpu_result
+        gpu_result = _run_delay_superresolution_gpu_points(
+            gpu_precomputed,
+            range_fft_size,
+            display_range_bins,
+            peak_threshold_db,
+            processing_generation_snapshot=processing_generation_snapshot,
+        )
+        if gpu_result is not None:
+            return gpu_result
+
+    doppler_frequency_matrix = to_cpu_array(doppler_frequency_matrix, dtype=np.complex64)
+    total_rows, vector_len = doppler_frequency_matrix.shape
+    row_start, row_stop, row_step = _display_doppler_row_bounds(
+        total_rows,
+        display_doppler_bins,
+        DISPLAY_DOWNSAMPLE,
+    )
+    display_rows = doppler_frequency_matrix[row_start:row_stop:row_step, :]
+    if display_rows.size == 0:
+        blank = np.zeros((0, display_range_bins), dtype=np.float32)
+        return {
+            'rd': blank,
+            'rd_levels': (0.0, 1.0),
+            'superres_rd': None,
+            'points': np.empty((0, 2), dtype=np.int32),
+            'strengths_db': np.empty((0,), dtype=np.float32),
+            'summary': {
+                'mode': get_delay_estimator_label(),
+                'rows_total': 0,
+                'rows_processed': 0,
+                'rows_skipped': 0,
+                'rows_detected': 0,
+                'source_count_max': 0,
+                'source_count_mean': 0.0,
+                'threshold_db': peak_threshold_db,
+                'reason': 'empty_display_window',
+            },
+        }
+
+    estimator = delay_estimator_mode
+    uses_spectrum = delay_estimator_outputs_spectrum()
+    spectrum_db = np.full((display_rows.shape[0], display_range_bins), -np.inf, dtype=np.float64)
+    point_candidates = []
+    point_strength_candidates = []
+    source_counts = []
+    row_powers = np.sum(np.abs(display_rows) ** 2, axis=1).astype(np.float64, copy=False)
+    rows_processed = 0
+    rows_skipped = 0
+    rows_capped = 0
+
+    point_mode_row_limit = min(int(display_rows.shape[0]), int(SUPERRES_POINT_MAX_ROWS))
+    if not uses_spectrum and point_mode_row_limit > 0:
+        row_priority = _limit_point_algorithm_rows_by_power(
+            row_powers,
+            np.arange(display_rows.shape[0], dtype=np.int32),
+            point_mode_row_limit,
+        )
+        row_priority_set = set(int(row_idx) for row_idx in row_priority.tolist())
+        rows_capped = max(0, int(display_rows.shape[0] - len(row_priority_set)))
+    else:
+        row_priority_set = None
+
+    for row_idx, row_vector in enumerate(display_rows):
+        if (
+            processing_generation_snapshot is not None
+            and get_processing_generation() != int(processing_generation_snapshot)
+        ):
+            return {
+                'rd': np.zeros((0, display_range_bins), dtype=np.float32),
+                'rd_levels': (0.0, 1.0),
+                'superres_rd': None,
+                'points': np.empty((0, 2), dtype=np.int32),
+                'strengths_db': np.empty((0,), dtype=np.float32),
+                'summary': {
+                    'mode': get_delay_estimator_label(),
+                    'rows_total': int(display_rows.shape[0]),
+                    'rows_processed': 0,
+                    'rows_skipped': int(display_rows.shape[0]),
+                    'rows_detected': 0,
+                    'source_count_max': 0,
+                    'source_count_mean': 0.0,
+                    'threshold_db': float(peak_threshold_db),
+                    'subcarrier_count': int(vector_len),
+                    'compute_backend': 'cpu-cancelled',
+                },
+            }
+        if row_priority_set is not None and int(row_idx) not in row_priority_set:
+            rows_skipped += 1
+            continue
+        smoothed = _build_spatially_smoothed_covariance(row_vector)
+        if smoothed is None:
+            rows_skipped += 1
+            continue
+
+        covariance, subarray_len, snapshot_count = smoothed
+        try:
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        except Exception:
+            rows_skipped += 1
+            continue
+
+        order = np.argsort(np.real(eigenvalues))[::-1]
+        eigenvalues = np.real(eigenvalues[order])
+        eigenvectors = eigenvectors[:, order]
+        source_count, _, _ = _estimate_mdl_source_count(eigenvalues, snapshot_count)
+        if source_count <= 0 or source_count >= subarray_len:
+            rows_skipped += 1
+            continue
+
+        signal_subspace = eigenvectors[:, :source_count]
+        noise_subspace = eigenvectors[:, source_count:]
+        rows_processed += 1
+        source_counts.append(int(source_count))
+
+        if estimator == DELAY_ESTIMATOR_MUSIC:
+            noise_projector = noise_subspace @ np.conjugate(noise_subspace).T
+            denominator = _quadratic_form_fft_grid(noise_projector, range_fft_size)[:display_range_bins]
+            spectrum_db[row_idx, :] = 20.0 * np.log10(1.0 / np.maximum(denominator, 1e-12))
+        elif estimator == DELAY_ESTIMATOR_CAPON:
+            try:
+                inverse_covariance = np.linalg.pinv(covariance)
+            except Exception:
+                rows_skipped += 1
+                rows_processed = max(0, rows_processed - 1)
+                if source_counts:
+                    source_counts.pop()
+                continue
+            denominator = _quadratic_form_fft_grid(inverse_covariance, range_fft_size)[:display_range_bins]
+            spectrum_db[row_idx, :] = 20.0 * np.log10(1.0 / np.maximum(denominator, 1e-12))
+        elif estimator == DELAY_ESTIMATOR_ROOTMUSIC:
+            noise_projector = noise_subspace @ np.conjugate(noise_subspace).T
+            delays = _delays_from_rootmusic(noise_projector, source_count, range_fft_size)
+            strengths_db = _estimate_point_strengths(row_vector, delays, range_fft_size)
+            for delay_value, strength_db in zip(delays.tolist(), strengths_db.tolist()):
+                if not np.isfinite(delay_value) or not np.isfinite(strength_db):
+                    continue
+                if delay_value < 0.0 or delay_value >= float(display_range_bins):
+                    continue
+                point_candidates.append((int(row_idx), int(np.clip(round(delay_value), 0, display_range_bins - 1))))
+                point_strength_candidates.append(float(strength_db))
+        elif estimator == DELAY_ESTIMATOR_ESPRIT:
+            delays = _delays_from_esprit(signal_subspace, source_count, range_fft_size)
+            strengths_db = _estimate_point_strengths(row_vector, delays, range_fft_size)
+            for delay_value, strength_db in zip(delays.tolist(), strengths_db.tolist()):
+                if not np.isfinite(delay_value) or not np.isfinite(strength_db):
+                    continue
+                if delay_value < 0.0 or delay_value >= float(display_range_bins):
+                    continue
+                point_candidates.append((int(row_idx), int(np.clip(round(delay_value), 0, display_range_bins - 1))))
+                point_strength_candidates.append(float(strength_db))
+
+    detected_points = np.empty((0, 2), dtype=np.int32)
+    detected_strengths_db = np.empty((0,), dtype=np.float32)
+    rd_levels = (0.0, 1.0)
+    superres_rd = None
+
+    if uses_spectrum:
+        finite_mask = np.isfinite(spectrum_db)
+        if np.any(finite_mask):
+            peak_db = float(np.max(spectrum_db[finite_mask]))
+            relative_db = np.where(finite_mask, spectrum_db - peak_db, -np.inf)
+            detection_mask = _build_local_max_mask_2d(relative_db) & (relative_db >= peak_threshold_db)
+            candidate_points = np.argwhere(detection_mask)
+            candidate_strengths = (
+                relative_db[candidate_points[:, 0], candidate_points[:, 1]].astype(np.float32, copy=False)
+                if candidate_points.size > 0
+                else np.empty((0,), dtype=np.float32)
+            )
+            detected_points, detected_strengths_db = _limit_ranked_points(
+                candidate_points.astype(np.int32, copy=False),
+                candidate_strengths,
+                SUPERRES_MAX_POINTS,
+            )
+            display_floor = min(-60.0, peak_threshold_db - 24.0)
+            display_image = np.where(finite_mask, np.maximum(relative_db, display_floor), display_floor)
+            superres_rd = display_image.astype(np.float32, copy=False)
+            rd_levels = (float(display_floor), 0.0)
+        else:
+            superres_rd = np.full((display_rows.shape[0], display_range_bins), -60.0, dtype=np.float32)
+            rd_levels = (-60.0, 0.0)
+        rd_display = np.asarray(superres_rd, dtype=np.float32)
+    else:
+        if point_candidates:
+            points_arr = np.asarray(point_candidates, dtype=np.int32)
+            strengths_arr = np.asarray(point_strength_candidates, dtype=np.float64)
+            peak_strength_db = float(np.max(strengths_arr))
+            relative_strengths = (strengths_arr - peak_strength_db).astype(np.float32, copy=False)
+            keep_mask = relative_strengths >= float(peak_threshold_db)
+            points_arr = points_arr[keep_mask]
+            relative_strengths = relative_strengths[keep_mask]
+            if points_arr.size > 0:
+                unique_strengths = {}
+                for point, strength_db in zip(points_arr.tolist(), relative_strengths.tolist()):
+                    point_key = (int(point[0]), int(point[1]))
+                    prev = unique_strengths.get(point_key)
+                    if prev is None or float(strength_db) > prev:
+                        unique_strengths[point_key] = float(strength_db)
+                sorted_items = sorted(unique_strengths.items(), key=lambda item: item[1], reverse=True)
+                points_arr = np.asarray([item[0] for item in sorted_items], dtype=np.int32)
+                relative_strengths = np.asarray([item[1] for item in sorted_items], dtype=np.float32)
+            detected_points, detected_strengths_db = _limit_ranked_points(
+                points_arr,
+                relative_strengths,
+                SUPERRES_MAX_POINTS,
+            )
+        rd_display = np.zeros((display_rows.shape[0], display_range_bins), dtype=np.float32)
+        rd_levels = (0.0, 1.0)
+
+    rows_detected = int(len(np.unique(detected_points[:, 0]))) if detected_points.size > 0 else 0
+    summary = {
+        'mode': get_delay_estimator_label(),
+        'rows_total': int(display_rows.shape[0]),
+        'rows_processed': int(rows_processed),
+        'rows_skipped': int(rows_skipped),
+        'rows_detected': int(rows_detected),
+        'source_count_max': int(max(source_counts)) if source_counts else 0,
+        'source_count_mean': float(np.mean(source_counts)) if source_counts else 0.0,
+        'threshold_db': float(peak_threshold_db),
+        'subcarrier_count': int(vector_len),
+        'compute_backend': 'cpu',
+        'rows_capped': int(rows_capped),
+    }
+    return {
+        'rd': rd_display.astype(np.float32, copy=False),
+        'rd_levels': rd_levels,
+        'superres_rd': None if superres_rd is None else np.asarray(superres_rd, dtype=np.float32),
+        'points': detected_points,
+        'strengths_db': detected_strengths_db.astype(np.float32, copy=False),
+        'summary': summary,
+    }
+
+
 def accumulate_range_time_data_batch(channel_range_time_views):
     updated_channels = []
     for ch_idx, range_time_view in channel_range_time_views:
@@ -1714,9 +2778,66 @@ def _finalize_channel_result(
     rd_spectrum_plot = rd_spectrum[:0, :0]
     rd_spectrum_plot_cpu = np.empty((0, 0), dtype=np.float32)
     target_clusters = []
+    detected_points = np.empty((0, 2), dtype=np.int32)
+    detected_strengths_db = np.empty((0,), dtype=np.float32)
+    detected_targets = []
+    detector_summary = None
+    rd_levels = None
+    superres_rd = None
     clean_component_points = np.empty((0, 2), dtype=np.int32)
     clean_component_strength_db = np.empty((0,), dtype=np.float32)
-    if local_detector_mode == LOCAL_DETECTOR_OS_CFAR:
+    if delay_estimator_uses_superres():
+        detector_mode = f"delay_superres_{delay_estimator_mode}"
+        processing_generation_snapshot = get_processing_generation()
+        try:
+            doppler_frequency_matrix = process_doppler_frequency_input(raw_frame, viewer_params)
+            superres_result = run_delay_superresolution(
+                doppler_frequency_matrix,
+                range_fft_size,
+                display_range_bins,
+                display_doppler_bins,
+                processing_generation_snapshot=processing_generation_snapshot,
+            )
+        except Exception as exc:
+            print(f"[CH{ch.ch_id + 1}] Delay superresolution error: {exc}")
+            superres_result = {
+                'rd': np.zeros((min(display_doppler_bins, doppler_fft_size), display_range_bins), dtype=np.float32),
+                'rd_levels': (0.0, 1.0),
+                'superres_rd': None,
+                'points': np.empty((0, 2), dtype=np.int32),
+                'strengths_db': np.empty((0,), dtype=np.float32),
+                'summary': {
+                    'mode': get_delay_estimator_label(),
+                    'rows_total': 0,
+                    'rows_processed': 0,
+                    'rows_skipped': 0,
+                    'rows_detected': 0,
+                    'source_count_max': 0,
+                    'source_count_mean': 0.0,
+                    'threshold_db': float(superres_peak_rel_threshold_db),
+                    'reason': str(exc),
+                },
+            }
+
+        rd_spectrum_plot_cpu = np.asarray(superres_result.get('rd'), dtype=np.float32)
+        rd_levels = superres_result.get('rd_levels')
+        superres_rd = superres_result.get('superres_rd')
+        detected_points = np.asarray(superres_result.get('points'), dtype=np.int32)
+        detected_strengths_db = np.asarray(superres_result.get('strengths_db'), dtype=np.float32)
+        detector_summary = dict(superres_result.get('summary') or {})
+        detector_summary['mode'] = get_delay_estimator_label()
+        cfar_points = detected_points
+        cfar_hits = int(detected_points.shape[0])
+        cfar_shown_hits = int(detected_points.shape[0])
+        cfar_backend = delay_estimator_mode
+        cfar_stats = detector_summary
+        target_clusters = build_direct_targets(
+            detected_points,
+            rd_spectrum_plot_cpu,
+            point_strengths_db=detected_strengths_db,
+        )
+        detected_targets = list(target_clusters)
+    elif local_detector_mode == LOCAL_DETECTOR_OS_CFAR:
         detector_mode = 'local_os_cfar'
         os_pad_rows = max(0, int(cfar_train_doppler)) + max(0, int(cfar_guard_doppler))
         os_pad_cols = max(0, int(cfar_train_range)) + max(0, int(cfar_guard_range))
@@ -1840,6 +2961,8 @@ def _finalize_channel_result(
             rd_spectrum_plot_cpu,
             point_strengths_db=clean_component_strength_db,
         )
+    elif delay_estimator_uses_superres():
+        target_clusters = detected_targets
 
     md_spectrum = None
     md_extent = None
@@ -1858,6 +2981,19 @@ def _finalize_channel_result(
             _, _, Pxx, md_extent = md_result
             md_spectrum = Pxx
 
+    if not delay_estimator_uses_superres():
+        detected_points = np.asarray(cfar_points, dtype=np.int32)
+        detected_targets = list(target_clusters)
+        detector_summary = {
+            'mode': get_local_detector_label(),
+            'enabled': bool(cfar_enabled),
+            'backend': cfar_backend,
+            'raw_hits': int(cfar_hits),
+            'shown_hits': int(cfar_shown_hits),
+        }
+        if isinstance(cfar_stats, dict):
+            detector_summary.update(cfar_stats)
+
     dsp_time = time.time() - t_start
 
     result = {
@@ -1865,7 +3001,14 @@ def _finalize_channel_result(
         'frame_id': int(frame_id),
         'raw': raw_frame,
         'rd': rd_spectrum_plot_cpu,
+        'rd_levels': rd_levels,
         'rd_complex': rd_complex_plot_cpu,
+        'superres_rd': superres_rd,
+        'delay_estimator_mode': delay_estimator_mode,
+        'detected_points': detected_points,
+        'detected_strengths_db': detected_strengths_db,
+        'detected_targets': detected_targets,
+        'detector_summary': detector_summary,
         'cfar_points': cfar_points,
         'cfar_hits': cfar_hits,
         'cfar_shown_hits': cfar_shown_hits,
@@ -2335,7 +3478,6 @@ class MainWindow(QtWidgets.QMainWindow):
         display_db_layout.addWidget(self.txt_display_db_max)
         display_db_layout.addWidget(btn_display_db)
         control_layout.addLayout(display_db_layout)
-
         self.superres_controls = QtWidgets.QWidget()
         superres_layout = QtWidgets.QVBoxLayout(self.superres_controls)
         superres_layout.setContentsMargins(0, 0, 0, 0)
@@ -2487,7 +3629,9 @@ class MainWindow(QtWidgets.QMainWindow):
         local_detector_layout.addWidget(self.local_clean_controls)
         control_layout.addWidget(self.local_detector_controls)
 
-        cluster_gap_layout = QtWidgets.QHBoxLayout()
+        self.cluster_controls = QtWidgets.QWidget()
+        cluster_gap_layout = QtWidgets.QHBoxLayout(self.cluster_controls)
+        cluster_gap_layout.setContentsMargins(0, 0, 0, 0)
         cluster_gap_layout.addWidget(QtWidgets.QLabel("DBSCAN Eps:"))
         self.lbl_dbscan_eps = QtWidgets.QLabel("")
         cluster_gap_layout.addWidget(self.lbl_dbscan_eps)
@@ -2497,7 +3641,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_cluster_apply = QtWidgets.QPushButton("Apply DBSCAN")
         btn_cluster_apply.clicked.connect(self.apply_target_cluster_settings)
         cluster_gap_layout.addWidget(btn_cluster_apply)
-        control_layout.addLayout(cluster_gap_layout)
+        control_layout.addWidget(self.cluster_controls)
 
         control_layout.addSpacing(20)
 
@@ -2617,6 +3761,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.targets_window.show()
 
         threading.Thread(target=send_skip_command, daemon=True).start()
+        self.combo_delay_estimator.blockSignals(True)
+        self.combo_delay_estimator.setCurrentIndex(
+            self.combo_delay_estimator.findData(delay_estimator_mode)
+        )
+        self.combo_delay_estimator.blockSignals(False)
         self.combo_local_detector.blockSignals(True)
         self.combo_local_detector.setCurrentIndex(
             self.combo_local_detector.findData(local_detector_mode)
@@ -2666,6 +3815,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if changed and announce:
             print("Local CLEAN forces Range Window and Doppler Window OFF")
         return changed
+
+    def apply_superres_settings(self):
+        global superres_peak_rel_threshold_db
+        try:
+            superres_peak_rel_threshold_db = float(self.txt_superres_peak_rel.text())
+            self.txt_superres_peak_rel.setText(f"{superres_peak_rel_threshold_db:.1f}")
+            self._force_ui_refresh = True
+            self._last_rendered_display_key = None
+            self._last_top_targets_key = None
+            reset_processing_state()
+            print(
+                "Delay superresolution updated: "
+                f"mode={get_delay_estimator_label()} "
+                f"peak_rel_threshold_db={superres_peak_rel_threshold_db:.1f}"
+            )
+        except ValueError:
+            print("Invalid Peak Rel Threshold")
+
+    def on_delay_estimator_changed(self, _idx):
+        global delay_estimator_mode
+        selected = self.combo_delay_estimator.currentData()
+        if selected not in DELAY_ESTIMATOR_CHOICES:
+            selected = DELAY_ESTIMATOR_FFT
+        if delay_estimator_mode == selected:
+            return
+        delay_estimator_mode = selected
+        self.refresh_detector_controls(force=True)
+        self._force_ui_refresh = True
+        self._last_rendered_display_key = None
+        self._last_top_targets_key = None
+        reset_processing_state()
+        print(f"Delay estimator switched to: {get_delay_estimator_label()}")
 
     def refresh_detector_controls(self, force=False):
         changed_windows = self._enforce_clean_window_policy(announce=force)
@@ -2878,7 +4059,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for ch in CHANNELS:
                 if isinstance(ch.current_display_data, dict):
                     ch.current_display_data['cfar_points'] = np.empty((0, 2), dtype=np.int32)
+                    ch.current_display_data['detected_points'] = np.empty((0, 2), dtype=np.int32)
                     ch.current_display_data['target_clusters'] = []
+                    ch.current_display_data['detected_targets'] = []
             self.rd_cfar_marker.setData([], [])
 
     def apply_clean_settings(self):
@@ -3282,20 +4465,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def _get_target_clusters(self, latest_disp):
         if not latest_disp:
             return []
+        detected_targets = latest_disp.get('detected_targets')
+        if detected_targets is not None:
+            return detected_targets
         clusters = latest_disp.get('target_clusters')
         if clusters is not None:
             return clusters
 
         rd_data = latest_disp.get('rd')
-        cfar_points = latest_disp.get('cfar_points')
-        if rd_data is None or cfar_points is None or len(cfar_points) == 0:
+        detected_points = latest_disp.get('detected_points')
+        if detected_points is None:
+            detected_points = latest_disp.get('cfar_points')
+        if rd_data is None or detected_points is None or len(detected_points) == 0:
             return []
 
         detector_mode = latest_disp.get('detector_mode', 'local_clean')
-        if detector_mode == 'local_clean':
-            clusters = build_direct_targets(cfar_points, rd_data)
+        if detector_mode == 'local_clean' or str(detector_mode).startswith("delay_superres_"):
+            clusters = build_direct_targets(
+                detected_points,
+                rd_data,
+                point_strengths_db=latest_disp.get('detected_strengths_db'),
+            )
         else:
-            clusters = cluster_detected_targets(cfar_points, rd_data)
+            clusters = cluster_detected_targets(detected_points, rd_data)
         latest_disp['target_clusters'] = clusters
         return clusters
 
@@ -3389,10 +4581,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         frame_id = latest_disp.get('frame_id', -1)
         detector_mode = latest_disp.get('detector_mode', 'local_clean')
+        detector_summary = latest_disp.get('detector_summary') or {}
         detector_label = {
             'local_os_cfar': 'local OS-CFAR',
             'local_clean': 'local CLEAN',
-        }.get(detector_mode, detector_mode)
+        }.get(detector_mode, detector_summary.get('mode', detector_mode))
         have_auto_aoa = (
             len(CHANNELS) >= 2
             and self.phase_ready
@@ -3406,6 +4599,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Detector={detector_label} | "
                 f"Mode=direct targets | "
                 f"List={TARGET_TEXT_POINT_LIMIT} Plot={TARGET_SECTOR_POINT_LIMIT}"
+            )
+        elif str(detector_mode).startswith("delay_superres_"):
+            detector_config_text = (
+                f"Detector={detector_label} | "
+                f"Rows={int(detector_summary.get('rows_processed', 0))}/{int(detector_summary.get('rows_total', 0))} | "
+                f"RowsDetected={int(detector_summary.get('rows_detected', 0))} | "
+                f"Kmax={int(detector_summary.get('source_count_max', 0))} | "
+                f"Thr={float(detector_summary.get('threshold_db', superres_peak_rel_threshold_db)):.1f}dB"
             )
         else:
             detector_config_text = (
@@ -4090,7 +5291,9 @@ class MainWindow(QtWidgets.QMainWindow):
             latest_disp = ch.current_display_data
             rd_data = latest_disp.get('rd')
             md_data = latest_disp.get('md')
-            cfar_points = latest_disp.get('cfar_points')
+            overlay_points = latest_disp.get('detected_points')
+            if overlay_points is None:
+                overlay_points = latest_disp.get('cfar_points')
             frame_id = int(latest_disp.get('frame_id', -1))
             display_render_key = (display_channel, frame_id)
             redraw_display = display_render_key != self._last_rendered_display_key
@@ -4108,6 +5311,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 int(get_dbscan_eps_range()),
                 int(target_dbscan_min_samples),
                 str(local_detector_mode),
+                str(delay_estimator_mode),
+                float(superres_peak_rel_threshold_db),
             )
             refresh_targets = top_targets_key != self._last_top_targets_key
 
@@ -4125,9 +5330,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.rd_doppler_min = -0.5 * float(rows)
                 self.rd_doppler_span = float(rows)
                 self.rd_img.setRect(QtCore.QRectF(self.rd_doppler_min, 0.0, self.rd_doppler_span, float(cols)))
-                if cfar_points is not None and len(cfar_points) > 0:
-                    x_pts = self.rd_doppler_min + cfar_points[:, 0].astype(np.float32)
-                    y_pts = cfar_points[:, 1].astype(np.float32)
+                if overlay_points is not None and len(overlay_points) > 0:
+                    x_pts = self.rd_doppler_min + overlay_points[:, 0].astype(np.float32)
+                    y_pts = overlay_points[:, 1].astype(np.float32)
                     self.rd_cfar_marker.setData(x_pts, y_pts)
                 else:
                     self.rd_cfar_marker.setData([], [])
@@ -4162,7 +5367,8 @@ class MainWindow(QtWidgets.QMainWindow):
             params_text = (
                 f"Params(CH{ch.ch_id + 1}): {params.describe()} | "
                 f"local_fft={get_processing_range_fft_size()}x{get_processing_doppler_fft_size()} | "
-                f"view={get_display_range_bin_limit()}x{get_display_doppler_bin_limit()}"
+                f"view={get_display_range_bin_limit()}x{get_display_doppler_bin_limit()} | "
+                f"delay_est={get_delay_estimator_label()} thr={superres_peak_rel_threshold_db:.1f}dB"
             )
             if ch.last_param_error:
                 params_text += f" | last_error={ch.last_param_error}"
@@ -4174,8 +5380,36 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"MD Buffer(CH{ch.ch_id + 1}): {len(ch.micro_doppler_buffer)}/{BUFFER_LENGTH}"
                 )
             detector_mode = latest_disp.get('detector_mode', 'local_clean')
+            detector_summary = latest_disp.get('detector_summary') or {}
             cfar_stats = latest_disp.get('cfar_stats') or {}
-            if detector_mode == 'local_os_cfar':
+            if str(detector_mode).startswith("delay_superres_"):
+                mode_label = str(detector_summary.get('mode', get_delay_estimator_label()))
+                rows_processed = int(detector_summary.get('rows_processed', 0))
+                rows_total = int(detector_summary.get('rows_total', 0))
+                rows_detected = int(detector_summary.get('rows_detected', 0))
+                source_count_max = int(detector_summary.get('source_count_max', 0))
+                threshold_db = float(detector_summary.get('threshold_db', superres_peak_rel_threshold_db))
+                compute_backend = str(detector_summary.get('compute_backend', 'cpu'))
+                cpu_rows_fetched = int(detector_summary.get('cpu_rows_fetched', 0))
+                rows_capped = int(detector_summary.get('rows_capped', 0))
+                hit_count = 0 if overlay_points is None else int(len(overlay_points))
+                cfar_status = (
+                    f"Detector(CH{ch.ch_id + 1}): {mode_label} hits={hit_count} "
+                    f"rows={rows_processed}/{rows_total} rows_detected={rows_detected} "
+                    f"kmax={source_count_max} thr={threshold_db:.1f}dB "
+                    f"subc={int(detector_summary.get('subcarrier_count', 0))} "
+                    f"capped={rows_capped} "
+                    f"cpu_rows={cpu_rows_fetched} "
+                    f"backend={compute_backend}"
+                )
+                cfar_status_short = (
+                    f"Detector(CH{ch.ch_id + 1}): {mode_label} "
+                    f"h={hit_count} r={rows_processed}/{rows_total} "
+                    f"k={source_count_max} t={threshold_db:.1f} "
+                    f"cap={rows_capped} "
+                    f"cpu={cpu_rows_fetched} {compute_backend}"
+                )
+            elif detector_mode == 'local_os_cfar':
                 cfar_status = f"Detector(CH{ch.ch_id + 1}): OS-CFAR {'on' if cfar_enabled else 'off'}"
                 if cfar_enabled:
                     cfar_status += (
