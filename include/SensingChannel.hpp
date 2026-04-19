@@ -20,6 +20,20 @@ struct SharedSensingRuntime {
     size_t sensing_symbol_stride = 20;
     bool enable_mti = true;
     bool skip_sensing_fft = true;
+    bool cfar_enabled = false;
+    int cfar_train_doppler = 20;
+    int cfar_train_range = 20;
+    int cfar_guard_doppler = 10;
+    int cfar_guard_range = 10;
+    float cfar_alpha_db = 16.989700f;
+    int cfar_min_range_bin = 0;
+    int cfar_dc_exclusion_bins = 0;
+    float cfar_min_power_db = 0.0f;
+    float cfar_os_rank_percent = 75.0f;
+    int cfar_os_suppress_doppler = 2;
+    int cfar_os_suppress_range = 2;
+    bool micro_doppler_enabled = true;
+    int micro_doppler_range_bin = 0;
     uint64_t generation = 1;
     uint64_t apply_symbol_index = 0;
 };
@@ -27,7 +41,7 @@ struct SharedSensingRuntime {
 class SensingChannel {
 public:
     using HeartbeatCallback = std::function<void(const std::string&, int)>;
-    using CoreResolver = std::function<size_t(size_t)>;
+    using CoreResolver = std::function<std::optional<size_t>(size_t)>;
     using BatchResetRequester = std::function<void()>;
 
     SensingChannel(
@@ -97,6 +111,28 @@ private:
         uint64_t frame_seq = 0;
     };
 
+public:
+    struct BackendZoomContext {
+        bool range_enabled = false;
+        bool doppler_enabled = false;
+        size_t range_view_bins = 0;
+        size_t doppler_view_bins = 0;
+        size_t doppler_head_bins = 0;
+        size_t doppler_tail_bins = 0;
+        std::unique_ptr<ZoomFFTProcessor> range_plan;
+        std::unique_ptr<ZoomFFTProcessor> doppler_head_plan;
+        std::unique_ptr<ZoomFFTProcessor> doppler_tail_plan;
+        AlignedVector range_output_buffer;
+
+        bool has_range_plan() const { return range_enabled && static_cast<bool>(range_plan); }
+        bool has_doppler_plan() const {
+            return doppler_enabled &&
+                   ((doppler_head_bins == 0 || static_cast<bool>(doppler_head_plan)) &&
+                    (doppler_tail_bins == 0 || static_cast<bool>(doppler_tail_plan)));
+        }
+    };
+
+private:
     class PairedFrameQueue;
 
     struct RxIoContext {
@@ -105,6 +141,8 @@ private:
         uhd::usrp::multi_usrp::sptr rx_usrp;
         uhd::rx_streamer::sptr rx_stream;
         uhd::time_spec_t stream_start_time{0.0};
+        double rx_sample_rate = 0.0;
+        double rx_tick_rate = 0.0;
         ObjectPool<AlignedVector> rx_frame_pool;
         std::unique_ptr<PairedFrameQueue> paired_queue;
         std::atomic<RxState> rx_state{RxState::ALIGNMENT};
@@ -156,9 +194,25 @@ private:
         AlignedFloatVector compact_range_window;
         AlignedFloatVector doppler_window;
         AlignedFloatVector compact_doppler_window;
+        size_t backend_view_range_bins = 0;
+        size_t backend_view_doppler_bins = 0;
+        bool backend_range_view_limited = false;
+        bool backend_doppler_view_limited = false;
+        BackendZoomContext backend_zoom;
+        BackendZoomContext compact_backend_zoom;
+        AlignedVector backend_view_buffer;
+        AlignedVector backend_output_buffer;
+        fftwf_plan backend_view_doppler_fft_plan = nullptr;
         std::vector<int> actual_subcarrier_indices;
         std::vector<int> compact_shifted_subcarrier_indices;
         std::vector<float> subcarrier_phases_unit_delay;
+        SensingCfarParams cfar_params;
+        MicroDopplerState micro_doppler_state;
+        bool micro_doppler_enabled = true;
+        size_t micro_doppler_range_bin = 0;
+        AlignedVector micro_doppler_trace;
+        AlignedFloatVector rd_magnitude_db;
+        std::vector<uint8_t> metadata_bytes;
         std::chrono::steady_clock::time_point next_hb_time;
         double pending_batch_gather_us = 0.0;
         double prof_gather_total_us = 0.0;
@@ -185,7 +239,7 @@ private:
         SensingComputeContext& operator=(SensingComputeContext&&) = delete;
     };
 
-    size_t _resolve_core(size_t hint) const;
+    std::optional<size_t> _resolve_core(size_t hint) const;
     void _rx_loop(const uhd::time_spec_t& start_time);
     void _handle_alignment();
     void _handle_normal_rx();
@@ -209,6 +263,14 @@ private:
         double prep_us,
         size_t symbol_count
     );
+    void _prepare_backend_processing_state(
+        SharedSensingRuntime& snapshot,
+        bool& clear_micro_doppler);
+    std::vector<uint8_t> _build_backend_metadata(
+        const std::complex<float>* rd_data,
+        size_t rows,
+        size_t cols,
+        uint64_t frame_start_symbol_index);
     void _apply_shared_sensing_if_due(uint64_t symbol_index);
     void _request_shared_batch_reset();
     void _apply_batch_reset_if_due(uint64_t frame_start_symbol_index);

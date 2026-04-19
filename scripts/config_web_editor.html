@@ -550,6 +550,28 @@
       font: inherit;
     }
 
+    .cpu-table input:disabled {
+      background: var(--surface-alt);
+      color: var(--muted-color);
+      cursor: not-allowed;
+    }
+
+    .cpu-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--secondary-color);
+      user-select: none;
+    }
+
+    .cpu-toggle input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--primary-color);
+      cursor: pointer;
+    }
+
     .actions, .row, .meta {
       display: flex;
       flex-wrap: wrap;
@@ -783,7 +805,7 @@
             <div id="configSections"></div>
             <div class="card" style="margin-top: 14px;">
               <h3>CPU Binding</h3>
-              <div class="subtle" id="cpuBindingIntro">Thread-aware CPU selection for this tab.</div>
+              <div class="subtle" id="cpuBindingIntro">Thread-aware CPU selection for this tab. Fill a CPU ID to pin a thread, or tick "No Bind" to write <code>-1</code> and let the system schedule it freely.</div>
               <div id="cpuBindingTable"></div>
               <div class="meta">
                 <span id="cpuListPreview">isolated CPUs: -</span>
@@ -1038,7 +1060,7 @@
     function defaultCpuSpec() {
       const model = currentModel();
       if (!model?.cpu_cores?.values) return '';
-      const unique = [...new Set(model.cpu_cores.values)].sort((a, b) => a - b);
+      const unique = [...new Set(model.cpu_cores.values.filter((value) => value >= 0))].sort((a, b) => a - b);
       return unique.join(',');
     }
 
@@ -2302,7 +2324,7 @@
       return holder;
     }
 
-    function cpuThreadRows(tab, cpuValues) {
+    function cpuThreadRows(tab, cpuValues, previousRows = []) {
       const rows = [];
       if (tab === 'modulator') {
         rows.push({ slot: 0, comment: 'idx0 (hint 0): _tx_proc', label: '_tx_proc' });
@@ -2334,24 +2356,34 @@
         const slot = rows.length;
         rows.push({ slot, comment: `extra[${slot}]`, label: `extra[${slot}]` });
       }
-      return rows.map((row, index) => ({
-        ...row,
-        cpu: cpuValues[index] ?? '',
-      }));
+      return rows.map((row, index) => {
+        const parsedValue = parseIntOrNull(cpuValues[index]);
+        return {
+          ...row,
+          cpu: parsedValue !== null && parsedValue >= 0
+            ? String(parsedValue)
+            : '',
+          savedCpu:
+            parsedValue !== null && parsedValue >= 0
+              ? String(parsedValue)
+              : String(previousRows[index]?.savedCpu ?? previousRows[index]?.cpu ?? ''),
+          unbound: parsedValue === -1 || Boolean(previousRows[index]?.unbound && cpuValues[index] === undefined),
+        };
+      });
     }
 
     function renderCpuBinding() {
       const model = currentModel();
       if (!model) return;
       const cpuValues = model.cpu_cores.values;
-      const rows = cpuThreadRows(currentTab, cpuValues);
+      const rows = cpuThreadRows(currentTab, cpuValues, model.cpu_cores.rows || []);
       model.cpu_cores.rows = rows;
 
       const table = document.createElement('table');
       table.className = 'cpu-table';
       table.innerHTML = `
         <thead>
-          <tr><th>Thread</th><th>Comment</th><th>CPU</th></tr>
+          <tr><th>Thread</th><th>Comment</th><th>CPU</th><th>No Bind</th></tr>
         </thead>
         <tbody></tbody>
       `;
@@ -2361,7 +2393,12 @@
         tr.innerHTML = `
           <td><code>${row.label}</code></td>
           <td class="hint">${row.comment}</td>
-          <td><input type="text" data-cpu-row="${row.slot}" value="${row.cpu ?? ''}" placeholder="e.g. 4"></td>
+          <td><input type="text" data-cpu-row="${row.slot}" value="${row.unbound ? '' : (row.cpu ?? '')}" placeholder="e.g. 4" ${row.unbound ? 'disabled' : ''}></td>
+          <td>
+            <label class="cpu-toggle">
+              <input type="checkbox" data-cpu-unbound-row="${row.slot}" ${row.unbound ? 'checked' : ''}>
+            </label>
+          </td>
         `;
         tbody.appendChild(tr);
       }
@@ -2371,7 +2408,49 @@
       cpuBindingTable.querySelectorAll('input[data-cpu-row]').forEach((input) => {
         input.addEventListener('input', () => {
           const slot = Number.parseInt(input.dataset.cpuRow, 10);
-          model.cpu_cores.rows[slot].cpu = input.value;
+          const row = model.cpu_cores.rows[slot];
+          if (!row) return;
+          row.cpu = input.value;
+          const trimmed = String(input.value ?? '').trim();
+          if (trimmed === '-1') {
+            row.unbound = true;
+            row.cpu = '';
+            input.value = '';
+            input.disabled = true;
+            const checkbox = cpuBindingTable.querySelector(`input[data-cpu-unbound-row="${slot}"]`);
+            if (checkbox) {
+              checkbox.checked = true;
+            }
+            syncCpuValuesFromRows();
+            return;
+          }
+          if (trimmed) {
+            row.savedCpu = trimmed;
+          }
+          syncCpuValuesFromRows();
+        });
+      });
+      cpuBindingTable.querySelectorAll('input[data-cpu-unbound-row]').forEach((checkbox) => {
+        checkbox.addEventListener('change', () => {
+          const slot = Number.parseInt(checkbox.dataset.cpuUnboundRow, 10);
+          const row = model.cpu_cores.rows[slot];
+          const input = cpuBindingTable.querySelector(`input[data-cpu-row="${slot}"]`);
+          if (!row || !input) return;
+          const currentCpu = String(row.cpu ?? '').trim();
+          if (checkbox.checked) {
+            if (currentCpu) {
+              row.savedCpu = currentCpu;
+            }
+            row.unbound = true;
+            row.cpu = '';
+            input.value = '';
+            input.disabled = true;
+          } else {
+            row.unbound = false;
+            row.cpu = String(row.savedCpu ?? '').trim();
+            input.disabled = false;
+            input.value = row.cpu;
+          }
           syncCpuValuesFromRows();
         });
       });
@@ -2383,7 +2462,12 @@
       if (!model) return;
       const values = [];
       let truncated = false;
-      for (const row of (model.cpu_cores.rows || [])) {
+      const rows = model.cpu_cores.rows || [];
+      for (const row of rows) {
+        if (row.unbound) {
+          values.push(-1);
+          continue;
+        }
         const parsed = parseIntOrNull(row.cpu);
         if (parsed === null) {
           if (String(row.cpu ?? '').trim() === '') {
@@ -2397,13 +2481,26 @@
       }
       model.cpu_cores.values = values;
 	      if (tabName === currentTab && !specialPlannerTabs.has(currentTab)) {
-        const unique = [...new Set(values)].sort((a, b) => a - b);
+        const unique = [...new Set(values.filter((value) => value >= 0))].sort((a, b) => a - b);
         const preview = unique.length ? `isolated CPUs: ${unique.join(',')}` : 'isolated CPUs: -';
+        const unboundLabels = rows.filter((row) => row.unbound).map((row) => row.label);
+        const unboundPreview = unboundLabels.length ? `  |  no-bind: ${unboundLabels.join(', ')}` : '';
         cpuListPreview.textContent = truncated
-          ? `${preview}  |  entries after the first blank row are ignored`
-          : preview;
+          ? `${preview}${unboundPreview}  |  entries after the first blank row are ignored`
+          : `${preview}${unboundPreview}`;
         updateRuntimeOptionControls();
       }
+    }
+
+    function fieldHintText(field) {
+      const base = field.display_comment || field.comment || '';
+      if (!field.optional) return base;
+      if (field.default_text) {
+        return base
+          ? `${base}<br>Default: ${field.default_text}.`
+          : `Optional.<br>Default: ${field.default_text}.`;
+      }
+      return base ? `${base} Optional; blank omits this key.` : 'Optional; blank omits this key.';
     }
 
 	    function renderSections() {
@@ -2452,7 +2549,7 @@
             holder.innerHTML = `
               <div class="key-col">
                 <code>${field.key}</code>
-                <div class="hint">${field.display_comment || field.comment || ''}</div>
+                <div class="hint">${fieldHintText(field)}</div>
               </div>
               <div class="value-col"></div>
             `;
@@ -2488,6 +2585,23 @@
                   });
                   wrapper.appendChild(input);
                   controlHost.appendChild(wrapper);
+                } else if (Array.isArray(sub.options) && sub.options.length) {
+                  const select = document.createElement('select');
+                  for (const optionValue of sub.options) {
+                    const option = document.createElement('option');
+                    option.value = String(optionValue);
+                    option.textContent = String(optionValue);
+                    select.appendChild(option);
+                  }
+                  select.value = value === null || value === undefined ? '' : String(value);
+                  if (!sub.options.map(String).includes(select.value) && sub.options.length) {
+                    select.value = String(sub.options[0]);
+                    item[sub.key] = select.value;
+                  }
+                  select.addEventListener('change', () => {
+                    item[sub.key] = select.value;
+                  });
+                  controlHost.appendChild(select);
                 } else {
                   const input = document.createElement('input');
                   input.type = 'text';
@@ -2512,7 +2626,7 @@
             row.innerHTML = `
               <div class="key-col">
                 <code>${field.key}</code>
-                <div class="hint">${field.display_comment || field.comment || ''}</div>
+                <div class="hint">${fieldHintText(field)}</div>
               </div>
               <div class="value-col"></div>
             `;
@@ -2570,7 +2684,7 @@
           row.innerHTML = `
             <div class="key-col">
               <code>${field.key}</code>
-              <div class="hint">${field.display_comment || field.comment || ''}</div>
+              <div class="hint">${fieldHintText(field)}</div>
             </div>
             <div class="value-col"></div>
           `;
@@ -2583,6 +2697,7 @@
             input.checked = Boolean(field.value);
             input.addEventListener('change', () => {
               field.value = input.checked;
+              field.value_text = input.checked ? 'true' : 'false';
               if (field.key === 'sensing_rx_channel_count') {
                 renderSections();
                 renderCpuBinding();
@@ -2590,10 +2705,46 @@
             });
             wrapper.appendChild(input);
             controlHost.appendChild(wrapper);
+          } else if (Array.isArray(field.options) && field.options.length) {
+            const select = document.createElement('select');
+            if (field.optional) {
+              const blank = document.createElement('option');
+              blank.value = '';
+              blank.textContent = '';
+              select.appendChild(blank);
+            }
+            for (const optionValue of field.options) {
+              const option = document.createElement('option');
+              option.value = String(optionValue);
+              option.textContent = String(optionValue);
+              select.appendChild(option);
+            }
+            select.value = field.value_text ?? '';
+            if (!field.optional && !field.options.map(String).includes(select.value) && field.options.length) {
+              select.value = String(field.options[0]);
+              field.value_text = select.value;
+            }
+            select.addEventListener('change', () => {
+              field.value_text = select.value;
+              if (field.key === 'sensing_rx_channel_count') {
+                field.value = select.value;
+                renderSections();
+                renderCpuBinding();
+                return;
+              }
+              if (['fft_size', 'num_symbols', 'sync_pos', 'pilot_positions'].includes(field.key)) {
+                field.value = select.value;
+                renderSections();
+              }
+            });
+            controlHost.appendChild(select);
           } else {
             const input = document.createElement(field.type === 'flow_list' ? 'textarea' : 'input');
             if (field.type !== 'flow_list') input.type = 'text';
-            input.value = field.value_text;
+            input.value = field.value_text ?? '';
+            if (field.default_text) {
+              input.placeholder = field.default_text;
+            }
             input.addEventListener('input', () => {
               field.value_text = input.value;
               if (field.key === 'sensing_rx_channel_count') {

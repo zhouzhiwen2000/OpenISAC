@@ -68,7 +68,7 @@ def parse_args() -> argparse.Namespace:
 
 def build_demod_role_map(demod_cfg: dict, pid: int) -> dict[tuple[int, str], str]:
     role_map: dict[tuple[int, str], str] = {}
-    demod_cores = [str(core) for core in demod_cfg.get("cpu_cores", [])]
+    demod_cores = [int(core) for core in demod_cfg.get("cpu_cores", [])]
     if demod_cores:
         base_roles = [
             "demod:rx_proc",
@@ -77,18 +77,19 @@ def build_demod_role_map(demod_cfg: dict, pid: int) -> dict[tuple[int, str], str
             "demod:bit_processing_proc",
         ]
         for idx, role in enumerate(base_roles):
-            if idx < len(demod_cores):
-                role_map[(pid, demod_cores[idx])] = role
-        role_map[(pid, demod_cores[-1])] = "demod:main"
+            if idx < len(demod_cores) and demod_cores[idx] >= 0:
+                role_map[(pid, str(demod_cores[idx]))] = role
+        if demod_cores[-1] >= 0:
+            role_map[(pid, str(demod_cores[-1]))] = "demod:main"
     return role_map
 
 
 def build_isolated_cpu_spec(*cfgs: dict) -> str:
     cpus: set[int] = set()
     for cfg in cfgs:
-        cpus.update(int(cpu) for cpu in cfg.get("cpu_cores", []))
+        cpus.update(int(cpu) for cpu in cfg.get("cpu_cores", []) if int(cpu) >= 0)
     if not cpus:
-        raise RuntimeError("Benchmark configs must define cpu_cores for isolate_cpus.bash")
+        raise RuntimeError("Benchmark configs must define at least one non-negative cpu_cores entry for isolate_cpus.bash")
     return ",".join(str(cpu) for cpu in sorted(cpus))
 
 

@@ -40,28 +40,29 @@ def parse_args() -> argparse.Namespace:
 
 def build_mod_role_map(mod_cfg: dict, pid: int) -> dict[tuple[int, str], str]:
     role_map: dict[tuple[int, str], str] = {}
-    mod_cores = [str(core) for core in mod_cfg.get("cpu_cores", [])]
+    mod_cores = [int(core) for core in mod_cfg.get("cpu_cores", [])]
     if mod_cores:
         base_roles = ["mod:_tx_proc", "mod:_modulation_proc", "mod:_data_ingest_proc"]
         for idx, role in enumerate(base_roles):
-            if idx < len(mod_cores):
-                role_map[(pid, mod_cores[idx])] = role
+            if idx < len(mod_cores) and mod_cores[idx] >= 0:
+                role_map[(pid, str(mod_cores[idx]))] = role
         sensing_count = int(mod_cfg.get("sensing_rx_channel_count", len(mod_cfg.get("sensing_rx_channels", [])) or 0))
         for ch_idx in range(sensing_count):
             rx_idx = 3 + ch_idx * 2
             proc_idx = rx_idx + 1
-            if rx_idx < len(mod_cores):
-                role_map[(pid, mod_cores[rx_idx])] = f"mod:sensing_rx_loop_ch{ch_idx}"
-            if proc_idx < len(mod_cores):
-                role_map[(pid, mod_cores[proc_idx])] = f"mod:sensing_process_loop_ch{ch_idx}"
-        role_map[(pid, mod_cores[-1])] = "mod:main"
+            if rx_idx < len(mod_cores) and mod_cores[rx_idx] >= 0:
+                role_map[(pid, str(mod_cores[rx_idx]))] = f"mod:sensing_rx_loop_ch{ch_idx}"
+            if proc_idx < len(mod_cores) and mod_cores[proc_idx] >= 0:
+                role_map[(pid, str(mod_cores[proc_idx]))] = f"mod:sensing_process_loop_ch{ch_idx}"
+        if mod_cores[-1] >= 0:
+            role_map[(pid, str(mod_cores[-1]))] = "mod:main"
     return role_map
 
 
 def build_isolated_cpu_spec(mod_cfg: dict) -> str:
-    cpus = {int(cpu) for cpu in mod_cfg.get("cpu_cores", [])}
+    cpus = {int(cpu) for cpu in mod_cfg.get("cpu_cores", []) if int(cpu) >= 0}
     if not cpus:
-        raise RuntimeError("Modulator config must define cpu_cores for isolate_cpus.bash")
+        raise RuntimeError("Modulator config must define at least one non-negative cpu_cores entry for isolate_cpus.bash")
     return ",".join(str(cpu) for cpu in sorted(cpus))
 
 

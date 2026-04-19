@@ -1,0 +1,1168 @@
+common:
+  sensing_rx_channels:
+    title: Sensing RX Channels
+    field:
+      type: mapping_list
+      key: sensing_rx_channels
+      comment: ""
+      optional: false
+      item_fields:
+        - key: usrp_channel
+          comment: USRP RX channel index for this sensing path
+          kind: int
+          default: 1
+        - key: device_args
+          comment: Per-channel USRP args override (optional)
+          kind: string
+          default: ""
+        - key: clock_source
+          comment: Per-channel clock source override (optional)
+          kind: string
+          default: ""
+          options: ["", internal, external, gpsdo]
+        - key: time_source
+          comment: Per-channel time source override (optional)
+          kind: string
+          default: ""
+          options: ["", internal, external, gpsdo]
+        - key: wire_format_rx
+          comment: Per-channel wire format override (optional)
+          kind: string
+          default: ""
+          options: ["", sc16, sc8]
+        - key: rx_gain
+          comment: Per-channel RX gain (dB)
+          kind: int
+          default: 30
+        - key: alignment
+          comment: Per-channel timing alignment offset (samples)
+          kind: int
+          default: 63
+        - key: rx_antenna
+          comment: RX antenna port (e.g. RX1/RX2/TX/RX)
+          kind: string
+          default: RX2
+          options: [RX1, RX2, TX/RX]
+        - key: enable_system_delay_estimation
+          comment: If true, this channel runs delay estimation only and disables sensing pipeline
+          kind: bool
+          default: false
+  data_resource_blocks:
+    title: Resource Preview
+    field:
+      type: mapping_list
+      key: data_resource_blocks
+      comment: Optional payload / sensing-pilot RE rectangles
+      allow_omit: true
+      optional: true
+      planner_kind: payload
+      default: []
+      item_fields:
+        - key: kind
+          comment: Block role; payload or sensing_pilot
+          kind: string
+          default: payload
+          options:
+            - payload
+            - sensing_pilot
+        - key: symbol_start
+          comment: 0-based absolute frame symbol index
+          kind: int
+          default: 0
+        - key: symbol_count
+          comment: Number of OFDM symbols in this block
+          kind: int
+          default: 1
+        - key: subcarrier_start
+          comment: 0-based FFT-bin start index
+          kind: int
+          default: 0
+        - key: subcarrier_count
+          comment: Number of contiguous subcarriers in this block
+          kind: int
+          default: 1
+  sensing_mask_blocks:
+    title: Resource Preview
+    field:
+      type: mapping_list
+      key: sensing_mask_blocks
+      comment: Optional compact sensing RE rectangles
+      allow_omit: true
+      optional: true
+      planner_kind: sensing_mask
+      default: []
+      item_fields:
+        - key: symbol_start
+          comment: 0-based absolute frame symbol index
+          kind: int
+          default: 0
+        - key: symbol_count
+          comment: Number of OFDM symbols in this block
+          kind: int
+          default: 1
+        - key: subcarrier_start
+          comment: 0-based FFT-bin start index
+          kind: int
+          default: 0
+        - key: subcarrier_count
+          comment: Number of contiguous subcarriers in this block
+          kind: int
+          default: 1
+
+modulator:
+  fft_size:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: fft_size
+      kind: int
+      comment: FFT size (subcarrier count)
+      default: 1024
+      optional: true
+  cp_length:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: cp_length
+      kind: int
+      comment: Cyclic prefix length (samples)
+      default: 128
+      optional: true
+  sync_pos:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: sync_pos
+      kind: int
+      comment: Sync symbol index in one frame
+      default: 1
+      optional: true
+  num_symbols:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: num_symbols
+      kind: int
+      comment: Number of OFDM symbols per frame
+      default: 100
+      optional: true
+  sensing_symbol_num:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: sensing_symbol_num
+      kind: int
+      comment: Number of symbols used in sensing processing
+      default: 100
+      optional: true
+  zc_root:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: zc_root
+      kind: int
+      comment: Zadoff-Chu root for sync/preamble
+      default: 29
+      optional: true
+  pilot_positions:
+    title: OFDM Frame
+    field:
+      type: flow_list
+      key: pilot_positions
+      item_kind: int
+      comment: Pilot subcarrier indices
+      default: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
+      optional: true
+  range_fft_size:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: range_fft_size
+      kind: int
+      comment: Range FFT size
+      default: 1024
+      optional: true
+  doppler_fft_size:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: doppler_fft_size
+      kind: int
+      comment: Doppler FFT size
+      default: 100
+      optional: true
+  sensing_output_mode:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_output_mode
+      kind: string
+      comment: dense or compact_mask
+      default: dense
+      optional: true
+      options: [dense, compact_mask]
+  enable_backend_sensing_processing:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: enable_backend_sensing_processing
+      kind: bool
+      comment: true lets backend publish RD/CFAR/MD metadata sidecars
+      default: false
+      optional: true
+  sensing_view_range_bins:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_view_range_bins
+      kind: int
+      comment: Backend RD view width in range bins; 0 uses full range_fft_size
+      default: 0
+      optional: true
+  sensing_view_doppler_bins:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_view_doppler_bins
+      kind: int
+      comment: Backend RD view height in Doppler bins; 0 uses full doppler_fft_size
+      default: 0
+      optional: true
+  sample_rate:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: sample_rate
+      kind: int
+      comment: Baseband sample rate (Hz)
+      default: 50000000
+      optional: true
+  bandwidth:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: bandwidth
+      kind: int
+      comment: Analog bandwidth (Hz), usually same as sample_rate
+      default: 50000000
+      optional: true
+  center_freq:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: center_freq
+      kind: int
+      comment: RF center frequency (Hz)
+      default: 2400000000
+      optional: true
+  tx_gain:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: tx_gain
+      kind: int
+      comment: TX gain (dB)
+      default: 60
+      optional: true
+  tx_channel:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: tx_channel
+      kind: int
+      comment: TX channel index on USRP
+      default: 0
+      optional: true
+  device_args:
+    title: USRP Device Args
+    field:
+      type: scalar
+      key: device_args
+      kind: string
+      comment: Shared fallback args
+      default: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"
+      optional: true
+  tx_device_args:
+    title: USRP Device Args
+    field:
+      type: scalar
+      key: tx_device_args
+      kind: string
+      comment: TX-specific args (empty = use device_args)
+      default: ""
+      optional: true
+  rx_device_args:
+    title: USRP Device Args
+    field:
+      type: scalar
+      key: rx_device_args
+      kind: string
+      comment: Default sensing RX args (empty = use device_args)
+      default: ""
+      optional: true
+  clock_source:
+    title: Clock / Time Sources
+    field:
+      type: scalar
+      key: clock_source
+      kind: string
+      comment: Global clock source; internal/external/gpsdo
+      default: external
+      optional: true
+      options: [internal, external, gpsdo]
+  time_source:
+    title: Clock / Time Sources
+    field:
+      type: scalar
+      key: time_source
+      kind: string
+      comment: Global time source; empty follows clock_source
+      default: internal
+      optional: true
+      options: ["", internal, external, gpsdo]
+  tx_clock_source:
+    title: Clock / Time Sources
+    field:
+      type: scalar
+      key: tx_clock_source
+      kind: string
+      comment: TX clock source override (optional)
+      default: ""
+      optional: true
+      options: ["", internal, external, gpsdo]
+  tx_time_source:
+    title: Clock / Time Sources
+    field:
+      type: scalar
+      key: tx_time_source
+      kind: string
+      comment: TX time source override (optional)
+      default: ""
+      optional: true
+      options: ["", internal, external, gpsdo]
+  rx_clock_source:
+    title: Clock / Time Sources
+    field:
+      type: scalar
+      key: rx_clock_source
+      kind: string
+      comment: Sensing RX clock source override (optional)
+      default: ""
+      optional: true
+      options: ["", internal, external, gpsdo]
+  rx_time_source:
+    title: Clock / Time Sources
+    field:
+      type: scalar
+      key: rx_time_source
+      kind: string
+      comment: Sensing RX time source override (optional)
+      default: ""
+      optional: true
+      options: ["", internal, external, gpsdo]
+  wire_format_tx:
+    title: Wire Format
+    field:
+      type: scalar
+      key: wire_format_tx
+      kind: string
+      comment: TX wire format; sc16/sc8
+      default: sc16
+      optional: true
+      options: [sc16, sc8]
+  wire_format_rx:
+    title: Wire Format
+    field:
+      type: scalar
+      key: wire_format_rx
+      kind: string
+      comment: RX wire format; sc16/sc8
+      default: sc16
+      optional: true
+      options: [sc16, sc8]
+  udp_input_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: udp_input_ip
+      kind: string
+      comment: Bind IP for incoming payload UDP packets
+      default: 0.0.0.0
+      optional: true
+  udp_input_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: udp_input_port
+      kind: int
+      comment: Bind port for incoming payload UDP packets
+      default: 50000
+      optional: true
+  mono_sensing_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: mono_sensing_ip
+      kind: string
+      comment: Monostatic sensing output IP (channel 0 default)
+      default: 127.0.0.1
+      optional: true
+  mono_sensing_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: mono_sensing_port
+      kind: int
+      comment: Monostatic sensing output port (channel 0 default)
+      default: 8888
+      optional: true
+  control_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: control_port
+      kind: int
+      comment: UDP port for runtime control commands
+      default: 9999
+      optional: true
+  default_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: default_ip
+      kind: string
+      comment: Default destination IP when per-output IP is empty
+      default: 127.0.0.1
+      optional: true
+  sensing_symbol_stride:
+    title: Network Output
+    field:
+      type: scalar
+      key: sensing_symbol_stride
+      kind: int
+      comment: Default STRD applied at startup before runtime commands
+      default: 20
+      optional: true
+  sensing_rx_channel_count:
+    title: Sensing RX Channels
+    field:
+      type: scalar
+      key: sensing_rx_channel_count
+      kind: int
+      comment: Number of sensing RX channels (0 disables sensing RX)
+      default: 1
+      optional: true
+  tx_circular_buffer_size:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: tx_circular_buffer_size
+      kind: int
+      comment: Modulator frame circular buffer capacity
+      default: 32
+      optional: true
+  data_packet_buffer_size:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: data_packet_buffer_size
+      kind: int
+      comment: Encoded packet buffer capacity
+      default: 32
+      optional: true
+  paired_frame_queue_size:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: paired_frame_queue_size
+      kind: int
+      comment: Per-channel RX/TX pairing queue capacity
+      default: 32
+      optional: true
+  profiling_modules:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: profiling_modules
+      kind: string
+      comment: Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
+      default: ""
+      optional: true
+  cpu_cores:
+    title: Runtime / Debug
+    field:
+      type: cpu_cores
+      key: cpu_cores
+      comment: Allowed CPU core list
+      default: [1, 2, 3, 4, 5, 6]
+      optional: true
+
+demodulator:
+  fft_size:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: fft_size
+      kind: int
+      comment: FFT size (subcarrier count)
+      default: 1024
+      optional: true
+  cp_length:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: cp_length
+      kind: int
+      comment: Cyclic prefix length (samples)
+      default: 128
+      optional: true
+  sync_pos:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: sync_pos
+      kind: int
+      comment: Sync symbol index in one frame
+      default: 1
+      optional: true
+  num_symbols:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: num_symbols
+      kind: int
+      comment: Number of OFDM symbols per frame
+      default: 100
+      optional: true
+  sensing_symbol_num:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: sensing_symbol_num
+      kind: int
+      comment: Number of symbols used in sensing processing
+      default: 100
+      optional: true
+  frame_queue_size:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: frame_queue_size
+      kind: int
+      comment: Capacity of the demodulated RX frame queue
+      default: 32
+      optional: true
+  sync_queue_size:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: sync_queue_size
+      kind: int
+      comment: Capacity of the sync-search batch queue
+      default: 32
+      optional: true
+  reset_hold_s:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: reset_hold_s
+      kind: float
+      comment: Persistent invalid-delay duration before forcing a hard reset (s)
+      default: 0.5
+      optional: true
+  zc_root:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: zc_root
+      kind: int
+      comment: Zadoff-Chu root for sync/preamble
+      default: 29
+      optional: true
+  pilot_positions:
+    title: OFDM Frame
+    field:
+      type: flow_list
+      key: pilot_positions
+      item_kind: int
+      comment: Pilot subcarrier indices
+      default: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
+      optional: true
+  range_fft_size:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: range_fft_size
+      kind: int
+      comment: Range FFT size
+      default: 1024
+      optional: true
+  doppler_fft_size:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: doppler_fft_size
+      kind: int
+      comment: Doppler FFT size
+      default: 100
+      optional: true
+  sensing_output_mode:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_output_mode
+      kind: string
+      comment: dense or compact_mask
+      default: dense
+      optional: true
+      options: [dense, compact_mask]
+  enable_backend_sensing_processing:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: enable_backend_sensing_processing
+      kind: bool
+      comment: true lets backend publish RD/CFAR/MD metadata sidecars
+      default: false
+      optional: true
+  sensing_view_range_bins:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_view_range_bins
+      kind: int
+      comment: Backend RD view width in range bins; 0 uses full range_fft_size
+      default: 0
+      optional: true
+  sensing_view_doppler_bins:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_view_doppler_bins
+      kind: int
+      comment: Backend RD view height in Doppler bins; 0 uses full doppler_fft_size
+      default: 0
+      optional: true
+  sample_rate:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: sample_rate
+      kind: int
+      comment: Baseband sample rate (Hz)
+      default: 50000000
+      optional: true
+  bandwidth:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: bandwidth
+      kind: int
+      comment: Analog bandwidth (Hz), usually same as sample_rate
+      default: 50000000
+      optional: true
+  center_freq:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: center_freq
+      kind: int
+      comment: RF center frequency (Hz)
+      default: 2400000000
+      optional: true
+  rx_gain:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_gain
+      kind: int
+      comment: RX gain (dB)
+      default: 10
+      optional: true
+  rx_agc_enable:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_agc_enable
+      kind: bool
+      comment: Enable hardware RX AGC driven by delay-spectrum peak
+      default: true
+      optional: true
+  rx_agc_low_threshold_db:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_agc_low_threshold_db
+      kind: float
+      comment: Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
+      default: 14.0
+      optional: true
+  rx_agc_high_threshold_db:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_agc_high_threshold_db
+      kind: float
+      comment: Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
+      default: 16.0
+      optional: true
+  rx_agc_max_step_db:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_agc_max_step_db
+      kind: float
+      comment: Maximum RX gain step per AGC update (dB)
+      default: 1.0
+      optional: true
+  rx_agc_update_frames:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_agc_update_frames
+      kind: int
+      comment: Apply AGC at most once every N processed frames
+      default: 4
+      optional: true
+  rx_channel:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_channel
+      kind: int
+      comment: RX channel index on USRP
+      default: 0
+      optional: true
+  device_args:
+    title: USRP Device / Link
+    field:
+      type: scalar
+      key: device_args
+      kind: string
+      comment: USRP args
+      default: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"
+      optional: true
+  clock_source:
+    title: USRP Device / Link
+    field:
+      type: scalar
+      key: clock_source
+      kind: string
+      comment: Clock source; internal/external/gpsdo
+      default: external
+      optional: true
+      options: [internal, external, gpsdo]
+  wire_format_rx:
+    title: USRP Device / Link
+    field:
+      type: scalar
+      key: wire_format_rx
+      kind: string
+      comment: RX wire format; sc16/sc8
+      default: sc16
+      optional: true
+      options: [sc16, sc8]
+  software_sync:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: software_sync
+      kind: bool
+      comment: Enable software sync tracking
+      default: true
+      optional: true
+  predictive_delay:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: predictive_delay
+      kind: bool
+      comment: Enable CFO-based predictive delay compensation during alignment/tracking
+      default: true
+      optional: true
+  hardware_sync:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: hardware_sync
+      kind: bool
+      comment: Enable hardware sync mode
+      default: false
+      optional: true
+  hardware_sync_tty:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: hardware_sync_tty
+      kind: string
+      comment: Serial device used by hardware sync controller
+      default: /dev/ttyUSB0
+      optional: true
+  ocxo_pi_kp_fast:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_kp_fast
+      kind: float
+      comment: Fast-stage OCXO PI proportional gain (Kp)
+      default: 30.0
+      optional: true
+  ocxo_pi_ki_fast:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_ki_fast
+      kind: float
+      comment: Fast-stage OCXO PI integral gain (Ki)
+      default: 1.0
+      optional: true
+  ocxo_pi_kp_slow:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_kp_slow
+      kind: float
+      comment: Slow-stage OCXO PI proportional gain (Kp)
+      default: 30.0
+      optional: true
+  ocxo_pi_ki_slow:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_ki_slow
+      kind: float
+      comment: Slow-stage OCXO PI integral gain (Ki)
+      default: 0.05
+      optional: true
+  ocxo_pi_switch_abs_error_ppm:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_switch_abs_error_ppm
+      kind: float
+      comment: Switch to slow stage when absolute error_ppm is below this threshold
+      default: 0.0002
+      optional: true
+  ocxo_pi_switch_hold_s:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_switch_hold_s
+      kind: float
+      comment: Required continuous hold time below threshold before switching (s)
+      default: 60.0
+      optional: true
+  ocxo_pi_max_step_fast_ppm:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_max_step_fast_ppm
+      kind: float
+      comment: Fast-stage max OCXO adjustment per update (ppm)
+      default: 0.01
+      optional: true
+  ocxo_pi_max_step_slow_ppm:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: ocxo_pi_max_step_slow_ppm
+      kind: float
+      comment: Slow-stage max OCXO adjustment per update (ppm)
+      default: 0.01
+      optional: true
+  akf_enable:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_enable
+      kind: bool
+      comment: Enable adaptive Kalman filter for hardware error_ppm
+      default: true
+      optional: true
+  akf_bootstrap_frames:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_bootstrap_frames
+      kind: int
+      comment: Cold-start frame count before AKF enters normal update
+      default: 64
+      optional: true
+  akf_innovation_window:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_innovation_window
+      kind: int
+      comment: Innovation history window used in ACF/LS adaptation
+      default: 64
+      optional: true
+  akf_max_lag:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_max_lag
+      kind: int
+      comment: Maximum innovation autocorrelation lag
+      default: 4
+      optional: true
+  akf_adapt_interval:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_adapt_interval
+      kind: int
+      comment: Frames between adaptive Q/R least-squares updates
+      default: 64
+      optional: true
+  akf_gate_sigma:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_gate_sigma
+      kind: float
+      comment: Innovation gating threshold in sigma units
+      default: 3.0
+      optional: true
+  akf_tikhonov_lambda:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_tikhonov_lambda
+      kind: float
+      comment: Tikhonov regularization coefficient for LS
+      default: 1.0e-3
+      optional: true
+  akf_update_smooth:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_update_smooth
+      kind: float
+      comment: Exponential smoothing for Q/R update
+      default: 0.2
+      optional: true
+  akf_q_wf_min:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_q_wf_min
+      kind: float
+      comment: Lower bound of white-frequency-noise coefficient
+      default: 1.0e-10
+      optional: true
+  akf_q_wf_max:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_q_wf_max
+      kind: float
+      comment: Upper bound of white-frequency-noise coefficient
+      default: 1.0e2
+      optional: true
+  akf_q_rw_min:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_q_rw_min
+      kind: float
+      comment: Lower bound of random-walk-frequency-noise coefficient
+      default: 1.0e-12
+      optional: true
+  akf_q_rw_max:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_q_rw_max
+      kind: float
+      comment: Upper bound of random-walk-frequency-noise coefficient
+      default: 1.0e1
+      optional: true
+  akf_r_min:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_r_min
+      kind: float
+      comment: Lower bound of observation noise variance R
+      default: 1.0e-8
+      optional: true
+  akf_r_max:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: akf_r_max
+      kind: float
+      comment: Upper bound of observation noise variance R
+      default: 1.0e3
+      optional: true
+  desired_peak_pos:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: desired_peak_pos
+      kind: int
+      comment: Target delay-peak index for alignment
+      default: 20
+      optional: true
+  sensing_symbol_stride:
+    title: Sync / Tracking
+    field:
+      type: scalar
+      key: sensing_symbol_stride
+      kind: int
+      comment: Default STRD applied at startup before runtime commands
+      default: 20
+      optional: true
+  enable_bi_sensing:
+    title: Network Output
+    field:
+      type: scalar
+      key: enable_bi_sensing
+      kind: bool
+      comment: Enable bistatic sensing pipeline and UDP output
+      default: true
+      optional: true
+  bi_sensing_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: bi_sensing_ip
+      kind: string
+      comment: Bistatic sensing output target IP
+      default: 127.0.0.1
+      optional: true
+  bi_sensing_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: bi_sensing_port
+      kind: int
+      comment: Bistatic sensing output target port
+      default: 8889
+      optional: true
+  control_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: control_port
+      kind: int
+      comment: UDP port for runtime control commands
+      default: 9999
+      optional: true
+  channel_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: channel_ip
+      kind: string
+      comment: Channel-estimate output IP (empty = use default_ip)
+      default: ""
+      optional: true
+  channel_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: channel_port
+      kind: int
+      comment: Channel-estimate output port
+      default: 12348
+      optional: true
+  pdf_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: pdf_ip
+      kind: string
+      comment: Delay-spectrum output IP (empty = use default_ip)
+      default: ""
+      optional: true
+  pdf_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: pdf_port
+      kind: int
+      comment: Delay-spectrum output port
+      default: 12349
+      optional: true
+  constellation_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: constellation_ip
+      kind: string
+      comment: Constellation output IP (empty = use default_ip)
+      default: ""
+      optional: true
+  constellation_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: constellation_port
+      kind: int
+      comment: Constellation output port
+      default: 12346
+      optional: true
+  udp_output_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: udp_output_ip
+      kind: string
+      comment: Payload output IP (empty = use default_ip)
+      default: ""
+      optional: true
+  udp_output_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: udp_output_port
+      kind: int
+      comment: Payload output port
+      default: 50001
+      optional: true
+  default_ip:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: default_ip
+      kind: string
+      comment: Default IP for outputs when per-output IP is empty
+      default: 127.0.0.1
+      optional: true
+  vofa_debug_ip:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: vofa_debug_ip
+      kind: string
+      comment: VOFA+ debug output IP
+      default: ""
+      optional: true
+  vofa_debug_port:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: vofa_debug_port
+      kind: int
+      comment: VOFA+ debug output port
+      default: 12347
+      optional: true
+  profiling_modules:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: profiling_modules
+      kind: string
+      comment: Comma-separated modules to profile, or "all"
+      default: agc
+      optional: true
+  cpu_cores:
+    title: Runtime / Debug
+    field:
+      type: cpu_cores
+      key: cpu_cores
+      comment: Allowed CPU core list
+      default: [1, 2, 3, 4, 5]
+      optional: true

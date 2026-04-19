@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <optional>
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
@@ -229,6 +230,13 @@ struct DataResourceBlock {
 
 inline constexpr const char* kSensingOutputModeDense = "dense";
 inline constexpr const char* kSensingOutputModeCompactMask = "compact_mask";
+inline constexpr const char* kSensingOnWireFormatCf32 = "cf32";
+inline constexpr const char* kSensingOnWireFormatCf16 = "cf16";
+
+enum class SensingOnWireFormat : uint32_t {
+    ComplexFloat32 = 0,
+    ComplexFloat16 = 1,
+};
 
 /**
  * @brief Shared payload-resource layout derived from Config.
@@ -314,6 +322,71 @@ struct CompactSensingMaskAnalysis {
             return runtime_restriction_reason;
         }
         return incompatibility_reason;
+    }
+};
+
+struct SensingCfarParams {
+    bool enabled = false;
+    int train_doppler = 20;
+    int train_range = 20;
+    int guard_doppler = 10;
+    int guard_range = 10;
+    float alpha_db = 16.989700f; // 10 * log10(50)
+    int min_range_bin = 0;
+    int dc_exclusion_bins = 0;
+    float min_power_db = 0.0f;
+    float os_rank_percent = 75.0f;
+    int os_suppress_doppler = 2;
+    int os_suppress_range = 2;
+    int max_points = 256;
+};
+
+struct SensingCfarStats {
+    float noise_min = 0.0f;
+    float noise_max = 0.0f;
+    float thresh_min = 0.0f;
+    float thresh_max = 0.0f;
+    float power_min_db = 0.0f;
+    uint32_t invalid_cells = 0;
+    uint32_t nonfinite_cells = 0;
+    uint32_t nonpositive_cells = 0;
+};
+
+struct SensingDetectionPoint {
+    int32_t doppler_idx = 0;
+    int32_t range_idx = 0;
+};
+
+struct SensingCluster {
+    int32_t peak_doppler_idx = 0;
+    int32_t peak_range_idx = 0;
+    float peak_strength_db = 0.0f;
+    uint32_t cluster_size = 0;
+    float centroid_doppler_idx = 0.0f;
+    float centroid_range_idx = 0.0f;
+};
+
+struct SensingMetadata {
+    bool cfar_enabled = false;
+    bool micro_doppler_enabled = false;
+    uint32_t cfar_hits = 0;
+    uint32_t cfar_shown_hits = 0;
+    SensingCfarStats cfar_stats;
+    std::vector<SensingDetectionPoint> cfar_points;
+    std::vector<SensingCluster> target_clusters;
+    std::vector<float> micro_doppler_spectrum;
+    uint32_t micro_doppler_rows = 0;
+    uint32_t micro_doppler_cols = 0;
+    std::array<float, 4> micro_doppler_extent{{0.0f, 0.0f, 0.0f, 0.0f}};
+
+    bool empty() const {
+        return !cfar_enabled &&
+               !micro_doppler_enabled &&
+               cfar_points.empty() &&
+               target_clusters.empty() &&
+               micro_doppler_spectrum.empty() &&
+               cfar_hits == 0 &&
+               cfar_shown_hits == 0;
     }
 };
 
@@ -617,6 +690,8 @@ struct Config {
     size_t fft_size = 1024;
     size_t range_fft_size = 1024;      // Range FFT size
     size_t doppler_fft_size = 100;     // Doppler FFT size
+    size_t sensing_view_range_bins = 0;   // Backend RD view width (0 = full range_fft_size)
+    size_t sensing_view_doppler_bins = 0; // Backend RD view height (0 = full doppler_fft_size)
     size_t cp_length = 128;            // Cyclic prefix length
     size_t num_symbols = 100;          // Number of symbols per frame
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
@@ -673,6 +748,8 @@ struct Config {
     bool data_resource_blocks_configured = false;
     std::vector<DataResourceBlock> data_resource_blocks;
     std::string sensing_output_mode = kSensingOutputModeDense;
+    SensingOnWireFormat sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    bool enable_backend_sensing_processing = false;
     std::vector<DataResourceBlock> sensing_mask_blocks;
     size_t payload_re_count = 0;
     size_t non_pilot_re_count = 0;
@@ -715,8 +792,8 @@ struct Config {
     size_t tx_circular_buffer_size = 8;    // Capacity of modulator frame circular buffer
     size_t data_packet_buffer_size = 32;   // Capacity of modulator encoded packet buffer
     size_t paired_frame_queue_size = 8;    // Capacity of per-channel RX/TX pairing queues
-    std::vector<size_t> available_cores = {0, 1, 2, 3, 4, 5};
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing, sensing_proc, sensing_process, data_ingest, demodulation, agc, align, snr, or "all"
+    std::vector<int> available_cores = {0, 1, 2, 3, 4, 5};
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, or "all"
     bool measurement_enable = false;
     std::string measurement_mode = "";
     std::string measurement_run_id = "";
@@ -783,6 +860,102 @@ inline std::string normalize_sensing_output_mode_string(std::string mode) {
 
 inline bool sensing_output_mode_is_compact_mask(const Config& cfg) {
     return cfg.sensing_output_mode == kSensingOutputModeCompactMask;
+}
+
+inline const char* sensing_on_wire_format_to_string(SensingOnWireFormat format) {
+    switch (format) {
+    case SensingOnWireFormat::ComplexFloat16:
+        return kSensingOnWireFormatCf16;
+    case SensingOnWireFormat::ComplexFloat32:
+    default:
+        return kSensingOnWireFormatCf32;
+    }
+}
+
+inline std::string normalize_sensing_on_wire_format_string(std::string format) {
+    std::transform(format.begin(), format.end(), format.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (format.empty()) {
+        return kSensingOnWireFormatCf32;
+    }
+    if (format == kSensingOnWireFormatCf32 || format == kSensingOnWireFormatCf16) {
+        return format;
+    }
+    throw std::runtime_error(
+        "Invalid sensing_on_wire_format='" + format +
+        "'. Supported values: cf32, cf16.");
+}
+
+inline SensingOnWireFormat parse_sensing_on_wire_format_string(const std::string& raw_format) {
+    const std::string format = normalize_sensing_on_wire_format_string(raw_format);
+    if (format == kSensingOnWireFormatCf16) {
+        return SensingOnWireFormat::ComplexFloat16;
+    }
+    return SensingOnWireFormat::ComplexFloat32;
+}
+
+inline size_t sensing_on_wire_complex_bytes(SensingOnWireFormat format) {
+    switch (format) {
+    case SensingOnWireFormat::ComplexFloat16:
+        return sizeof(uint16_t) * 2u;
+    case SensingOnWireFormat::ComplexFloat32:
+    default:
+        return sizeof(std::complex<float>);
+    }
+}
+
+inline uint16_t float32_to_half_ieee_bits(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    uint32_t exponent = (bits >> 23) & 0xFFu;
+    uint32_t mantissa = bits & 0x7FFFFFu;
+
+    if (exponent == 0xFFu) {
+        if (mantissa != 0) {
+            return static_cast<uint16_t>(sign | 0x7E00u);
+        }
+        return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+
+    if (exponent == 0) {
+        return static_cast<uint16_t>(sign);
+    }
+
+    int32_t half_exponent = static_cast<int32_t>(exponent) - 127 + 15;
+    if (half_exponent >= 31) {
+        return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+    if (half_exponent <= 0) {
+        if (half_exponent < -10) {
+            return static_cast<uint16_t>(sign);
+        }
+        mantissa |= 0x800000u;
+        const uint32_t shift = static_cast<uint32_t>(14 - half_exponent);
+        uint32_t rounded = mantissa >> shift;
+        const uint32_t round_bit = 1u << (shift - 1);
+        if ((mantissa & round_bit) &&
+            (((mantissa & (round_bit - 1u)) != 0u) || (rounded & 0x1u))) {
+            ++rounded;
+        }
+        return static_cast<uint16_t>(sign | rounded);
+    }
+
+    mantissa += 0x1000u;
+    if (mantissa & 0x800000u) {
+        mantissa = 0;
+        ++half_exponent;
+        if (half_exponent >= 31) {
+            return static_cast<uint16_t>(sign | 0x7C00u);
+        }
+    }
+
+    return static_cast<uint16_t>(
+        sign |
+        (static_cast<uint32_t>(half_exponent) << 10) |
+        (mantissa >> 13));
 }
 
 inline size_t raw_fft_bin_to_shifted_index(size_t subcarrier_index, size_t fft_size) {
@@ -1012,6 +1185,26 @@ inline std::string compact_mask_runtime_fft_controls_reason(const Config& cfg) {
     return analyze_compact_sensing_mask(cfg).effective_reason();
 }
 
+inline bool backend_sensing_processing_supported(const Config& cfg) {
+    if (!cfg.enable_backend_sensing_processing) {
+        return false;
+    }
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return true;
+    }
+    return analyze_compact_sensing_mask(cfg).local_delay_doppler_supported;
+}
+
+inline std::string backend_sensing_processing_reason(const Config& cfg) {
+    if (!cfg.enable_backend_sensing_processing) {
+        return "backend sensing processing disabled";
+    }
+    if (!sensing_output_mode_is_compact_mask(cfg)) {
+        return {};
+    }
+    return analyze_compact_sensing_mask(cfg).effective_reason();
+}
+
 inline size_t required_sensing_range_bin_count(const Config& cfg) {
     if (!sensing_output_mode_is_compact_mask(cfg)) {
         return std::max<size_t>(cfg.fft_size, 1);
@@ -1033,6 +1226,23 @@ inline size_t required_sensing_doppler_symbol_count(const Config& cfg) {
         required = std::max(required, analysis.selected_symbol_count);
     }
     return required;
+}
+
+inline size_t resolved_sensing_view_range_bins(const Config& cfg) {
+    const size_t full_range_bins = std::max<size_t>(cfg.range_fft_size, 1);
+    if (cfg.sensing_view_range_bins == 0) {
+        return full_range_bins;
+    }
+    return std::clamp(cfg.sensing_view_range_bins, size_t{1}, full_range_bins);
+}
+
+inline size_t resolved_sensing_view_doppler_bins(const Config& cfg) {
+    const size_t full_doppler_bins = std::max<size_t>(cfg.doppler_fft_size, 1);
+    const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
+    if (cfg.sensing_view_doppler_bins == 0) {
+        return full_doppler_bins;
+    }
+    return std::clamp(cfg.sensing_view_doppler_bins, min_doppler_bins, full_doppler_bins);
 }
 
 inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
@@ -1065,6 +1275,35 @@ inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
                      << " for " << context_name
                      << ". Expanding doppler_fft_size to keep sensing buffers consistent.";
         cfg.doppler_fft_size = required_doppler;
+    }
+}
+
+inline void normalize_sensing_view_bins(Config& cfg, const char* context_name) {
+    if (cfg.sensing_view_range_bins != 0 && cfg.sensing_view_range_bins > cfg.range_fft_size) {
+        LOG_G_WARN() << context_name
+                     << " sensing_view_range_bins=" << cfg.sensing_view_range_bins
+                     << " exceeds range_fft_size=" << cfg.range_fft_size
+                     << ". Clamping backend view width to the configured range FFT size.";
+        cfg.sensing_view_range_bins = cfg.range_fft_size;
+    }
+
+    if (cfg.sensing_view_doppler_bins != 0) {
+        const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
+        if (cfg.sensing_view_doppler_bins < min_doppler_bins) {
+            LOG_G_WARN() << context_name
+                         << " sensing_view_doppler_bins=" << cfg.sensing_view_doppler_bins
+                         << " is smaller than the required slow-time symbol count="
+                         << min_doppler_bins
+                         << ". Clamping backend view height to preserve the full sensing aperture.";
+            cfg.sensing_view_doppler_bins = min_doppler_bins;
+        }
+        if (cfg.sensing_view_doppler_bins > cfg.doppler_fft_size) {
+            LOG_G_WARN() << context_name
+                         << " sensing_view_doppler_bins=" << cfg.sensing_view_doppler_bins
+                         << " exceeds doppler_fft_size=" << cfg.doppler_fft_size
+                         << ". Clamping backend view height to the configured Doppler FFT size.";
+            cfg.sensing_view_doppler_bins = cfg.doppler_fft_size;
+        }
     }
 }
 
@@ -1250,6 +1489,12 @@ inline void finalize_data_resource_grid_config(Config& cfg, const char* role_nam
 inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
     cfg.sensing_output_mode = normalize_sensing_output_mode_string(cfg.sensing_output_mode);
     if (!sensing_output_mode_is_compact_mask(cfg)) {
+        if (cfg.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
+            LOG_G_WARN() << role_name
+                         << " requested enable_backend_sensing_processing=1, but the current sensing mode "
+                         << "cannot provide dense backend RD output. Falling back to viewer-local processing.";
+            cfg.enable_backend_sensing_processing = false;
+        }
         return;
     }
     const SensingMaskLayout layout = build_sensing_mask_layout(cfg);
@@ -1257,6 +1502,14 @@ inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
         throw std::runtime_error(
             std::string(role_name) +
             " compact_mask mode requires a non-empty sensing_mask_blocks selection.");
+    }
+    if (cfg.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
+        LOG_G_WARN() << role_name
+                     << " requested enable_backend_sensing_processing=1 in compact_mask mode, but the mask "
+                     << "is not regular local-DD compatible: "
+                     << backend_sensing_processing_reason(cfg)
+                     << ". Falling back to viewer-local processing.";
+        cfg.enable_backend_sensing_processing = false;
     }
 }
 
@@ -1438,11 +1691,43 @@ inline bool path_exists(const std::string& path) {
     return !path.empty() && ::access(path.c_str(), F_OK) == 0;
 }
 
-inline size_t core_from_hint(const Config& cfg, size_t hint) {
+inline std::optional<size_t> core_from_hint(const Config& cfg, size_t hint) {
     if (cfg.available_cores.empty()) {
-        return 0;
+        return std::nullopt;
     }
-    return cfg.available_cores[hint % cfg.available_cores.size()];
+    const int configured_core = cfg.available_cores[hint % cfg.available_cores.size()];
+    if (configured_core < 0) {
+        return std::nullopt;
+    }
+    return static_cast<size_t>(configured_core);
+}
+
+inline std::optional<size_t> main_thread_core(const Config& cfg) {
+    if (cfg.available_cores.empty()) {
+        return std::nullopt;
+    }
+    const int configured_core = cfg.available_cores.back();
+    if (configured_core < 0) {
+        return std::nullopt;
+    }
+    return static_cast<size_t>(configured_core);
+}
+
+inline bool bind_current_thread_to_core(const std::optional<size_t>& core) {
+    if (!core.has_value()) {
+        return false;
+    }
+    std::vector<size_t> cpu_list = {*core};
+    uhd::set_thread_affinity(cpu_list);
+    return true;
+}
+
+inline bool bind_current_thread_from_hint(const Config& cfg, size_t hint) {
+    return bind_current_thread_to_core(core_from_hint(cfg, hint));
+}
+
+inline bool bind_current_thread_to_main_core(const Config& cfg) {
+    return bind_current_thread_to_core(main_thread_core(cfg));
 }
 
 inline void prefault_thread_stack(size_t bytes = 512 * 1024) {
@@ -1597,6 +1882,8 @@ inline Config make_default_modulator_config() {
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     cfg.num_symbols = 100;
     cfg.sensing_output_mode = kSensingOutputModeDense;
+    cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    cfg.enable_backend_sensing_processing = false;
     cfg.cuda_mod_pipeline_slots = 2;
     cfg.mono_sensing_output_enabled = true;
     cfg.mono_sensing_ip = "";
@@ -1626,6 +1913,8 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
     out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
     out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
+    out << YAML::Key << "sensing_view_range_bins" << YAML::Value << cfg.sensing_view_range_bins;
+    out << YAML::Key << "sensing_view_doppler_bins" << YAML::Value << cfg.sensing_view_doppler_bins;
     out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
     out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
     out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
@@ -1637,6 +1926,10 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
     out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
+    out << YAML::Key << "sensing_on_wire_format" << YAML::Value
+        << sensing_on_wire_format_to_string(cfg.sensing_on_wire_format);
+    out << YAML::Key << "enable_backend_sensing_processing" << YAML::Value
+        << cfg.enable_backend_sensing_processing;
     out << YAML::Key << "cuda_mod_pipeline_slots" << YAML::Value << cfg.cuda_mod_pipeline_slots;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
@@ -1717,6 +2010,12 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
         if (has_range_fft_size) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
         if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
+        if (config["sensing_view_range_bins"]) {
+            cfg.sensing_view_range_bins = config["sensing_view_range_bins"].as<size_t>();
+        }
+        if (config["sensing_view_doppler_bins"]) {
+            cfg.sensing_view_doppler_bins = config["sensing_view_doppler_bins"].as<size_t>();
+        }
         if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
         if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
         if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
@@ -1729,6 +2028,14 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
         if (config["sensing_output_mode"]) {
             cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
+        }
+        if (config["sensing_on_wire_format"]) {
+            cfg.sensing_on_wire_format = parse_sensing_on_wire_format_string(
+                config["sensing_on_wire_format"].as<std::string>());
+        }
+        if (config["enable_backend_sensing_processing"]) {
+            cfg.enable_backend_sensing_processing =
+                config["enable_backend_sensing_processing"].as<bool>();
         }
         if (config["cuda_mod_pipeline_slots"]) {
             cfg.cuda_mod_pipeline_slots = config["cuda_mod_pipeline_slots"].as<size_t>();
@@ -1805,7 +2112,7 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "Modulator config")) {
             return false;
         }
-        if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
+        if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<int>>();
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -1818,6 +2125,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
         cfg.default_ip = "127.0.0.1";
     }
     normalize_sensing_fft_sizes(cfg, "modulator sensing");
+    normalize_sensing_view_bins(cfg, "modulator sensing");
     if (cfg.cuda_mod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda_mod_pipeline_slots = 1;
@@ -1962,6 +2270,8 @@ inline Config make_default_demodulator_config() {
     cfg.akf_r_min = 1e-8;
     cfg.akf_r_max = 1e3;
     cfg.sensing_output_mode = kSensingOutputModeDense;
+    cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    cfg.enable_backend_sensing_processing = false;
     cfg.sensing_symbol_stride = 20;
     cfg.measurement_enable = false;
     cfg.measurement_mode = "";
@@ -1994,12 +2304,16 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
     out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
+    out << YAML::Key << "sensing_on_wire_format" << YAML::Value
+        << sensing_on_wire_format_to_string(cfg.sensing_on_wire_format);
     out << YAML::Key << "cuda_demod_pipeline_slots" << YAML::Value << cfg.cuda_demod_pipeline_slots;
     out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
     out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
     out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
     out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
     out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
+    out << YAML::Key << "sensing_view_range_bins" << YAML::Value << cfg.sensing_view_range_bins;
+    out << YAML::Key << "sensing_view_doppler_bins" << YAML::Value << cfg.sensing_view_doppler_bins;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
     out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
@@ -2055,6 +2369,8 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "akf_r_max" << YAML::Value << cfg.akf_r_max;
     out << YAML::Key << "desired_peak_pos" << YAML::Value << cfg.desired_peak_pos;
     out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
+    out << YAML::Key << "enable_backend_sensing_processing" << YAML::Value
+        << cfg.enable_backend_sensing_processing;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
     config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
@@ -2107,6 +2423,14 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["sensing_output_mode"]) {
             cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
         }
+        if (config["sensing_on_wire_format"]) {
+            cfg.sensing_on_wire_format = parse_sensing_on_wire_format_string(
+                config["sensing_on_wire_format"].as<std::string>());
+        }
+        if (config["enable_backend_sensing_processing"]) {
+            cfg.enable_backend_sensing_processing =
+                config["enable_backend_sensing_processing"].as<bool>();
+        }
         if (config["cuda_demod_pipeline_slots"]) {
             cfg.cuda_demod_pipeline_slots = config["cuda_demod_pipeline_slots"].as<size_t>();
         }
@@ -2115,6 +2439,12 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["reset_hold_s"]) cfg.reset_hold_s = config["reset_hold_s"].as<double>();
         if (config["range_fft_size"]) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
         if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
+        if (config["sensing_view_range_bins"]) {
+            cfg.sensing_view_range_bins = config["sensing_view_range_bins"].as<size_t>();
+        }
+        if (config["sensing_view_doppler_bins"]) {
+            cfg.sensing_view_doppler_bins = config["sensing_view_doppler_bins"].as<size_t>();
+        }
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
         if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
@@ -2186,7 +2516,7 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "Demodulator config")) {
             return false;
         }
-        if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<size_t>>();
+        if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<int>>();
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -2196,6 +2526,7 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
 
 inline void finalize_demodulator_network_defaults(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "demodulator sensing");
+    normalize_sensing_view_bins(cfg, "demodulator sensing");
     if (cfg.cuda_demod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda_demod_pipeline_slots = 1;
@@ -2749,6 +3080,62 @@ struct AggregatedSensingFrameHeader {
 static_assert(sizeof(AggregatedSensingFrameHeader) == 24, "AggregatedSensingFrameHeader size mismatch");
 inline constexpr uint32_t kAggregatedSensingMagicVersion = 0x41534731u; // "ASG1"
 
+#pragma pack(push, 1)
+struct SensingMetadataWireHeader {
+    char magic[4];
+    uint32_t total_bytes = 0;
+    uint32_t flags = 0;
+    uint32_t cfar_point_count = 0;
+    uint32_t cluster_count = 0;
+    uint32_t md_rows = 0;
+    uint32_t md_cols = 0;
+    uint32_t cfar_hits = 0;
+    uint32_t cfar_shown_hits = 0;
+    uint32_t invalid_cells = 0;
+    uint32_t nonfinite_cells = 0;
+    uint32_t nonpositive_cells = 0;
+    float noise_min = 0.0f;
+    float noise_max = 0.0f;
+    float thresh_min = 0.0f;
+    float thresh_max = 0.0f;
+    float power_min_db = 0.0f;
+    float md_t0 = 0.0f;
+    float md_t1 = 0.0f;
+    float md_f0 = 0.0f;
+    float md_f1 = 0.0f;
+    uint64_t frame_start_symbol_index = 0;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(SensingMetadataWireHeader) == 92, "SensingMetadataWireHeader size mismatch");
+
+#pragma pack(push, 1)
+struct SensingClusterWire {
+    int32_t peak_doppler_idx = 0;
+    int32_t peak_range_idx = 0;
+    float peak_strength_db = 0.0f;
+    uint32_t cluster_size = 0;
+    float centroid_doppler_idx = 0.0f;
+    float centroid_range_idx = 0.0f;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(SensingClusterWire) == 24, "SensingClusterWire size mismatch");
+
+#pragma pack(push, 1)
+struct AggregatedSensingMetadataHeader {
+    char magic[4];
+    uint32_t channel_count = 0;
+    uint32_t channel_mask = 0;
+    uint32_t reserved = 0;
+    uint64_t frame_start_symbol_index = 0;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(AggregatedSensingMetadataHeader) == 24, "AggregatedSensingMetadataHeader size mismatch");
+inline constexpr char kSensingMetadataMagic[4] = {'S', 'M', 'D', '1'};
+inline constexpr char kAggregatedSensingMetadataMagic[4] = {'A', 'S', 'M', '1'};
+
 enum class SensingViewerFrameFormat : uint32_t {
     DenseChannelBuffer = 0,
     CompactRaw = 1,
@@ -2756,13 +3143,23 @@ enum class SensingViewerFrameFormat : uint32_t {
     CompactSparse = 3
 };
 
-inline constexpr uint32_t kSensingViewerParamsVersion = 2u;
+enum class SensingViewerWireDataFormat : uint32_t {
+    ComplexFloat32 = 0,
+    ComplexFloat16 = 1,
+};
+
+inline constexpr uint32_t kSensingMetadataFlagCfarEnabled = 1u << 0;
+inline constexpr uint32_t kSensingMetadataFlagMicroDopplerEnabled = 1u << 1;
+
+inline constexpr uint32_t kSensingViewerParamsVersion = 5u;
 inline constexpr uint32_t kSensingViewerFlagCompactMask = 1u << 0;
 inline constexpr uint32_t kSensingViewerFlagCompactLocalDelayDoppler = 1u << 1;
 inline constexpr uint32_t kSensingViewerFlagSkipSensingFft = 1u << 2;
 inline constexpr uint32_t kSensingViewerFlagEnableMti = 1u << 3;
 inline constexpr uint32_t kSensingViewerFlagBistatic = 1u << 4;
 inline constexpr uint32_t kSensingViewerFlagAggregatedStream = 1u << 5;
+inline constexpr uint32_t kSensingViewerFlagBackendProcessing = 1u << 6;
+inline constexpr uint32_t kSensingViewerFlagMetadataSidecar = 1u << 7;
 
 #pragma pack(push, 1)
 struct SensingViewerParamsPacket {
@@ -2779,12 +3176,94 @@ struct SensingViewerParamsPacket {
     uint32_t range_fft_size = 0;
     uint32_t doppler_fft_size = 0;
     uint32_t compact_mask_hash = 0;
+    uint32_t wire_data_format = 0;
     uint32_t stream_channel_count = 0;
     uint32_t stream_channel_mask = 0;
+    uint32_t os_cfar_rank_percent_x100 = 0;
+    uint32_t os_cfar_suppress_doppler = 0;
+    uint32_t os_cfar_suppress_range = 0;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SensingViewerParamsPacket) == 60, "SensingViewerParamsPacket size mismatch");
+static_assert(sizeof(SensingViewerParamsPacket) == 76, "SensingViewerParamsPacket size mismatch");
+
+inline std::vector<uint8_t> serialize_sensing_metadata(
+    const SensingMetadata& metadata,
+    uint64_t frame_start_symbol_index)
+{
+    const size_t cfar_point_bytes =
+        metadata.cfar_points.size() * sizeof(SensingDetectionPoint);
+    const size_t cluster_bytes =
+        metadata.target_clusters.size() * sizeof(SensingClusterWire);
+    const size_t md_bytes =
+        metadata.micro_doppler_spectrum.size() * sizeof(float);
+    const size_t total_bytes =
+        sizeof(SensingMetadataWireHeader) + cfar_point_bytes + cluster_bytes + md_bytes;
+
+    std::vector<uint8_t> bytes(total_bytes, 0);
+    SensingMetadataWireHeader header{};
+    std::memcpy(header.magic, kSensingMetadataMagic, sizeof(header.magic));
+    header.total_bytes = static_cast<uint32_t>(total_bytes);
+    if (metadata.cfar_enabled) {
+        header.flags |= kSensingMetadataFlagCfarEnabled;
+    }
+    if (metadata.micro_doppler_enabled) {
+        header.flags |= kSensingMetadataFlagMicroDopplerEnabled;
+    }
+    header.cfar_point_count = static_cast<uint32_t>(metadata.cfar_points.size());
+    header.cluster_count = static_cast<uint32_t>(metadata.target_clusters.size());
+    header.md_rows = metadata.micro_doppler_rows;
+    header.md_cols = metadata.micro_doppler_cols;
+    header.cfar_hits = metadata.cfar_hits;
+    header.cfar_shown_hits = metadata.cfar_shown_hits;
+    header.invalid_cells = metadata.cfar_stats.invalid_cells;
+    header.nonfinite_cells = metadata.cfar_stats.nonfinite_cells;
+    header.nonpositive_cells = metadata.cfar_stats.nonpositive_cells;
+    header.noise_min = metadata.cfar_stats.noise_min;
+    header.noise_max = metadata.cfar_stats.noise_max;
+    header.thresh_min = metadata.cfar_stats.thresh_min;
+    header.thresh_max = metadata.cfar_stats.thresh_max;
+    header.power_min_db = metadata.cfar_stats.power_min_db;
+    header.md_t0 = metadata.micro_doppler_extent[0];
+    header.md_t1 = metadata.micro_doppler_extent[1];
+    header.md_f0 = metadata.micro_doppler_extent[2];
+    header.md_f1 = metadata.micro_doppler_extent[3];
+    header.frame_start_symbol_index = frame_start_symbol_index;
+
+    std::memcpy(bytes.data(), &header, sizeof(header));
+
+    size_t offset = sizeof(header);
+    if (!metadata.cfar_points.empty()) {
+        std::memcpy(
+            bytes.data() + static_cast<std::ptrdiff_t>(offset),
+            metadata.cfar_points.data(),
+            cfar_point_bytes);
+        offset += cfar_point_bytes;
+    }
+    if (!metadata.target_clusters.empty()) {
+        for (size_t i = 0; i < metadata.target_clusters.size(); ++i) {
+            SensingClusterWire cluster_wire{};
+            cluster_wire.peak_doppler_idx = metadata.target_clusters[i].peak_doppler_idx;
+            cluster_wire.peak_range_idx = metadata.target_clusters[i].peak_range_idx;
+            cluster_wire.peak_strength_db = metadata.target_clusters[i].peak_strength_db;
+            cluster_wire.cluster_size = metadata.target_clusters[i].cluster_size;
+            cluster_wire.centroid_doppler_idx = metadata.target_clusters[i].centroid_doppler_idx;
+            cluster_wire.centroid_range_idx = metadata.target_clusters[i].centroid_range_idx;
+            std::memcpy(
+                bytes.data() + static_cast<std::ptrdiff_t>(offset + i * sizeof(SensingClusterWire)),
+                &cluster_wire,
+                sizeof(SensingClusterWire));
+        }
+        offset += cluster_bytes;
+    }
+    if (!metadata.micro_doppler_spectrum.empty()) {
+        std::memcpy(
+            bytes.data() + static_cast<std::ptrdiff_t>(offset),
+            metadata.micro_doppler_spectrum.data(),
+            md_bytes);
+    }
+    return bytes;
+}
 
 inline uint32_t sensing_viewer_active_flags(
     const Config& cfg,
@@ -2794,13 +3273,14 @@ inline uint32_t sensing_viewer_active_flags(
 {
     uint32_t flags = 0;
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
+    const bool backend_processing = backend_sensing_processing_supported(cfg);
     if (sensing_output_mode_is_compact_mask(cfg)) {
         flags |= kSensingViewerFlagCompactMask;
     }
     if (analysis.local_delay_doppler_supported) {
         flags |= kSensingViewerFlagCompactLocalDelayDoppler;
     }
-    if (skip_sensing_fft) {
+    if (skip_sensing_fft && !backend_processing) {
         flags |= kSensingViewerFlagSkipSensingFft;
     }
     if (enable_mti) {
@@ -2809,6 +3289,10 @@ inline uint32_t sensing_viewer_active_flags(
     if (bistatic) {
         flags |= kSensingViewerFlagBistatic;
     }
+    if (backend_processing) {
+        flags |= kSensingViewerFlagBackendProcessing;
+        flags |= kSensingViewerFlagMetadataSidecar;
+    }
     return flags;
 }
 
@@ -2816,6 +3300,9 @@ inline SensingViewerFrameFormat sensing_viewer_frame_format(
     const Config& cfg,
     bool skip_sensing_fft)
 {
+    if (backend_sensing_processing_supported(cfg)) {
+        return SensingViewerFrameFormat::DenseRangeDoppler;
+    }
     if (!sensing_output_mode_is_compact_mask(cfg)) {
         return skip_sensing_fft
             ? SensingViewerFrameFormat::DenseChannelBuffer
@@ -2835,6 +3322,9 @@ inline size_t sensing_viewer_wire_rows(
     const Config& cfg,
     bool skip_sensing_fft)
 {
+    if (backend_sensing_processing_supported(cfg)) {
+        return resolved_sensing_view_doppler_bins(cfg);
+    }
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
@@ -2852,6 +3342,9 @@ inline size_t sensing_viewer_wire_cols(
     const Config& cfg,
     bool skip_sensing_fft)
 {
+    if (backend_sensing_processing_supported(cfg)) {
+        return resolved_sensing_view_range_bins(cfg);
+    }
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
@@ -2869,6 +3362,9 @@ inline size_t sensing_viewer_active_rows(
     const Config& cfg,
     bool skip_sensing_fft)
 {
+    if (backend_sensing_processing_supported(cfg)) {
+        return resolved_sensing_view_doppler_bins(cfg);
+    }
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
@@ -2887,6 +3383,9 @@ inline size_t sensing_viewer_active_cols(
     const Config& cfg,
     bool skip_sensing_fft)
 {
+    if (backend_sensing_processing_supported(cfg)) {
+        return resolved_sensing_view_range_bins(cfg);
+    }
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
@@ -2909,10 +3408,24 @@ inline uint32_t sensing_viewer_mask_hash(const Config& cfg)
     return build_sensing_mask_layout(cfg).mask_hash;
 }
 
+inline SensingViewerWireDataFormat sensing_viewer_wire_data_format(const Config& cfg)
+{
+    switch (cfg.sensing_on_wire_format) {
+    case SensingOnWireFormat::ComplexFloat16:
+        return SensingViewerWireDataFormat::ComplexFloat16;
+    case SensingOnWireFormat::ComplexFloat32:
+    default:
+        return SensingViewerWireDataFormat::ComplexFloat32;
+    }
+}
+
 inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     const Config& cfg,
     bool skip_sensing_fft,
     bool enable_mti,
+    float os_cfar_rank_percent = 75.0f,
+    int os_cfar_suppress_doppler = 2,
+    int os_cfar_suppress_range = 2,
     bool bistatic = false,
     uint32_t stream_channel_count = 1,
     uint32_t stream_channel_mask = 0x1u,
@@ -2936,8 +3449,14 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     packet.range_fft_size = htonl(static_cast<uint32_t>(cfg.range_fft_size));
     packet.doppler_fft_size = htonl(static_cast<uint32_t>(cfg.doppler_fft_size));
     packet.compact_mask_hash = htonl(sensing_viewer_mask_hash(cfg));
+    packet.wire_data_format = htonl(static_cast<uint32_t>(sensing_viewer_wire_data_format(cfg)));
     packet.stream_channel_count = htonl(stream_channel_count);
     packet.stream_channel_mask = htonl(stream_channel_mask);
+    const uint32_t rank_percent_x100 = static_cast<uint32_t>(std::llround(
+        std::clamp(static_cast<double>(os_cfar_rank_percent), 0.0, 100.0) * 100.0));
+    packet.os_cfar_rank_percent_x100 = htonl(rank_percent_x100);
+    packet.os_cfar_suppress_doppler = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_doppler)));
+    packet.os_cfar_suppress_range = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_range)));
     return packet;
 }
 
@@ -3092,11 +3611,17 @@ public:
         uint64_t first_symbol_index = 0; // OFDM symbol index before sparse sampling
         PayloadFormat format = PayloadFormat::Dense;
         uint32_t mask_hash = 0;
+        std::vector<uint8_t> metadata;
     };
 
-    SensingDataSender(const std::string& ip, int port, bool enabled = true) 
+    SensingDataSender(
+        const std::string& ip,
+        int port,
+        bool enabled = true,
+        SensingOnWireFormat wire_data_format = SensingOnWireFormat::ComplexFloat32)
         : UdpBaseSender(ip, port),
           _enabled(enabled),
+          _wire_data_format(wire_data_format),
           _data_queue(64) {}
 
     ~SensingDataSender() {
@@ -3122,12 +3647,21 @@ public:
     }
 
     void push_data(const AlignedVector& data, uint64_t first_symbol_index) {
+        push_data(data, first_symbol_index, {});
+    }
+
+    void push_data(
+        const AlignedVector& data,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled) return;
         if (!_running.load()) return;
 
         FrameData frame_data;
         frame_data.data = data;
         frame_data.first_symbol_index = first_symbol_index;
+        frame_data.metadata = std::move(metadata);
         _queue_frame(std::move(frame_data));
     }
 
@@ -3136,12 +3670,21 @@ public:
     }
 
     void push_data(AlignedVector&& data, uint64_t first_symbol_index) {
+        push_data(std::move(data), first_symbol_index, {});
+    }
+
+    void push_data(
+        AlignedVector&& data,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled) return;
         if (!_running.load()) return;
 
         FrameData frame_data;
         frame_data.data = std::move(data);
         frame_data.first_symbol_index = first_symbol_index;
+        frame_data.metadata = std::move(metadata);
         _queue_frame(std::move(frame_data));
     }
 
@@ -3183,6 +3726,16 @@ public:
         size_t count,
         uint64_t first_symbol_index
     ) {
+        push_external(std::move(owner), data, count, first_symbol_index, {});
+    }
+
+    void push_external(
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata
+    ) {
         if (!_enabled) return;
         if (!_running.load()) return;
 
@@ -3191,6 +3744,7 @@ public:
         frame_data.external_data = data;
         frame_data.external_size = count;
         frame_data.first_symbol_index = first_symbol_index;
+        frame_data.metadata = std::move(metadata);
         _queue_frame(std::move(frame_data));
     }
 
@@ -3216,6 +3770,7 @@ public:
 
 private:
     bool _enabled = true;
+    SensingOnWireFormat _wire_data_format = SensingOnWireFormat::ComplexFloat32;
 
     void _queue_frame(FrameData&& frame_data) {
         spsc_wait_push(_data_queue, std::move(frame_data), [this]() {
@@ -3245,6 +3800,9 @@ private:
                 } else {
                     send_data_with_original_format(frame_data);
                 }
+            }
+            if (!frame_data.metadata.empty()) {
+                send_metadata_frame(frame_data.metadata, frame_data.first_symbol_index);
             }
         }
     }
@@ -3287,13 +3845,104 @@ private:
         );
     }
 
+    static uint16_t _float32_to_half_bits(float value) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+
+        const uint32_t sign = (bits >> 16) & 0x8000u;
+        uint32_t exponent = (bits >> 23) & 0xFFu;
+        uint32_t mantissa = bits & 0x7FFFFFu;
+
+        if (exponent == 0xFFu) {
+            if (mantissa != 0) {
+                return static_cast<uint16_t>(sign | 0x7E00u);
+            }
+            return static_cast<uint16_t>(sign | 0x7C00u);
+        }
+
+        if (exponent == 0) {
+            return static_cast<uint16_t>(sign);
+        }
+
+        int32_t half_exponent = static_cast<int32_t>(exponent) - 127 + 15;
+        if (half_exponent >= 31) {
+            return static_cast<uint16_t>(sign | 0x7C00u);
+        }
+        if (half_exponent <= 0) {
+            if (half_exponent < -10) {
+                return static_cast<uint16_t>(sign);
+            }
+            mantissa |= 0x800000u;
+            const uint32_t shift = static_cast<uint32_t>(14 - half_exponent);
+            uint32_t rounded = mantissa >> shift;
+            const uint32_t round_bit = 1u << (shift - 1);
+            if ((mantissa & round_bit) &&
+                (((mantissa & (round_bit - 1u)) != 0u) || (rounded & 0x1u))) {
+                ++rounded;
+            }
+            return static_cast<uint16_t>(sign | rounded);
+        }
+
+        mantissa += 0x1000u;
+        if (mantissa & 0x800000u) {
+            mantissa = 0;
+            ++half_exponent;
+            if (half_exponent >= 31) {
+                return static_cast<uint16_t>(sign | 0x7C00u);
+            }
+        }
+
+        return static_cast<uint16_t>(
+            sign |
+            (static_cast<uint32_t>(half_exponent) << 10) |
+            (mantissa >> 13));
+    }
+
+    static void _append_cf16_payload(
+        std::vector<uint8_t>& out,
+        const std::complex<float>* data_ptr,
+        size_t data_size)
+    {
+        const size_t start = out.size();
+        out.resize(start + data_size * sensing_on_wire_complex_bytes(SensingOnWireFormat::ComplexFloat16));
+        auto* dst = out.data() + static_cast<std::ptrdiff_t>(start);
+        for (size_t i = 0; i < data_size; ++i) {
+            const uint16_t re_bits = _float32_to_half_bits(data_ptr[i].real());
+            const uint16_t im_bits = _float32_to_half_bits(data_ptr[i].imag());
+            std::memcpy(dst + i * 4, &re_bits, sizeof(re_bits));
+            std::memcpy(dst + i * 4 + sizeof(re_bits), &im_bits, sizeof(im_bits));
+        }
+    }
+
+    void _append_payload_bytes(
+        std::vector<uint8_t>& out,
+        const std::complex<float>* data_ptr,
+        size_t data_size) const
+    {
+        if (data_ptr == nullptr || data_size == 0) {
+            return;
+        }
+        if (_wire_data_format == SensingOnWireFormat::ComplexFloat16) {
+            _append_cf16_payload(out, data_ptr, data_size);
+            return;
+        }
+        const auto* payload_bytes = reinterpret_cast<const uint8_t*>(data_ptr);
+        out.insert(
+            out.end(),
+            payload_bytes,
+            payload_bytes + data_size * sizeof(std::complex<float>));
+    }
+
     void send_data_with_original_format_impl(
         const std::complex<float>* data_ptr,
         size_t data_size,
         uint64_t first_symbol_index
     ) {
         const size_t chunk_size = 60000;
-        size_t total_chunks = (data_size * sizeof(std::complex<float>) + chunk_size - 1) / chunk_size;
+        std::vector<uint8_t> encoded_payload;
+        encoded_payload.reserve(data_size * sensing_on_wire_complex_bytes(_wire_data_format));
+        _append_payload_bytes(encoded_payload, data_ptr, data_size);
+        size_t total_chunks = (encoded_payload.size() + chunk_size - 1) / chunk_size;
         // Packet Header: [Frame ID | Total Chunks | Current Chunk Index]
         // Reuse frame_id field to carry first OFDM symbol index (lower 32 bits)
         const uint32_t frame_id = static_cast<uint32_t>(first_symbol_index & 0xFFFFFFFFu);
@@ -3307,15 +3956,13 @@ private:
             };
             // Calculate current chunk size
             size_t offset = i * chunk_size;
-            size_t remaining = data_size * sizeof(std::complex<float>) - offset;
+            size_t remaining = encoded_payload.size() - offset;
             size_t current_chunk_size = (remaining < chunk_size) ? remaining : chunk_size;
             
             // Construct complete packet
             std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
             memcpy(packet.data(), header, sizeof(header));
-            memcpy(packet.data() + sizeof(header),
-                  reinterpret_cast<const uint8_t*>(data_ptr) + offset,
-                  current_chunk_size);
+            memcpy(packet.data() + sizeof(header), encoded_payload.data() + offset, current_chunk_size);
             
             try {
                 send_raw(packet.data(), packet.size());
@@ -3335,8 +3982,10 @@ private:
             return;
         }
         const size_t chunk_size = 60000;
-        const size_t payload_bytes = sizeof(CompactSensingFrameHeader) + data_size * sizeof(std::complex<float>);
-        const size_t total_chunks = (payload_bytes + chunk_size - 1) / chunk_size;
+        std::vector<uint8_t> encoded_payload;
+        encoded_payload.reserve(
+            sizeof(CompactSensingFrameHeader) +
+            data_size * sensing_on_wire_complex_bytes(_wire_data_format));
         const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
 
         CompactSensingFrameHeader compact_header{};
@@ -3345,10 +3994,15 @@ private:
         compact_header.re_count = htonl(static_cast<uint32_t>(data_size));
         compact_header.frame_start_symbol_index = host_to_network_u64(frame_start_symbol_index);
 
-        const auto* compact_header_bytes =
-            reinterpret_cast<const uint8_t*>(&compact_header);
-        const auto* data_bytes =
-            reinterpret_cast<const uint8_t*>(data_ptr);
+        const auto* compact_header_bytes = reinterpret_cast<const uint8_t*>(&compact_header);
+        encoded_payload.insert(
+            encoded_payload.end(),
+            compact_header_bytes,
+            compact_header_bytes + sizeof(CompactSensingFrameHeader));
+        _append_payload_bytes(encoded_payload, data_ptr, data_size);
+        const size_t payload_bytes = encoded_payload.size();
+        const auto* data_bytes = encoded_payload.data();
+        const size_t total_chunks = (payload_bytes + chunk_size - 1) / chunk_size;
 
         for (size_t i = 0; i < total_chunks; ++i) {
             uint32_t header[3] = {
@@ -3363,27 +4017,46 @@ private:
             std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
             std::memcpy(packet.data(), header, sizeof(header));
 
-            size_t copied = 0;
-            if (payload_offset < sizeof(CompactSensingFrameHeader)) {
-                const size_t header_offset = payload_offset;
-                const size_t header_bytes_left = sizeof(CompactSensingFrameHeader) - header_offset;
-                copied = std::min(current_chunk_size, header_bytes_left);
-                std::memcpy(
-                    packet.data() + sizeof(header),
-                    compact_header_bytes + header_offset,
-                    copied);
-            }
+            std::memcpy(
+                packet.data() + sizeof(header),
+                data_bytes + payload_offset,
+                current_chunk_size);
 
-            if (copied < current_chunk_size) {
-                const size_t data_offset = (payload_offset + copied > sizeof(CompactSensingFrameHeader))
-                    ? (payload_offset + copied - sizeof(CompactSensingFrameHeader))
-                    : 0;
-                std::memcpy(
-                    packet.data() + sizeof(header) + copied,
-                    data_bytes + data_offset,
-                    current_chunk_size - copied);
+            try {
+                send_raw(packet.data(), packet.size());
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "UDP send error: " << e.what();
             }
+        }
+    }
 
+    void send_metadata_frame(
+        const std::vector<uint8_t>& metadata,
+        uint64_t frame_start_symbol_index)
+    {
+        if (metadata.empty()) {
+            return;
+        }
+
+        const size_t chunk_size = 60000;
+        const size_t total_chunks = (metadata.size() + chunk_size - 1) / chunk_size;
+        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
+
+        for (size_t i = 0; i < total_chunks; ++i) {
+            uint32_t header[3] = {
+                htonl(frame_id),
+                htonl(static_cast<uint32_t>(total_chunks) | 0x80000000u),
+                htonl(static_cast<uint32_t>(i))
+            };
+            const size_t offset = i * chunk_size;
+            const size_t remaining = metadata.size() - offset;
+            const size_t current_chunk_size = std::min(remaining, chunk_size);
+            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
+            std::memcpy(packet.data(), header, sizeof(header));
+            std::memcpy(
+                packet.data() + sizeof(header),
+                metadata.data() + static_cast<std::ptrdiff_t>(offset),
+                current_chunk_size);
             try {
                 send_raw(packet.data(), packet.size());
             } catch (const std::exception& e) {
@@ -3414,9 +4087,11 @@ public:
         int port,
         std::vector<uint32_t> channel_ids,
         bool enabled = true,
-        size_t per_channel_queue_size = 8)
+        size_t per_channel_queue_size = 8,
+        SensingOnWireFormat wire_data_format = SensingOnWireFormat::ComplexFloat32)
         : UdpBaseSender(ip, static_cast<uint16_t>(port)),
           _enabled(enabled && !channel_ids.empty()),
+          _wire_data_format(wire_data_format),
           _channel_ids(std::move(channel_ids)),
           _channel_queues(_channel_ids.size())
     {
@@ -3466,18 +4141,38 @@ public:
     }
 
     void push_data(uint32_t channel_id, const AlignedVector& data, uint64_t first_symbol_index) {
+        push_data(channel_id, data, first_symbol_index, {});
+    }
+
+    void push_data(
+        uint32_t channel_id,
+        const AlignedVector& data,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled || !_running.load(std::memory_order_acquire)) return;
         FrameData frame_data;
         frame_data.data = data;
         frame_data.first_symbol_index = first_symbol_index;
+        frame_data.metadata = std::move(metadata);
         _queue_frame(channel_id, std::move(frame_data));
     }
 
     void push_data(uint32_t channel_id, AlignedVector&& data, uint64_t first_symbol_index) {
+        push_data(channel_id, std::move(data), first_symbol_index, {});
+    }
+
+    void push_data(
+        uint32_t channel_id,
+        AlignedVector&& data,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled || !_running.load(std::memory_order_acquire)) return;
         FrameData frame_data;
         frame_data.data = std::move(data);
         frame_data.first_symbol_index = first_symbol_index;
+        frame_data.metadata = std::move(metadata);
         _queue_frame(channel_id, std::move(frame_data));
     }
 
@@ -3518,12 +4213,24 @@ public:
         size_t count,
         uint64_t first_symbol_index)
     {
+        push_external(channel_id, std::move(owner), data, count, first_symbol_index, {});
+    }
+
+    void push_external(
+        uint32_t channel_id,
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled || !_running.load(std::memory_order_acquire)) return;
         FrameData frame_data;
         frame_data.owner = std::move(owner);
         frame_data.external_data = data;
         frame_data.external_size = count;
         frame_data.first_symbol_index = first_symbol_index;
+        frame_data.metadata = std::move(metadata);
         _queue_frame(channel_id, std::move(frame_data));
     }
 
@@ -3593,18 +4300,18 @@ private:
         return frame_data.data.data();
     }
 
-    static size_t _wire_payload_bytes(const FrameData& frame_data) {
-        const size_t complex_bytes = _payload_complex_count(frame_data) * sizeof(std::complex<float>);
+    size_t _wire_payload_bytes(const FrameData& frame_data) const {
+        const size_t complex_bytes =
+            _payload_complex_count(frame_data) * sensing_on_wire_complex_bytes(_wire_data_format);
         if (frame_data.format == SensingDataSender::PayloadFormat::CompactMask) {
             return sizeof(CompactSensingFrameHeader) + complex_bytes;
         }
         return complex_bytes;
     }
 
-    static void _append_wire_payload(std::vector<uint8_t>& packet, const FrameData& frame_data) {
-        const auto* payload_data = reinterpret_cast<const uint8_t*>(_payload_data_ptr(frame_data));
+    void _append_wire_payload(std::vector<uint8_t>& packet, const FrameData& frame_data) const {
+        const auto* payload_data = _payload_data_ptr(frame_data);
         const size_t payload_complex_count = _payload_complex_count(frame_data);
-        const size_t payload_bytes = payload_complex_count * sizeof(std::complex<float>);
         if (frame_data.format == SensingDataSender::PayloadFormat::CompactMask) {
             CompactSensingFrameHeader compact_header{};
             compact_header.magic_version = htonl(kCompactSensingMagicVersion);
@@ -3614,7 +4321,53 @@ private:
             const auto* header_bytes = reinterpret_cast<const uint8_t*>(&compact_header);
             packet.insert(packet.end(), header_bytes, header_bytes + sizeof(compact_header));
         }
-        packet.insert(packet.end(), payload_data, payload_data + payload_bytes);
+        if (_wire_data_format == SensingOnWireFormat::ComplexFloat16) {
+            const size_t start = packet.size();
+            packet.resize(start + payload_complex_count * sensing_on_wire_complex_bytes(_wire_data_format));
+            auto* dst = packet.data() + static_cast<std::ptrdiff_t>(start);
+            for (size_t i = 0; i < payload_complex_count; ++i) {
+                const uint16_t re_bits = float32_to_half_ieee_bits(payload_data[i].real());
+                const uint16_t im_bits = float32_to_half_ieee_bits(payload_data[i].imag());
+                std::memcpy(dst + i * 4, &re_bits, sizeof(re_bits));
+                std::memcpy(dst + i * 4 + sizeof(re_bits), &im_bits, sizeof(im_bits));
+            }
+            return;
+        }
+        const auto* raw_bytes = reinterpret_cast<const uint8_t*>(payload_data);
+        packet.insert(
+            packet.end(),
+            raw_bytes,
+            raw_bytes + payload_complex_count * sizeof(std::complex<float>));
+    }
+
+    void _send_chunked_payload(
+        const std::vector<uint8_t>& payload,
+        uint64_t frame_start_symbol_index,
+        const char* error_prefix,
+        bool metadata_sidecar = false)
+    {
+        const size_t total_chunks = (payload.size() + kChunkSizeBytes - 1) / kChunkSizeBytes;
+        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
+        const uint32_t total_chunks_field =
+            static_cast<uint32_t>(total_chunks) | (metadata_sidecar ? 0x80000000u : 0u);
+        for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
+            uint32_t header[3] = {
+                htonl(frame_id),
+                htonl(total_chunks_field),
+                htonl(static_cast<uint32_t>(chunk_idx))
+            };
+            const size_t offset = chunk_idx * kChunkSizeBytes;
+            const size_t remaining = payload.size() - offset;
+            const size_t current_chunk_size = std::min(remaining, kChunkSizeBytes);
+            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
+            std::memcpy(packet.data(), header, sizeof(header));
+            std::memcpy(packet.data() + sizeof(header), payload.data() + offset, current_chunk_size);
+            try {
+                send_raw(packet.data(), packet.size());
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << error_prefix << e.what();
+            }
+        }
     }
 
     void _drop_oldest_pending_frame() {
@@ -3660,26 +4413,57 @@ private:
             _append_wire_payload(payload, pending.frames[i]);
         }
 
-        const size_t total_chunks = (payload.size() + kChunkSizeBytes - 1) / kChunkSizeBytes;
-        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
-        for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
-            uint32_t header[3] = {
-                htonl(frame_id),
-                htonl(static_cast<uint32_t>(total_chunks)),
-                htonl(static_cast<uint32_t>(chunk_idx))
-            };
-            const size_t offset = chunk_idx * kChunkSizeBytes;
-            const size_t remaining = payload.size() - offset;
-            const size_t current_chunk_size = std::min(remaining, kChunkSizeBytes);
-            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
-            std::memcpy(packet.data(), header, sizeof(header));
-            std::memcpy(packet.data() + sizeof(header), payload.data() + offset, current_chunk_size);
-            try {
-                send_raw(packet.data(), packet.size());
-            } catch (const std::exception& e) {
-                LOG_G_WARN() << "Aggregated sensing UDP send error: " << e.what();
-            }
+        _send_chunked_payload(
+            payload,
+            frame_start_symbol_index,
+            "[Sensing Aggregate] UDP send error: ");
+
+        bool have_all_metadata = true;
+        bool any_metadata = false;
+        for (size_t i = 0; i < channel_count; ++i) {
+            const bool has_metadata = !pending.frames[i].metadata.empty();
+            any_metadata = any_metadata || has_metadata;
+            have_all_metadata = have_all_metadata && has_metadata;
         }
+        if (any_metadata && !have_all_metadata) {
+            LOG_G_WARN() << "[Sensing Aggregate] dropping metadata sidecar for frame "
+                         << frame_start_symbol_index
+                         << " because not all channels provided metadata";
+            return;
+        }
+        if (!have_all_metadata) {
+            return;
+        }
+
+        std::vector<uint8_t> metadata_payload;
+        metadata_payload.reserve(sizeof(AggregatedSensingMetadataHeader));
+        AggregatedSensingMetadataHeader metadata_header{};
+        std::memcpy(
+            metadata_header.magic,
+            kAggregatedSensingMetadataMagic,
+            sizeof(metadata_header.magic));
+        metadata_header.channel_count = static_cast<uint32_t>(channel_count);
+        metadata_header.channel_mask = _channel_mask;
+        metadata_header.reserved = 0;
+        metadata_header.frame_start_symbol_index = frame_start_symbol_index;
+        const auto* metadata_header_bytes =
+            reinterpret_cast<const uint8_t*>(&metadata_header);
+        metadata_payload.insert(
+            metadata_payload.end(),
+            metadata_header_bytes,
+            metadata_header_bytes + sizeof(metadata_header));
+
+        for (size_t i = 0; i < channel_count; ++i) {
+            metadata_payload.insert(
+                metadata_payload.end(),
+                pending.frames[i].metadata.begin(),
+                pending.frames[i].metadata.end());
+        }
+        _send_chunked_payload(
+            metadata_payload,
+            frame_start_symbol_index,
+            "[Sensing Aggregate] metadata UDP send error: ",
+            true);
     }
 
     void run() {
@@ -3728,6 +4512,7 @@ private:
     }
 
     bool _enabled = true;
+    SensingOnWireFormat _wire_data_format = SensingOnWireFormat::ComplexFloat32;
     std::vector<uint32_t> _channel_ids;
     std::vector<int32_t> _channel_index_by_id;
     uint32_t _channel_mask = 0;
@@ -3744,13 +4529,14 @@ public:
         int port,
         bool enabled,
         uint32_t channel_id = 0,
-        std::shared_ptr<AggregatedSensingDataSender> aggregated_sender = nullptr)
+        std::shared_ptr<AggregatedSensingDataSender> aggregated_sender = nullptr,
+        SensingOnWireFormat wire_data_format = SensingOnWireFormat::ComplexFloat32)
         : _enabled(enabled),
           _channel_id(channel_id),
           _aggregated_sender(std::move(aggregated_sender))
     {
         if (_aggregated_sender == nullptr) {
-            _direct_sender = std::make_unique<SensingDataSender>(ip, port, enabled);
+            _direct_sender = std::make_unique<SensingDataSender>(ip, port, enabled, wire_data_format);
         }
     }
 
@@ -3767,21 +4553,45 @@ public:
     }
 
     void push_data(const AlignedVector& data, uint64_t first_symbol_index) {
+        push_data(data, first_symbol_index, {});
+    }
+
+    void push_data(
+        const AlignedVector& data,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled) return;
         if (_aggregated_sender) {
-            _aggregated_sender->push_data(_channel_id, data, first_symbol_index);
+            _aggregated_sender->push_data(
+                _channel_id,
+                data,
+                first_symbol_index,
+                std::move(metadata));
             return;
         }
-        _direct_sender->push_data(data, first_symbol_index);
+        _direct_sender->push_data(data, first_symbol_index, std::move(metadata));
     }
 
     void push_data(AlignedVector&& data, uint64_t first_symbol_index) {
+        push_data(std::move(data), first_symbol_index, {});
+    }
+
+    void push_data(
+        AlignedVector&& data,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled) return;
         if (_aggregated_sender) {
-            _aggregated_sender->push_data(_channel_id, std::move(data), first_symbol_index);
+            _aggregated_sender->push_data(
+                _channel_id,
+                std::move(data),
+                first_symbol_index,
+                std::move(metadata));
             return;
         }
-        _direct_sender->push_data(std::move(data), first_symbol_index);
+        _direct_sender->push_data(std::move(data), first_symbol_index, std::move(metadata));
     }
 
     void push_compact_data(
@@ -3820,6 +4630,16 @@ public:
         size_t count,
         uint64_t first_symbol_index)
     {
+        push_external(std::move(owner), data, count, first_symbol_index, {});
+    }
+
+    void push_external(
+        std::shared_ptr<const void> owner,
+        const std::complex<float>* data,
+        size_t count,
+        uint64_t first_symbol_index,
+        std::vector<uint8_t> metadata)
+    {
         if (!_enabled) return;
         if (_aggregated_sender) {
             _aggregated_sender->push_external(
@@ -3827,10 +4647,16 @@ public:
                 std::move(owner),
                 data,
                 count,
-                first_symbol_index);
+                first_symbol_index,
+                std::move(metadata));
             return;
         }
-        _direct_sender->push_external(std::move(owner), data, count, first_symbol_index);
+        _direct_sender->push_external(
+            std::move(owner),
+            data,
+            count,
+            first_symbol_index,
+            std::move(metadata));
     }
 
     void push_compact_external(

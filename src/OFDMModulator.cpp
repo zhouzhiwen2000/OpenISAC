@@ -444,7 +444,9 @@ private:
                 _cfg.mono_sensing_ip,
                 _cfg.mono_sensing_port,
                 std::move(aggregate_channel_ids),
-                true);
+                true,
+                8,
+                _cfg.sensing_on_wire_format);
             LOG_G_INFO() << "[Sensing Aggregate] enabled for "
                          << _aggregated_sensing_sender->channel_count()
                          << " channels -> " << _cfg.mono_sensing_ip
@@ -497,7 +499,21 @@ private:
         auto same_runtime_values = [](const SharedSensingRuntime& lhs, const SharedSensingRuntime& rhs) {
             return lhs.sensing_symbol_stride == rhs.sensing_symbol_stride &&
                    lhs.enable_mti == rhs.enable_mti &&
-                   lhs.skip_sensing_fft == rhs.skip_sensing_fft;
+                   lhs.skip_sensing_fft == rhs.skip_sensing_fft &&
+                   lhs.cfar_enabled == rhs.cfar_enabled &&
+                   lhs.cfar_train_doppler == rhs.cfar_train_doppler &&
+                   lhs.cfar_train_range == rhs.cfar_train_range &&
+                   lhs.cfar_guard_doppler == rhs.cfar_guard_doppler &&
+                   lhs.cfar_guard_range == rhs.cfar_guard_range &&
+                   lhs.cfar_alpha_db == rhs.cfar_alpha_db &&
+                   lhs.cfar_min_range_bin == rhs.cfar_min_range_bin &&
+                   lhs.cfar_dc_exclusion_bins == rhs.cfar_dc_exclusion_bins &&
+                   lhs.cfar_min_power_db == rhs.cfar_min_power_db &&
+                   lhs.cfar_os_rank_percent == rhs.cfar_os_rank_percent &&
+                   lhs.cfar_os_suppress_doppler == rhs.cfar_os_suppress_doppler &&
+                   lhs.cfar_os_suppress_range == rhs.cfar_os_suppress_range &&
+                   lhs.micro_doppler_enabled == rhs.micro_doppler_enabled &&
+                   lhs.micro_doppler_range_bin == rhs.micro_doppler_range_bin;
         };
         SharedSensingRuntime snapshot;
         uint64_t next_symbol = 0;
@@ -573,6 +589,9 @@ private:
             _cfg,
             snapshot.skip_sensing_fft,
             snapshot.enable_mti,
+            snapshot.cfar_os_rank_percent,
+            snapshot.cfar_os_suppress_doppler,
+            snapshot.cfar_os_suppress_range,
             false,
             stream_channel_count,
             stream_channel_mask,
@@ -596,6 +615,8 @@ private:
             compact_mask_runtime_fft_controls_supported(_cfg);
         const std::string compact_mask_reason =
             compact_mask_runtime_fft_controls_reason(_cfg);
+        const bool backend_processing_mode =
+            backend_sensing_processing_supported(_cfg);
 
         _control_handler.register_command("ALCH", [this](int32_t value) {
             if (value < 0) {
@@ -635,7 +656,11 @@ private:
                 static_cast<int32_t>(next_target));
         });
 
-        _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
+        _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason, backend_processing_mode](int32_t value) {
+            if (backend_processing_mode) {
+                LOG_G_INFO() << "Ignoring SKIP command in backend sensing processing mode";
+                return;
+            }
             if (compact_mask_mode && !compact_mask_fft_controls_supported) {
                 LOG_G_INFO() << "Ignoring SKIP command in compact_mask sensing mode: "
                              << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
@@ -671,6 +696,91 @@ private:
                 cfg.enable_mti = new_mti;
             });
             LOG_G_INFO() << "Received MTI command: " << (new_mti ? "Enable" : "Disable");
+        });
+
+        _control_handler.register_command("CFEN", [this](int32_t value) {
+            const bool enabled = (value != 0);
+            _schedule_shared_sensing_update([enabled](SharedSensingRuntime& cfg) {
+                cfg.cfar_enabled = enabled;
+            });
+            LOG_G_INFO() << "Received CFEN command: " << (enabled ? 1 : 0);
+        });
+
+        _control_handler.register_command("CFTD", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_train_doppler = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("CFTR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_train_range = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("CFGD", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_guard_doppler = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("CFGR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_guard_range = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("CFAL", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_alpha_db = static_cast<float>(value) / 100.0f;
+            });
+        });
+
+        _control_handler.register_command("CFMR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_min_range_bin = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("CFDC", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_dc_exclusion_bins = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("CFMP", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_min_power_db = static_cast<float>(value) / 100.0f;
+            });
+        });
+        _control_handler.register_command("CFRK", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_os_rank_percent =
+                    static_cast<float>(std::clamp(value, 0, 10000)) / 100.0f;
+            });
+        });
+        _control_handler.register_command("CFSD", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_os_suppress_doppler = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFSR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_os_suppress_range = std::max(0, value);
+            });
+        });
+
+        _control_handler.register_command("MDEN", [this](int32_t value) {
+            const bool enabled = (value != 0);
+            _schedule_shared_sensing_update([enabled](SharedSensingRuntime& cfg) {
+                cfg.micro_doppler_enabled = enabled;
+            });
+        });
+
+        _control_handler.register_command("MDRB", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.micro_doppler_range_bin = std::max(0, value);
+            });
         });
 
         _control_handler.register_command("TXGN", [this](int32_t value) {
@@ -1095,8 +1205,7 @@ private:
     void _data_ingest_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe(0.2f, true);
-        std::vector<size_t> cpu_list = {core_from_hint(_cfg, 2)};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(_cfg, 2);
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
@@ -1276,8 +1385,7 @@ private:
     void _modulation_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(0.6f, true);
-        std::vector<size_t> cpu_list = {core_from_hint(_cfg, 1)};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(_cfg, 1);
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
@@ -1537,8 +1645,7 @@ private:
     void _tx_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1.0f, true);
-        std::vector<size_t> cpu_list = {core_from_hint(_cfg, 0)};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(_cfg, 0);
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
@@ -1547,14 +1654,22 @@ private:
         md.start_of_burst = true;
         md.end_of_burst = false;
         const double tick_rate = _tx_usrp ? _tx_usrp->get_master_clock_rate() : _cfg.sample_rate;
+        double tx_sample_rate = _cfg.sample_rate;
+        if (_tx_usrp) {
+            const double actual_tx_rate = _tx_usrp->get_tx_rate(_cfg.tx_channel);
+            if (actual_tx_rate > 0.0) {
+                tx_sample_rate = actual_tx_rate;
+            }
+        }
         const double exact_frame_ticks =
-            static_cast<double>(_cfg.samples_per_frame()) * tick_rate / _cfg.sample_rate;
+            static_cast<double>(_cfg.samples_per_frame()) * tick_rate / tx_sample_rate;
         const long long frame_ticks = std::llround(exact_frame_ticks);
         const double frame_tick_error = std::abs(exact_frame_ticks - static_cast<double>(frame_ticks));
         if (frame_tick_error > 1e-6) {
             LOG_G_WARN() << std::fixed << std::setprecision(6)
                          << "[TX] Frame duration quantized to " << frame_ticks
                          << " ticks at tick_rate=" << tick_rate
+                         << " Hz using tx_rate=" << tx_sample_rate
                          << " Hz (error=" << frame_tick_error << " ticks)"
                          << std::defaultfloat;
         }
@@ -1748,10 +1863,7 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     normalize_modulator_sensing_channels(cfg);
 
     // Set main thread affinity to the last configured core.
-    if (!cfg.available_cores.empty()) {
-        std::vector<size_t> cpu_list = {cfg.available_cores.back()};
-        uhd::set_thread_affinity(cpu_list);
-    }
+    bind_current_thread_to_main_core(cfg);
 
     // Load FFTW wisdom
     FFTWManager::import_wisdom();

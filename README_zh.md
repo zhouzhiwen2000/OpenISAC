@@ -540,7 +540,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `measurement_payload_bytes` | `int` | `1024` | 每个内部测量载荷的字节数。若小于内部测量头长度，会自动钳制到最小合法值。 |
 | `measurement_prbs_seed` | `int` | `0x5A` | 用于生成确定性 PRBS 载荷内容的基础种子。 |
 | `measurement_packets_per_point` | `int` | `1` | 每个在线 `MRST` epoch 要发送的测量载荷数。小于 `1` 时会钳制到 `1`。 |
-| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `modulation`、`latency`、`data_ingest`、`sensing_proc`、`sensing_process`；`all` 表示全部。调制器端到端时延统计只有在同时包含 `modulation` 和 `latency` 时才启用。 |
+| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `modulation`、`latency`、`data_ingest`、`sensing_proc`；`all` 表示全部。调制器端到端时延统计只有在同时包含 `modulation` 和 `latency` 时才启用。 |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | 允许使用的 CPU 核列表。建议按 TX 线程、调制线程、数据输入线程、每个已启用感知通道的 RX/感知线程，以及主线程来预留。若核心数量有限，应先给主线程保留一个专用核心，其次优先 TX 和感知 RX 线程，最后再考虑调制、数据输入和感知处理线程，因为后者有更深的缓冲区。 |
 
 快速理解：

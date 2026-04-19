@@ -12,11 +12,8 @@
 namespace {
 
 inline bool should_profile_sensing(const Config& cfg) {
-    const bool sensing_enabled =
-        cfg.should_profile("sensing") ||
-        cfg.should_profile("sensing_proc") ||
-        cfg.should_profile("sensing_process");
-    return sensing_enabled && cfg.should_profile("latency");
+    return cfg.should_profile("sensing") ||
+           cfg.should_profile("sensing_proc");
 }
 
 int64_t round_divide_nearest_away_from_zero(int64_t numerator, int64_t denominator) {
@@ -41,22 +38,56 @@ int64_t round_divide_nearest_away_from_zero(int64_t numerator, int64_t denominat
     return (numerator < 0) ? -rounded : rounded;
 }
 
+int64_t round_long_double_to_int64(long double value) {
+    if (!std::isfinite(value)) {
+        return 0;
+    }
+    const long double max_i64 = static_cast<long double>(std::numeric_limits<int64_t>::max());
+    const long double min_i64 = static_cast<long double>(std::numeric_limits<int64_t>::min());
+    if (value >= max_i64) {
+        return std::numeric_limits<int64_t>::max();
+    }
+    if (value <= min_i64) {
+        return std::numeric_limits<int64_t>::min();
+    }
+    return static_cast<int64_t>(std::llround(value));
+}
+
+int64_t compute_elapsed_samples_from_ticks(
+    const uhd::time_spec_t& raw_start_time,
+    const uhd::time_spec_t& stream_start_time,
+    double sample_rate,
+    double tick_rate)
+{
+    if (sample_rate <= 0.0 || tick_rate <= 0.0) {
+        return 0;
+    }
+
+    const int64_t raw_ticks = raw_start_time.to_ticks(tick_rate);
+    const int64_t stream_start_ticks = stream_start_time.to_ticks(tick_rate);
+    const int64_t delta_ticks = raw_ticks - stream_start_ticks;
+    const long double elapsed_samples =
+        static_cast<long double>(delta_ticks) * static_cast<long double>(sample_rate) /
+        static_cast<long double>(tick_rate);
+    return round_long_double_to_int64(elapsed_samples);
+}
+
 uint64_t compute_rx_frame_seq_from_time(
     const uhd::time_spec_t& raw_start_time,
     const uhd::time_spec_t& stream_start_time,
     int32_t discard_samples,
     int32_t target_alignment_samples,
-    const Config& cfg
+    const Config& cfg,
+    double sample_rate,
+    double tick_rate
 ) {
-    if (cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0) {
+    if (sample_rate <= 0.0 || tick_rate <= 0.0 || cfg.samples_per_frame() == 0) {
         return 0;
     }
 
-    const uhd::time_spec_t aligned_start_time =
-        raw_start_time + uhd::time_spec_t(static_cast<double>(discard_samples) / cfg.sample_rate);
-    const double delta_samples =
-        (aligned_start_time - stream_start_time).get_real_secs() * cfg.sample_rate;
-    const int64_t rounded_samples = static_cast<int64_t>(std::llround(delta_samples));
+    const int64_t rounded_samples =
+        compute_elapsed_samples_from_ticks(raw_start_time, stream_start_time, sample_rate, tick_rate) +
+        static_cast<int64_t>(discard_samples);
     const int64_t frame_samples = static_cast<int64_t>(cfg.samples_per_frame());
     if (frame_samples <= 0) {
         return 0;
@@ -91,17 +122,17 @@ int32_t compute_rx_frame_boundary_error_samples(
     const uhd::time_spec_t& raw_start_time,
     const uhd::time_spec_t& stream_start_time,
     int32_t discard_samples,
-    const Config& cfg
+    const Config& cfg,
+    double sample_rate,
+    double tick_rate
 ) {
-    if (cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0) {
+    if (sample_rate <= 0.0 || tick_rate <= 0.0 || cfg.samples_per_frame() == 0) {
         return 0;
     }
 
-    const uhd::time_spec_t aligned_start_time =
-        raw_start_time + uhd::time_spec_t(static_cast<double>(discard_samples) / cfg.sample_rate);
-    const double delta_samples =
-        (aligned_start_time - stream_start_time).get_real_secs() * cfg.sample_rate;
-    const int64_t rounded_samples = static_cast<int64_t>(std::llround(delta_samples));
+    const int64_t rounded_samples =
+        compute_elapsed_samples_from_ticks(raw_start_time, stream_start_time, sample_rate, tick_rate) +
+        static_cast<int64_t>(discard_samples);
     const int64_t frame_samples = static_cast<int64_t>(cfg.samples_per_frame());
     if (frame_samples <= 0) {
         return 0;
@@ -121,6 +152,165 @@ size_t sensing_symbol_capacity(const Config& cfg) {
         return cfg.sensing_symbol_num;
     }
     return std::max(cfg.sensing_symbol_num, analysis.selected_symbol_count);
+}
+
+void copy_backend_range_view_input(
+    const AlignedVector& src,
+    size_t src_rows,
+    size_t src_stride,
+    size_t fft_rows,
+    size_t view_cols,
+    AlignedVector& dst)
+{
+    if (dst.size() != fft_rows * view_cols) {
+        dst.assign(fft_rows * view_cols, std::complex<float>(0.0f, 0.0f));
+    } else {
+        std::fill(dst.begin(), dst.end(), std::complex<float>(0.0f, 0.0f));
+    }
+
+    const size_t rows_to_copy = std::min(src_rows, fft_rows);
+    for (size_t row = 0; row < rows_to_copy; ++row) {
+        const auto* src_row = src.data() + row * src_stride;
+        auto* dst_row = dst.data() + row * view_cols;
+        std::copy_n(src_row, view_cols, dst_row);
+    }
+}
+
+void crop_doppler_view_output(
+    const std::complex<float>* src,
+    size_t full_rows,
+    size_t cols,
+    size_t output_rows,
+    AlignedVector& dst)
+{
+    if (src == nullptr || full_rows == 0 || cols == 0 || output_rows == 0) {
+        dst.clear();
+        return;
+    }
+
+    if (output_rows >= full_rows) {
+        dst.assign(src, src + full_rows * cols);
+        return;
+    }
+
+    if (dst.size() != output_rows * cols) {
+        dst.assign(output_rows * cols, std::complex<float>(0.0f, 0.0f));
+    }
+
+    const size_t shifted_start = (full_rows / 2) - (output_rows / 2);
+    const size_t ifftshift_offset = output_rows / 2;
+    for (size_t row = 0; row < output_rows; ++row) {
+        const size_t shifted_row = (row + ifftshift_offset) % output_rows;
+        const size_t src_row = (shifted_start + shifted_row + full_rows / 2) % full_rows;
+        const auto* src_row_ptr = src + src_row * cols;
+        auto* dst_row = dst.data() + row * cols;
+        std::copy_n(src_row_ptr, cols, dst_row);
+    }
+}
+
+float sensing_rd_amplitude_scale(size_t active_rows, size_t active_cols)
+{
+    if (active_rows == 0 || active_cols == 0) {
+        return 1.0f;
+    }
+    return 1.0f / std::sqrt(static_cast<float>(active_rows) * static_cast<float>(active_cols));
+}
+
+void scale_complex_buffer_inplace(
+    std::complex<float>* data,
+    size_t complex_count,
+    float scale)
+{
+    if (data == nullptr || complex_count == 0 || scale == 1.0f) {
+        return;
+    }
+
+    auto* scalar = reinterpret_cast<float*>(data);
+    const size_t scalar_count = complex_count * 2;
+    #pragma omp simd simdlen(16)
+    for (size_t i = 0; i < scalar_count; ++i) {
+        scalar[i] *= scale;
+    }
+}
+
+size_t doppler_zoom_head_bin_count(size_t output_rows)
+{
+    return (output_rows + 1) / 2;
+}
+
+size_t doppler_zoom_tail_bin_count(size_t output_rows)
+{
+    return output_rows / 2;
+}
+
+bool backend_range_zoom_active(
+    const SensingChannel::BackendZoomContext& zoom,
+    bool micro_doppler_enabled,
+    size_t micro_doppler_range_bin)
+{
+    if (!zoom.has_range_plan()) {
+        return false;
+    }
+    if (!micro_doppler_enabled) {
+        return true;
+    }
+    return micro_doppler_range_bin < zoom.range_view_bins;
+}
+
+void execute_range_zoom_rows(
+    ZoomFFTProcessor& plan,
+    const std::complex<float>* src,
+    size_t src_rows,
+    size_t src_stride,
+    size_t fft_rows,
+    AlignedVector& dst)
+{
+    const size_t view_cols = plan.params().output_size;
+    if (dst.size() != fft_rows * view_cols) {
+        dst.assign(fft_rows * view_cols, std::complex<float>(0.0f, 0.0f));
+    } else {
+        std::fill(dst.begin(), dst.end(), std::complex<float>(0.0f, 0.0f));
+    }
+
+    const size_t rows_to_process = std::min(src_rows, fft_rows);
+    for (size_t row = 0; row < rows_to_process; ++row) {
+        plan.execute(
+            src + row * src_stride,
+            1,
+            dst.data() + row * view_cols,
+            1);
+    }
+}
+
+void execute_doppler_zoom_columns(
+    SensingChannel::BackendZoomContext& zoom,
+    const std::complex<float>* src,
+    size_t cols,
+    AlignedVector& dst)
+{
+    const size_t output_rows = zoom.doppler_view_bins;
+    if (dst.size() != output_rows * cols) {
+        dst.assign(output_rows * cols, std::complex<float>(0.0f, 0.0f));
+    } else {
+        std::fill(dst.begin(), dst.end(), std::complex<float>(0.0f, 0.0f));
+    }
+
+    for (size_t col = 0; col < cols; ++col) {
+        if (zoom.doppler_head_bins > 0 && zoom.doppler_head_plan) {
+            zoom.doppler_head_plan->execute(
+                src + col,
+                cols,
+                dst.data() + col,
+                cols);
+        }
+        if (zoom.doppler_tail_bins > 0 && zoom.doppler_tail_plan) {
+            zoom.doppler_tail_plan->execute(
+                src + col,
+                cols,
+                dst.data() + zoom.doppler_head_bins * cols + col,
+                cols);
+        }
+    }
 }
 
 }
@@ -328,7 +518,13 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
   : demod_fft_in(cfg.fft_size),
     demod_fft_out(cfg.fft_size),
     sensing_core({cfg.fft_size, std::max(cfg.range_fft_size, cfg.fft_size), cfg.doppler_fft_size, sensing_symbol_capacity(cfg)}),
-    sensing_sender(output_ip, output_port, c.enable_sensing_output, logical_id, std::move(aggregated_sender)),
+    sensing_sender(
+        output_ip,
+        output_port,
+        c.enable_sensing_output,
+        logical_id,
+        std::move(aggregated_sender),
+        cfg.sensing_on_wire_format),
     next_hb_time(std::chrono::steady_clock::now()) {
     accumulated_rx_symbols.reserve(cfg.sensing_symbol_num);
     accumulated_tx_symbols.reserve(cfg.sensing_symbol_num);
@@ -356,6 +552,77 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
     WindowGenerator::generate_hamming(range_window, cfg.fft_size);
     doppler_window.resize(cfg.sensing_symbol_num);
     WindowGenerator::generate_hamming(doppler_window, cfg.sensing_symbol_num);
+    cfar_params.max_points = 256;
+    backend_view_range_bins = resolved_sensing_view_range_bins(cfg);
+    backend_view_doppler_bins = resolved_sensing_view_doppler_bins(cfg);
+    const bool backend_processing = backend_sensing_processing_supported(cfg);
+    backend_range_view_limited =
+        backend_processing &&
+        (backend_view_range_bins != sensing_core.params().range_fft_size);
+    backend_doppler_view_limited =
+        backend_processing &&
+        (backend_view_doppler_bins != sensing_core.params().doppler_fft_size);
+    backend_zoom.range_enabled = backend_range_view_limited;
+    backend_zoom.doppler_enabled = backend_doppler_view_limited;
+    backend_zoom.range_view_bins = backend_view_range_bins;
+    backend_zoom.doppler_view_bins = backend_view_doppler_bins;
+    backend_zoom.doppler_head_bins = doppler_zoom_head_bin_count(backend_view_doppler_bins);
+    backend_zoom.doppler_tail_bins = doppler_zoom_tail_bin_count(backend_view_doppler_bins);
+    if (backend_zoom.range_enabled) {
+        backend_zoom.range_plan = std::make_unique<ZoomFFTProcessor>(ZoomFFTProcessor::Params{
+            sensing_core.params().fft_size,
+            sensing_core.params().range_fft_size,
+            0,
+            backend_view_range_bins,
+            ZoomFFTProcessor::Direction::Backward,
+        });
+    }
+    if (backend_zoom.doppler_enabled) {
+        if (backend_zoom.doppler_head_bins > 0) {
+            backend_zoom.doppler_head_plan = std::make_unique<ZoomFFTProcessor>(ZoomFFTProcessor::Params{
+                sensing_core.params().doppler_fft_size,
+                sensing_core.params().doppler_fft_size,
+                0,
+                backend_zoom.doppler_head_bins,
+                ZoomFFTProcessor::Direction::Forward,
+            });
+        }
+        if (backend_zoom.doppler_tail_bins > 0) {
+            backend_zoom.doppler_tail_plan = std::make_unique<ZoomFFTProcessor>(ZoomFFTProcessor::Params{
+                sensing_core.params().doppler_fft_size,
+                sensing_core.params().doppler_fft_size,
+                sensing_core.params().doppler_fft_size - backend_zoom.doppler_tail_bins,
+                backend_zoom.doppler_tail_bins,
+                ZoomFFTProcessor::Direction::Forward,
+            });
+        }
+    }
+    if (backend_range_view_limited) {
+        backend_view_buffer.assign(
+            backend_view_range_bins * sensing_core.params().doppler_fft_size,
+            std::complex<float>(0.0f, 0.0f));
+        const int backend_view_rows = static_cast<int>(sensing_core.params().doppler_fft_size);
+        const int backend_view_cols = static_cast<int>(backend_view_range_bins);
+        backend_view_doppler_fft_plan = fftwf_plan_many_dft(
+            1,
+            &backend_view_rows,
+            backend_view_cols,
+            reinterpret_cast<fftwf_complex*>(backend_view_buffer.data()),
+            nullptr,
+            backend_view_cols,
+            1,
+            reinterpret_cast<fftwf_complex*>(backend_view_buffer.data()),
+            nullptr,
+            backend_view_cols,
+            1,
+            FFTW_FORWARD,
+            FFTW_MEASURE);
+    }
+    if (backend_doppler_view_limited) {
+        backend_output_buffer.assign(
+            backend_view_range_bins * backend_view_doppler_bins,
+            std::complex<float>(0.0f, 0.0f));
+    }
     if (compact_mask_local_delay_doppler_supported) {
         compact_range_window.resize(compact_mask_analysis.common_subcarrier_count);
         WindowGenerator::generate_hamming(
@@ -363,6 +630,43 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
             compact_mask_analysis.common_subcarrier_count);
         compact_doppler_window.resize(cfg.sensing_symbol_num);
         WindowGenerator::generate_hamming(compact_doppler_window, cfg.sensing_symbol_num);
+        compact_backend_zoom.range_enabled = backend_processing &&
+            (backend_view_range_bins != cfg.range_fft_size);
+        compact_backend_zoom.doppler_enabled = backend_processing &&
+            (backend_view_doppler_bins != cfg.doppler_fft_size);
+        compact_backend_zoom.range_view_bins = backend_view_range_bins;
+        compact_backend_zoom.doppler_view_bins = backend_view_doppler_bins;
+        compact_backend_zoom.doppler_head_bins = doppler_zoom_head_bin_count(backend_view_doppler_bins);
+        compact_backend_zoom.doppler_tail_bins = doppler_zoom_tail_bin_count(backend_view_doppler_bins);
+        if (compact_backend_zoom.range_enabled) {
+            compact_backend_zoom.range_plan = std::make_unique<ZoomFFTProcessor>(ZoomFFTProcessor::Params{
+                compact_mask_analysis.common_subcarrier_count,
+                cfg.range_fft_size,
+                0,
+                backend_view_range_bins,
+                ZoomFFTProcessor::Direction::Backward,
+            });
+        }
+        if (compact_backend_zoom.doppler_enabled) {
+            if (compact_backend_zoom.doppler_head_bins > 0) {
+                compact_backend_zoom.doppler_head_plan = std::make_unique<ZoomFFTProcessor>(ZoomFFTProcessor::Params{
+                    cfg.doppler_fft_size,
+                    cfg.doppler_fft_size,
+                    0,
+                    compact_backend_zoom.doppler_head_bins,
+                    ZoomFFTProcessor::Direction::Forward,
+                });
+            }
+            if (compact_backend_zoom.doppler_tail_bins > 0) {
+                compact_backend_zoom.doppler_tail_plan = std::make_unique<ZoomFFTProcessor>(ZoomFFTProcessor::Params{
+                    cfg.doppler_fft_size,
+                    cfg.doppler_fft_size,
+                    cfg.doppler_fft_size - compact_backend_zoom.doppler_tail_bins,
+                    compact_backend_zoom.doppler_tail_bins,
+                    ZoomFFTProcessor::Direction::Forward,
+                });
+            }
+        }
     }
     actual_subcarrier_indices.resize(cfg.fft_size);
     subcarrier_phases_unit_delay.resize(cfg.fft_size);
@@ -408,6 +712,10 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
 }
 
 SensingChannel::SensingComputeContext::~SensingComputeContext() {
+    if (backend_view_doppler_fft_plan != nullptr) {
+        fftwf_destroy_plan(backend_view_doppler_fft_plan);
+        backend_view_doppler_fft_plan = nullptr;
+    }
     if (demod_fft_plan != nullptr) {
         fftwf_destroy_plan(demod_fft_plan);
         demod_fft_plan = nullptr;
@@ -695,6 +1003,9 @@ void SensingChannel::_apply_batch_reset_if_due(uint64_t frame_start_symbol_index
     _compute.batch_has_first_symbol = false;
     _compute.current_batch_first_symbol = frame_start_symbol_index;
     _compute.next_symbol_to_sample = frame_start_symbol_index;
+    if (backend_sensing_processing_supported(_cfg)) {
+        _compute.micro_doppler_state.clear();
+    }
     _compute.sensing_core.clear_channel_buffer();
     if (_compute.compact_sensing_core) {
         _compute.compact_sensing_core->clear_channel_buffer();
@@ -803,6 +1114,10 @@ void SensingChannel::initialize_rx_hardware_and_sync(
         io.rx_usrp->set_rx_freq(tune_req, io.channel_cfg.usrp_channel);
         io.rx_usrp->set_rx_gain(io.channel_cfg.rx_gain, io.channel_cfg.usrp_channel);
         io.rx_usrp->set_rx_bandwidth(cfg.bandwidth, io.channel_cfg.usrp_channel);
+        const double actual_rx_rate = io.rx_usrp->get_rx_rate(io.channel_cfg.usrp_channel);
+        io.rx_sample_rate = (actual_rx_rate > 0.0) ? actual_rx_rate : cfg.sample_rate;
+        const double actual_tick_rate = io.rx_usrp->get_master_clock_rate();
+        io.rx_tick_rate = (actual_tick_rate > 0.0) ? actual_tick_rate : io.rx_sample_rate;
         if (!io.channel_cfg.rx_antenna.empty()) {
             io.rx_usrp->set_rx_antenna(io.channel_cfg.rx_antenna, io.channel_cfg.usrp_channel);
         }
@@ -897,16 +1212,15 @@ void SensingChannel::initialize_rx_hardware_and_sync(
     return;
 }
 
-size_t SensingChannel::_resolve_core(size_t hint) const {
+std::optional<size_t> SensingChannel::_resolve_core(size_t hint) const {
     if (_core_resolver) return _core_resolver(hint);
-    return 0;
+    return std::nullopt;
 }
 
 void SensingChannel::_rx_loop(const uhd::time_spec_t& start_time) {
     async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
     uhd::set_thread_priority_safe(1.0f, true);
-    std::vector<size_t> cpu_list = {_resolve_core(3 + static_cast<size_t>(_rx_io.logical_id) * 2)};
-    uhd::set_thread_affinity(cpu_list);
+    bind_current_thread_to_core(_resolve_core(3 + static_cast<size_t>(_rx_io.logical_id) * 2));
     prefault_thread_stack();
 
     uhd::stream_cmd_t stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
@@ -1004,7 +1318,10 @@ void SensingChannel::_handle_alignment() {
             _rx_io.stream_start_time,
             discard,
             _rx_io.target_alignment.load(std::memory_order_relaxed),
-            _cfg)
+            _cfg,
+            _rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.sample_rate,
+            _rx_io.rx_tick_rate > 0.0 ? _rx_io.rx_tick_rate :
+                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.sample_rate))
         : _rx_io.next_rx_frame_seq;
     RxSymbolsFrame rx_item;
     rx_item.samples = std::move(aligned_frame);
@@ -1065,7 +1382,10 @@ void SensingChannel::_handle_normal_rx() {
             first_time_spec,
             _rx_io.stream_start_time,
             0,
-            _cfg);
+            _cfg,
+            _rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.sample_rate,
+            _rx_io.rx_tick_rate > 0.0 ? _rx_io.rx_tick_rate :
+                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.sample_rate));
         const int32_t correction = normalize_alignment_samples(
             static_cast<int64_t>(desired_alignment) - static_cast<int64_t>(frame_offset),
             frame_samples);
@@ -1086,7 +1406,10 @@ void SensingChannel::_handle_normal_rx() {
             _rx_io.stream_start_time,
             0,
             _rx_io.target_alignment.load(std::memory_order_relaxed),
-            _cfg)
+            _cfg,
+            _rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.sample_rate,
+            _rx_io.rx_tick_rate > 0.0 ? _rx_io.rx_tick_rate :
+                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.sample_rate))
         : _rx_io.next_rx_frame_seq;
     RxSymbolsFrame rx_item;
     rx_item.samples = std::move(rx_frame);
@@ -1104,8 +1427,7 @@ void SensingChannel::_handle_normal_rx() {
 void SensingChannel::_sensing_loop() {
     async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
     uhd::set_thread_priority_safe(0.6f, true);
-    std::vector<size_t> cpu_list = {_resolve_core(4 + static_cast<size_t>(_rx_io.logical_id) * 2)};
-    uhd::set_thread_affinity(cpu_list);
+    bind_current_thread_to_core(_resolve_core(4 + static_cast<size_t>(_rx_io.logical_id) * 2));
     prefault_thread_stack();
 
     while (_running_ref.load(std::memory_order_relaxed)) {
@@ -1232,12 +1554,15 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
         }
     }
 
-    const double delay_us = (_cfg.sample_rate > 0.0)
-        ? (static_cast<double>(delay_samples) * 1e6 / _cfg.sample_rate)
+    const double rx_sample_rate =
+        (_rx_io.rx_sample_rate > 0.0) ? _rx_io.rx_sample_rate : _cfg.sample_rate;
+    const double delay_us = (rx_sample_rate > 0.0)
+        ? (static_cast<double>(delay_samples) * 1e6 / rx_sample_rate)
         : 0.0;
     const float corr_ratio = (avg_corr > 0.0f) ? (max_corr / avg_corr) : 0.0f;
-    const int32_t alignment_now = _rx_io.discard_samples.load(std::memory_order_relaxed);
-    const int64_t suggested_alignment_raw = static_cast<int64_t>(alignment_now) + delay_samples;
+    const int32_t target_alignment = _rx_io.target_alignment.load(std::memory_order_relaxed);
+    const int64_t suggested_alignment_raw =
+        static_cast<int64_t>(target_alignment) + delay_samples;
 
     _compute.next_delay_estimation_frame_seq = frame_seq + kSystemDelayEstimationFrameInterval;
 
@@ -1247,7 +1572,7 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
                   << ", peak=" << max_pos
                   << ", expected=" << _compute.system_delay_expected_sync_pos
                   << ", corr_ratio=" << corr_ratio
-                  << ", alignment_now=" << alignment_now
+                  << ", target_alignment=" << target_alignment
                   << ", alignment_suggest=" << suggested_alignment_raw
                   << ", next_frame_seq=" << _compute.next_delay_estimation_frame_seq
                   << ", interval=" << kSystemDelayEstimationFrameInterval;
@@ -1508,6 +1833,7 @@ void SensingChannel::_process_regular_compact_buffer(
     auto& channel_buf = compact_core.channel_buffer();
     const size_t symbol_count = tx_symbols.size();
     const size_t range_stride = compact_core.params().range_fft_size;
+    const bool backend_processing = backend_sensing_processing_supported(_cfg);
 
     compact_core.channel_estimate_with_shift(tx_symbols, symbol_count);
     compact_core.apply_mti(_compute.active_enable_mti, symbol_count);
@@ -1533,9 +1859,120 @@ void SensingChannel::_process_regular_compact_buffer(
         _compute.compact_range_window,
         _compute.compact_doppler_window,
         symbol_count);
-    compact_core.execute_range_ifft();
-    compact_core.execute_doppler_fft();
-    _compute.sensing_sender.push_data(channel_buf, frame_start_symbol_index);
+    const bool range_zoom_enabled = backend_processing &&
+        backend_range_zoom_active(
+            _compute.compact_backend_zoom,
+            _compute.micro_doppler_enabled,
+            _compute.micro_doppler_range_bin);
+    const bool doppler_zoom_enabled = backend_processing &&
+        _compute.compact_backend_zoom.has_doppler_plan();
+    const size_t fft_rows = compact_core.params().doppler_fft_size;
+    const std::complex<float>* doppler_input = nullptr;
+    size_t doppler_input_cols = range_stride;
+    AlignedVector* post_doppler_buf = &channel_buf;
+
+    if (range_zoom_enabled) {
+        execute_range_zoom_rows(
+            *_compute.compact_backend_zoom.range_plan,
+            channel_buf.data(),
+            symbol_count,
+            range_stride,
+            fft_rows,
+            _compute.compact_backend_zoom.range_output_buffer);
+        doppler_input = _compute.compact_backend_zoom.range_output_buffer.data();
+        doppler_input_cols = _compute.compact_backend_zoom.range_view_bins;
+    } else {
+        compact_core.execute_range_ifft();
+        doppler_input = channel_buf.data();
+        if (backend_processing && _compute.backend_range_view_limited) {
+            copy_backend_range_view_input(
+                channel_buf,
+                symbol_count,
+                range_stride,
+                fft_rows,
+                _compute.backend_view_range_bins,
+                _compute.backend_view_buffer);
+            doppler_input = _compute.backend_view_buffer.data();
+            doppler_input_cols = _compute.backend_view_range_bins;
+        }
+    }
+
+    if (backend_processing &&
+        _compute.micro_doppler_enabled &&
+        doppler_input_cols > 0) {
+        const size_t selected_range_bin = std::min(
+            _compute.micro_doppler_range_bin,
+            doppler_input_cols - 1);
+        extract_range_bin_trace(
+            doppler_input,
+            symbol_count,
+            doppler_input_cols,
+            selected_range_bin,
+            _compute.micro_doppler_trace);
+        _compute.micro_doppler_state.append_samples(
+            _compute.micro_doppler_trace.data(),
+            _compute.micro_doppler_trace.size());
+    }
+
+    if (doppler_zoom_enabled) {
+        execute_doppler_zoom_columns(
+            _compute.compact_backend_zoom,
+            doppler_input,
+            doppler_input_cols,
+            _compute.backend_output_buffer);
+        post_doppler_buf = &_compute.backend_output_buffer;
+    } else if (backend_processing && _compute.backend_range_view_limited) {
+        if (doppler_input == _compute.backend_view_buffer.data()) {
+            fftwf_execute(_compute.backend_view_doppler_fft_plan);
+            post_doppler_buf = &_compute.backend_view_buffer;
+        } else {
+            fftwf_execute_dft(
+                _compute.backend_view_doppler_fft_plan,
+                reinterpret_cast<fftwf_complex*>(const_cast<std::complex<float>*>(doppler_input)),
+                reinterpret_cast<fftwf_complex*>(const_cast<std::complex<float>*>(doppler_input)));
+            post_doppler_buf = &_compute.compact_backend_zoom.range_output_buffer;
+        }
+    } else {
+        compact_core.execute_doppler_fft();
+        post_doppler_buf = &channel_buf;
+    }
+
+    if (backend_processing) {
+        AlignedVector* output_buf = nullptr;
+        const size_t output_cols = doppler_input_cols;
+        if (doppler_zoom_enabled) {
+            output_buf = &_compute.backend_output_buffer;
+        } else if (_compute.backend_doppler_view_limited) {
+            const auto* fft_output = post_doppler_buf->data();
+            crop_doppler_view_output(
+                fft_output,
+                fft_rows,
+                output_cols,
+                _compute.backend_view_doppler_bins,
+                _compute.backend_output_buffer);
+            output_buf = &_compute.backend_output_buffer;
+        } else {
+            output_buf = post_doppler_buf;
+        }
+        const size_t output_rows = (doppler_zoom_enabled || _compute.backend_doppler_view_limited)
+            ? _compute.backend_view_doppler_bins
+            : fft_rows;
+        const float amplitude_scale = sensing_rd_amplitude_scale(
+            std::min(_cfg.sensing_symbol_num, compact_core.params().doppler_fft_size),
+            compact_core.params().fft_size);
+        scale_complex_buffer_inplace(output_buf->data(), output_buf->size(), amplitude_scale);
+        _compute.metadata_bytes = _build_backend_metadata(
+            output_buf->data(),
+            output_rows,
+            output_cols,
+            frame_start_symbol_index);
+        _compute.sensing_sender.push_data(
+            *output_buf,
+            frame_start_symbol_index,
+            std::move(_compute.metadata_bytes));
+    } else {
+        _compute.sensing_sender.push_data(channel_buf, frame_start_symbol_index);
+    }
     compact_core.clear_channel_buffer();
 }
 
@@ -1613,6 +2050,7 @@ void SensingChannel::_sensing_process_finalize(
 ) {
     using ProfileClock = std::chrono::steady_clock;
     const bool do_prof = should_profile_sensing(_cfg);
+    const bool backend_processing = backend_sensing_processing_supported(_cfg);
     auto& channel_buf = _compute.sensing_core.channel_buffer();
     const auto chest_start = ProfileClock::now();
     _compute.sensing_core.channel_estimate_with_shift(tx_symbols, symbol_count);
@@ -1624,6 +2062,17 @@ void SensingChannel::_sensing_process_finalize(
         ProfileClock::now() - mti_start).count();
 
     double windows_fft_us = 0.0;
+    const size_t fft_rows = _compute.sensing_core.params().doppler_fft_size;
+    const bool range_zoom_enabled = backend_processing &&
+        backend_range_zoom_active(
+            _compute.backend_zoom,
+            _compute.micro_doppler_enabled,
+            _compute.micro_doppler_range_bin);
+    const bool doppler_zoom_enabled = backend_processing &&
+        _compute.backend_zoom.has_doppler_plan();
+    const std::complex<float>* doppler_input = channel_buf.data();
+    size_t doppler_input_cols = _compute.sensing_core.params().range_fft_size;
+    AlignedVector* post_doppler_buf = &channel_buf;
     if (!_compute.active_skip_sensing_fft) {
         const auto fft_start = ProfileClock::now();
         _compute.sensing_core.apply_windows(
@@ -1631,14 +2080,113 @@ void SensingChannel::_sensing_process_finalize(
             _compute.range_window,
             _compute.doppler_window,
             symbol_count);
-        _compute.sensing_core.execute_range_ifft();
-        _compute.sensing_core.execute_doppler_fft();
+        if (range_zoom_enabled) {
+            execute_range_zoom_rows(
+                *_compute.backend_zoom.range_plan,
+                channel_buf.data(),
+                symbol_count,
+                _compute.sensing_core.params().range_fft_size,
+                fft_rows,
+                _compute.backend_zoom.range_output_buffer);
+            doppler_input = _compute.backend_zoom.range_output_buffer.data();
+            doppler_input_cols = _compute.backend_zoom.range_view_bins;
+        } else {
+            _compute.sensing_core.execute_range_ifft();
+            doppler_input = channel_buf.data();
+            doppler_input_cols = _compute.sensing_core.params().range_fft_size;
+            if (backend_processing && _compute.backend_range_view_limited) {
+                copy_backend_range_view_input(
+                    channel_buf,
+                    symbol_count,
+                    _compute.sensing_core.params().range_fft_size,
+                    fft_rows,
+                    _compute.backend_view_range_bins,
+                    _compute.backend_view_buffer);
+                doppler_input = _compute.backend_view_buffer.data();
+                doppler_input_cols = _compute.backend_view_range_bins;
+            }
+        }
+
+        if (backend_processing &&
+            _compute.micro_doppler_enabled &&
+            doppler_input_cols > 0) {
+            const size_t selected_range_bin = std::min(
+                _compute.micro_doppler_range_bin,
+                doppler_input_cols - 1);
+            extract_range_bin_trace(
+                doppler_input,
+                symbol_count,
+                doppler_input_cols,
+                selected_range_bin,
+                _compute.micro_doppler_trace);
+            _compute.micro_doppler_state.append_samples(
+                _compute.micro_doppler_trace.data(),
+                _compute.micro_doppler_trace.size());
+        }
+
+        if (doppler_zoom_enabled) {
+            execute_doppler_zoom_columns(
+                _compute.backend_zoom,
+                doppler_input,
+                doppler_input_cols,
+                _compute.backend_output_buffer);
+            post_doppler_buf = &_compute.backend_output_buffer;
+        } else if (backend_processing && _compute.backend_range_view_limited) {
+            if (doppler_input == _compute.backend_view_buffer.data()) {
+                fftwf_execute(_compute.backend_view_doppler_fft_plan);
+                post_doppler_buf = &_compute.backend_view_buffer;
+            } else {
+                fftwf_execute_dft(
+                    _compute.backend_view_doppler_fft_plan,
+                    reinterpret_cast<fftwf_complex*>(const_cast<std::complex<float>*>(doppler_input)),
+                    reinterpret_cast<fftwf_complex*>(const_cast<std::complex<float>*>(doppler_input)));
+                post_doppler_buf = &_compute.backend_zoom.range_output_buffer;
+            }
+        } else {
+            _compute.sensing_core.execute_doppler_fft();
+            post_doppler_buf = &channel_buf;
+        }
         windows_fft_us = std::chrono::duration<double, std::micro>(
             ProfileClock::now() - fft_start).count();
     }
 
     const auto send_start = ProfileClock::now();
-    _compute.sensing_sender.push_data(channel_buf, first_symbol_index);
+    if (backend_processing) {
+        AlignedVector* output_buf = nullptr;
+        const size_t output_cols = doppler_input_cols;
+        if (doppler_zoom_enabled) {
+            output_buf = &_compute.backend_output_buffer;
+        } else if (_compute.backend_doppler_view_limited) {
+            const auto* fft_output = post_doppler_buf->data();
+            crop_doppler_view_output(
+                fft_output,
+                fft_rows,
+                output_cols,
+                _compute.backend_view_doppler_bins,
+                _compute.backend_output_buffer);
+            output_buf = &_compute.backend_output_buffer;
+        } else {
+            output_buf = post_doppler_buf;
+        }
+        const size_t output_rows = (doppler_zoom_enabled || _compute.backend_doppler_view_limited)
+            ? _compute.backend_view_doppler_bins
+            : fft_rows;
+        const float amplitude_scale = sensing_rd_amplitude_scale(
+            std::min(_cfg.sensing_symbol_num, _compute.sensing_core.params().doppler_fft_size),
+            _compute.sensing_core.params().fft_size);
+        scale_complex_buffer_inplace(output_buf->data(), output_buf->size(), amplitude_scale);
+        _compute.metadata_bytes = _build_backend_metadata(
+            output_buf->data(),
+            output_rows,
+            output_cols,
+            first_symbol_index);
+        _compute.sensing_sender.push_data(
+            *output_buf,
+            first_symbol_index,
+            std::move(_compute.metadata_bytes));
+    } else {
+        _compute.sensing_sender.push_data(channel_buf, first_symbol_index);
+    }
     const double send_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - send_start).count();
     if (_cfg.range_fft_size != _cfg.fft_size || _cfg.doppler_fft_size != _cfg.fft_size) {
@@ -1686,6 +2234,81 @@ void SensingChannel::_sensing_process_finalize(
     }
 }
 
+void SensingChannel::_prepare_backend_processing_state(
+    SharedSensingRuntime& snapshot,
+    bool& clear_micro_doppler)
+{
+    clear_micro_doppler = false;
+    _compute.cfar_params.enabled = snapshot.cfar_enabled;
+    _compute.cfar_params.train_doppler = snapshot.cfar_train_doppler;
+    _compute.cfar_params.train_range = snapshot.cfar_train_range;
+    _compute.cfar_params.guard_doppler = snapshot.cfar_guard_doppler;
+    _compute.cfar_params.guard_range = snapshot.cfar_guard_range;
+    _compute.cfar_params.alpha_db = snapshot.cfar_alpha_db;
+    _compute.cfar_params.min_range_bin = snapshot.cfar_min_range_bin;
+    _compute.cfar_params.dc_exclusion_bins = snapshot.cfar_dc_exclusion_bins;
+    _compute.cfar_params.min_power_db = snapshot.cfar_min_power_db;
+    _compute.cfar_params.os_rank_percent = snapshot.cfar_os_rank_percent;
+    _compute.cfar_params.os_suppress_doppler = snapshot.cfar_os_suppress_doppler;
+    _compute.cfar_params.os_suppress_range = snapshot.cfar_os_suppress_range;
+
+    if (_compute.micro_doppler_enabled != snapshot.micro_doppler_enabled) {
+        _compute.micro_doppler_enabled = snapshot.micro_doppler_enabled;
+        clear_micro_doppler = true;
+    }
+    const size_t next_range_bin = static_cast<size_t>(std::max(0, snapshot.micro_doppler_range_bin));
+    if (_compute.micro_doppler_range_bin != next_range_bin) {
+        _compute.micro_doppler_range_bin = next_range_bin;
+        clear_micro_doppler = true;
+    }
+}
+
+std::vector<uint8_t> SensingChannel::_build_backend_metadata(
+    const std::complex<float>* rd_data,
+    size_t rows,
+    size_t cols,
+    uint64_t frame_start_symbol_index)
+{
+    if (!backend_sensing_processing_supported(_cfg) ||
+        rd_data == nullptr ||
+        rows == 0 ||
+        cols == 0) {
+        return {};
+    }
+
+    SensingMetadata metadata{};
+    metadata.cfar_enabled = _compute.cfar_params.enabled;
+    metadata.micro_doppler_enabled = _compute.micro_doppler_enabled;
+    compute_shifted_magnitude_db(rd_data, rows, cols, _compute.rd_magnitude_db);
+    run_os_cfar_2d_full(
+        _compute.rd_magnitude_db,
+        rows,
+        cols,
+        _compute.cfar_params,
+        metadata.cfar_points,
+        metadata.cfar_hits,
+        metadata.cfar_shown_hits,
+        metadata.cfar_stats);
+    if (!metadata.cfar_points.empty()) {
+        metadata.target_clusters = cluster_detected_targets(
+            metadata.cfar_points,
+            _compute.rd_magnitude_db,
+            rows,
+            cols,
+            std::max(0, _compute.cfar_params.os_suppress_doppler) + 1,
+            std::max(0, _compute.cfar_params.os_suppress_range) + 1);
+    }
+
+    if (_compute.micro_doppler_enabled) {
+        _compute.micro_doppler_state.compute_spectrum(
+            metadata.micro_doppler_spectrum,
+            metadata.micro_doppler_rows,
+            metadata.micro_doppler_cols,
+            metadata.micro_doppler_extent);
+    }
+    return serialize_sensing_metadata(metadata, frame_start_symbol_index);
+}
+
 void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
     SharedSensingRuntime snapshot;
     bool should_apply = false;
@@ -1704,7 +2327,14 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
 
     _compute.active_stride = std::max<size_t>(1, snapshot.sensing_symbol_stride);
     _compute.active_enable_mti = snapshot.enable_mti;
-    _compute.active_skip_sensing_fft = snapshot.skip_sensing_fft;
+    _compute.active_skip_sensing_fft = backend_sensing_processing_supported(_cfg)
+        ? false
+        : snapshot.skip_sensing_fft;
+    bool clear_micro_doppler = false;
+    _prepare_backend_processing_state(snapshot, clear_micro_doppler);
+    if (clear_micro_doppler) {
+        _compute.micro_doppler_state.clear();
+    }
     _compute.applied_generation = snapshot.generation;
 
     if (_compute.next_symbol_to_sample < snapshot.apply_symbol_index) {
@@ -1717,5 +2347,10 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
                   << " (stride=" << _compute.active_stride
                   << ", MTI=" << (_compute.active_enable_mti ? 1 : 0)
                   << ", SKIP=" << (_compute.active_skip_sensing_fft ? 1 : 0)
+                  << ", CFAR=" << (_compute.cfar_params.enabled ? 1 : 0)
+                  << ", OS%=" << _compute.cfar_params.os_rank_percent
+                  << ", OSS=" << _compute.cfar_params.os_suppress_doppler
+                  << "/" << _compute.cfar_params.os_suppress_range
+                  << ", MD=" << (_compute.micro_doppler_enabled ? 1 : 0)
                   << ")";
 }

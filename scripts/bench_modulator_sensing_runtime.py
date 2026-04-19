@@ -264,7 +264,7 @@ def main() -> None:
     mod_cfg["bandwidth"] = float(args.sample_rate)
     mod_cfg["fft_size"] = int(args.fft_size)
     mod_cfg["range_fft_size"] = int(args.fft_size)
-    mod_cfg["profiling_modules"] = "sensing,latency"
+    mod_cfg["profiling_modules"] = "sensing_proc"
     mod_cfg["mono_sensing_output_enabled"] = False
     if isinstance(mod_cfg.get("sensing_rx_channels"), list):
         for ch in mod_cfg["sensing_rx_channels"]:

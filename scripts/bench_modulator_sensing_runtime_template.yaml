@@ -51,7 +51,7 @@ sensing_symbol_stride: 20  # Default STRD applied at startup before runtime comm
 tx_circular_buffer_size: 32  # Modulator frame circular buffer capacity
 data_packet_buffer_size: 32  # Encoded packet buffer capacity
 paired_frame_queue_size: 32  # Per-channel RX/TX pairing queue capacity
-profiling_modules: sensing,latency  # Enable sensing timing profiling
+profiling_modules: sensing_proc  # Enable sensing timing profiling
 cpu_cores:
   - 5  # idx0 (hint 0): _tx_proc
   - 7  # idx1 (hint 1): _modulation_proc

@@ -671,8 +671,14 @@ private:
             compact_mask_runtime_fft_controls_supported(cfg_);
         const std::string compact_mask_reason =
             compact_mask_runtime_fft_controls_reason(cfg_);
+        const bool backend_processing_mode =
+            backend_sensing_processing_supported(cfg_);
 
-        _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
+        _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason, backend_processing_mode](int32_t value) {
+            if (backend_processing_mode) {
+                LOG_G_INFO() << "Ignoring SKIP command in backend sensing processing mode";
+                return;
+            }
             if (compact_mask_mode && !compact_mask_fft_controls_supported) {
                 LOG_G_INFO() << "Ignoring SKIP command in compact_mask sensing mode: "
                              << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
@@ -723,6 +729,80 @@ private:
             LOG_G_INFO() << "MTI " << (enable ? "Enabled" : "Disabled");
         });
 
+        _control_handler.register_command("CFEN", [this](int32_t value) {
+            const bool enabled = (value != 0);
+            _schedule_shared_sensing_update([enabled](SharedSensingRuntime& cfg) {
+                cfg.cfar_enabled = enabled;
+            });
+        });
+        _control_handler.register_command("CFTD", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_train_doppler = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFTR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_train_range = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFGD", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_guard_doppler = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFGR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_guard_range = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFAL", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_alpha_db = static_cast<float>(value) / 100.0f;
+            });
+        });
+        _control_handler.register_command("CFMR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_min_range_bin = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFDC", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_dc_exclusion_bins = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFMP", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_min_power_db = static_cast<float>(value) / 100.0f;
+            });
+        });
+        _control_handler.register_command("CFRK", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_os_rank_percent =
+                    static_cast<float>(std::clamp(value, 0, 10000)) / 100.0f;
+            });
+        });
+        _control_handler.register_command("CFSD", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_os_suppress_doppler = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("CFSR", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.cfar_os_suppress_range = std::max(0, value);
+            });
+        });
+        _control_handler.register_command("MDEN", [this](int32_t value) {
+            const bool enabled = (value != 0);
+            _schedule_shared_sensing_update([enabled](SharedSensingRuntime& cfg) {
+                cfg.micro_doppler_enabled = enabled;
+            });
+        });
+        _control_handler.register_command("MDRB", [this](int32_t value) {
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.micro_doppler_range_bin = std::max(0, value);
+            });
+        });
+
         _control_handler.register_command("MRST", [this](int32_t value) {
             if (!_measurement_enabled) {
                 LOG_G_WARN() << "MRST ignored: measurement mode disabled";
@@ -750,6 +830,9 @@ private:
                     cfg_,
                     snapshot.skip_sensing_fft,
                     snapshot.enable_mti,
+                    snapshot.cfar_os_rank_percent,
+                    snapshot.cfar_os_suppress_doppler,
+                    snapshot.cfar_os_suppress_range,
                     true);
             _control_handler.send_sensing_viewer_params(
                 cfg_.bi_sensing_ip,
@@ -910,10 +993,7 @@ private:
     void rx_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1.0, true);
-        // Assign to available core (index 0)
-        size_t core_idx = 0 % cfg_.available_cores.size();
-        std::vector<size_t> cpu_list = {cfg_.available_cores[core_idx]};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(cfg_, 0);
         uhd::rx_metadata_t md;
         rx_stream_->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
 
@@ -1171,10 +1251,7 @@ private:
     void process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1, true);
-        // Assign to available core (index 1)
-        size_t core_idx = 1 % cfg_.available_cores.size();
-        std::vector<size_t> cpu_list = {cfg_.available_cores[core_idx]};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(cfg_, 1);
         
         using Clock = std::chrono::high_resolution_clock;
         Clock::time_point frame_start, frame_end;
@@ -1791,10 +1868,7 @@ private:
     void sensing_process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1);
-        // Assign to available core (index 2)
-        size_t core_idx = 2 % cfg_.available_cores.size();
-        std::vector<size_t> cpu_list = {cfg_.available_cores[core_idx]};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(cfg_, 2);
         SPSCBackoff sensing_backoff;
         while (sensing_running_.load()) {
             SensingFrame frame;
@@ -1831,10 +1905,7 @@ private:
     void bit_processing_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe();
-        // Assign to available core (index 3)
-        size_t core_idx = 3 % cfg_.available_cores.size();
-        std::vector<size_t> cpu_list = {cfg_.available_cores[core_idx]};
-        uhd::set_thread_affinity(cpu_list);
+        bind_current_thread_from_hint(cfg_, 3);
         SPSCBackoff llr_backoff;
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
@@ -2071,10 +2142,7 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     log_demodulator_agc_mode(cfg);
     uhd::set_thread_priority_safe(1, true);
     // Use last available core for main thread
-    if (!cfg.available_cores.empty()) {
-        std::vector<size_t> cpu_list = {cfg.available_cores.back()};
-        uhd::set_thread_affinity(cpu_list);
-    }
+    bind_current_thread_to_main_core(cfg);
     
     // Load FFTW wisdom
     FFTWManager::import_wisdom();

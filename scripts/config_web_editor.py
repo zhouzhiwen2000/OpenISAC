@@ -22,9 +22,10 @@ import yaml
 
 
 HTML_TEMPLATE_PATH = Path(__file__).with_suffix(".html")
+SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
-    "modulator": ("all", "modulation", "latency", "data_ingest", "sensing_proc", "sensing_process"),
+    "modulator": ("all", "modulation", "latency", "data_ingest", "sensing_proc"),
     "demodulator": ("all", "demodulation", "agc", "align"),
 }
 
@@ -33,116 +34,42 @@ PROFILING_DESCRIPTIONS: dict[str, str] = {
     "modulation": "Show modulator frame processing breakdown and load statistics.",
     "latency": "Enable modulator end-to-end latency tracking. Requires modulation too.",
     "data_ingest": "Profile UDP ingest, LDPC encode, and enqueue cost in the modulator.",
-    "sensing_proc": "Profile per-channel sensing RX-side processing in the modulator path.",
-    "sensing_process": "Profile sensing output/aggregation work in the modulator path.",
+    "sensing_proc": "Profile sensing processing in the modulator path, including per-channel sensing work.",
     "demodulation": "Show demodulator per-frame processing breakdown and load statistics.",
     "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",
     "align": "Enable runtime alignment diagnostics, including ALGN logs.",
 }
 
-FALLBACK_LAYOUT_FIELDS: dict[str, dict[str, Any]] = {
-    "sensing_rx_channels": {
-        "title": "Sensing RX Channels",
-        "field": {
-            "type": "mapping_list",
-            "key": "sensing_rx_channels",
-            "comment": "",
-            "item_fields": [
-                {"key": "usrp_channel", "comment": "USRP RX channel index for this sensing path", "kind": "int"},
-                {"key": "device_args", "comment": "Per-channel USRP args override (optional)", "kind": "string"},
-                {"key": "clock_source", "comment": "Per-channel clock source override (optional)", "kind": "string"},
-                {"key": "time_source", "comment": "Per-channel time source override (optional)", "kind": "string"},
-                {"key": "wire_format_rx", "comment": "Per-channel wire format override (optional)", "kind": "string"},
-                {"key": "rx_gain", "comment": "Per-channel RX gain (dB)", "kind": "int"},
-                {"key": "alignment", "comment": "Per-channel timing alignment offset (samples)", "kind": "int"},
-                {"key": "rx_antenna", "comment": "RX antenna port (e.g. RX1/RX2/TX/RX)", "kind": "string"},
-                {
-                    "key": "enable_system_delay_estimation",
-                    "comment": "If true, this channel runs delay estimation only and disables sensing pipeline",
-                    "kind": "bool",
-                },
-            ],
-        },
-    },
-    "data_resource_blocks": {
-        "title": "Resource Preview",
-        "field": {
-            "type": "mapping_list",
-            "key": "data_resource_blocks",
-            "comment": "Optional payload / sensing-pilot RE rectangles",
-            "allow_omit": True,
-            "planner_kind": "payload",
-            "item_fields": [
-                {
-                    "key": "kind",
-                    "comment": "Block role: payload or sensing_pilot",
-                    "kind": "string",
-                    "options": ["payload", "sensing_pilot"],
-                },
-                {"key": "symbol_start", "comment": "0-based absolute frame symbol index", "kind": "int"},
-                {"key": "symbol_count", "comment": "Number of OFDM symbols in this block", "kind": "int"},
-                {"key": "subcarrier_start", "comment": "0-based FFT-bin start index", "kind": "int"},
-                {"key": "subcarrier_count", "comment": "Number of contiguous subcarriers in this block", "kind": "int"},
-            ],
-        },
-    },
-    "sensing_mask_blocks": {
-        "title": "Resource Preview",
-        "field": {
-            "type": "mapping_list",
-            "key": "sensing_mask_blocks",
-            "comment": "Optional compact sensing RE rectangles",
-            "allow_omit": True,
-            "planner_kind": "sensing_mask",
-            "item_fields": [
-                {"key": "symbol_start", "comment": "0-based absolute frame symbol index", "kind": "int"},
-                {"key": "symbol_count", "comment": "Number of OFDM symbols in this block", "kind": "int"},
-                {"key": "subcarrier_start", "comment": "0-based FFT-bin start index", "kind": "int"},
-                {"key": "subcarrier_count", "comment": "Number of contiguous subcarriers in this block", "kind": "int"},
-            ],
-        },
-    },
-    "sensing_output_mode": {
-        "title": "Sensing FFT",
-        "field": {
-            "type": "scalar",
-            "key": "sensing_output_mode",
-            "comment": "Sensing output mode: dense or compact_mask",
-        },
-    },
-    "sensing_symbol_num": {
-        "title": "OFDM Frame",
-        "field": {
-            "type": "scalar",
-            "key": "sensing_symbol_num",
-            "comment": "Number of symbols used in sensing processing",
-        },
-    },
-    "range_fft_size": {
-        "title": "Sensing FFT",
-        "field": {
-            "type": "scalar",
-            "key": "range_fft_size",
-            "comment": "Range FFT size",
-        },
-    },
-    "doppler_fft_size": {
-        "title": "Sensing FFT",
-        "field": {
-            "type": "scalar",
-            "key": "doppler_fft_size",
-            "comment": "Doppler FFT size",
-        },
-    },
-    "profiling_modules": {
-        "title": "Runtime / Debug",
-        "field": {
-            "type": "scalar",
-            "key": "profiling_modules",
-            "comment": 'Comma-separated modules to profile, or "all"',
-        },
-    },
-}
+def load_layout_schema() -> dict[str, dict[str, dict[str, Any]]]:
+    if not SCHEMA_TEMPLATE_PATH.exists():
+        return {}
+    raw = yaml.safe_load(SCHEMA_TEMPLATE_PATH.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        return {}
+
+    schema: dict[str, dict[str, dict[str, Any]]] = {}
+    for scope_name in ("common", "modulator", "demodulator"):
+        scope = raw.get(scope_name, {})
+        if not isinstance(scope, dict):
+            continue
+        scope_schema: dict[str, dict[str, Any]] = {}
+        for key, entry in scope.items():
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title", "Other"))
+            field = copy.deepcopy(entry.get("field", {}))
+            if not isinstance(field, dict):
+                continue
+            field.setdefault("key", key)
+            scope_schema[str(field["key"])] = {
+                "title": title,
+                "field": field,
+            }
+        schema[scope_name] = scope_schema
+    return schema
+
+
+LAYOUT_SCHEMA_FIELDS_BY_SCOPE = load_layout_schema()
 
 
 def int_or_default(value: Any, default: int) -> int:
@@ -245,6 +172,18 @@ def int_or_zero(value: Any) -> int:
         return int(value)
     except Exception:
         return 0
+
+
+def non_negative_cpu_values(values: list[Any]) -> list[int]:
+    parsed_values: list[int] = []
+    for value in values:
+        try:
+            parsed = int(value)
+        except Exception:
+            continue
+        if parsed >= 0:
+            parsed_values.append(parsed)
+    return parsed_values
 
 
 def profiling_options_for_tab(tab_name: str, value: Any) -> list[str]:
@@ -515,62 +454,122 @@ def cpu_binding_rows(tab_name: str, data: dict[str, Any]) -> list[dict[str, Any]
 
 
 def unique_cpu_spec(values: list[int]) -> str:
-    unique = sorted({int(v) for v in values})
+    unique = sorted(set(non_negative_cpu_values(values)))
     return ",".join(str(v) for v in unique)
+
+
+def _sample_field_metadata(sample_value: Any, field: dict[str, Any]) -> dict[str, Any]:
+    metadata = copy.deepcopy(field)
+    if metadata.get("type") == "scalar":
+        metadata.setdefault("kind", detect_kind(sample_value, "string"))
+    elif metadata.get("type") == "flow_list":
+        if isinstance(sample_value, list) and sample_value:
+            metadata.setdefault("item_kind", detect_kind(sample_value[0], "int"))
+        else:
+            metadata.setdefault("item_kind", "int")
+    metadata.setdefault("default", copy.deepcopy(sample_value))
+    metadata.setdefault("optional", True)
+    return metadata
+
+
+def build_optional_field_catalog(
+    tab_name: str,
+    sample_candidates: tuple[Path, ...],
+    schema_fields_by_scope: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+
+    for candidate in sample_candidates:
+        if not candidate.exists():
+            continue
+        text = candidate.read_text(encoding="utf-8")
+        sample_layout = parse_layout(text)
+        sample_data = yaml.safe_load(text) or {}
+        if not isinstance(sample_data, dict):
+            sample_data = {}
+        for sample_section in sample_layout:
+            for sample_field in sample_section["fields"]:
+                key = str(sample_field["key"])
+                if key in catalog:
+                    continue
+                catalog[key] = {
+                    "title": sample_section["title"],
+                    "field": _sample_field_metadata(sample_data.get(key), sample_field),
+                }
+
+    merged_schema: dict[str, dict[str, Any]] = {}
+    for scope_name in ("common", tab_name):
+        for key, schema_entry in schema_fields_by_scope.get(scope_name, {}).items():
+            merged_schema[key] = schema_entry
+
+    for key, schema_entry in merged_schema.items():
+        title = str(schema_entry.get("title", "Other"))
+        schema_field = copy.deepcopy(schema_entry.get("field", {}))
+        if not isinstance(schema_field, dict):
+            continue
+        schema_field.setdefault("key", key)
+        schema_field.setdefault("optional", True)
+        if key in catalog:
+            merged_field = copy.deepcopy(catalog[key]["field"])
+            for attr_key, attr_value in schema_field.items():
+                if attr_key == "item_fields":
+                    merged_field["item_fields"] = copy.deepcopy(attr_value)
+                else:
+                    merged_field[attr_key] = copy.deepcopy(attr_value)
+            catalog[key] = {
+                "title": title or catalog[key]["title"],
+                "field": merged_field,
+            }
+        else:
+            catalog[key] = {
+                "title": title,
+                "field": schema_field,
+            }
+
+    return catalog
 
 
 def append_missing_layout_fields(
     layout: list[dict[str, Any]],
-    sample_candidates: tuple[Path, ...],
-    required_keys: tuple[str, ...],
+    catalog: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     existing = {field["key"] for section in layout for field in section["fields"]}
-    missing = [key for key in required_keys if key not in existing]
-    if not missing:
-        return layout
-
-    sample_layout: list[dict[str, Any]] = []
-    for candidate in sample_candidates:
-        if candidate.exists():
-            sample_layout = parse_layout(candidate.read_text(encoding="utf-8"))
-            break
-
     layout_copy = copy.deepcopy(layout)
-    for key in missing:
+    for key, entry in catalog.items():
+        if key in existing:
+            continue
         inserted = False
-        for sample_section in sample_layout:
-            for sample_field in sample_section["fields"]:
-                if sample_field["key"] != key:
-                    continue
-                for target_section in layout_copy:
-                    if target_section["title"] == sample_section["title"]:
-                        target_section["fields"].append(copy.deepcopy(sample_field))
-                        inserted = True
-                        break
-                if not inserted:
-                    layout_copy.append({
-                        "title": sample_section["title"],
-                        "fields": [copy.deepcopy(sample_field)],
-                    })
-                    inserted = True
-                break
-            if inserted:
-                break
-        if inserted:
-            continue
-        fallback = FALLBACK_LAYOUT_FIELDS.get(key)
-        if fallback is None:
-            continue
         for target_section in layout_copy:
-            if target_section["title"] == fallback["title"]:
-                target_section["fields"].append(copy.deepcopy(fallback["field"]))
+            if target_section["title"] == entry["title"]:
+                target_section["fields"].append(copy.deepcopy(entry["field"]))
                 inserted = True
                 break
         if not inserted:
             layout_copy.append({
-                "title": fallback["title"],
-                "fields": [copy.deepcopy(fallback["field"])],
+                "title": entry["title"],
+                "fields": [copy.deepcopy(entry["field"])],
             })
+    return layout_copy
+
+
+def merge_layout_field_metadata(
+    layout: list[dict[str, Any]],
+    catalog: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    layout_copy = copy.deepcopy(layout)
+    for section in layout_copy:
+        for field in section["fields"]:
+            key = field.get("key")
+            if not key:
+                continue
+            metadata = catalog.get(str(key), {}).get("field", {})
+            if not isinstance(metadata, dict):
+                continue
+            for attr in ("kind", "item_kind", "default", "display_comment", "optional", "options"):
+                if attr in metadata and attr not in field:
+                    field[attr] = copy.deepcopy(metadata[attr])
+                elif attr == "optional" and attr in metadata:
+                    field[attr] = bool(metadata[attr])
     return layout_copy
 
 
@@ -581,7 +580,8 @@ def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, 
             item_field["key"]: item_field
             for item_field in fallback["field"].get("item_fields", [])
         }
-        for field_key, fallback in FALLBACK_LAYOUT_FIELDS.items()
+        for scope in LAYOUT_SCHEMA_FIELDS_BY_SCOPE.values()
+        for field_key, fallback in scope.items()
         if fallback["field"].get("type") == "mapping_list"
     }
     for section in layout_copy:
@@ -699,7 +699,7 @@ def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> 
     return normalized
 
 
-def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Path]:
+def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path, ...]) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Path]:
     exists = path.exists()
     source = path if exists else next((candidate for candidate in fallback_paths if candidate.exists()), path)
     text = source.read_text(encoding="utf-8") if source.exists() else ""
@@ -713,28 +713,22 @@ def load_yaml_with_layout(path: Path, fallback_paths: tuple[Path, ...]) -> tuple
             section["title"] = "Resource Preview"
     if "sensing_rx_channels" in data and not isinstance(data["sensing_rx_channels"], list):
         data["sensing_rx_channels"] = []
-    if "data_resource_blocks" in data and not isinstance(data["data_resource_blocks"], list):
-        data["data_resource_blocks"] = []
-    else:
-        data["data_resource_blocks"] = normalized_data_resource_block_items(data.get("data_resource_blocks", []))
+    if "data_resource_blocks" in data:
+        if not isinstance(data["data_resource_blocks"], list):
+            data["data_resource_blocks"] = []
+        else:
+            data["data_resource_blocks"] = normalized_data_resource_block_items(data.get("data_resource_blocks", []))
     if "sensing_mask_blocks" in data and not isinstance(data["sensing_mask_blocks"], list):
         data["sensing_mask_blocks"] = []
     if "cpu_cores" in data and not isinstance(data["cpu_cores"], list):
         data["cpu_cores"] = []
-    layout = append_missing_layout_fields(
-        layout,
-        fallback_paths,
-        (
-            "sensing_rx_channels",
-            "data_resource_blocks",
-            "sensing_mask_blocks",
-            "sensing_output_mode",
-            "range_fft_size",
-            "doppler_fft_size",
-            "sensing_symbol_num",
-            "profiling_modules",
-        ),
+    optional_catalog = build_optional_field_catalog(
+        tab_name=tab_name,
+        sample_candidates=fallback_paths,
+        schema_fields_by_scope=LAYOUT_SCHEMA_FIELDS_BY_SCOPE,
     )
+    layout = merge_layout_field_metadata(layout, optional_catalog)
+    layout = append_missing_layout_fields(layout, optional_catalog)
     layout = enrich_mapping_list_layouts(layout)
     known_keys = {field["key"] for section in layout for field in section["fields"]}
     extra_keys = [key for key in data.keys() if key not in known_keys]
@@ -752,6 +746,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
         section_payload = {"title": section["title"], "fields": []}
         for field in section["fields"]:
             key = field["key"]
+            has_value = key in data
             value = data.get(key)
             if field["type"] == "cpu_cores":
                 section_payload["fields"].append({
@@ -778,6 +773,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                         "comment": item_field.get("comment", ""),
                         "display_comment": display_comment_override(item_field["key"], item_field.get("comment", "")),
                         "kind": item_field.get("kind") or detect_kind(sample_value),
+                        "options": copy.deepcopy(item_field.get("options", [])),
                     })
                 field_payload = {
                     "type": "mapping_list",
@@ -787,6 +783,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                     "item_fields": item_fields,
                     "items": items,
                     "allow_omit": bool(field.get("allow_omit", False)),
+                    "optional": bool(field.get("optional", False)),
                     "planner_kind": field.get("planner_kind", ""),
                 }
                 if key == "sensing_rx_channels":
@@ -830,27 +827,55 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 continue
             if field["type"] == "flow_list":
                 item_kind = detect_kind(value[0], "int") if isinstance(value, list) and value else "int"
+                if field.get("item_kind"):
+                    item_kind = str(field.get("item_kind"))
+                default_value = field.get("default", [])
+                default_text = ""
+                if isinstance(default_value, list) and default_value:
+                    default_text = ", ".join(str(v) for v in default_value)
                 section_payload["fields"].append({
                     "type": "flow_list",
                     "key": key,
                     "comment": field.get("comment", ""),
                     "display_comment": display_comment_override(key, field.get("comment", "")),
                     "kind": item_kind,
-                    "value_text": ", ".join(str(v) for v in (value or [])),
+                    "optional": bool(field.get("optional", False)),
+                    "default_text": default_text,
+                    "value_text": ", ".join(str(v) for v in (value or [])) if has_value else "",
+                    "options": copy.deepcopy(field.get("options", [])),
                 })
                 continue
 
-            kind = detect_kind(value)
+            kind = str(field.get("kind") or detect_kind(value))
             unit_meta = display_unit_meta(key)
+            default_value = field.get("default")
+            default_text = ""
+            if default_value is not None:
+                if kind == "bool":
+                    default_text = "true" if bool(default_value) else "false"
+                else:
+                    default_text = format_display_value(key, default_value)
+            effective_value = value
+            effective_has_value = has_value
+            if kind == "bool" and not has_value and default_value is not None:
+                effective_value = bool(default_value)
+                effective_has_value = True
+            value_text = format_display_value(key, value) if has_value else ""
+            if kind == "bool":
+                value_text = "true" if bool(effective_value) else "false"
             section_payload["fields"].append({
                 "type": "scalar",
                 "key": key,
                 "comment": field.get("comment", ""),
                 "display_comment": display_comment_override(key, field.get("comment", "")),
                 "kind": kind,
-                "value": value,
-                "value_text": format_display_value(key, value),
+                "optional": bool(field.get("optional", False)),
+                "default_text": default_text,
+                "value": effective_value,
+                "value_text": value_text,
                 "display_unit": unit_meta[1] if unit_meta is not None else "",
+                "options": copy.deepcopy(field.get("options", [])),
+                "is_set": effective_has_value,
             })
         sections.append(section_payload)
 
@@ -876,6 +901,8 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
             key = field["key"]
             comment = field.get("comment", "")
             suffix = f"  # {comment}" if comment else ""
+            if field.get("optional") and key not in data:
+                continue
             if field["type"] == "cpu_cores":
                 values = data.get("cpu_cores", []) or []
                 if not values:
@@ -931,31 +958,50 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
     if not isinstance(mapping_lists, dict):
         raise RuntimeError("Invalid mapping list payload.")
 
-    kind_map: dict[str, tuple[str, str]] = {}
+    kind_map: dict[str, tuple[str, str, bool]] = {}
     mapping_layouts: dict[str, list[dict[str, Any]]] = {}
     for section in layout:
         for field in section["fields"]:
             if field["type"] == "mapping_list":
                 mapping_layouts[field["key"]] = field["item_fields"]
             elif field["key"] == "profiling_modules":
-                kind_map[field["key"]] = ("profiling_modules", "")
+                kind_map[field["key"]] = ("profiling_modules", "", bool(field.get("optional", False)))
             elif field["type"] == "flow_list":
                 existing = current_data.get(field["key"], [])
                 item_kind = detect_kind(existing[0], "int") if isinstance(existing, list) and existing else "int"
-                kind_map[field["key"]] = ("flow_list", item_kind)
+                if field.get("item_kind"):
+                    item_kind = str(field.get("item_kind"))
+                kind_map[field["key"]] = ("flow_list", item_kind, bool(field.get("optional", False)))
             elif field["type"] == "scalar":
-                kind_map[field["key"]] = (field.get("kind") or detect_kind(current_data.get(field["key"])), "")
+                kind_map[field["key"]] = (
+                    str(field.get("kind") or detect_kind(current_data.get(field["key"]))),
+                    "",
+                    bool(field.get("optional", False)),
+                )
 
     for key, raw in scalars.items():
-        field_kind, extra = kind_map.get(key, ("string", ""))
+        field_kind, extra, optional = kind_map.get(key, ("string", "", False))
         if field_kind == "profiling_modules":
-            result[key] = encode_profiling_modules(raw, tab_name, current_data.get(key, ""))
+            encoded = encode_profiling_modules(raw, tab_name, current_data.get(key, ""))
+            if optional and not encoded:
+                result.pop(key, None)
+            else:
+                result[key] = encoded
         elif field_kind == "flow_list":
-            result[key] = coerce_flow_list(str(raw), extra)
+            raw_text = str(raw).strip()
+            if optional and not raw_text:
+                result.pop(key, None)
+            else:
+                result[key] = coerce_flow_list(raw_text, extra)
         elif field_kind == "bool":
-            result[key] = bool(raw)
+            raw_text = str(raw).strip().lower()
+            result[key] = raw_text == "true" if isinstance(raw, str) else bool(raw)
         else:
-            result[key] = parse_display_value(key, str(raw), field_kind)
+            raw_text = str(raw)
+            if optional and not raw_text.strip():
+                result.pop(key, None)
+            else:
+                result[key] = parse_display_value(key, raw_text, field_kind)
 
     for key, raw_mapping in mapping_lists.items():
         item_layout = mapping_layouts.get(key, [])
@@ -1252,7 +1298,7 @@ class ConfigEditorApp:
 
     def load_config(self, name: str) -> dict[str, Any]:
         tab = self.tab_config(name)
-        data, layout, exists, source = load_yaml_with_layout(tab.yaml_path, tab.sample_candidates)
+        data, layout, exists, source = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         mtime = (
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tab.yaml_path.stat().st_mtime))
             if tab.yaml_path.exists()
@@ -1270,7 +1316,7 @@ class ConfigEditorApp:
 
     def save_config(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         tab = self.tab_config(name)
-        current_data, layout, _, _ = load_yaml_with_layout(tab.yaml_path, tab.sample_candidates)
+        current_data, layout, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         new_data = normalize_payload_data(name, layout, payload, current_data)
         rendered = render_yaml(name, layout, new_data)
         tab.yaml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1290,7 +1336,7 @@ class ConfigEditorApp:
         sudo_password: str = "",
     ) -> dict[str, Any]:
         tab = self.tab_config(name)
-        data, _, _, _ = load_yaml_with_layout(tab.yaml_path, tab.sample_candidates)
+        data, _, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         cpu_values = [int_or_zero(v) for v in (data.get("cpu_cores", []) or [])]
         return self.processes[name].start(command, cpu_values, isolate_cpu, isolate_cpu_spec, sudo_password)
 

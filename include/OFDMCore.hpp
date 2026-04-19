@@ -2110,6 +2110,193 @@ private:
     size_t _range_fft_size;
 };
 
+/**
+ * @brief FFT-based Zoom FFT / CZT evaluator for contiguous DFT-bin segments.
+ *
+ * This computes a contiguous subset of a length-@p fft_length DFT or inverse DFT
+ * without materializing the full transform. Internally it uses the Bluestein /
+ * chirp-z identity and reuses FFTW plans across calls.
+ */
+class ZoomFFTProcessor {
+public:
+    enum class Direction {
+        Forward,
+        Backward
+    };
+
+    struct Params {
+        size_t input_size = 0;
+        size_t fft_length = 0;
+        size_t output_start_bin = 0;
+        size_t output_size = 0;
+        Direction direction = Direction::Forward;
+    };
+
+    explicit ZoomFFTProcessor(const Params& params)
+        : _params(params)
+    {
+        if (_params.input_size == 0 || _params.fft_length == 0 || _params.output_size == 0) {
+            throw std::runtime_error("ZoomFFTProcessor requires non-zero input/output/FFT sizes.");
+        }
+        if (_params.input_size > _params.fft_length) {
+            throw std::runtime_error("ZoomFFTProcessor input_size exceeds fft_length.");
+        }
+        if (_params.output_start_bin >= _params.fft_length ||
+            _params.output_size > _params.fft_length ||
+            _params.output_start_bin + _params.output_size > _params.fft_length) {
+            throw std::runtime_error("ZoomFFTProcessor output bin range exceeds fft_length.");
+        }
+
+        _conv_size = next_power_of_two(_params.input_size + _params.output_size - 1);
+        _time_buffer.assign(_conv_size, std::complex<float>(0.0f, 0.0f));
+        _freq_buffer.assign(_conv_size, std::complex<float>(0.0f, 0.0f));
+        _kernel_fft.assign(_conv_size, std::complex<float>(0.0f, 0.0f));
+        _input_chirp.resize(_params.input_size);
+        _output_chirp.resize(_params.output_size);
+
+        _forward_plan = fftwf_plan_dft_1d(
+            static_cast<int>(_conv_size),
+            reinterpret_cast<fftwf_complex*>(_time_buffer.data()),
+            reinterpret_cast<fftwf_complex*>(_freq_buffer.data()),
+            FFTW_FORWARD,
+            FFTW_MEASURE);
+        _inverse_plan = fftwf_plan_dft_1d(
+            static_cast<int>(_conv_size),
+            reinterpret_cast<fftwf_complex*>(_freq_buffer.data()),
+            reinterpret_cast<fftwf_complex*>(_time_buffer.data()),
+            FFTW_BACKWARD,
+            FFTW_MEASURE);
+
+        initialize_kernel();
+    }
+
+    ~ZoomFFTProcessor() {
+        if (_forward_plan) {
+            fftwf_destroy_plan(_forward_plan);
+            _forward_plan = nullptr;
+        }
+        if (_inverse_plan) {
+            fftwf_destroy_plan(_inverse_plan);
+            _inverse_plan = nullptr;
+        }
+    }
+
+    ZoomFFTProcessor(const ZoomFFTProcessor&) = delete;
+    ZoomFFTProcessor& operator=(const ZoomFFTProcessor&) = delete;
+
+    ZoomFFTProcessor(ZoomFFTProcessor&& other) noexcept
+        : _params(other._params),
+          _conv_size(other._conv_size),
+          _forward_plan(other._forward_plan),
+          _inverse_plan(other._inverse_plan),
+          _time_buffer(std::move(other._time_buffer)),
+          _freq_buffer(std::move(other._freq_buffer)),
+          _kernel_fft(std::move(other._kernel_fft)),
+          _input_chirp(std::move(other._input_chirp)),
+          _output_chirp(std::move(other._output_chirp))
+    {
+        other._forward_plan = nullptr;
+        other._inverse_plan = nullptr;
+        other._conv_size = 0;
+    }
+
+    /**
+     * @brief Evaluate the configured transform segment for a strided input vector.
+     *
+     * @param input Pointer to the first complex input sample
+     * @param input_stride Stride, in complex samples, between consecutive inputs
+     * @param output Pointer to the first complex output sample
+     * @param output_stride Stride, in complex samples, between consecutive outputs
+     */
+    void execute(
+        const std::complex<float>* input,
+        size_t input_stride,
+        std::complex<float>* output,
+        size_t output_stride = 1)
+    {
+        if (input == nullptr || output == nullptr) {
+            return;
+        }
+
+        std::fill(_time_buffer.begin(), _time_buffer.end(), std::complex<float>(0.0f, 0.0f));
+        for (size_t n = 0; n < _params.input_size; ++n) {
+            _time_buffer[n] = input[n * input_stride] * _input_chirp[n];
+        }
+
+        fftwf_execute(_forward_plan);
+
+        #pragma omp simd simdlen(16)
+        for (size_t i = 0; i < _conv_size; ++i) {
+            _freq_buffer[i] *= _kernel_fft[i];
+        }
+
+        fftwf_execute(_inverse_plan);
+
+        const float scale = 1.0f / static_cast<float>(_conv_size);
+        const size_t output_offset = _params.input_size - 1;
+        for (size_t k = 0; k < _params.output_size; ++k) {
+            output[k * output_stride] =
+                _time_buffer[output_offset + k] * _output_chirp[k] * scale;
+        }
+    }
+
+    const Params& params() const { return _params; }
+
+private:
+    static size_t next_power_of_two(size_t value) {
+        size_t out = 1;
+        while (out < value) {
+            out <<= 1;
+        }
+        return out;
+    }
+
+    void initialize_kernel() {
+        const double sign = (_params.direction == Direction::Forward) ? -1.0 : 1.0;
+        const double fft_length = static_cast<double>(_params.fft_length);
+        const double start_bin = static_cast<double>(_params.output_start_bin);
+        const double two_pi_over_n = (2.0 * M_PI) / fft_length;
+        const double pi_over_n = M_PI / fft_length;
+
+        for (size_t n = 0; n < _params.input_size; ++n) {
+            const double nd = static_cast<double>(n);
+            const double phase =
+                sign * (two_pi_over_n * start_bin * nd + pi_over_n * nd * nd);
+            _input_chirp[n] = std::polar(1.0f, static_cast<float>(phase));
+        }
+
+        for (size_t k = 0; k < _params.output_size; ++k) {
+            const double kd = static_cast<double>(k);
+            const double phase = sign * pi_over_n * kd * kd;
+            _output_chirp[k] = std::polar(1.0f, static_cast<float>(phase));
+        }
+
+        std::fill(_time_buffer.begin(), _time_buffer.end(), std::complex<float>(0.0f, 0.0f));
+        for (int64_t diff = -static_cast<int64_t>(_params.input_size) + 1;
+             diff <= static_cast<int64_t>(_params.output_size) - 1;
+             ++diff) {
+            const size_t idx = static_cast<size_t>(
+                diff + static_cast<int64_t>(_params.input_size) - 1);
+            const double delta = static_cast<double>(diff);
+            const double phase = -sign * pi_over_n * delta * delta;
+            _time_buffer[idx] = std::polar(1.0f, static_cast<float>(phase));
+        }
+
+        fftwf_execute(_forward_plan);
+        std::copy(_freq_buffer.begin(), _freq_buffer.end(), _kernel_fft.begin());
+    }
+
+    Params _params{};
+    size_t _conv_size = 0;
+    fftwf_plan _forward_plan = nullptr;
+    fftwf_plan _inverse_plan = nullptr;
+    AlignedVector _time_buffer;
+    AlignedVector _freq_buffer;
+    AlignedVector _kernel_fft;
+    AlignedVector _input_chirp;
+    AlignedVector _output_chirp;
+};
+
 
 /**
  * @brief Core Sensing Processing Operations.
@@ -2422,6 +2609,693 @@ public:
 
     const Params& params() const { return _params; }
 };
+
+class MicroDopplerState {
+public:
+    static constexpr size_t kBufferLength = 5000;
+    static constexpr size_t kWindowLength = 256;
+    static constexpr size_t kOverlap = 192;
+    static constexpr size_t kStep = kWindowLength - kOverlap;
+    static constexpr size_t kFftSize = 256;
+
+    explicit MicroDopplerState(size_t buffer_length = kBufferLength)
+        : _buffer_length(buffer_length),
+          _ring(buffer_length, std::complex<float>(0.0f, 0.0f)),
+          _window(kWindowLength),
+          _fft_in(kFftSize),
+          _fft_out(kFftSize)
+    {
+        WindowGenerator::generate_hamming(_window, kWindowLength);
+        _fft_plan = fftwf_plan_dft_1d(
+            static_cast<int>(kFftSize),
+            reinterpret_cast<fftwf_complex*>(_fft_in.data()),
+            reinterpret_cast<fftwf_complex*>(_fft_out.data()),
+            FFTW_FORWARD,
+            FFTW_MEASURE);
+    }
+
+    ~MicroDopplerState() {
+        if (_fft_plan != nullptr) {
+            fftwf_destroy_plan(_fft_plan);
+            _fft_plan = nullptr;
+        }
+    }
+
+    MicroDopplerState(const MicroDopplerState&) = delete;
+    MicroDopplerState& operator=(const MicroDopplerState&) = delete;
+
+    MicroDopplerState(MicroDopplerState&& other) noexcept
+        : _buffer_length(other._buffer_length),
+          _ring(std::move(other._ring)),
+          _write_pos(other._write_pos),
+          _size(other._size),
+          _window(std::move(other._window)),
+          _fft_in(std::move(other._fft_in)),
+          _fft_out(std::move(other._fft_out)),
+          _signal_scratch(std::move(other._signal_scratch)),
+          _fft_plan(other._fft_plan)
+    {
+        other._fft_plan = nullptr;
+        other._write_pos = 0;
+        other._size = 0;
+    }
+
+    void clear() {
+        _write_pos = 0;
+        _size = 0;
+        std::fill(_ring.begin(), _ring.end(), std::complex<float>(0.0f, 0.0f));
+    }
+
+    size_t size() const { return _size; }
+
+    void append_samples(const std::complex<float>* samples, size_t count) {
+        if (samples == nullptr || count == 0 || _ring.empty()) {
+            return;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            _ring[_write_pos] = samples[i];
+            _write_pos = (_write_pos + 1) % _buffer_length;
+            if (_size < _buffer_length) {
+                ++_size;
+            }
+        }
+    }
+
+    bool compute_spectrum(
+        std::vector<float>& out_spectrum,
+        uint32_t& out_rows,
+        uint32_t& out_cols,
+        std::array<float, 4>& out_extent)
+    {
+        out_spectrum.clear();
+        out_rows = 0;
+        out_cols = 0;
+        out_extent = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (_size < kWindowLength || _fft_plan == nullptr) {
+            return false;
+        }
+
+        _signal_scratch.resize(_size);
+        const size_t start =
+            (_size == _buffer_length) ? _write_pos : 0;
+        for (size_t i = 0; i < _size; ++i) {
+            _signal_scratch[i] = _ring[(start + i) % _buffer_length];
+        }
+
+        const size_t n_frames = 1 + (_size - kWindowLength) / kStep;
+        if (n_frames == 0) {
+            return false;
+        }
+
+        out_rows = static_cast<uint32_t>(kFftSize);
+        out_cols = static_cast<uint32_t>(n_frames);
+        out_spectrum.assign(kFftSize * n_frames, 0.0f);
+
+        const size_t half_fft = kFftSize / 2;
+        for (size_t frame_idx = 0; frame_idx < n_frames; ++frame_idx) {
+            const size_t start_idx = frame_idx * kStep;
+            std::fill(_fft_in.begin(), _fft_in.end(), std::complex<float>(0.0f, 0.0f));
+            #pragma omp simd simdlen(16)
+            for (size_t i = 0; i < kWindowLength; ++i) {
+                _fft_in[i] = _signal_scratch[start_idx + i] * _window[i];
+            }
+            fftwf_execute(_fft_plan);
+
+            for (size_t row = 0; row < kFftSize; ++row) {
+                const size_t shifted_row = (row + half_fft) % kFftSize;
+                out_spectrum[row * n_frames + frame_idx] =
+                    20.0f * std::log10(std::abs(_fft_out[shifted_row]) + 1e-12f);
+            }
+        }
+
+        const float x0 = 0.0f;
+        const float x1 = (n_frames > 1)
+            ? static_cast<float>((n_frames - 1) * kStep)
+            : 1.0f;
+        const float y0 = -0.5f;
+        const float y1 = (static_cast<float>(half_fft) - 1.0f) /
+            static_cast<float>(kFftSize);
+        out_extent = {x0, x1, y0, y1};
+        return true;
+    }
+
+private:
+    size_t _buffer_length = kBufferLength;
+    std::vector<std::complex<float>> _ring;
+    size_t _write_pos = 0;
+    size_t _size = 0;
+    AlignedFloatVector _window;
+    AlignedVector _fft_in;
+    AlignedVector _fft_out;
+    std::vector<std::complex<float>> _signal_scratch;
+    fftwf_plan _fft_plan = nullptr;
+};
+
+inline void compute_shifted_magnitude_db(
+    const std::complex<float>* rd_data,
+    size_t rows,
+    size_t cols,
+    AlignedFloatVector& out_db)
+{
+    out_db.resize(rows * cols);
+    if (rd_data == nullptr || rows == 0 || cols == 0) {
+        return;
+    }
+    const size_t half_rows = rows / 2;
+    for (size_t row = 0; row < rows; ++row) {
+        const size_t shifted_row = (row + half_rows) % rows;
+        const auto* __restrict__ src = rd_data + shifted_row * cols;
+        auto* __restrict__ dst = out_db.data() + row * cols;
+        #pragma omp simd simdlen(16)
+        for (size_t col = 0; col < cols; ++col) {
+            const float re = src[col].real();
+            const float im = src[col].imag();
+            dst[col] = 10.0f * std::log10(re * re + im * im + 1e-24f);
+        }
+    }
+}
+
+inline void extract_range_bin_trace(
+    const std::complex<float>* range_time_rows,
+    size_t num_symbols,
+    size_t stride,
+    size_t range_bin,
+    AlignedVector& out_trace)
+{
+    out_trace.resize(num_symbols);
+    if (range_time_rows == nullptr || stride == 0) {
+        return;
+    }
+    #pragma omp simd simdlen(16)
+    for (size_t row = 0; row < num_symbols; ++row) {
+        out_trace[row] = range_time_rows[row * stride + range_bin];
+    }
+}
+
+inline void run_ca_cfar_2d_full(
+    const AlignedFloatVector& rd_db,
+    size_t rows,
+    size_t cols,
+    const SensingCfarParams& params,
+    std::vector<SensingDetectionPoint>& out_points,
+    uint32_t& raw_hits,
+    uint32_t& shown_hits,
+    SensingCfarStats& out_stats)
+{
+    out_points.clear();
+    raw_hits = 0;
+    shown_hits = 0;
+    out_stats = SensingCfarStats{};
+    out_stats.power_min_db = params.min_power_db;
+
+    if (!params.enabled || rows == 0 || cols == 0) {
+        return;
+    }
+
+    const int td = std::max(0, params.train_doppler);
+    const int tr = std::max(0, params.train_range);
+    const int gd = std::max(0, params.guard_doppler);
+    const int gr = std::max(0, params.guard_range);
+    const int outer_h = td + gd;
+    const int outer_w = tr + gr;
+    if (rows <= static_cast<size_t>(2 * outer_h) ||
+        cols <= static_cast<size_t>(2 * outer_w)) {
+        return;
+    }
+
+    const double alpha = std::max(
+        1e-12,
+        std::pow(10.0, static_cast<double>(params.alpha_db) / 10.0));
+    const double eps = 1e-12;
+    std::vector<double> power(rows * cols, 0.0);
+    #pragma omp simd simdlen(16)
+    for (size_t idx = 0; idx < rd_db.size(); ++idx) {
+        power[idx] = std::pow(10.0, static_cast<double>(rd_db[idx]) / 10.0);
+    }
+
+    std::vector<double> integral((rows + 1) * (cols + 1), 0.0);
+    for (size_t row = 0; row < rows; ++row) {
+        double row_accum = 0.0;
+        const size_t row_offset = row * cols;
+        for (size_t col = 0; col < cols; ++col) {
+            row_accum += power[row_offset + col];
+            integral[(row + 1) * (cols + 1) + (col + 1)] =
+                integral[row * (cols + 1) + (col + 1)] + row_accum;
+        }
+    }
+
+    auto rect_sum = [&](int top, int left, int bottom, int right) -> double {
+        const size_t top_u = static_cast<size_t>(top);
+        const size_t left_u = static_cast<size_t>(left);
+        const size_t bottom_u = static_cast<size_t>(bottom + 1);
+        const size_t right_u = static_cast<size_t>(right + 1);
+        return integral[bottom_u * (cols + 1) + right_u]
+             - integral[top_u * (cols + 1) + right_u]
+             - integral[bottom_u * (cols + 1) + left_u]
+             + integral[top_u * (cols + 1) + left_u];
+    };
+
+    const int outer_cells = (2 * outer_h + 1) * (2 * outer_w + 1);
+    const int guard_cells = (2 * gd + 1) * (2 * gr + 1);
+    const int training_cells = std::max(1, outer_cells - guard_cells);
+    const int center_row = static_cast<int>(rows / 2);
+
+    double noise_min = std::numeric_limits<double>::infinity();
+    double noise_max = 0.0;
+    double thresh_min = std::numeric_limits<double>::infinity();
+    double thresh_max = 0.0;
+    uint32_t invalid_cells = 0;
+    uint32_t nonfinite_cells = 0;
+    uint32_t nonpositive_cells = 0;
+
+    struct RankedPoint {
+        float value_db = 0.0f;
+        SensingDetectionPoint point;
+    };
+    std::vector<RankedPoint> ranked_points;
+
+    for (int row = outer_h; row < static_cast<int>(rows) - outer_h; ++row) {
+        for (int col = outer_w; col < static_cast<int>(cols) - outer_w; ++col) {
+            if (params.min_range_bin > 0 && col < params.min_range_bin) {
+                continue;
+            }
+            if (params.dc_exclusion_bins > 0 &&
+                std::abs(row - center_row) <= params.dc_exclusion_bins) {
+                continue;
+            }
+
+            const double outer_sum = rect_sum(
+                row - outer_h,
+                col - outer_w,
+                row + outer_h,
+                col + outer_w);
+            const double guard_sum = rect_sum(
+                row - gd,
+                col - gr,
+                row + gd,
+                col + gr);
+            const double noise_mean = (outer_sum - guard_sum) /
+                static_cast<double>(training_cells);
+            const double cut_power = power[static_cast<size_t>(row) * cols + static_cast<size_t>(col)];
+            const bool finite = std::isfinite(noise_mean) && std::isfinite(cut_power);
+            const bool positive = noise_mean > eps;
+            if (!finite) {
+                ++nonfinite_cells;
+                ++invalid_cells;
+                continue;
+            }
+            if (!positive) {
+                ++nonpositive_cells;
+                ++invalid_cells;
+                continue;
+            }
+
+            const double threshold = alpha * noise_mean;
+            noise_min = std::min(noise_min, noise_mean);
+            noise_max = std::max(noise_max, noise_mean);
+            thresh_min = std::min(thresh_min, threshold);
+            thresh_max = std::max(thresh_max, threshold);
+
+            const float value_db =
+                rd_db[static_cast<size_t>(row) * cols + static_cast<size_t>(col)];
+            if (value_db < params.min_power_db || cut_power <= threshold) {
+                continue;
+            }
+
+            RankedPoint ranked{};
+            ranked.value_db = value_db;
+            ranked.point.doppler_idx = row;
+            ranked.point.range_idx = col;
+            ranked_points.push_back(ranked);
+        }
+    }
+
+    raw_hits = static_cast<uint32_t>(ranked_points.size());
+    std::sort(
+        ranked_points.begin(),
+        ranked_points.end(),
+        [](const RankedPoint& lhs, const RankedPoint& rhs) {
+            return lhs.value_db > rhs.value_db;
+        });
+    if (ranked_points.size() > static_cast<size_t>(std::max(1, params.max_points))) {
+        ranked_points.resize(static_cast<size_t>(std::max(1, params.max_points)));
+    }
+
+    shown_hits = static_cast<uint32_t>(ranked_points.size());
+    out_points.reserve(ranked_points.size());
+    for (const auto& ranked : ranked_points) {
+        out_points.push_back(ranked.point);
+    }
+
+    if (!std::isfinite(noise_min)) {
+        noise_min = 0.0;
+    }
+    if (!std::isfinite(thresh_min)) {
+        thresh_min = 0.0;
+    }
+    out_stats.noise_min = static_cast<float>(noise_min);
+    out_stats.noise_max = static_cast<float>(noise_max);
+    out_stats.thresh_min = static_cast<float>(thresh_min);
+    out_stats.thresh_max = static_cast<float>(thresh_max);
+    out_stats.invalid_cells = invalid_cells;
+    out_stats.nonfinite_cells = nonfinite_cells;
+    out_stats.nonpositive_cells = nonpositive_cells;
+    out_stats.power_min_db = params.min_power_db;
+}
+
+inline void run_os_cfar_2d_full(
+    const AlignedFloatVector& rd_db,
+    size_t rows,
+    size_t cols,
+    const SensingCfarParams& params,
+    std::vector<SensingDetectionPoint>& out_points,
+    uint32_t& raw_hits,
+    uint32_t& shown_hits,
+    SensingCfarStats& out_stats)
+{
+    out_points.clear();
+    raw_hits = 0;
+    shown_hits = 0;
+    out_stats = SensingCfarStats{};
+    out_stats.power_min_db = params.min_power_db;
+
+    if (!params.enabled || rows == 0 || cols == 0) {
+        return;
+    }
+
+    const int td = std::max(0, params.train_doppler);
+    const int tr = std::max(0, params.train_range);
+    const int gd = std::max(0, params.guard_doppler);
+    const int gr = std::max(0, params.guard_range);
+    const int outer_h = td + gd;
+    const int outer_w = tr + gr;
+    if (rows <= static_cast<size_t>(2 * outer_h) ||
+        cols <= static_cast<size_t>(2 * outer_w)) {
+        return;
+    }
+
+    const double alpha = std::max(
+        1e-12,
+        std::pow(10.0, static_cast<double>(params.alpha_db) / 10.0));
+    const double eps = 1e-12;
+    std::vector<double> power(rows * cols, 0.0);
+    #pragma omp simd simdlen(16)
+    for (size_t idx = 0; idx < rd_db.size(); ++idx) {
+        power[idx] = std::pow(10.0, static_cast<double>(rd_db[idx]) / 10.0);
+    }
+
+    struct WindowOffset {
+        int row = 0;
+        int col = 0;
+    };
+    std::vector<WindowOffset> training_offsets;
+    training_offsets.reserve(static_cast<size_t>((2 * outer_h + 1) * (2 * outer_w + 1)));
+    for (int row = -outer_h; row <= outer_h; ++row) {
+        for (int col = -outer_w; col <= outer_w; ++col) {
+            if (std::abs(row) <= gd && std::abs(col) <= gr) {
+                continue;
+            }
+            training_offsets.push_back(WindowOffset{row, col});
+        }
+    }
+    const int training_cells = static_cast<int>(training_offsets.size());
+    if (training_cells <= 0) {
+        return;
+    }
+
+    const double clamped_rank = std::clamp(static_cast<double>(params.os_rank_percent), 0.0, 100.0);
+    const size_t rank_index = static_cast<size_t>(std::llround(
+        (clamped_rank / 100.0) * static_cast<double>(training_cells - 1)));
+    const int center_row = static_cast<int>(rows / 2);
+
+    struct CandidatePoint {
+        float value_db = 0.0f;
+        int row = 0;
+        int col = 0;
+    };
+    std::vector<CandidatePoint> candidates;
+    candidates.reserve((rows - static_cast<size_t>(2 * outer_h)) *
+                       (cols - static_cast<size_t>(2 * outer_w)));
+    for (int row = outer_h; row < static_cast<int>(rows) - outer_h; ++row) {
+        if (params.dc_exclusion_bins > 0 &&
+            std::abs(row - center_row) <= params.dc_exclusion_bins) {
+            continue;
+        }
+        for (int col = outer_w; col < static_cast<int>(cols) - outer_w; ++col) {
+            if (params.min_range_bin > 0 && col < params.min_range_bin) {
+                continue;
+            }
+            candidates.push_back(CandidatePoint{
+                rd_db[static_cast<size_t>(row) * cols + static_cast<size_t>(col)],
+                row,
+                col
+            });
+        }
+    }
+    if (candidates.empty()) {
+        return;
+    }
+
+    const size_t candidate_limit = std::min<size_t>(
+        candidates.size(),
+        std::max<size_t>(
+            static_cast<size_t>(std::max(1, params.max_points)) * static_cast<size_t>(32),
+            static_cast<size_t>(1024)));
+    auto candidate_desc = [](const CandidatePoint& lhs, const CandidatePoint& rhs) {
+        return lhs.value_db > rhs.value_db;
+    };
+    std::partial_sort(
+        candidates.begin(),
+        candidates.begin() + candidate_limit,
+        candidates.end(),
+        candidate_desc);
+    candidates.resize(candidate_limit);
+
+    const int active_rows = static_cast<int>(rows) - 2 * outer_h;
+    const int active_cols = static_cast<int>(cols) - 2 * outer_w;
+    std::vector<uint8_t> suppressed(static_cast<size_t>(active_rows) * static_cast<size_t>(active_cols), 0);
+    const int suppress_d = std::max(0, params.os_suppress_doppler);
+    const int suppress_r = std::max(0, params.os_suppress_range);
+    double noise_min = std::numeric_limits<double>::infinity();
+    double noise_max = 0.0;
+    double thresh_min = std::numeric_limits<double>::infinity();
+    double thresh_max = 0.0;
+    uint32_t invalid_cells = 0;
+    uint32_t nonfinite_cells = 0;
+    uint32_t nonpositive_cells = 0;
+
+    struct RankedPoint {
+        float value_db = 0.0f;
+        SensingDetectionPoint point;
+    };
+    std::vector<RankedPoint> ranked_points;
+    ranked_points.reserve(candidate_limit);
+    std::vector<double> training_values;
+    training_values.reserve(static_cast<size_t>(training_cells));
+
+    for (const auto& candidate : candidates) {
+        const int local_row = candidate.row - outer_h;
+        const int local_col = candidate.col - outer_w;
+        if (suppressed[static_cast<size_t>(local_row) * static_cast<size_t>(active_cols) +
+                       static_cast<size_t>(local_col)] != 0) {
+            continue;
+        }
+
+        const float cut_db = candidate.value_db;
+        if (!std::isfinite(cut_db) || cut_db < params.min_power_db) {
+            continue;
+        }
+
+        training_values.clear();
+        for (const auto& offset : training_offsets) {
+            const double value = power[
+                static_cast<size_t>(candidate.row + offset.row) * cols +
+                static_cast<size_t>(candidate.col + offset.col)];
+            if (std::isfinite(value)) {
+                training_values.push_back(value);
+            }
+        }
+        if (training_values.empty()) {
+            ++nonfinite_cells;
+            ++invalid_cells;
+            continue;
+        }
+
+        const size_t local_rank_index = std::min(rank_index, training_values.size() - 1);
+        std::nth_element(
+            training_values.begin(),
+            training_values.begin() + static_cast<std::ptrdiff_t>(local_rank_index),
+            training_values.end());
+        const double noise_order = training_values[local_rank_index];
+        if (!std::isfinite(noise_order)) {
+            ++nonfinite_cells;
+            ++invalid_cells;
+            continue;
+        }
+        if (noise_order <= eps) {
+            ++nonpositive_cells;
+            ++invalid_cells;
+            continue;
+        }
+
+        const double threshold = alpha * noise_order;
+        noise_min = std::min(noise_min, noise_order);
+        noise_max = std::max(noise_max, noise_order);
+        thresh_min = std::min(thresh_min, threshold);
+        thresh_max = std::max(thresh_max, threshold);
+
+        const double cut_power = power[
+            static_cast<size_t>(candidate.row) * cols + static_cast<size_t>(candidate.col)];
+        if (cut_power <= threshold) {
+            continue;
+        }
+
+        RankedPoint ranked{};
+        ranked.value_db = cut_db;
+        ranked.point.doppler_idx = candidate.row;
+        ranked.point.range_idx = candidate.col;
+        ranked_points.push_back(ranked);
+
+        const int lo_r = std::max(0, local_row - suppress_d);
+        const int hi_r = std::min(active_rows, local_row + suppress_d + 1);
+        const int lo_c = std::max(0, local_col - suppress_r);
+        const int hi_c = std::min(active_cols, local_col + suppress_r + 1);
+        for (int row = lo_r; row < hi_r; ++row) {
+            auto* suppress_row = suppressed.data() +
+                static_cast<size_t>(row) * static_cast<size_t>(active_cols);
+            std::fill(
+                suppress_row + static_cast<size_t>(lo_c),
+                suppress_row + static_cast<size_t>(hi_c),
+                static_cast<uint8_t>(1));
+        }
+    }
+
+    raw_hits = static_cast<uint32_t>(ranked_points.size());
+    if (ranked_points.size() > static_cast<size_t>(std::max(1, params.max_points))) {
+        ranked_points.resize(static_cast<size_t>(std::max(1, params.max_points)));
+    }
+
+    shown_hits = static_cast<uint32_t>(ranked_points.size());
+    out_points.reserve(ranked_points.size());
+    for (const auto& ranked : ranked_points) {
+        out_points.push_back(ranked.point);
+    }
+
+    if (!std::isfinite(noise_min)) {
+        noise_min = 0.0;
+    }
+    if (!std::isfinite(thresh_min)) {
+        thresh_min = 0.0;
+    }
+    out_stats.noise_min = static_cast<float>(noise_min);
+    out_stats.noise_max = static_cast<float>(noise_max);
+    out_stats.thresh_min = static_cast<float>(thresh_min);
+    out_stats.thresh_max = static_cast<float>(thresh_max);
+    out_stats.invalid_cells = invalid_cells;
+    out_stats.nonfinite_cells = nonfinite_cells;
+    out_stats.nonpositive_cells = nonpositive_cells;
+    out_stats.power_min_db = params.min_power_db;
+}
+
+inline std::vector<SensingCluster> cluster_detected_targets(
+    const std::vector<SensingDetectionPoint>& points,
+    const AlignedFloatVector& rd_db,
+    size_t rows,
+    size_t cols,
+    int doppler_gap = 2,
+    int range_gap = 2)
+{
+    if (points.empty() || rd_db.empty() || rows == 0 || cols == 0) {
+        return {};
+    }
+
+    std::vector<uint8_t> visited(points.size(), 0);
+    std::vector<SensingCluster> clusters;
+    clusters.reserve(points.size());
+
+    auto rd_value = [&](int row, int col) -> float {
+        if (row < 0 || col < 0 ||
+            row >= static_cast<int>(rows) ||
+            col >= static_cast<int>(cols)) {
+            return -std::numeric_limits<float>::infinity();
+        }
+        return rd_db[static_cast<size_t>(row) * cols + static_cast<size_t>(col)];
+    };
+
+    for (size_t seed_idx = 0; seed_idx < points.size(); ++seed_idx) {
+        if (visited[seed_idx]) {
+            continue;
+        }
+
+        std::vector<size_t> queue;
+        std::vector<size_t> cluster_indices;
+        queue.push_back(seed_idx);
+        visited[seed_idx] = 1;
+        while (!queue.empty()) {
+            const size_t cur_idx = queue.back();
+            queue.pop_back();
+            cluster_indices.push_back(cur_idx);
+            const int cur_d = points[cur_idx].doppler_idx;
+            const int cur_r = points[cur_idx].range_idx;
+
+            for (size_t nbr_idx = 0; nbr_idx < points.size(); ++nbr_idx) {
+                if (visited[nbr_idx]) {
+                    continue;
+                }
+                if (std::abs(points[nbr_idx].doppler_idx - cur_d) <= doppler_gap &&
+                    std::abs(points[nbr_idx].range_idx - cur_r) <= range_gap) {
+                    visited[nbr_idx] = 1;
+                    queue.push_back(nbr_idx);
+                }
+            }
+        }
+
+        if (cluster_indices.empty()) {
+            continue;
+        }
+
+        size_t peak_local_idx = 0;
+        float peak_strength = -std::numeric_limits<float>::infinity();
+        double weight_sum = 0.0;
+        double centroid_d = 0.0;
+        double centroid_r = 0.0;
+        for (size_t i = 0; i < cluster_indices.size(); ++i) {
+            const auto& point = points[cluster_indices[i]];
+            const float value_db = rd_value(point.doppler_idx, point.range_idx);
+            if (value_db > peak_strength) {
+                peak_strength = value_db;
+                peak_local_idx = i;
+            }
+            const double weight = std::pow(10.0, static_cast<double>(value_db) / 20.0);
+            weight_sum += weight;
+            centroid_d += static_cast<double>(point.doppler_idx) * weight;
+            centroid_r += static_cast<double>(point.range_idx) * weight;
+        }
+
+        SensingCluster cluster{};
+        const auto& peak_point = points[cluster_indices[peak_local_idx]];
+        cluster.peak_doppler_idx = peak_point.doppler_idx;
+        cluster.peak_range_idx = peak_point.range_idx;
+        cluster.peak_strength_db = peak_strength;
+        cluster.cluster_size = static_cast<uint32_t>(cluster_indices.size());
+        if (weight_sum > 0.0) {
+            cluster.centroid_doppler_idx = static_cast<float>(centroid_d / weight_sum);
+            cluster.centroid_range_idx = static_cast<float>(centroid_r / weight_sum);
+        } else {
+            cluster.centroid_doppler_idx = static_cast<float>(peak_point.doppler_idx);
+            cluster.centroid_range_idx = static_cast<float>(peak_point.range_idx);
+        }
+        clusters.push_back(cluster);
+    }
+
+    std::sort(
+        clusters.begin(),
+        clusters.end(),
+        [](const SensingCluster& lhs, const SensingCluster& rhs) {
+            return lhs.peak_strength_db > rhs.peak_strength_db;
+        });
+    return clusters;
+}
 
 
 // ============== Pure Signal Processing Functions ==============
