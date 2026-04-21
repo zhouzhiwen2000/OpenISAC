@@ -208,12 +208,34 @@ void crop_doppler_view_output(
     }
 }
 
+float hamming_coherent_gain(size_t length)
+{
+    if (length <= 1) {
+        return 1.0f;
+    }
+    return 0.54f - (0.46f / static_cast<float>(length));
+}
+
 float sensing_rd_amplitude_scale(size_t active_rows, size_t active_cols)
 {
     if (active_rows == 0 || active_cols == 0) {
         return 1.0f;
     }
-    return 1.0f / std::sqrt(static_cast<float>(active_rows) * static_cast<float>(active_cols));
+    const float periodogram_norm =
+        std::sqrt(static_cast<float>(active_rows) * static_cast<float>(active_cols));
+    const float processing_gain_norm =
+        std::sqrt(static_cast<float>(active_rows) * static_cast<float>(active_cols));
+    const float window_coherent_gain =
+        hamming_coherent_gain(active_cols) * hamming_coherent_gain(active_rows);
+    // Divide by sqrt(M*K): standard periodogram normalization so the noise power stays unchanged.
+    // Divide by another sqrt(M*K): remove the coherent processing gain from integrating M symbols and K subcarriers.
+    // Finally divide by G_r * G_d: compensate the coherent gain introduced by the range and Doppler windows.
+    const float total_gain =
+        periodogram_norm * processing_gain_norm * window_coherent_gain;
+    if (!(total_gain > 0.0f) || !std::isfinite(total_gain)) {
+        return 1.0f;
+    }
+    return 1.0f / total_gain;
 }
 
 void scale_complex_buffer_inplace(
@@ -1958,7 +1980,7 @@ void SensingChannel::_process_regular_compact_buffer(
             ? _compute.backend_view_doppler_bins
             : fft_rows;
         const float amplitude_scale = sensing_rd_amplitude_scale(
-            std::min(_cfg.sensing_symbol_num, compact_core.params().doppler_fft_size),
+            symbol_count,
             compact_core.params().fft_size);
         scale_complex_buffer_inplace(output_buf->data(), output_buf->size(), amplitude_scale);
         _compute.metadata_bytes = _build_backend_metadata(
@@ -2172,7 +2194,7 @@ void SensingChannel::_sensing_process_finalize(
             ? _compute.backend_view_doppler_bins
             : fft_rows;
         const float amplitude_scale = sensing_rd_amplitude_scale(
-            std::min(_cfg.sensing_symbol_num, _compute.sensing_core.params().doppler_fft_size),
+            symbol_count,
             _compute.sensing_core.params().fft_size);
         scale_complex_buffer_inplace(output_buf->data(), output_buf->size(), amplitude_scale);
         _compute.metadata_bytes = _build_backend_metadata(

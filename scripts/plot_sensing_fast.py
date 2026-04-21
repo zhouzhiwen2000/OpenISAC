@@ -267,8 +267,12 @@ PROCESS_RANGE_FFT_SIZE = RANGE_FFT_SIZE
 PROCESS_DOPPLER_FFT_SIZE = DOPPLER_FFT_SIZE
 DISPLAY_RANGE_BIN_LIMIT = MAX_RANGE_BIN
 DISPLAY_DOPPLER_BIN_LIMIT = MAX_DOPPLER_BINS
-DISPLAY_DB_MIN = 0.0
-DISPLAY_DB_MAX = 60.0
+DEFAULT_DISPLAY_DB_MIN = -80.0
+DEFAULT_DISPLAY_DB_MAX = 0.0
+DISPLAY_RD_DB_MIN = DEFAULT_DISPLAY_DB_MIN
+DISPLAY_RD_DB_MAX = DEFAULT_DISPLAY_DB_MAX
+DISPLAY_MD_DB_MIN = DEFAULT_DISPLAY_DB_MIN
+DISPLAY_MD_DB_MAX = DEFAULT_DISPLAY_DB_MAX
 
 LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
     version=0,
@@ -347,6 +351,9 @@ RAW_QUEUE_SIZE = 20
 DISPLAY_QUEUE_SIZE = 5
 DISPLAY_DOWNSAMPLE = 1
 BUFFER_LENGTH = 5000
+MICRO_DOPPLER_STFT_NPERSEG = 256
+MICRO_DOPPLER_STFT_NOVERLAP = 192
+MICRO_DOPPLER_STFT_NFFT = 256
 C_LIGHT_MPS = 299792458.0
 ANTENNA_SPACING_M = 42.83e-3
 AGGREGATE_FRAME_QUEUE_SIZE = 20
@@ -387,8 +394,60 @@ def sanitize_display_db_range(low_db, high_db):
     return float(low), float(high)
 
 
-def get_display_db_range():
-    return sanitize_display_db_range(DISPLAY_DB_MIN, DISPLAY_DB_MAX)
+def get_delay_doppler_display_db_range():
+    return sanitize_display_db_range(DISPLAY_RD_DB_MIN, DISPLAY_RD_DB_MAX)
+
+
+def get_micro_doppler_display_db_range():
+    return sanitize_display_db_range(DISPLAY_MD_DB_MIN, DISPLAY_MD_DB_MAX)
+
+
+def _hamming_coherent_gain(length):
+    length = max(1, int(length))
+    cached = _hamming_coherent_gain_cache.get(length)
+    if cached is not None:
+        return cached
+    cached = float(np.mean(np.hamming(length).astype(np.float64, copy=False)))
+    _hamming_coherent_gain_cache[length] = cached
+    return cached
+
+
+def get_rd_window_coherent_gain(length, enabled):
+    if not enabled:
+        return 1.0
+    return _hamming_coherent_gain(length)
+
+
+def get_rd_display_amplitude_norm(raw_rows, raw_cols, range_window_active, doppler_window_active):
+    raw_rows = max(1, int(raw_rows))
+    raw_cols = max(1, int(raw_cols))
+    range_window_gain = get_rd_window_coherent_gain(raw_cols, range_window_active)
+    doppler_window_gain = get_rd_window_coherent_gain(raw_rows, doppler_window_active)
+    periodogram_norm = np.sqrt(float(raw_rows) * float(raw_cols))
+    processing_gain_norm = np.sqrt(float(raw_rows) * float(raw_cols))
+    window_gain_norm = range_window_gain * doppler_window_gain
+    # Divide by sqrt(M*K): standard periodogram normalization so the noise power stays unchanged.
+    # Divide by another sqrt(M*K): remove the coherent processing gain from integrating M symbols and K subcarriers.
+    # Finally divide by G_r * G_d: compensate the coherent gain introduced by the range and Doppler windows.
+    norm = periodogram_norm * processing_gain_norm * window_gain_norm
+    return max(float(norm), 1e-12)
+
+
+def get_micro_doppler_display_amplitude_norm(viewer_params, nperseg):
+    raw_cols = max(1, int(viewer_params.active_cols))
+    range_window_active = enable_range_window and not local_clean_disables_windows()
+    md_window_gain = _hamming_coherent_gain(nperseg)
+    rd_range_window_gain = get_rd_window_coherent_gain(raw_cols, range_window_active)
+
+    # Match the MD STFT amplitude scale to the calibrated RD convention by
+    # removing the range coherent gain before the slow-time STFT coherent gain.
+    norm = (
+        float(raw_cols)
+        * rd_range_window_gain
+        * float(nperseg)
+        * md_window_gain
+    )
+    return max(float(norm), 1e-12)
 
 
 def get_local_detector_label():
@@ -876,14 +935,38 @@ def parse_args():
     parser.add_argument(
         "--display-db-min",
         type=float,
-        default=DISPLAY_DB_MIN,
-        help="Default display color scale minimum in dB",
+        default=DEFAULT_DISPLAY_DB_MIN,
+        help="Shared default display color scale minimum in dB",
     )
     parser.add_argument(
         "--display-db-max",
         type=float,
-        default=DISPLAY_DB_MAX,
-        help="Default display color scale maximum in dB",
+        default=DEFAULT_DISPLAY_DB_MAX,
+        help="Shared default display color scale maximum in dB",
+    )
+    parser.add_argument(
+        "--delay-doppler-db-min",
+        type=float,
+        default=None,
+        help="Delay-Doppler display color scale minimum in dB",
+    )
+    parser.add_argument(
+        "--delay-doppler-db-max",
+        type=float,
+        default=None,
+        help="Delay-Doppler display color scale maximum in dB",
+    )
+    parser.add_argument(
+        "--micro-doppler-db-min",
+        type=float,
+        default=None,
+        help="Micro-Doppler display color scale minimum in dB",
+    )
+    parser.add_argument(
+        "--micro-doppler-db-max",
+        type=float,
+        default=None,
+        help="Micro-Doppler display color scale maximum in dB",
     )
     return parser.parse_args()
 
@@ -943,7 +1026,18 @@ class ChannelRuntime:
 
 args = parse_args()
 UDP_PORT = int(args.port)
-DISPLAY_DB_MIN, DISPLAY_DB_MAX = sanitize_display_db_range(args.display_db_min, args.display_db_max)
+shared_display_db_min, shared_display_db_max = sanitize_display_db_range(
+    args.display_db_min,
+    args.display_db_max,
+)
+DISPLAY_RD_DB_MIN, DISPLAY_RD_DB_MAX = sanitize_display_db_range(
+    args.delay_doppler_db_min if args.delay_doppler_db_min is not None else shared_display_db_min,
+    args.delay_doppler_db_max if args.delay_doppler_db_max is not None else shared_display_db_max,
+)
+DISPLAY_MD_DB_MIN, DISPLAY_MD_DB_MAX = sanitize_display_db_range(
+    args.micro_doppler_db_min if args.micro_doppler_db_min is not None else shared_display_db_min,
+    args.micro_doppler_db_max if args.micro_doppler_db_max is not None else shared_display_db_max,
+)
 initial_channel_count = max(1, int(args.channels))
 CHANNELS = [ChannelRuntime(idx, UDP_PORT, args.control_port) for idx in range(initial_channel_count)]
 if not CHANNELS:
@@ -1319,6 +1413,7 @@ receiver_threads.append(_t)
 # ====== FFT Processing ======
 _range_window_cache = {}
 _doppler_window_cache = {}
+_hamming_coherent_gain_cache = {}
 
 
 def get_range_window(length):
@@ -1415,6 +1510,12 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
     max_view_range_bins = min(max_view_range_bins, range_fft_size)
     range_window_active = enable_range_window and not local_clean_disables_windows()
     doppler_window_active = enable_doppler_window and not local_clean_disables_windows()
+    rd_display_norm = get_rd_display_amplitude_norm(
+        raw_rows,
+        raw_cols,
+        range_window_active,
+        doppler_window_active,
+    )
 
     if USE_NVIDIA_GPU or USE_INTEL_GPU:
         range_win = get_range_window(raw_cols) if range_window_active else cp.ones((1, raw_cols), dtype=cp.float32)
@@ -1436,7 +1537,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
         doppler_fft = cp.fft.fft(padded_doppler, axis=0)
         doppler_shifted = cp.fft.fftshift(doppler_fft, axes=0)
 
-        magnitude = cp.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols)
+        magnitude = cp.abs(doppler_shifted) / rd_display_norm
         magnitude_db = 20.0 * cp.log10(magnitude + 1e-12)
         return (
             magnitude_db.astype(cp.float32, copy=False),
@@ -1457,7 +1558,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
         doppler_fft = mx.fft.fft(doppler_windowed, n=doppler_fft_size, axis=0)
         doppler_shifted = mx.fft.fftshift(doppler_fft, axes=(0,))
 
-        magnitude = mx.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols)
+        magnitude = mx.abs(doppler_shifted) / rd_display_norm
         magnitude_db = 20.0 * mx.log10(magnitude + 1e-12)
         return (
             np.array(magnitude_db, copy=False).astype(np.float32, copy=False),
@@ -1477,7 +1578,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
         padded_doppler = cpu_prep_doppler_fft(range_time_view, doppler_win, raw_rows, doppler_fft_size, view_width)
         doppler_fft = np.fft.fft(padded_doppler, axis=0)
         doppler_shifted = np.fft.fftshift(doppler_fft, axes=0)
-        magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
+        magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / rd_display_norm + 1e-12)
         return magnitude_db.astype(np.float32, copy=False), range_time_view, doppler_shifted.astype(np.complex64, copy=False)
 
     shifted_data = np.fft.fftshift(raw_frame, axes=1)
@@ -1495,7 +1596,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
     doppler_fft = np.fft.fft(padded_doppler, axis=0)
     doppler_shifted = np.fft.fftshift(doppler_fft, axes=0)
 
-    magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
+    magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / rd_display_norm + 1e-12)
     return magnitude_db.astype(np.float32, copy=False), range_time_view, doppler_shifted.astype(np.complex64, copy=False)
 
 
@@ -1547,6 +1648,12 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
     max_view_range_bins = min(max_view_range_bins, range_fft_size)
     range_window_active = enable_range_window and not local_clean_disables_windows()
     doppler_window_active = enable_doppler_window and not local_clean_disables_windows()
+    rd_display_norm = get_rd_display_amplitude_norm(
+        raw_rows,
+        raw_cols,
+        range_window_active,
+        doppler_window_active,
+    )
 
     raw_batch = np.stack(
         [np.asarray(frame[:raw_rows, :raw_cols], dtype=np.complex64) for _, frame in active_items],
@@ -1572,7 +1679,7 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
         doppler_fft = cp.fft.fft(padded_doppler, axis=1)
         doppler_shifted = cp.fft.fftshift(doppler_fft, axes=1)
 
-        magnitude_db = 20.0 * cp.log10(cp.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
+        magnitude_db = 20.0 * cp.log10(cp.abs(doppler_shifted) / rd_display_norm + 1e-12)
         for batch_idx, (ch_idx, _) in enumerate(active_items):
             results[ch_idx] = (
                 magnitude_db[batch_idx].astype(cp.float32, copy=False),
@@ -1594,7 +1701,7 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
         doppler_windowed = range_time_view * doppler_win_3d
         doppler_fft = mx.fft.fft(doppler_windowed, n=doppler_fft_size, axis=1)
         doppler_shifted = mx.fft.fftshift(doppler_fft, axes=(1,))
-        magnitude_db = 20.0 * mx.log10(mx.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
+        magnitude_db = 20.0 * mx.log10(mx.abs(doppler_shifted) / rd_display_norm + 1e-12)
         magnitude_db_cpu = np.asarray(magnitude_db, dtype=np.float32)
         range_time_cpu = np.asarray(range_time_view, dtype=np.complex64)
         doppler_shifted_cpu = np.asarray(doppler_shifted, dtype=np.complex64)
@@ -1618,7 +1725,7 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
     padded_doppler[:, :raw_rows, :] = range_time_view * doppler_win.reshape(1, raw_rows, 1)
     doppler_fft = np.fft.fft(padded_doppler, axis=1)
     doppler_shifted = np.fft.fftshift(doppler_fft, axes=1)
-    magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / np.sqrt(raw_rows * raw_cols) + 1e-12)
+    magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / rd_display_norm + 1e-12)
     for batch_idx, (ch_idx, _) in enumerate(active_items):
         results[ch_idx] = (
             magnitude_db[batch_idx].astype(np.float32, copy=False),
@@ -2651,7 +2758,14 @@ def accumulate_range_time_data_batch(channel_range_time_views):
     return updated_channels
 
 
-def _batched_micro_doppler_stft(signal_batch, fs=1.0, nperseg=256, noverlap=192, nfft=256):
+def _batched_micro_doppler_stft(
+    signal_batch,
+    fs=1.0,
+    nperseg=MICRO_DOPPLER_STFT_NPERSEG,
+    noverlap=MICRO_DOPPLER_STFT_NOVERLAP,
+    nfft=MICRO_DOPPLER_STFT_NFFT,
+    display_norms=None,
+):
     signal_batch = np.asarray(signal_batch, dtype=np.complex64)
     if signal_batch.ndim != 2:
         raise ValueError("signal_batch must be 2D: channels x time")
@@ -2678,11 +2792,22 @@ def _batched_micro_doppler_stft(signal_batch, fs=1.0, nperseg=256, noverlap=192,
 
     f = np.fft.fftfreq(nfft, d=1.0 / fs)
     t = (np.arange(n_frames) * step) / fs
-    Pxx_db = 20 * np.log10(np.abs(Zxx) + 1e-12)
+    magnitude = np.abs(Zxx).astype(np.float64, copy=False)
+    if display_norms is None:
+        norm_view = 1.0
+    else:
+        norm_arr = np.asarray(display_norms, dtype=np.float64)
+        if norm_arr.ndim == 0:
+            norm_view = max(float(norm_arr), 1e-12)
+        else:
+            if norm_arr.shape[0] != batch_size:
+                raise ValueError("display_norms length must match the signal batch size")
+            norm_view = np.maximum(norm_arr.reshape(batch_size, 1, 1), 1e-12)
+    Pxx_db = 20.0 * np.log10(magnitude / norm_view + 1e-12)
     Pxx_db_shifted = np.fft.fftshift(Pxx_db, axes=1)
     f_shifted = np.fft.fftshift(f)
     f_idx = (f_shifted > -0.5) & (f_shifted < 0.5)
-    return f_shifted[f_idx], t, Pxx_db_shifted[:, f_idx, :]
+    return f_shifted[f_idx], t, Pxx_db_shifted[:, f_idx, :].astype(np.float32, copy=False)
 
 
 def calculate_micro_doppler_batch(channel_indices):
@@ -2693,15 +2818,16 @@ def calculate_micro_doppler_batch(channel_indices):
     for ch_idx in channel_indices:
         with CHANNELS[ch_idx].micro_lock:
             buf_len = len(CHANNELS[ch_idx].micro_doppler_buffer)
-        if buf_len < 256:
+        if buf_len < MICRO_DOPPLER_STFT_NPERSEG:
             continue
         min_len = buf_len if min_len is None else min(min_len, buf_len)
 
-    if min_len is None or min_len < 256:
+    if min_len is None or min_len < MICRO_DOPPLER_STFT_NPERSEG:
         return {}
 
     eligible_channels = []
     signal_batch = []
+    display_norms = []
     for ch_idx in channel_indices:
         with CHANNELS[ch_idx].micro_lock:
             if len(CHANNELS[ch_idx].micro_doppler_buffer) < min_len:
@@ -2709,11 +2835,23 @@ def calculate_micro_doppler_batch(channel_indices):
             signal = np.asarray(list(CHANNELS[ch_idx].micro_doppler_buffer)[-min_len:], dtype=np.complex64)
         eligible_channels.append(ch_idx)
         signal_batch.append(signal)
+        display_norms.append(
+            get_micro_doppler_display_amplitude_norm(
+                get_viewer_params(CHANNELS[ch_idx]),
+                MICRO_DOPPLER_STFT_NPERSEG,
+            )
+        )
 
     if not eligible_channels:
         return {}
 
-    f, t, Pxx_batch = _batched_micro_doppler_stft(np.stack(signal_batch, axis=0))
+    f, t, Pxx_batch = _batched_micro_doppler_stft(
+        np.stack(signal_batch, axis=0),
+        nperseg=MICRO_DOPPLER_STFT_NPERSEG,
+        noverlap=MICRO_DOPPLER_STFT_NOVERLAP,
+        nfft=MICRO_DOPPLER_STFT_NFFT,
+        display_norms=np.asarray(display_norms, dtype=np.float64),
+    )
     if Pxx_batch is None:
         return {}
 
@@ -3301,10 +3439,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rd_plot.setLabel('left', 'Range Bin')
         self.rd_plot.setLabel('bottom', 'Doppler Bin')
         self.rd_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
-        default_db_levels = get_display_db_range()
-        self.rd_colorbar = pg.ColorBarItem(values=default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
+        rd_default_db_levels = get_delay_doppler_display_db_range()
+        self.rd_colorbar = pg.ColorBarItem(values=rd_default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
         self.rd_colorbar.setImageItem(self.rd_img, insert_in=self.rd_plot.plotItem)
-        self.rd_img.setLevels(default_db_levels)
+        self.rd_img.setLevels(rd_default_db_levels)
 
         self.rd_click_marker = pg.ScatterPlotItem([], [], symbol='x', size=12, pen=pg.mkPen('w', width=2))
         self.rd_cfar_marker = pg.ScatterPlotItem(
@@ -3326,9 +3464,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.md_plot.setLabel('left', 'Doppler')
         self.md_plot.setLabel('bottom', 'Time')
         self.md_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
-        self.md_colorbar = pg.ColorBarItem(values=default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
+        md_default_db_levels = get_micro_doppler_display_db_range()
+        self.md_colorbar = pg.ColorBarItem(values=md_default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
         self.md_colorbar.setImageItem(self.md_img, insert_in=self.md_plot.plotItem)
-        self.md_img.setLevels(default_db_levels)
+        self.md_img.setLevels(md_default_db_levels)
         plot_layout.addWidget(self.md_plot)
 
         # Phase-Channel Curve Plot
@@ -3466,18 +3605,31 @@ class MainWindow(QtWidgets.QMainWindow):
         doppler_view_layout.addWidget(btn_doppler_view)
         control_layout.addLayout(doppler_view_layout)
 
-        display_db_layout = QtWidgets.QHBoxLayout()
-        display_db_layout.addWidget(QtWidgets.QLabel("Display dB:"))
-        self.txt_display_db_min = QtWidgets.QLineEdit(f"{DISPLAY_DB_MIN:.1f}")
-        self.txt_display_db_min.setPlaceholderText("Min")
-        self.txt_display_db_max = QtWidgets.QLineEdit(f"{DISPLAY_DB_MAX:.1f}")
-        self.txt_display_db_max.setPlaceholderText("Max")
-        btn_display_db = QtWidgets.QPushButton("Apply")
-        btn_display_db.clicked.connect(self.apply_display_db_range)
-        display_db_layout.addWidget(self.txt_display_db_min)
-        display_db_layout.addWidget(self.txt_display_db_max)
-        display_db_layout.addWidget(btn_display_db)
-        control_layout.addLayout(display_db_layout)
+        delay_doppler_db_layout = QtWidgets.QHBoxLayout()
+        delay_doppler_db_layout.addWidget(QtWidgets.QLabel("Delay Doppler dB:"))
+        self.txt_delay_doppler_db_min = QtWidgets.QLineEdit(f"{DISPLAY_RD_DB_MIN:.1f}")
+        self.txt_delay_doppler_db_min.setPlaceholderText("Min")
+        self.txt_delay_doppler_db_max = QtWidgets.QLineEdit(f"{DISPLAY_RD_DB_MAX:.1f}")
+        self.txt_delay_doppler_db_max.setPlaceholderText("Max")
+        btn_delay_doppler_db = QtWidgets.QPushButton("Apply")
+        btn_delay_doppler_db.clicked.connect(self.apply_delay_doppler_display_db_range)
+        delay_doppler_db_layout.addWidget(self.txt_delay_doppler_db_min)
+        delay_doppler_db_layout.addWidget(self.txt_delay_doppler_db_max)
+        delay_doppler_db_layout.addWidget(btn_delay_doppler_db)
+        control_layout.addLayout(delay_doppler_db_layout)
+
+        micro_doppler_db_layout = QtWidgets.QHBoxLayout()
+        micro_doppler_db_layout.addWidget(QtWidgets.QLabel("MicroDoppler dB:"))
+        self.txt_micro_doppler_db_min = QtWidgets.QLineEdit(f"{DISPLAY_MD_DB_MIN:.1f}")
+        self.txt_micro_doppler_db_min.setPlaceholderText("Min")
+        self.txt_micro_doppler_db_max = QtWidgets.QLineEdit(f"{DISPLAY_MD_DB_MAX:.1f}")
+        self.txt_micro_doppler_db_max.setPlaceholderText("Max")
+        btn_micro_doppler_db = QtWidgets.QPushButton("Apply")
+        btn_micro_doppler_db.clicked.connect(self.apply_micro_doppler_display_db_range)
+        micro_doppler_db_layout.addWidget(self.txt_micro_doppler_db_min)
+        micro_doppler_db_layout.addWidget(self.txt_micro_doppler_db_max)
+        micro_doppler_db_layout.addWidget(btn_micro_doppler_db)
+        control_layout.addLayout(micro_doppler_db_layout)
         self.superres_controls = QtWidgets.QWidget()
         superres_layout = QtWidgets.QVBoxLayout(self.superres_controls)
         superres_layout.setContentsMargins(0, 0, 0, 0)
@@ -4023,25 +4175,41 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             print("Invalid doppler display bins")
 
-    def apply_display_db_range(self):
-        global DISPLAY_DB_MIN, DISPLAY_DB_MAX
+    def apply_delay_doppler_display_db_range(self):
+        global DISPLAY_RD_DB_MIN, DISPLAY_RD_DB_MAX
         try:
-            DISPLAY_DB_MIN, DISPLAY_DB_MAX = sanitize_display_db_range(
-                self.txt_display_db_min.text(),
-                self.txt_display_db_max.text(),
+            DISPLAY_RD_DB_MIN, DISPLAY_RD_DB_MAX = sanitize_display_db_range(
+                self.txt_delay_doppler_db_min.text(),
+                self.txt_delay_doppler_db_max.text(),
             )
-            self.txt_display_db_min.setText(f"{DISPLAY_DB_MIN:.1f}")
-            self.txt_display_db_max.setText(f"{DISPLAY_DB_MAX:.1f}")
-            levels = get_display_db_range()
+            self.txt_delay_doppler_db_min.setText(f"{DISPLAY_RD_DB_MIN:.1f}")
+            self.txt_delay_doppler_db_max.setText(f"{DISPLAY_RD_DB_MAX:.1f}")
+            levels = get_delay_doppler_display_db_range()
             self.rd_img.setLevels(levels)
             self.rd_colorbar.setLevels(values=levels)
+            self._force_ui_refresh = True
+            self._last_rendered_display_key = None
+            print(f"Delay Doppler dB range set to: {DISPLAY_RD_DB_MIN:.1f} to {DISPLAY_RD_DB_MAX:.1f}")
+        except ValueError:
+            print("Invalid Delay Doppler dB range")
+
+    def apply_micro_doppler_display_db_range(self):
+        global DISPLAY_MD_DB_MIN, DISPLAY_MD_DB_MAX
+        try:
+            DISPLAY_MD_DB_MIN, DISPLAY_MD_DB_MAX = sanitize_display_db_range(
+                self.txt_micro_doppler_db_min.text(),
+                self.txt_micro_doppler_db_max.text(),
+            )
+            self.txt_micro_doppler_db_min.setText(f"{DISPLAY_MD_DB_MIN:.1f}")
+            self.txt_micro_doppler_db_max.setText(f"{DISPLAY_MD_DB_MAX:.1f}")
+            levels = get_micro_doppler_display_db_range()
             self.md_img.setLevels(levels)
             self.md_colorbar.setLevels(values=levels)
             self._force_ui_refresh = True
             self._last_rendered_display_key = None
-            print(f"Display dB range set to: {DISPLAY_DB_MIN:.1f} to {DISPLAY_DB_MAX:.1f}")
+            print(f"MicroDoppler dB range set to: {DISPLAY_MD_DB_MIN:.1f} to {DISPLAY_MD_DB_MAX:.1f}")
         except ValueError:
-            print("Invalid display dB range")
+            print("Invalid MicroDoppler dB range")
 
     def toggle_micro_doppler(self):
         global show_micro_doppler
@@ -5323,7 +5491,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     low_level = float(rd_levels[0])
                     high_level = float(rd_levels[1])
                 else:
-                    low_level, high_level = get_display_db_range()
+                    low_level, high_level = get_delay_doppler_display_db_range()
                 self.rd_img.setLevels((low_level, high_level))
                 self.rd_colorbar.setLevels(values=(low_level, high_level))
                 rows, cols = rd_data.shape  # rows=doppler, cols=range
@@ -5344,7 +5512,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_rendered_display_key = display_render_key
             if md_data is not None and redraw_display:
                 self.md_img.setImage(md_data, autoLevels=False)
-                md_low_level, md_high_level = get_display_db_range()
+                md_low_level, md_high_level = get_micro_doppler_display_db_range()
                 self.md_img.setLevels((md_low_level, md_high_level))
                 self.md_colorbar.setLevels(values=(md_low_level, md_high_level))
                 md_extent = latest_disp.get('md_extent')
