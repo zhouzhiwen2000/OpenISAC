@@ -68,7 +68,7 @@ cmake --install .
 
 ```bash
 cd ~
-git clone https://github.com/zhouzhiwen2000/UHD_OFDM.git
+git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 cd UHD_OFDM
 cmake -S . -B build \
   -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
