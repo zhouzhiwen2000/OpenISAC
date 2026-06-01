@@ -403,6 +403,7 @@ private:
         std::make_shared<std::atomic<uint64_t>>(0);
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
+    std::atomic<uint32_t> _ldpc_packet_seq{0};
 
     struct EncodePacketProfile {
         double header_encode_us{0.0};
@@ -1111,35 +1112,50 @@ private:
 
         const size_t K_bits_local = _ldpc.get_K();
         const size_t bytes_per_ldpc_block = (K_bits_local + 7) / 8;
-        const size_t padded_len =
-            ((payload_len + bytes_per_ldpc_block - 1) / bytes_per_ldpc_block) * bytes_per_ldpc_block;
-        const size_t header_len = K_bits_local ? (K_bits_local + 7) / 8 : 0;
-
-        LDPCCodec::AlignedByteVector header_bytes(header_len, 0x00);
-        size_t half1 = (header_len + 1) / 2;
-        size_t half2 = header_len - half1;
-        if ((half2 % 2) != 0 && half2 > 0) {
-            half1 += 1;
-            half2 -= 1;
+        if (bytes_per_ldpc_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock ||
+            _ldpc.get_N() != LdpcPacketFraming::kLdpcCodeBitsPerBlock) {
+            throw std::runtime_error("CPU LDPC codec dimensions do not match unified framing.");
         }
-        for (size_t i = 0; i < half1; ++i) {
-            header_bytes[i] = static_cast<uint8_t>((i + 1) & 0xFF);
-        }
-        const uint16_t payload16 =
-            payload_len > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(payload_len & 0xFFFF);
-        for (size_t i = 0; i < half2; ++i) {
-            const size_t idx = half1 + i;
-            header_bytes[idx] = ((i % 2) == 0)
-                ? static_cast<uint8_t>((payload16 >> 8) & 0xFF)
-                : static_cast<uint8_t>(payload16 & 0xFF);
+        if (!LdpcPacketFraming::payload_len_fits(payload_len)) {
+            static std::atomic<uint64_t> dropped_oversize_count{0};
+            const uint64_t dropped = dropped_oversize_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN() << "Dropping UDP payload because mini-header supports at most "
+                             << LdpcPacketFraming::max_payload_bytes()
+                             << " bytes per packet: payload_bytes=" << payload_len
+                             << ", dropped_packets=" << dropped;
+            }
+            return true;
         }
 
-        LDPCCodec::AlignedIntVector header_coded_bits;
-        _ldpc.encode_frame(header_bytes, header_coded_bits);
-        scrambler.scramble(header_coded_bits);
-        _bit_interleaver->interleave_inplace(header_coded_bits, _interleaver_bits_scratch);
-        LDPCCodec::AlignedIntVector header_qpsk_ints;
-        LDPCCodec::pack_bits_qpsk(header_coded_bits, header_qpsk_ints);
+        const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload_len);
+        const size_t padded_len = payload_blocks * bytes_per_ldpc_block;
+        const size_t packet_qpsk_symbols =
+            LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+        if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
+            static std::atomic<uint64_t> dropped_capacity_count{0};
+            const uint64_t dropped = dropped_capacity_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN() << "Dropping UDP payload because one unified LDPC packet exceeds payload RE capacity: "
+                             << "payload_bytes=" << payload_len
+                             << ", qpsk_syms=" << packet_qpsk_symbols
+                             << ", frame_capacity=" << _data_resource_layout.payload_re_count
+                             << ", dropped_packets=" << dropped;
+            }
+            return true;
+        }
+
+        AlignedIntVector packet = _data_packet_pool.acquire();
+        packet.clear();
+        packet.resize(LdpcPacketFraming::kControlSymbols);
+        const LdpcMiniHeader mini_header{
+            LdpcPacketFraming::kVersion,
+            LdpcPacketFraming::kFlags,
+            static_cast<uint16_t>(payload_len),
+            LdpcPacketFraming::payload_blocks_field_for_len(payload_len),
+            static_cast<uint16_t>(_ldpc_packet_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu),
+        };
+        LdpcPacketFraming::write_control_qpsk(mini_header, packet.data());
         prof_step_end = ProfileClock::now();
         profile.header_encode_us =
             std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1151,20 +1167,23 @@ private:
 
         prof_step_start = ProfileClock::now();
         LDPCCodec::AlignedIntVector encoded_bits_all;
-        _ldpc.encode_frame(input_bytes, encoded_bits_all);
-        scrambler.scramble(encoded_bits_all);
-        _bit_interleaver->interleave_inplace(encoded_bits_all, _interleaver_bits_scratch);
         LDPCCodec::AlignedIntVector qpsk_ints_all;
-        LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all);
+        if (payload_blocks > 0) {
+            _ldpc.encode_frame(input_bytes, encoded_bits_all);
+            scrambler.scramble(encoded_bits_all);
+            _bit_interleaver->interleave_inplace(encoded_bits_all, _interleaver_bits_scratch);
+            LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all);
+        }
         prof_step_end = ProfileClock::now();
         profile.payload_encode_us =
             std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-        AlignedIntVector packet = _data_packet_pool.acquire();
-        packet.clear();
-        packet.reserve(header_qpsk_ints.size() + qpsk_ints_all.size());
-        packet.insert(packet.end(), header_qpsk_ints.begin(), header_qpsk_ints.end());
+        packet.reserve(packet_qpsk_symbols);
         packet.insert(packet.end(), qpsk_ints_all.begin(), qpsk_ints_all.end());
+        if (packet.size() != packet_qpsk_symbols) {
+            _data_packet_pool.release(std::move(packet));
+            throw std::runtime_error("Unified LDPC packet symbol count mismatch.");
+        }
 
         prof_step_start = ProfileClock::now();
         bool enqueued = false;

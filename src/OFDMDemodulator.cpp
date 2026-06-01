@@ -1936,97 +1936,74 @@ private:
                              << " llr_scale: " << _llr_scale;
             }
             
-            // Process frame data, block by block according to decoder N (bits)
-            size_t bits_per_block = _ldpc_decoder.get_N();
-            size_t llr_offset = 0;
+            const size_t bits_per_block = _ldpc_decoder.get_N();
+            const size_t bytes_per_ldpc_block = (_ldpc_decoder.get_K() + 7) / 8;
+            if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
+                bytes_per_ldpc_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock) {
+                LOG_G_WARN() << "[Demod] LDPC codec dimensions do not match unified framing.";
+                _llr_pool.release(std::move(frame_llr.llr));
+                continue;
+            }
+
+            size_t symbol_offset = 0;
             bool latency_recorded = false;
-            while (llr_offset + bits_per_block <= frame_llr.llr.size()) {
-                // 1. Extract LLR of current block (corresponding to one LDPC code block)
-                LDPCCodec::AlignedFloatVector header_llr(bits_per_block);
-                std::copy(frame_llr.llr.begin() + llr_offset,
-                         frame_llr.llr.begin() + llr_offset + bits_per_block,
-                         header_llr.begin());
-                
-                // 2. Deinterleave and soft descramble the LDPC header
-                _bit_interleaver->deinterleave_inplace(header_llr, _deinterleaver_llr_scratch);
-                _descrambler.soft_descramble(header_llr);
-                
-                // 3. LDPC soft decode
-                LDPCCodec::AlignedByteVector decoded_header;
-                bool header_decoded = false;
-                try {
-                    _ldpc_decoder.decode_frame(header_llr, decoded_header);
-                    header_decoded = true;
-                } catch (const std::exception& e) {
-                    // LDPC decode failed, skip this frame
+            while ((symbol_offset + LdpcPacketFraming::kControlSymbols) * 2 <= frame_llr.llr.size()) {
+                const size_t control_llr_offset = symbol_offset * 2;
+                float marker_metric = 0.0f;
+                if (!LdpcPacketFraming::detect_marker_llrs(
+                        frame_llr.llr.data() + control_llr_offset,
+                        &marker_metric)) {
                     break;
                 }
-                
-                // 4. Detect header: dynamic header_len (based on decoder K) and verify repetition of payload_len in first and second half
-                if (header_decoded) {
-                    // Use K/N from decoder to calculate bytes/bits
-                    size_t K_bits_local = _ldpc_decoder.get_K();
-                    size_t bytes_per_ldpc_block = (K_bits_local + 7) / 8;
-                    size_t header_len = (K_bits_local + 7) / 8; // Number of bytes
 
-                    // Split into two halves, ensure second half has even bytes, extra byte goes to first half
-                    size_t half1 = (header_len + 1) / 2;
-                    size_t half2 = header_len - half1;
-                    if ((half2 % 2) != 0 && half2 > 0) { half1 += 1; half2 -= 1; }
+                LdpcMiniHeader mini_header;
+                if (!LdpcPacketFraming::decode_mini_header_llrs(
+                        frame_llr.llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
+                        mini_header)) {
+                    LOG_G_WARN() << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
+                    break;
+                }
 
-                    // Verify first half is 1,2,3... (byte-wise, wrapped to 8 bits)
-                    bool header_match = true;
-                    for (size_t i = 0; i < half1; ++i) {
-                        if (static_cast<uint8_t>(decoded_header[i]) != static_cast<uint8_t>((i + 1) & 0xFF)) { header_match = false; break; }
-                    }
-                    if (!header_match) {
-                        // Mismatch, skip this frame
-                        break;
-                    }
+                const size_t payload_blocks =
+                    LdpcPacketFraming::payload_blocks_for_len(mini_header.payload_len);
+                const size_t required_llr = payload_blocks * bits_per_block;
+                const size_t payload_llr_offset =
+                    control_llr_offset + LdpcPacketFraming::kControlBits;
+                const size_t next_symbol_offset =
+                    symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
 
-                    size_t second_start = half1;
-                    uint16_t payload_len = (static_cast<uint16_t>(static_cast<uint8_t>(decoded_header[second_start])) << 8) |
-                                           static_cast<uint16_t>(static_cast<uint8_t>(decoded_header[second_start + 1]));
+                if (payload_llr_offset + required_llr > frame_llr.llr.size()) {
+                    LOG_G_WARN() << "[Demod] Mini-header requested payload beyond frame: blocks="
+                                 << payload_blocks
+                                 << ", seq=" << mini_header.seq;
+                    break;
+                }
 
-                    bool all_equal = true;
-                    for (size_t k = 1; k < half2/2; ++k) {
-                        size_t idx = second_start + k*2;
-                        uint16_t v = (static_cast<uint16_t>(static_cast<uint8_t>(decoded_header[idx])) << 8) |
-                                     static_cast<uint16_t>(static_cast<uint8_t>(decoded_header[idx+1]));
-                        if (v != payload_len) { all_equal = false; break; }
-                    }
-                    if (!all_equal) {
-                        LOG_G_WARN() << "[Demod] Warning: payload_len inconsistency in repetition area";
-                        llr_offset += bits_per_block;
+                if (payload_blocks == 0) {
+                    symbol_offset = next_symbol_offset;
+                    continue;
+                }
+
+                LDPCCodec::AlignedFloatVector payload_llr(required_llr);
+                std::copy(frame_llr.llr.begin() + payload_llr_offset,
+                          frame_llr.llr.begin() + payload_llr_offset + required_llr,
+                          payload_llr.begin());
+
+                _bit_interleaver->deinterleave_inplace(payload_llr, _deinterleaver_llr_scratch);
+                _descrambler.soft_descramble(payload_llr);
+
+                LDPCCodec::AlignedByteVector decoded_payload;
+                try {
+                    _ldpc_decoder.decode_frame(payload_llr, decoded_payload);
+                    if (decoded_payload.size() < mini_header.payload_len) {
+                        LOG_G_WARN() << "[Demod] Decoded payload shorter than mini-header length.";
+                        symbol_offset = next_symbol_offset;
                         continue;
                     }
 
-                    // Calculate padding and required LLR count (using bytes_per_ldpc_block and decoder N)
-                    size_t padded_len = ((payload_len + bytes_per_ldpc_block - 1) / bytes_per_ldpc_block) * bytes_per_ldpc_block;
-                    size_t num_blocks = padded_len / bytes_per_ldpc_block;
-                    size_t required_llr = num_blocks * bits_per_block;
-
-                    llr_offset += bits_per_block; // Move past header LLR (one LDPC block)
-                    
-                    // 7. Check if there is enough LLR data
-                    if (llr_offset + required_llr <= frame_llr.llr.size()) {
-                        // 8. Extract payload LLR
-                        LDPCCodec::AlignedFloatVector payload_llr(required_llr);
-                        std::copy(frame_llr.llr.begin() + llr_offset,
-                                 frame_llr.llr.begin() + llr_offset + required_llr,
-                                 payload_llr.begin());
-                        
-                        // 9. Deinterleave and soft descramble payload data
-                        _bit_interleaver->deinterleave_inplace(payload_llr, _deinterleaver_llr_scratch);
-                        _descrambler.soft_descramble(payload_llr);
-                        
-                        // 10. LDPC soft decode payload data
-                        LDPCCodec::AlignedByteVector decoded_payload;
-                        try {
-                            _ldpc_decoder.decode_frame(payload_llr, decoded_payload);
-                            
-                            // 11. Send decoded UDP data directly (padding removed)
-                            std::vector<uint8_t> udp_data(decoded_payload.begin(), decoded_payload.begin() + payload_len);
+                    std::vector<uint8_t> udp_data(
+                        decoded_payload.begin(),
+                        decoded_payload.begin() + mini_header.payload_len);
 
                             bool handled_measurement_payload = false;
                             if (_measurement_enabled) {
@@ -2088,17 +2065,10 @@ private:
                             }
                             // LOG_G_INFO() << "[Demod] Successfully reconstructed and sent UDP packet, size: " << udp_data.size() << " bytes" << std::endl;
 
-                            llr_offset += required_llr; // Move past payload data
-                            
-                        } catch (const std::exception& e) {
-                            LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
-                            llr_offset += required_llr; // Skip this data chunk
-                        }
-                    } else {
-                        // Insufficient data, exit loop
-                        break;
-                    }
-                    }
+                } catch (const std::exception& e) {
+                    LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
+                }
+                symbol_offset = next_symbol_offset;
             }
             // Return LLR buffer to pool for reuse
             _llr_pool.release(std::move(frame_llr.llr));

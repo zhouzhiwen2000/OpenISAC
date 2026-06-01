@@ -14,6 +14,10 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <fftw3.h>
 #include "Common.hpp"
 #include <cstdio>
@@ -174,6 +178,472 @@ inline AlignedVector generate_sensing_pilot_freq(size_t fft_size, int sync_zc_ro
         fft_size,
         select_known_sensing_pilot_zc_root(fft_size, sync_zc_root));
 }
+
+struct LdpcMiniHeader {
+    uint8_t version = 1;
+    uint8_t flags = 0;
+    uint16_t payload_len = 0;
+    uint8_t payload_blocks = 0;
+    uint16_t seq = 0;
+};
+
+/**
+ * @brief Shared marker + mini-header framing for LDPC(1008,504) packets.
+ */
+class LdpcPacketFraming {
+public:
+    static constexpr size_t kMarkerSymbols = 64;
+    static constexpr size_t kMarkerBits = kMarkerSymbols * 2;
+    static constexpr size_t kMiniHeaderBits = 64;
+    static constexpr size_t kMiniHeaderBchBits = 127;
+    static constexpr size_t kMiniHeaderEncodedBits = 128;
+    static constexpr size_t kMiniHeaderSymbols = kMiniHeaderEncodedBits / 2;
+    static constexpr size_t kMiniHeaderBchT = 10;
+    static constexpr size_t kControlSymbols = kMarkerSymbols + kMiniHeaderSymbols;
+    static constexpr size_t kControlBits = kControlSymbols * 2;
+    static constexpr size_t kLdpcInfoBytesPerBlock = 63;
+    static constexpr size_t kLdpcCodeBitsPerBlock = 1008;
+    static constexpr size_t kLdpcQpskSymbolsPerBlock = kLdpcCodeBitsPerBlock / 2;
+    static constexpr uint8_t kVersion = 1;
+    static constexpr uint8_t kFlags = 0;
+    static constexpr uint8_t kPayloadBlocksExtended = std::numeric_limits<uint8_t>::max();
+    static constexpr float kMarkerMetricThreshold = 0.50f;
+
+    static size_t max_payload_bytes() {
+        return std::numeric_limits<uint16_t>::max();
+    }
+
+    static bool payload_len_fits(size_t payload_len) {
+        return payload_len <= max_payload_bytes();
+    }
+
+    static size_t payload_blocks_for_len(size_t payload_len) {
+        if (!payload_len_fits(payload_len)) {
+            throw std::runtime_error("LDPC mini-header payload length exceeds representable block count.");
+        }
+        return (payload_len + kLdpcInfoBytesPerBlock - 1) / kLdpcInfoBytesPerBlock;
+    }
+
+    static uint8_t payload_blocks_field_for_len(size_t payload_len) {
+        const size_t blocks = payload_blocks_for_len(payload_len);
+        return static_cast<uint8_t>(
+            std::min<size_t>(blocks, kPayloadBlocksExtended));
+    }
+
+    static bool payload_blocks_field_matches(size_t payload_len, uint8_t field) {
+        const size_t blocks = payload_blocks_for_len(payload_len);
+        if (blocks >= kPayloadBlocksExtended) {
+            return field == kPayloadBlocksExtended;
+        }
+        return field == static_cast<uint8_t>(blocks);
+    }
+
+    static size_t padded_payload_len(size_t payload_len) {
+        return payload_blocks_for_len(payload_len) * kLdpcInfoBytesPerBlock;
+    }
+
+    static size_t packet_qpsk_symbols(size_t payload_blocks) {
+        return kControlSymbols + payload_blocks * kLdpcQpskSymbolsPerBlock;
+    }
+
+    static int marker_symbol(size_t idx) {
+        uint32_t x = 0x4f504953u ^ static_cast<uint32_t>(idx * 0x9e3779b9u);
+        x ^= x >> 16;
+        x *= 0x7feb352du;
+        x ^= x >> 15;
+        x *= 0x846ca68bu;
+        x ^= x >> 16;
+        return static_cast<int>((x >> 5) & 0x3u);
+    }
+
+    template<typename Out>
+    static void write_marker_qpsk(Out* out) {
+        for (size_t i = 0; i < kMarkerSymbols; ++i) {
+            out[i] = static_cast<Out>(marker_symbol(i));
+        }
+    }
+
+    template<typename Out>
+    static void write_mini_header_qpsk(const LdpcMiniHeader& header, Out* out) {
+        const uint64_t word = pack_header(header);
+        const auto code_bits = bch_encode_header(word);
+        for (size_t sym = 0; sym < kMiniHeaderSymbols; ++sym) {
+            const size_t bit_idx = sym * 2;
+            const int b0 = (bit_idx < kMiniHeaderBchBits) ? code_bits[bit_idx] : 0;
+            const int b1 = (bit_idx + 1 < kMiniHeaderBchBits) ? code_bits[bit_idx + 1] : 0;
+            out[sym] = static_cast<Out>((b0 << 1) | b1);
+        }
+    }
+
+    template<typename Out>
+    static void write_control_qpsk(const LdpcMiniHeader& header, Out* out) {
+        write_marker_qpsk(out);
+        write_mini_header_qpsk(header, out + kMarkerSymbols);
+    }
+
+    template<typename Llr>
+    static float marker_metric_from_llrs(const Llr* llrs) {
+        double corr = 0.0;
+        double energy = 0.0;
+        for (size_t sym = 0; sym < kMarkerSymbols; ++sym) {
+            const int qpsk = marker_symbol(sym);
+            const int b0 = (qpsk >> 1) & 1;
+            const int b1 = qpsk & 1;
+            const float l0 = static_cast<float>(llrs[sym * 2]);
+            const float l1 = static_cast<float>(llrs[sym * 2 + 1]);
+            corr += (b0 ? -l0 : l0);
+            corr += (b1 ? -l1 : l1);
+            energy += std::abs(l0) + std::abs(l1);
+        }
+        if (energy <= 1.0e-9) {
+            return 0.0f;
+        }
+        return static_cast<float>(corr / energy);
+    }
+
+    template<typename Llr>
+    static bool detect_marker_llrs(const Llr* llrs, float* metric_out = nullptr) {
+        const float metric = marker_metric_from_llrs(llrs);
+        if (metric_out) {
+            *metric_out = metric;
+        }
+        return metric >= kMarkerMetricThreshold;
+    }
+
+    template<typename Llr>
+    static bool decode_mini_header_llrs(const Llr* llrs, LdpcMiniHeader& header_out) {
+        std::array<uint8_t, kMiniHeaderBchBits> code_bits{};
+        for (size_t bit = 0; bit < kMiniHeaderBchBits; ++bit) {
+            code_bits[bit] = (static_cast<float>(llrs[bit]) < 0.0f) ? 1 : 0;
+        }
+        uint64_t word = 0;
+        return bch_decode_header(code_bits, word) && unpack_header(word, header_out);
+    }
+
+    static uint64_t pack_header(const LdpcMiniHeader& header) {
+        if (header.version != kVersion || header.flags != kFlags) {
+            throw std::runtime_error("LDPC mini-header version/flags mismatch.");
+        }
+        if (!payload_len_fits(header.payload_len)) {
+            throw std::runtime_error("LDPC mini-header payload length is too large.");
+        }
+        if (!payload_blocks_field_matches(header.payload_len, header.payload_blocks)) {
+            throw std::runtime_error("LDPC mini-header payload block count mismatch.");
+        }
+
+        uint64_t prefix = 0;
+        prefix |= (static_cast<uint64_t>(header.version & 0x0F) << 44);
+        prefix |= (static_cast<uint64_t>(header.flags & 0x0F) << 40);
+        prefix |= (static_cast<uint64_t>(header.payload_len) << 24);
+        prefix |= (static_cast<uint64_t>(header.payload_blocks) << 16);
+        prefix |= static_cast<uint64_t>(header.seq);
+
+        uint8_t bytes[6] = {};
+        for (int i = 0; i < 6; ++i) {
+            bytes[i] = static_cast<uint8_t>((prefix >> (40 - i * 8)) & 0xFFu);
+        }
+        const uint16_t crc = crc16_ccitt(bytes, sizeof(bytes));
+        return (prefix << 16) | static_cast<uint64_t>(crc);
+    }
+
+    static bool unpack_header(uint64_t word, LdpcMiniHeader& header_out) {
+        uint8_t bytes[6] = {};
+        const uint64_t prefix = word >> 16;
+        for (int i = 0; i < 6; ++i) {
+            bytes[i] = static_cast<uint8_t>((prefix >> (40 - i * 8)) & 0xFFu);
+        }
+        const uint16_t expected_crc = crc16_ccitt(bytes, sizeof(bytes));
+        const uint16_t got_crc = static_cast<uint16_t>(word & 0xFFFFu);
+        if (expected_crc != got_crc) {
+            return false;
+        }
+
+        LdpcMiniHeader parsed;
+        parsed.version = static_cast<uint8_t>((prefix >> 44) & 0x0Fu);
+        parsed.flags = static_cast<uint8_t>((prefix >> 40) & 0x0Fu);
+        parsed.payload_len = static_cast<uint16_t>((prefix >> 24) & 0xFFFFu);
+        parsed.payload_blocks = static_cast<uint8_t>((prefix >> 16) & 0xFFu);
+        parsed.seq = static_cast<uint16_t>(prefix & 0xFFFFu);
+
+        if (parsed.version != kVersion || parsed.flags != kFlags) {
+            return false;
+        }
+        if (!payload_len_fits(parsed.payload_len)) {
+            return false;
+        }
+        if (!payload_blocks_field_matches(parsed.payload_len, parsed.payload_blocks)) {
+            return false;
+        }
+
+        header_out = parsed;
+        return true;
+    }
+
+private:
+    struct BchTables {
+        std::array<uint8_t, 127> exp{};
+        std::array<int16_t, 128> log{};
+        std::array<uint8_t, 64> generator{};
+    };
+
+    static int header_bit(uint64_t word, size_t bit_idx) {
+        return static_cast<int>((word >> (63 - bit_idx)) & 0x1u);
+    }
+
+    static uint8_t gf_xtime(uint8_t value) {
+        uint16_t shifted = static_cast<uint16_t>(value) << 1;
+        if (shifted & 0x80u) {
+            shifted ^= 0x83u; // x^7 + x + 1
+        }
+        return static_cast<uint8_t>(shifted & 0x7Fu);
+    }
+
+    static const BchTables& bch_tables() {
+        static const BchTables tables = []() {
+            BchTables t;
+            t.log.fill(-1);
+
+            uint8_t value = 1;
+            for (int i = 0; i < 127; ++i) {
+                t.exp[static_cast<size_t>(i)] = value;
+                t.log[static_cast<size_t>(value)] = static_cast<int16_t>(i);
+                value = gf_xtime(value);
+            }
+            if (value != 1) {
+                throw std::runtime_error("BCH GF(2^7) primitive polynomial order check failed.");
+            }
+
+            auto gf_mul_local = [&t](uint8_t a, uint8_t b) -> uint8_t {
+                if (a == 0 || b == 0) {
+                    return 0;
+                }
+                const int sum = t.log[static_cast<size_t>(a)] + t.log[static_cast<size_t>(b)];
+                return t.exp[static_cast<size_t>(sum % 127)];
+            };
+
+            std::array<uint8_t, 127> root_seen{};
+            std::vector<int> root_exponents;
+            root_exponents.reserve(63);
+            for (int root = 1; root <= static_cast<int>(2 * kMiniHeaderBchT); ++root) {
+                int exponent = root % 127;
+                for (int i = 0; i < 7; ++i) {
+                    if (!root_seen[static_cast<size_t>(exponent)]) {
+                        root_seen[static_cast<size_t>(exponent)] = 1;
+                        root_exponents.push_back(exponent);
+                    }
+                    exponent = (exponent * 2) % 127;
+                }
+            }
+            std::sort(root_exponents.begin(), root_exponents.end());
+
+            std::vector<uint8_t> poly(1, 1);
+            for (int exponent : root_exponents) {
+                const uint8_t root = t.exp[static_cast<size_t>(exponent)];
+                std::vector<uint8_t> next(poly.size() + 1, 0);
+                for (size_t i = 0; i < poly.size(); ++i) {
+                    next[i] ^= gf_mul_local(poly[i], root);
+                    next[i + 1] ^= poly[i];
+                }
+                poly = std::move(next);
+            }
+
+            if (poly.size() != t.generator.size()) {
+                throw std::runtime_error("BCH(127,64) generator degree mismatch.");
+            }
+            for (size_t i = 0; i < poly.size(); ++i) {
+                if (poly[i] != 0 && poly[i] != 1) {
+                    throw std::runtime_error("BCH(127,64) generator is not binary.");
+                }
+                t.generator[i] = poly[i];
+            }
+            if (t.generator.back() != 1) {
+                throw std::runtime_error("BCH(127,64) generator is not monic.");
+            }
+            return t;
+        }();
+        return tables;
+    }
+
+    static uint8_t gf_mul(uint8_t a, uint8_t b) {
+        if (a == 0 || b == 0) {
+            return 0;
+        }
+        const auto& t = bch_tables();
+        const int sum = t.log[static_cast<size_t>(a)] + t.log[static_cast<size_t>(b)];
+        return t.exp[static_cast<size_t>(sum % 127)];
+    }
+
+    static uint8_t gf_div(uint8_t a, uint8_t b) {
+        if (a == 0) {
+            return 0;
+        }
+        if (b == 0) {
+            throw std::runtime_error("BCH GF divide by zero.");
+        }
+        const auto& t = bch_tables();
+        int diff = t.log[static_cast<size_t>(a)] - t.log[static_cast<size_t>(b)];
+        diff %= 127;
+        if (diff < 0) {
+            diff += 127;
+        }
+        return t.exp[static_cast<size_t>(diff)];
+    }
+
+    static std::array<uint8_t, kMiniHeaderBchBits> bch_encode_header(uint64_t word) {
+        const auto& tables = bch_tables();
+        std::array<uint8_t, kMiniHeaderBchBits> work{};
+        std::array<uint8_t, kMiniHeaderBits> message{};
+        for (size_t i = 0; i < kMiniHeaderBits; ++i) {
+            message[i] = static_cast<uint8_t>(header_bit(word, i));
+            work[63 + i] = message[i];
+        }
+
+        for (int pos = static_cast<int>(kMiniHeaderBchBits) - 1; pos >= 63; --pos) {
+            if (work[static_cast<size_t>(pos)] == 0) {
+                continue;
+            }
+            const int shift = pos - 63;
+            for (size_t j = 0; j < tables.generator.size(); ++j) {
+                work[static_cast<size_t>(shift) + j] ^= tables.generator[j];
+            }
+        }
+
+        std::array<uint8_t, kMiniHeaderBchBits> code_bits{};
+        for (size_t i = 0; i < 63; ++i) {
+            code_bits[i] = work[i] & 1u;
+        }
+        for (size_t i = 0; i < kMiniHeaderBits; ++i) {
+            code_bits[63 + i] = message[i];
+        }
+        return code_bits;
+    }
+
+    static std::array<uint8_t, 2 * kMiniHeaderBchT> bch_syndromes(
+        const std::array<uint8_t, kMiniHeaderBchBits>& code_bits)
+    {
+        const auto& tables = bch_tables();
+        std::array<uint8_t, 2 * kMiniHeaderBchT> syndromes{};
+        for (size_t syndrome = 1; syndrome <= syndromes.size(); ++syndrome) {
+            uint8_t accum = 0;
+            for (size_t pos = 0; pos < kMiniHeaderBchBits; ++pos) {
+                if (code_bits[pos]) {
+                    accum ^= tables.exp[(syndrome * pos) % 127];
+                }
+            }
+            syndromes[syndrome - 1] = accum;
+        }
+        return syndromes;
+    }
+
+    static bool bch_decode_header(
+        std::array<uint8_t, kMiniHeaderBchBits> code_bits,
+        uint64_t& word_out)
+    {
+        constexpr size_t kSyndromeCount = 2 * kMiniHeaderBchT;
+        const auto& tables = bch_tables();
+        auto syndromes = bch_syndromes(code_bits);
+
+        bool has_error = false;
+        for (uint8_t s : syndromes) {
+            has_error = has_error || (s != 0);
+        }
+        if (has_error) {
+            std::array<uint8_t, kSyndromeCount + 1> locator{};
+            std::array<uint8_t, kSyndromeCount + 1> previous{};
+            locator[0] = 1;
+            previous[0] = 1;
+            size_t degree = 0;
+            size_t shift = 1;
+            uint8_t scale = 1;
+
+            for (size_t n = 0; n < kSyndromeCount; ++n) {
+                uint8_t discrepancy = syndromes[n];
+                for (size_t i = 1; i <= degree; ++i) {
+                    if (locator[i] != 0 && syndromes[n - i] != 0) {
+                        discrepancy ^= gf_mul(locator[i], syndromes[n - i]);
+                    }
+                }
+
+                if (discrepancy == 0) {
+                    ++shift;
+                    continue;
+                }
+
+                const auto saved = locator;
+                const uint8_t factor = gf_div(discrepancy, scale);
+                for (size_t i = 0; i + shift < locator.size(); ++i) {
+                    if (previous[i]) {
+                        locator[i + shift] ^= gf_mul(factor, previous[i]);
+                    }
+                }
+
+                if (2 * degree <= n) {
+                    degree = n + 1 - degree;
+                    previous = saved;
+                    scale = discrepancy;
+                    shift = 1;
+                } else {
+                    ++shift;
+                }
+            }
+
+            if (degree > kMiniHeaderBchT) {
+                return false;
+            }
+
+            std::vector<size_t> error_positions;
+            error_positions.reserve(degree);
+            for (size_t pos = 0; pos < kMiniHeaderBchBits; ++pos) {
+                const uint8_t x = tables.exp[(127 - (pos % 127)) % 127];
+                uint8_t value = locator[0];
+                uint8_t x_power = 1;
+                for (size_t i = 1; i <= degree; ++i) {
+                    x_power = gf_mul(x_power, x);
+                    if (locator[i]) {
+                        value ^= gf_mul(locator[i], x_power);
+                    }
+                }
+                if (value == 0) {
+                    error_positions.push_back(pos);
+                }
+            }
+
+            if (error_positions.size() != degree) {
+                return false;
+            }
+            for (size_t pos : error_positions) {
+                code_bits[pos] ^= 1u;
+            }
+
+            const auto corrected_syndromes = bch_syndromes(code_bits);
+            for (uint8_t s : corrected_syndromes) {
+                if (s != 0) {
+                    return false;
+                }
+            }
+        }
+
+        uint64_t word = 0;
+        for (size_t i = 0; i < kMiniHeaderBits; ++i) {
+            word = (word << 1) | static_cast<uint64_t>(code_bits[63 + i] & 1u);
+        }
+        word_out = word;
+        return true;
+    }
+
+    static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
+        uint16_t crc = 0xFFFFu;
+        for (size_t i = 0; i < len; ++i) {
+            crc ^= static_cast<uint16_t>(data[i]) << 8;
+            for (int bit = 0; bit < 8; ++bit) {
+                crc = (crc & 0x8000u)
+                    ? static_cast<uint16_t>((crc << 1) ^ 0x1021u)
+                    : static_cast<uint16_t>(crc << 1);
+            }
+        }
+        return crc;
+    }
+};
 
 
 /**

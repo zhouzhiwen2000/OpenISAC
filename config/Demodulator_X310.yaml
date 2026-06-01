@@ -6,7 +6,7 @@ cp_length: 128                 # Cyclic prefix length (samples)
 sync_pos: 1                    # Sync symbol index in one frame
 num_symbols: 100               # Number of OFDM symbols per frame
 sensing_symbol_num: 100        # Number of symbols used in sensing processing
-frame_queue_size: 32           # Capacity of the demodulated RX frame queue
+frame_queue_size: 128          # Capacity of the demodulated RX frame queue
 sync_queue_size: 32            # Capacity of the sync-search batch queue
 reset_hold_s: 0.5              # Persistent invalid-delay duration before forcing a hard reset (s)
 zc_root: 29                    # Zadoff-Chu root for sync/preamble
