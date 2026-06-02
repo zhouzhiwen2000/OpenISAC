@@ -37,7 +37,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - Setup and installation: [Hardware Setup](#hardware-setup), [Software Installation](#software-installation)
 - First end-to-end run: [Typical Usage Example](#typical-usage-example)
 - Runtime configuration: [OFDM Modulator](#ofdm-modulator), [OFDM Demodulator](#ofdm-demodulator)
-- Web control UI: [Web Config Console](#7-web-config-console)
+- Web control UI: [Web Config Console](#8-web-config-console)
 - Recent updates: [Changelog](CHANGELOG.md)
 
 ## Repository Layout
@@ -457,7 +457,21 @@ python3 ./scripts/plot_bi_sensing_fast.py
 ```
 This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.
 
-### 7. Web Config Console
+### 7. Calibrate sensing channel response
+
+Before calibration, connect the sensing RF path directly: connect the transmit RF output to the corresponding sensing RX input and keep the connection stable during calibration.
+
+If the transmit power is high, reduce the transmit power first. If needed, insert a suitable attenuator in the direct RF path to avoid RX saturation. The attenuator should be as flat as possible across the signal bandwidth; otherwise its in-band ripple will be included in the calibration result.
+
+For monostatic sensing, start the BS backend and the monostatic sensing frontend, select the sensing channel you want to calibrate in the viewer, then click `Calibrate Hsys`. For multichannel monostatic setups, repeat this for each channel that needs its own RF path calibration.
+
+For bistatic sensing, start the BS and UE backends, open the bistatic sensing frontend, then click `Calibrate Hsys` in the bistatic viewer while the RF path is directly connected.
+
+Wait for the backend log to report that calibration has completed and the calibration file has been saved. The current run will immediately use the new response calibration. On later launches, the backend automatically loads the matching calibration file; if no matching file is found, sensing continues without calibration and prints a notice.
+
+After calibration is complete, restore the normal antenna or experiment connection before continuing OTA measurements.
+
+### 8. Web Config Console
 For remote-friendly configuration editing and process control, run:
 ```bash
 python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765

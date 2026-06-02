@@ -11,6 +11,7 @@ CMD_HEADER = b"CMD "
 REQ_HEADER = b"REQ "
 READY_COMMAND = b"RDY "
 PARAMS_COMMAND = b"PARM"
+CALIBRATE_SYSTEM_RESPONSE_COMMAND = b"CALB"
 
 COMPACT_MAGIC_VERSION = 0x43534D31  # "CSM1"
 AGGREGATE_MAGIC_VERSION = 0x41534731  # "ASG1"
@@ -188,6 +189,14 @@ class DecodedSensingMetadata:
 
 def build_params_request(value: int = 0) -> bytes:
     return REQUEST_PACKET_STRUCT.pack(REQ_HEADER, PARAMS_COMMAND, int(value))
+
+
+def build_control_command(command: bytes, value: int = 0) -> bytes:
+    return REQUEST_PACKET_STRUCT.pack(CMD_HEADER, command, int(value))
+
+
+def build_system_response_calibration_command(value: int = 0) -> bytes:
+    return build_control_command(CALIBRATE_SYSTEM_RESPONSE_COMMAND, value)
 
 
 def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:

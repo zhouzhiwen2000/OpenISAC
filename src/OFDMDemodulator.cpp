@@ -816,6 +816,15 @@ private:
             LOG_G_INFO() << "Measurement epoch reset to " << value;
         });
 
+        _control_handler.register_command("CALB", [this](int32_t value) {
+            if (!_bistatic_sensing_channel) {
+                LOG_G_WARN() << "CALB ignored: bistatic sensing channel is not initialized";
+                return;
+            }
+            const size_t target_symbols = value <= 0 ? 0u : static_cast<size_t>(value);
+            _bistatic_sensing_channel->request_system_response_calibration(target_symbols);
+        });
+
         _control_handler.register_request("PARM", [this](int32_t) {
             if (!cfg_.enable_bi_sensing) {
                 return;
@@ -872,6 +881,7 @@ private:
         _bistatic_sensing_channel = std::make_unique<SensingChannel>(
             cfg_,
             bistatic_cfg,
+            SensingChannel::SensingRole::Bistatic,
             cfg_.bi_sensing_ip,
             cfg_.bi_sensing_port,
             0,

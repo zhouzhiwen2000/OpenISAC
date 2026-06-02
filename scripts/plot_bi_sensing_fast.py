@@ -18,6 +18,7 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 from sensing_runtime_protocol import (
+    CALIBRATE_SYSTEM_RESPONSE_COMMAND,
     CTRL_HEADER,
     PARAMS_COMMAND,
     READY_COMMAND,
@@ -979,6 +980,10 @@ def send_strd_command(val):
 def send_mti_command(enabled):
     send_command(b"CMD ", b"MTI ", 1 if enabled else 0)
 
+def send_system_response_calibration_command():
+    send_command(b"CMD ", CALIBRATE_SYSTEM_RESPONSE_COMMAND, 0)
+    print("Requested bistatic Hsys calibration. Keep RF TX/RX directly connected until backend reports completion.")
+
 # ====== MainWindow with PyQt6 + PyQtGraph ======
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -1181,6 +1186,11 @@ class MainWindow(QtWidgets.QMainWindow):
         strd_layout.addWidget(self.txt_strd)
         strd_layout.addWidget(btn_strd)
         control_layout.addLayout(strd_layout)
+        control_layout.addSpacing(20)
+
+        btn_hsys_cal = QtWidgets.QPushButton("Calibrate Hsys")
+        btn_hsys_cal.clicked.connect(send_system_response_calibration_command)
+        control_layout.addWidget(btn_hsys_cal)
         control_layout.addSpacing(20)
 
         # Toggles

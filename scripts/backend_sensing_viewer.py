@@ -21,6 +21,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from sensing_detection import build_detection_views
 from sensing_runtime_protocol import (
     AGGREGATE_MAGIC_VERSION,
+    CALIBRATE_SYSTEM_RESPONSE_COMMAND,
     CTRL_HEADER,
     FLAG_ENABLE_MTI,
     PARAMS_COMMAND,
@@ -1021,6 +1022,10 @@ class MainWindow(QtWidgets.QMainWindow):
         rx_gain_layout.addWidget(btn_rx_gain)
         control_layout.addLayout(rx_gain_layout)
 
+        btn_hsys_cal = QtWidgets.QPushButton("Calibrate Hsys")
+        btn_hsys_cal.clicked.connect(self.calibrate_system_response)
+        control_layout.addWidget(btn_hsys_cal)
+
         control_layout.addSpacing(20)
 
         btn_refresh = QtWidgets.QPushButton("Refresh Viewer Params")
@@ -1205,6 +1210,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.runtime.launch_cfg.mode == "mono":
             self.runtime.send_control_command(b"ALCH", int(self._selected_channel))
         self.runtime.send_control_command(b"RXGN", gain_x10)
+
+    def calibrate_system_response(self) -> None:
+        if self.runtime.launch_cfg.mode == "mono":
+            self.runtime.send_control_command(b"ALCH", int(self._selected_channel))
+        if self.runtime.send_control_command(CALIBRATE_SYSTEM_RESPONSE_COMMAND, 0):
+            print("Requested Hsys calibration. Keep RF TX/RX directly connected until backend reports completion.")
 
     def _apply_backend_settings(self) -> None:
         try:

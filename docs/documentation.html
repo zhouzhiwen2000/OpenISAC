@@ -274,7 +274,14 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <pre><code class="language-bash">python3 ./scripts/plot_bi_sensing_fast.py
 </code></pre>
 <p>This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.</p>
-<h3 id="7-web-config-console">7. Web Config Console</h3>
+<h3 id="7-calibrate-sensing-channel-response">7. Calibrate sensing channel response</h3>
+<p>Before calibration, connect the sensing RF path directly: connect the transmit RF output to the corresponding sensing RX input and keep the connection stable during calibration.</p>
+<p>If the transmit power is high, reduce the transmit power first. If needed, insert a suitable attenuator in the direct RF path to avoid RX saturation. The attenuator should be as flat as possible across the signal bandwidth; otherwise its in-band ripple will be included in the calibration result.</p>
+<p>For monostatic sensing, start the BS backend and the monostatic sensing frontend, select the sensing channel you want to calibrate in the viewer, then click <code>Calibrate Hsys</code>. For multichannel monostatic setups, repeat this for each channel that needs its own RF path calibration.</p>
+<p>For bistatic sensing, start the BS and UE backends, open the bistatic sensing frontend, then click <code>Calibrate Hsys</code> in the bistatic viewer while the RF path is directly connected.</p>
+<p>Wait for the backend log to report that calibration has completed and the calibration file has been saved. The current run will immediately use the new response calibration. On later launches, the backend automatically loads the matching calibration file; if no matching file is found, sensing continues without calibration and prints a notice.</p>
+<p>After calibration is complete, restore the normal antenna or experiment connection before continuing OTA measurements.</p>
+<h3 id="8-web-config-console">8. Web Config Console</h3>
 <p>For remote-friendly configuration editing and process control, run:</p>
 <pre><code class="language-bash">python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 </code></pre>

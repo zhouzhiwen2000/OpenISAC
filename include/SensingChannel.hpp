@@ -6,6 +6,7 @@
 #include <fftw3.h>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -40,6 +41,11 @@ struct SharedSensingRuntime {
 
 class SensingChannel {
 public:
+    enum class SensingRole {
+        Monostatic,
+        Bistatic,
+    };
+
     using HeartbeatCallback = std::function<void(const std::string&, int)>;
     using CoreResolver = std::function<std::optional<size_t>(size_t)>;
     using BatchResetRequester = std::function<void()>;
@@ -47,6 +53,7 @@ public:
     SensingChannel(
         const Config& cfg,
         const SensingRxChannelConfig& channel_cfg,
+        SensingRole role,
         const std::string& output_ip,
         int output_port,
         uint32_t logical_id,
@@ -77,6 +84,7 @@ public:
     void set_alignment(int32_t samples);
     bool set_rx_gain(double requested_gain_db, double* applied_gain_db = nullptr);
     void apply_shared_cfg(const SharedSensingRuntime& snapshot);
+    void request_system_response_calibration(size_t target_symbols = 0);
 
     uint32_t logical_id() const;
     int32_t target_alignment() const;
@@ -109,6 +117,18 @@ private:
     struct RxSymbolsFrame {
         AlignedVector samples;
         uint64_t frame_seq = 0;
+    };
+
+    struct SystemResponseCalibrationState {
+        std::string file_path;
+        AlignedVector response;
+        AlignedVector inverse_response;
+        AlignedVector accumulator;
+        float min_valid_power = 0.0f;
+        size_t target_symbols = 0;
+        size_t captured_symbols = 0;
+        bool loaded = false;
+        bool capture_active = false;
     };
 
 public:
@@ -274,8 +294,34 @@ private:
     void _apply_shared_sensing_if_due(uint64_t symbol_index);
     void _request_shared_batch_reset();
     void _apply_batch_reset_if_due(uint64_t frame_start_symbol_index);
+    std::string _system_response_calibration_file_path() const;
+    bool _can_capture_full_band_system_response() const;
+    void _load_system_response_calibration();
+    void _accumulate_system_response_calibration(
+        const AlignedVector& channel_buf,
+        size_t range_stride,
+        size_t symbol_count,
+        size_t fft_size
+    );
+    void _apply_system_response_calibration(
+        AlignedVector& channel_buf,
+        size_t range_stride,
+        size_t symbol_count,
+        size_t fft_size
+    );
+    void _apply_regular_compact_system_response_calibration(
+        AlignedVector& channel_buf,
+        size_t range_stride,
+        size_t symbol_count,
+        const std::vector<int>& raw_subcarrier_indices
+    );
+    void _apply_sparse_compact_system_response_calibration(
+        AlignedVector& compact_output,
+        const std::vector<int>& raw_subcarrier_indices
+    );
 
     const Config& _cfg;
+    SensingRole _role = SensingRole::Monostatic;
     std::atomic<bool>& _running_ref;
     std::string _output_ip;
     int _output_port = 0;
@@ -291,6 +337,8 @@ private:
     std::mutex _shared_cfg_mutex;
     SharedSensingRuntime _pending_shared_cfg;
     bool _has_pending_shared_cfg = false;
+    std::mutex _system_response_mutex;
+    SystemResponseCalibrationState _system_response_calibration;
     std::atomic<bool> _stop_requested{false};
 };
 

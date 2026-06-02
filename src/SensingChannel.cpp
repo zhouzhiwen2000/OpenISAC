@@ -3,10 +3,14 @@
 #include <uhd/utils/thread.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 
 namespace {
@@ -14,6 +18,188 @@ namespace {
 inline bool should_profile_sensing(const Config& cfg) {
     return cfg.should_profile("sensing") ||
            cfg.should_profile("sensing_proc");
+}
+
+constexpr size_t kDefaultSystemResponseCalibrationSymbols = 1000;
+constexpr uint32_t kSystemResponseCalibrationVersion = 1;
+constexpr uint32_t kSystemResponseRoleMonostatic = 1;
+constexpr uint32_t kSystemResponseRoleBistatic = 2;
+constexpr char kSystemResponseMagic[8] = {'O', 'I', 'S', 'A', 'C', 'H', '1', '\0'};
+
+#pragma pack(push, 1)
+struct SystemResponseCalibrationFileHeader {
+    char magic[8];
+    char mode[16];
+    uint32_t version = 0;
+    uint32_t role = 0;
+    uint32_t logical_id = 0;
+    uint32_t fft_size = 0;
+    double sample_rate = 0.0;
+    double center_freq = 0.0;
+    double bandwidth = 0.0;
+    uint64_t captured_symbols = 0;
+};
+#pragma pack(pop)
+
+const char* sensing_role_label(SensingChannel::SensingRole role) {
+    return role == SensingChannel::SensingRole::Bistatic ? "bistatic" : "monostatic";
+}
+
+uint32_t sensing_role_id(SensingChannel::SensingRole role) {
+    return role == SensingChannel::SensingRole::Bistatic
+        ? kSystemResponseRoleBistatic
+        : kSystemResponseRoleMonostatic;
+}
+
+std::string make_system_response_calibration_filename(
+    SensingChannel::SensingRole role,
+    uint32_t logical_id)
+{
+    std::ostringstream oss;
+    oss << "sensing_system_response_" << sensing_role_label(role)
+        << "_ch" << logical_id << ".bin";
+    return oss.str();
+}
+
+bool nearly_equal_config_value(double lhs, double rhs) {
+    const double scale = std::max(1.0, std::max(std::abs(lhs), std::abs(rhs)));
+    return std::abs(lhs - rhs) <= scale * 1e-9;
+}
+
+float compute_system_response_min_power(const AlignedVector& response) {
+    float max_power = 0.0f;
+    for (const auto& value : response) {
+        max_power = std::max(max_power, std::norm(value));
+    }
+    if (!(max_power > 0.0f) || !std::isfinite(max_power)) {
+        return std::numeric_limits<float>::infinity();
+    }
+    return std::max(max_power * 1.0e-6f, 1.0e-20f);
+}
+
+bool normalize_system_response(AlignedVector& response) {
+    if (response.empty()) {
+        return false;
+    }
+
+    double power_sum = 0.0;
+    for (const auto& value : response) {
+        const double power = static_cast<double>(std::norm(value));
+        if (!std::isfinite(power)) {
+            return false;
+        }
+        power_sum += power;
+    }
+
+    if (!(power_sum > 0.0) || !std::isfinite(power_sum)) {
+        return false;
+    }
+
+    const float scale = static_cast<float>(
+        std::sqrt(static_cast<double>(response.size()) / power_sum));
+    for (auto& value : response) {
+        value *= scale;
+    }
+    return true;
+}
+
+AlignedVector compute_system_response_inverse(
+    const AlignedVector& response,
+    float min_valid_power)
+{
+    AlignedVector inverse_response(response.size(), std::complex<float>(1.0f, 0.0f));
+    for (size_t i = 0; i < response.size(); ++i) {
+        const float h_real = response[i].real();
+        const float h_imag = response[i].imag();
+        const float power = h_real * h_real + h_imag * h_imag;
+        if (power >= min_valid_power && std::isfinite(power)) {
+            const float inv_power = 1.0f / power;
+            inverse_response[i] = std::complex<float>(h_real * inv_power, -h_imag * inv_power);
+        }
+    }
+    return inverse_response;
+}
+
+SystemResponseCalibrationFileHeader make_system_response_header(
+    const Config& cfg,
+    SensingChannel::SensingRole role,
+    uint32_t logical_id,
+    size_t captured_symbols)
+{
+    SystemResponseCalibrationFileHeader header{};
+    std::memcpy(header.magic, kSystemResponseMagic, sizeof(header.magic));
+    const char* mode = sensing_role_label(role);
+    std::strncpy(header.mode, mode, sizeof(header.mode) - 1);
+    header.version = kSystemResponseCalibrationVersion;
+    header.role = sensing_role_id(role);
+    header.logical_id = logical_id;
+    header.fft_size = static_cast<uint32_t>(cfg.fft_size);
+    header.sample_rate = cfg.sample_rate;
+    header.center_freq = cfg.center_freq;
+    header.bandwidth = cfg.bandwidth;
+    header.captured_symbols = static_cast<uint64_t>(captured_symbols);
+    return header;
+}
+
+std::string header_mode_string(const SystemResponseCalibrationFileHeader& header) {
+    const auto* begin = header.mode;
+    const auto* end = header.mode + sizeof(header.mode);
+    const auto* nul = std::find(begin, end, '\0');
+    return std::string(begin, nul);
+}
+
+void save_system_response_calibration_async(
+    std::string file_path,
+    SystemResponseCalibrationFileHeader header,
+    AlignedVector response)
+{
+    try {
+        std::thread(
+            [file_path = std::move(file_path),
+             header,
+             response = std::move(response)]() mutable {
+                async_logger::LoggerThreadModeGuard log_mode_guard(
+                    async_logger::LoggerThreadMode::NonRealtime);
+                std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
+                if (!out) {
+                    LOG_G_WARN() << "[Sensing Hsys " << header_mode_string(header)
+                                 << " CH " << header.logical_id
+                                 << "] failed to open calibration file for write: "
+                                 << file_path;
+                    return;
+                }
+
+                out.write(
+                    reinterpret_cast<const char*>(&header),
+                    static_cast<std::streamsize>(sizeof(header)));
+                if (!response.empty()) {
+                    out.write(
+                        reinterpret_cast<const char*>(response.data()),
+                        static_cast<std::streamsize>(
+                            response.size() * sizeof(std::complex<float>)));
+                }
+
+                if (!out) {
+                    LOG_G_WARN() << "[Sensing Hsys " << header_mode_string(header)
+                                 << " CH " << header.logical_id
+                                 << "] failed while writing calibration file: "
+                                 << file_path;
+                    return;
+                }
+
+                LOG_G_INFO() << "[Sensing Hsys " << header_mode_string(header)
+                             << " CH " << header.logical_id
+                             << "] saved system response calibration: "
+                             << file_path
+                             << " (" << header.captured_symbols << " symbols)";
+            })
+            .detach();
+    } catch (const std::exception& e) {
+        LOG_G_WARN() << "[Sensing Hsys " << header_mode_string(header)
+                     << " CH " << header.logical_id
+                     << "] failed to start calibration save worker: "
+                     << e.what();
+    }
 }
 
 int64_t round_divide_nearest_away_from_zero(int64_t numerator, int64_t denominator) {
@@ -747,6 +933,7 @@ SensingChannel::SensingComputeContext::~SensingComputeContext() {
 SensingChannel::SensingChannel(
     const Config& cfg,
     const SensingRxChannelConfig& channel_cfg,
+    SensingRole role,
     const std::string& output_ip,
     int output_port,
     uint32_t logical_id,
@@ -758,6 +945,7 @@ SensingChannel::SensingChannel(
     CoreResolver core_resolver
 )
   : _cfg(cfg),
+    _role(role),
     _running_ref(running_ref),
     _output_ip(output_ip),
     _output_port(output_port),
@@ -786,6 +974,8 @@ SensingChannel::SensingChannel(
                          << (reason.empty() ? "mask is not regular-sampling compatible" : reason);
         }
     }
+
+    _load_system_response_calibration();
 
     if (_compute.delay_estimation_enabled && _compute.sensing_pipeline_disabled_by_mode) {
         LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
@@ -998,6 +1188,358 @@ void SensingChannel::apply_shared_cfg(const SharedSensingRuntime& snapshot) {
     std::lock_guard<std::mutex> lock(_shared_cfg_mutex);
     _pending_shared_cfg = snapshot;
     _has_pending_shared_cfg = true;
+}
+
+void SensingChannel::request_system_response_calibration(size_t target_symbols) {
+    const size_t resolved_target =
+        (target_symbols == 0) ? kDefaultSystemResponseCalibrationSymbols : target_symbols;
+    if (resolved_target == 0) {
+        return;
+    }
+
+    if (_compute.sensing_pipeline_disabled_by_mode) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] CALB ignored: sensing pipeline is disabled for this channel";
+        return;
+    }
+    if (!_can_capture_full_band_system_response()) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] CALB ignored: full-band system-response capture requires dense mode "
+                     << "or a full-band regular compact mask";
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_system_response_mutex);
+        auto& cal = _system_response_calibration;
+        cal.file_path = _system_response_calibration_file_path();
+        if (cal.accumulator.size() != _cfg.fft_size) {
+            cal.accumulator.assign(_cfg.fft_size, std::complex<float>(0.0f, 0.0f));
+        } else {
+            std::fill(cal.accumulator.begin(), cal.accumulator.end(), std::complex<float>(0.0f, 0.0f));
+        }
+        cal.target_symbols = resolved_target;
+        cal.captured_symbols = 0;
+        cal.capture_active = true;
+    }
+
+    LOG_G_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+                 << " CH " << _rx_io.logical_id
+                 << "] started system response calibration: target_symbols="
+                 << resolved_target
+                 << ", output_file=" << _system_response_calibration_file_path()
+                 << ". Keep RF TX/RX directly connected until completion.";
+}
+
+std::string SensingChannel::_system_response_calibration_file_path() const {
+    return make_system_response_calibration_filename(_role, _rx_io.logical_id);
+}
+
+bool SensingChannel::_can_capture_full_band_system_response() const {
+    if (!sensing_output_mode_is_compact_mask(_cfg)) {
+        return true;
+    }
+    return _compute.compact_mask_local_delay_doppler_supported &&
+           _compute.compact_mask_analysis.common_subcarrier_count == _cfg.fft_size;
+}
+
+void SensingChannel::_load_system_response_calibration() {
+    const std::string file_path = _system_response_calibration_file_path();
+    {
+        std::lock_guard<std::mutex> lock(_system_response_mutex);
+        _system_response_calibration.file_path = file_path;
+        _system_response_calibration.loaded = false;
+        _system_response_calibration.response.clear();
+        _system_response_calibration.inverse_response.clear();
+        _system_response_calibration.min_valid_power = 0.0f;
+    }
+
+    std::ifstream in(file_path, std::ios::binary);
+    if (!in) {
+        LOG_G_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] calibration file not found: " << file_path
+                     << "; system-response correction skipped";
+        return;
+    }
+
+    SystemResponseCalibrationFileHeader header{};
+    in.read(reinterpret_cast<char*>(&header), static_cast<std::streamsize>(sizeof(header)));
+    if (!in ||
+        std::memcmp(header.magic, kSystemResponseMagic, sizeof(header.magic)) != 0 ||
+        header.version != kSystemResponseCalibrationVersion) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] invalid calibration header in " << file_path
+                     << "; system-response correction skipped";
+        return;
+    }
+
+    const std::string expected_mode = sensing_role_label(_role);
+    const std::string file_mode = header_mode_string(header);
+    if (header.role != sensing_role_id(_role) ||
+        file_mode != expected_mode ||
+        header.logical_id != _rx_io.logical_id ||
+        header.fft_size != _cfg.fft_size ||
+        !nearly_equal_config_value(header.sample_rate, _cfg.sample_rate) ||
+        !nearly_equal_config_value(header.center_freq, _cfg.center_freq) ||
+        !nearly_equal_config_value(header.bandwidth, _cfg.bandwidth)) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] calibration file does not match current runtime config: "
+                     << file_path
+                     << " (file_mode=" << file_mode
+                     << ", file_ch=" << header.logical_id
+                     << ", file_fft=" << header.fft_size
+                     << "); system-response correction skipped";
+        return;
+    }
+
+    AlignedVector response(header.fft_size);
+    in.read(
+        reinterpret_cast<char*>(response.data()),
+        static_cast<std::streamsize>(response.size() * sizeof(std::complex<float>)));
+    if (!in) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] calibration file is truncated: " << file_path
+                     << "; system-response correction skipped";
+        return;
+    }
+
+    if (!normalize_system_response(response)) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] calibration response has no usable normalization power: "
+                     << file_path
+                     << "; system-response correction skipped";
+        return;
+    }
+
+    const float min_valid_power = compute_system_response_min_power(response);
+    if (!std::isfinite(min_valid_power)) {
+        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                     << " CH " << _rx_io.logical_id
+                     << "] calibration response has no usable bins: " << file_path
+                     << "; system-response correction skipped";
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_system_response_mutex);
+        auto& cal = _system_response_calibration;
+        cal.inverse_response = compute_system_response_inverse(response, min_valid_power);
+        cal.response = std::move(response);
+        cal.min_valid_power = min_valid_power;
+        cal.loaded = cal.inverse_response.size() == _cfg.fft_size;
+    }
+
+    LOG_G_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+                 << " CH " << _rx_io.logical_id
+                 << "] loaded system response calibration: "
+                 << file_path
+                 << " (" << header.captured_symbols << " symbols)";
+}
+
+void SensingChannel::_accumulate_system_response_calibration(
+    const AlignedVector& channel_buf,
+    size_t range_stride,
+    size_t symbol_count,
+    size_t fft_size)
+{
+    if (fft_size != _cfg.fft_size || range_stride < _cfg.fft_size || symbol_count == 0) {
+        return;
+    }
+
+    AlignedVector averaged_response;
+    size_t completed_symbols = 0;
+    bool completed = false;
+    bool failed_response = false;
+    {
+        std::lock_guard<std::mutex> lock(_system_response_mutex);
+        auto& cal = _system_response_calibration;
+        if (!cal.capture_active || cal.target_symbols == 0) {
+            return;
+        }
+        if (cal.accumulator.size() != _cfg.fft_size) {
+            cal.accumulator.assign(_cfg.fft_size, std::complex<float>(0.0f, 0.0f));
+        }
+
+        const size_t remaining = cal.target_symbols - cal.captured_symbols;
+        const size_t rows_to_use = std::min(symbol_count, remaining);
+        for (size_t row = 0; row < rows_to_use; ++row) {
+            const auto* src = channel_buf.data() + row * range_stride;
+            for (size_t bin = 0; bin < _cfg.fft_size; ++bin) {
+                cal.accumulator[bin] += src[bin];
+            }
+        }
+
+        cal.captured_symbols += rows_to_use;
+        if (cal.captured_symbols >= cal.target_symbols) {
+            averaged_response = cal.accumulator;
+            const float scale = 1.0f / static_cast<float>(cal.captured_symbols);
+            for (auto& value : averaged_response) {
+                value *= scale;
+            }
+            if (!normalize_system_response(averaged_response)) {
+                cal.response.clear();
+                cal.inverse_response.clear();
+                cal.min_valid_power = 0.0f;
+                cal.loaded = false;
+                cal.capture_active = false;
+                completed_symbols = cal.captured_symbols;
+                failed_response = true;
+                std::fill(cal.accumulator.begin(), cal.accumulator.end(), std::complex<float>(0.0f, 0.0f));
+            } else {
+                cal.response = averaged_response;
+                cal.min_valid_power = compute_system_response_min_power(cal.response);
+                cal.inverse_response = std::isfinite(cal.min_valid_power)
+                    ? compute_system_response_inverse(cal.response, cal.min_valid_power)
+                    : AlignedVector{};
+                cal.loaded = cal.inverse_response.size() == _cfg.fft_size;
+                cal.capture_active = false;
+                completed_symbols = cal.captured_symbols;
+                completed = cal.loaded;
+                std::fill(cal.accumulator.begin(), cal.accumulator.end(), std::complex<float>(0.0f, 0.0f));
+            }
+        }
+    }
+
+    if (failed_response) {
+        LOG_RT_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+                      << " CH " << _rx_io.logical_id
+                      << "] completed calibration but response has no usable normalization power; "
+                      << "system-response correction skipped";
+        return;
+    }
+    if (!completed) {
+        return;
+    }
+
+    const auto header = make_system_response_header(
+        _cfg,
+        _role,
+        _rx_io.logical_id,
+        completed_symbols);
+    LOG_RT_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+                  << " CH " << _rx_io.logical_id
+                  << "] completed system response calibration from "
+                  << completed_symbols << " symbols; saving "
+                  << _system_response_calibration_file_path();
+    save_system_response_calibration_async(
+        _system_response_calibration_file_path(),
+        header,
+        std::move(averaged_response));
+}
+
+void SensingChannel::_apply_system_response_calibration(
+    AlignedVector& channel_buf,
+    size_t range_stride,
+    size_t symbol_count,
+    size_t fft_size)
+{
+    if (fft_size != _cfg.fft_size || range_stride < _cfg.fft_size || symbol_count == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(_system_response_mutex);
+    const auto& cal = _system_response_calibration;
+    if (!cal.loaded || cal.inverse_response.size() != _cfg.fft_size) {
+        return;
+    }
+
+    const auto* inverse_response = cal.inverse_response.data();
+    for (size_t row = 0; row < symbol_count; ++row) {
+        auto* dst = channel_buf.data() + row * range_stride;
+        #pragma omp simd simdlen(16)
+        for (size_t bin = 0; bin < _cfg.fft_size; ++bin) {
+            const float in_real = dst[bin].real();
+            const float in_imag = dst[bin].imag();
+            const float corr_real = inverse_response[bin].real();
+            const float corr_imag = inverse_response[bin].imag();
+            dst[bin] = std::complex<float>(
+                in_real * corr_real - in_imag * corr_imag,
+                in_real * corr_imag + in_imag * corr_real);
+        }
+    }
+}
+
+void SensingChannel::_apply_regular_compact_system_response_calibration(
+    AlignedVector& channel_buf,
+    size_t range_stride,
+    size_t symbol_count,
+    const std::vector<int>& raw_subcarrier_indices)
+{
+    if (raw_subcarrier_indices.empty() || symbol_count == 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(_system_response_mutex);
+    const auto& cal = _system_response_calibration;
+    if (!cal.loaded || cal.inverse_response.size() != _cfg.fft_size) {
+        return;
+    }
+
+    const size_t compact_fft_size = raw_subcarrier_indices.size();
+    if (range_stride < compact_fft_size) {
+        return;
+    }
+
+    const auto* inverse_response = cal.inverse_response.data();
+    const size_t full_fft_size = _cfg.fft_size;
+    for (size_t row = 0; row < symbol_count; ++row) {
+        auto* dst = channel_buf.data() + row * range_stride;
+        #pragma omp simd simdlen(16)
+        for (size_t sub_idx = 0; sub_idx < compact_fft_size; ++sub_idx) {
+            const int raw_sc = raw_subcarrier_indices[sub_idx];
+            if (raw_sc >= 0 && static_cast<size_t>(raw_sc) < full_fft_size) {
+                const size_t compact_shifted = raw_fft_bin_to_shifted_index(sub_idx, compact_fft_size);
+                const size_t full_shifted = raw_fft_bin_to_shifted_index(static_cast<size_t>(raw_sc), full_fft_size);
+                const float in_real = dst[compact_shifted].real();
+                const float in_imag = dst[compact_shifted].imag();
+                const float corr_real = inverse_response[full_shifted].real();
+                const float corr_imag = inverse_response[full_shifted].imag();
+                dst[compact_shifted] = std::complex<float>(
+                    in_real * corr_real - in_imag * corr_imag,
+                    in_real * corr_imag + in_imag * corr_real);
+            }
+        }
+    }
+}
+
+void SensingChannel::_apply_sparse_compact_system_response_calibration(
+    AlignedVector& compact_output,
+    const std::vector<int>& raw_subcarrier_indices)
+{
+    if (compact_output.empty() || raw_subcarrier_indices.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(_system_response_mutex);
+    const auto& cal = _system_response_calibration;
+    if (!cal.loaded || cal.inverse_response.size() != _cfg.fft_size) {
+        return;
+    }
+
+    const size_t count = std::min(compact_output.size(), raw_subcarrier_indices.size());
+    const auto* inverse_response = cal.inverse_response.data();
+    const size_t full_fft_size = _cfg.fft_size;
+    #pragma omp simd simdlen(16)
+    for (size_t idx = 0; idx < count; ++idx) {
+        const int raw_sc = raw_subcarrier_indices[idx];
+        if (raw_sc >= 0 && static_cast<size_t>(raw_sc) < full_fft_size) {
+            const size_t shifted = raw_fft_bin_to_shifted_index(static_cast<size_t>(raw_sc), full_fft_size);
+            const float in_real = compact_output[idx].real();
+            const float in_imag = compact_output[idx].imag();
+            const float corr_real = inverse_response[shifted].real();
+            const float corr_imag = inverse_response[shifted].imag();
+            compact_output[idx] = std::complex<float>(
+                in_real * corr_real - in_imag * corr_imag,
+                in_real * corr_imag + in_imag * corr_real);
+        }
+    }
 }
 
 void SensingChannel::_request_shared_batch_reset() {
@@ -1632,6 +2174,9 @@ void SensingChannel::_process_compact_monostatic_frame(
         }
     }
 
+    _apply_sparse_compact_system_response_calibration(
+        compact_output,
+        layout.flat_subcarrier_indices);
     _compute.sensing_sender.push_compact_data(
         compact_output,
         layout.mask_hash,
@@ -1679,6 +2224,9 @@ void SensingChannel::_process_compact_bistatic_frame(
         }
     }
 
+    _apply_sparse_compact_system_response_calibration(
+        compact_output,
+        layout.flat_subcarrier_indices);
     _compute.sensing_sender.push_compact_data(
         compact_output,
         layout.mask_hash,
@@ -1858,6 +2406,16 @@ void SensingChannel::_process_regular_compact_buffer(
     const bool backend_processing = backend_sensing_processing_supported(_cfg);
 
     compact_core.channel_estimate_with_shift(tx_symbols, symbol_count);
+    _accumulate_system_response_calibration(
+        channel_buf,
+        range_stride,
+        symbol_count,
+        compact_core.params().fft_size);
+    _apply_regular_compact_system_response_calibration(
+        channel_buf,
+        range_stride,
+        symbol_count,
+        analysis.common_subcarrier_indices);
     compact_core.apply_mti(_compute.active_enable_mti, symbol_count);
 
     if (_compute.active_skip_sensing_fft) {
@@ -2076,6 +2634,16 @@ void SensingChannel::_sensing_process_finalize(
     auto& channel_buf = _compute.sensing_core.channel_buffer();
     const auto chest_start = ProfileClock::now();
     _compute.sensing_core.channel_estimate_with_shift(tx_symbols, symbol_count);
+    _accumulate_system_response_calibration(
+        channel_buf,
+        _compute.sensing_core.params().range_fft_size,
+        symbol_count,
+        _compute.sensing_core.params().fft_size);
+    _apply_system_response_calibration(
+        channel_buf,
+        _compute.sensing_core.params().range_fft_size,
+        symbol_count,
+        _compute.sensing_core.params().fft_size);
     const double chest_shift_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - chest_start).count();
     const auto mti_start = ProfileClock::now();

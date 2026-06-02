@@ -460,6 +460,7 @@ private:
             auto channel = std::make_unique<SensingChannel>(
                 _cfg,
                 _cfg.sensing_rx_channels[i],
+                SensingChannel::SensingRole::Monostatic,
                 _cfg.mono_sensing_ip,
                 _cfg.mono_sensing_port,
                 i,
@@ -840,6 +841,33 @@ private:
             }
 
             apply_one(static_cast<uint32_t>(target));
+        });
+
+        _control_handler.register_command("CALB", [this](int32_t value) {
+            if (_sensing_channels.empty()) {
+                LOG_G_WARN() << "CALB ignored: no sensing RX channels configured";
+                return;
+            }
+
+            const size_t target_symbols = value <= 0 ? 0u : static_cast<size_t>(value);
+            const int64_t target = _align_target_channel.load();
+
+            auto request_one = [&](uint32_t ch_id) {
+                if (ch_id >= _sensing_channels.size()) {
+                    LOG_G_WARN() << "Invalid target channel for CALB: " << ch_id;
+                    return;
+                }
+                _sensing_channels[ch_id]->request_system_response_calibration(target_symbols);
+            };
+
+            if (target < 0) {
+                for (uint32_t i = 0; i < _sensing_channels.size(); ++i) {
+                    request_one(i);
+                }
+                return;
+            }
+
+            request_one(static_cast<uint32_t>(target));
         });
 
         _control_handler.register_request("PARM", [this](int32_t) {

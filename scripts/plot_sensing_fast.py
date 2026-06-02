@@ -29,6 +29,7 @@ import pyqtgraph as pg
 from sensing_runtime_protocol import (
     AGGREGATE_HEADER_STRUCT,
     AGGREGATE_MAGIC_VERSION,
+    CALIBRATE_SYSTEM_RESPONSE_COMMAND,
     CTRL_HEADER,
     PARAMS_COMMAND,
     READY_COMMAND,
@@ -3336,6 +3337,15 @@ def send_rx_gain_command(val):
         print(f"Invalid RX gain value: {val}")
 
 
+def send_system_response_calibration_command():
+    target = _current_control_channel_id()
+    if target is None:
+        return
+    send_control_command(b"ALCH", int(target), target)
+    send_control_command(CALIBRATE_SYSTEM_RESPONSE_COMMAND, 0, target)
+    print("Requested Hsys calibration. Keep RF TX/RX directly connected until backend reports completion.")
+
+
 # ====== MainWindow with PyQt6 + PyQtGraph ======
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -3847,6 +3857,10 @@ class MainWindow(QtWidgets.QMainWindow):
         rx_gain_layout.addWidget(self.txt_rx_gain)
         rx_gain_layout.addWidget(btn_rx_gain)
         control_layout.addLayout(rx_gain_layout)
+
+        btn_hsys_cal = QtWidgets.QPushButton("Calibrate Hsys")
+        btn_hsys_cal.clicked.connect(send_system_response_calibration_command)
+        control_layout.addWidget(btn_hsys_cal)
 
         aoa_freq_layout = QtWidgets.QHBoxLayout()
         aoa_freq_layout.addWidget(QtWidgets.QLabel("Center Freq(GHz):"))
