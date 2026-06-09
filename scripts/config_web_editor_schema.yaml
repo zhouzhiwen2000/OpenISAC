@@ -1,4 +1,214 @@
 common:
+  radio_backend:
+    title: Radio backend
+    field:
+      type: scalar
+      key: radio_backend
+      kind: string
+      comment: Radio I/O backend; uhd = real USRP, sim = channel simulator
+      default: uhd
+      optional: true
+      options: [uhd, sim]
+  simulation:
+    title: Channel simulator
+    field:
+      type: simulation_mapping
+      key: simulation
+      comment: Channel simulator parameters used when radio_backend=sim
+      default:
+        session: oisac_sim
+      optional: true
+      scalar_fields:
+        - key: session
+          comment: Shared-memory namespace used by Modulator, Demodulator, and ChannelSimulator
+          kind: string
+          default: oisac_sim
+          optional: true
+        - key: enable_comm_rx
+          comment: Produce the communication RX path for OFDMDemodulator
+          kind: bool
+          default: true
+          optional: true
+        - key: enable_sensing_rx
+          comment: Produce monostatic sensing RX paths for the antenna array
+          kind: bool
+          default: true
+          optional: true
+        - key: noise_power_dbfs
+          comment: AWGN power per RX channel in dBFS; very low disables effectively
+          kind: float
+          default: -100.0
+          optional: true
+        - key: cfo_hz
+          comment: Carrier frequency offset injected on RX in Hz
+          kind: float
+          default: 0.0
+          optional: true
+        - key: timing_offset_samples
+          comment: Constant integer sample delay injected on RX
+          kind: int
+          default: 0
+          optional: true
+        - key: array_spacing_m
+          comment: Physical ULA element spacing in meters; set <=0 to use array_spacing_lambda
+          kind: float
+          default: 0.04283
+          optional: true
+        - key: array_spacing_lambda
+          comment: Legacy fixed ULA spacing in wavelengths
+          kind: float
+          default: 0.5
+          optional: true
+        - key: ring_capacity_samples
+          comment: Per-stream shared-memory ring capacity in complex samples
+          kind: int
+          default: 262144
+          optional: true
+        - key: steering_override_file
+          comment: Optional steering matrix file; empty uses ULA steering
+          kind: string
+          default: ""
+          optional: true
+      list_fields:
+        - key: comm_multipath_taps
+          comment: Communication-link tapped-delay-line channel taps
+          optional: true
+          item_fields:
+            - key: delay_samples
+              comment: Integer sample delay
+              kind: int
+              default: 0
+            - key: gain_db
+              comment: Tap magnitude in dB
+              kind: float
+              default: 0.0
+            - key: phase_deg
+              comment: Tap phase in degrees
+              kind: float
+              default: 0.0
+        - key: targets
+          comment: Monostatic sensing point scatterers
+          optional: true
+          item_fields:
+            - key: range_m
+              comment: Target range in meters
+              kind: float
+              default: 30.0
+            - key: velocity_mps
+              comment: Radial velocity in m/s; positive approaches
+              kind: float
+              default: 0.0
+            - key: gain_db
+              comment: Complex amplitude magnitude in dB
+              kind: float
+              default: -10.0
+            - key: angle_deg
+              comment: Angle of arrival in degrees
+              kind: float
+              default: 0.0
+        - key: bistatic_targets
+          comment: Bistatic / communication-channel point scatterers
+          optional: true
+          item_fields:
+            - key: range_m
+              comment: Target range in meters
+              kind: float
+              default: 30.0
+            - key: velocity_mps
+              comment: Radial velocity in m/s; positive approaches
+              kind: float
+              default: 0.0
+            - key: gain_db
+              comment: Complex amplitude magnitude in dB
+              kind: float
+              default: -20.0
+            - key: angle_deg
+              comment: Angle field kept for schema compatibility; comm RX ignores it
+              kind: float
+              default: 0.0
+  measurement_enable:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_enable
+      kind: bool
+      comment: Enable internal PRBS measurement traffic
+      default: false
+      optional: true
+  measurement_mode:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_mode
+      kind: string
+      comment: Measurement payload generator / checker mode
+      default: internal_prbs
+      optional: true
+      options: ["", internal_prbs]
+  measurement_run_id:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_run_id
+      kind: string
+      comment: Optional run identifier written to measurement CSV summaries
+      default: ""
+      optional: true
+  measurement_output_dir:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_output_dir
+      kind: string
+      comment: Optional directory for measurement CSV summaries
+      default: ""
+      optional: true
+  measurement_payload_bytes:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_payload_bytes
+      kind: int
+      comment: Bytes per generated measurement payload
+      default: 1024
+      optional: true
+  measurement_prbs_seed:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_prbs_seed
+      kind: int
+      comment: Initial PRBS seed for measurement payload generation
+      default: 90
+      optional: true
+  measurement_packets_per_point:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_packets_per_point
+      kind: int
+      comment: Packets to send / compare for one measurement epoch
+      default: 1
+      optional: true
+  measurement_max_packets_per_frame:
+    title: Measurement mode
+    field:
+      type: scalar
+      key: measurement_max_packets_per_frame
+      kind: int
+      comment: Max measurement packets pulled per frame; 0 means unlimited
+      default: 1
+      optional: true
+  sensing_on_wire_format:
+    title: Sensing FFT
+    field:
+      type: scalar
+      key: sensing_on_wire_format
+      kind: string
+      comment: Sensing ZMQ sample format
+      default: cf32
+      optional: true
+      options: [cf32, cf16]
   sensing_rx_channels:
     title: Sensing RX Channels
     field:
@@ -154,6 +364,15 @@ modulator:
       kind: int
       comment: Number of symbols used in sensing processing
       default: 100
+      optional: true
+  cuda_mod_pipeline_slots:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: cuda_mod_pipeline_slots
+      kind: int
+      comment: Number of CUDA modulation pipeline slots
+      default: 3
       optional: true
   zc_root:
     title: OFDM Frame
@@ -404,8 +623,8 @@ modulator:
       type: scalar
       key: mono_sensing_ip
       kind: string
-      comment: Monostatic sensing output IP (channel 0 default)
-      default: 127.0.0.1
+      comment: Monostatic sensing ZMQ listen IP
+      default: 0.0.0.0
       optional: true
   mono_sensing_port:
     title: Network Output
@@ -413,8 +632,17 @@ modulator:
       type: scalar
       key: mono_sensing_port
       kind: int
-      comment: Monostatic sensing output port (channel 0 default)
+      comment: Monostatic sensing ZMQ listen port
       default: 8888
+      optional: true
+  mono_sensing_output_enabled:
+    title: Network Output
+    field:
+      type: scalar
+      key: mono_sensing_output_enabled
+      kind: bool
+      comment: Enable monostatic sensing ZMQ output
+      default: true
       optional: true
   control_port:
     title: Network Output
@@ -422,17 +650,8 @@ modulator:
       type: scalar
       key: control_port
       kind: int
-      comment: UDP port for runtime control commands
+      comment: ZMQ port for runtime control commands
       default: 9999
-      optional: true
-  default_ip:
-    title: Network Output
-    field:
-      type: scalar
-      key: default_ip
-      kind: string
-      comment: Default destination IP when per-output IP is empty
-      default: 127.0.0.1
       optional: true
   sensing_symbol_stride:
     title: Network Output
@@ -476,8 +695,8 @@ modulator:
       type: scalar
       key: paired_frame_queue_size
       kind: int
-      comment: Per-channel RX/TX pairing queue capacity
-      default: 32
+      comment: Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
+      default: 64
       optional: true
   profiling_modules:
     title: Runtime / Debug
@@ -542,6 +761,15 @@ demodulator:
       kind: int
       comment: Number of symbols used in sensing processing
       default: 100
+      optional: true
+  cuda_demod_pipeline_slots:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: cuda_demod_pipeline_slots
+      kind: int
+      comment: Number of CUDA demodulation pipeline slots
+      default: 3
       optional: true
   frame_queue_size:
     title: OFDM Frame
@@ -1020,7 +1248,7 @@ demodulator:
       type: scalar
       key: enable_bi_sensing
       kind: bool
-      comment: Enable bistatic sensing pipeline and UDP output
+      comment: Enable bistatic sensing pipeline and ZMQ output
       default: true
       optional: true
   bi_sensing_ip:
@@ -1029,8 +1257,8 @@ demodulator:
       type: scalar
       key: bi_sensing_ip
       kind: string
-      comment: Bistatic sensing output target IP
-      default: 127.0.0.1
+      comment: Bistatic sensing ZMQ listen IP
+      default: 0.0.0.0
       optional: true
   bi_sensing_port:
     title: Network Output
@@ -1038,7 +1266,7 @@ demodulator:
       type: scalar
       key: bi_sensing_port
       kind: int
-      comment: Bistatic sensing output target port
+      comment: Bistatic sensing ZMQ listen port
       default: 8889
       optional: true
   control_port:
@@ -1047,8 +1275,8 @@ demodulator:
       type: scalar
       key: control_port
       kind: int
-      comment: UDP port for runtime control commands
-      default: 9999
+      comment: ZMQ port for runtime control commands
+      default: 10000
       optional: true
   channel_ip:
     title: Network Output
@@ -1056,7 +1284,7 @@ demodulator:
       type: scalar
       key: channel_ip
       kind: string
-      comment: Channel-estimate output IP (empty = use default_ip)
+      comment: Channel-estimate output IP (empty = use default_out_ip)
       default: ""
       optional: true
   channel_port:
@@ -1074,7 +1302,7 @@ demodulator:
       type: scalar
       key: pdf_ip
       kind: string
-      comment: Delay-spectrum output IP (empty = use default_ip)
+      comment: Delay-spectrum output IP (empty = use default_out_ip)
       default: ""
       optional: true
   pdf_port:
@@ -1092,7 +1320,7 @@ demodulator:
       type: scalar
       key: constellation_ip
       kind: string
-      comment: Constellation output IP (empty = use default_ip)
+      comment: Constellation output IP (empty = use default_out_ip)
       default: ""
       optional: true
   constellation_port:
@@ -1110,7 +1338,7 @@ demodulator:
       type: scalar
       key: udp_output_ip
       kind: string
-      comment: Payload output IP (empty = use default_ip)
+      comment: Payload output IP (empty = use default_out_ip)
       default: ""
       optional: true
   udp_output_port:
@@ -1122,13 +1350,13 @@ demodulator:
       comment: Payload output port
       default: 50001
       optional: true
-  default_ip:
+  default_out_ip:
     title: Runtime / Debug
     field:
       type: scalar
-      key: default_ip
+      key: default_out_ip
       kind: string
-      comment: Default IP for outputs when per-output IP is empty
+      comment: Default output IP when per-output IP is empty
       default: 127.0.0.1
       optional: true
   vofa_debug_ip:

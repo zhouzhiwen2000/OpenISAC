@@ -293,6 +293,74 @@
       color: var(--primary-color);
     }
 
+    .simulation-card {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      background: rgba(255, 255, 255, 0.96);
+    }
+
+    .simulation-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 10px 12px;
+    }
+
+    .simulation-grid .field label {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted-color);
+      font-weight: 700;
+    }
+
+    .simulation-grid .field input:not([type="checkbox"]),
+    .simulation-grid .field select {
+      width: 100%;
+      height: 40px;
+      margin-top: 6px;
+      padding: 0 10px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: white;
+      color: var(--text-color);
+      font: inherit;
+    }
+
+    .simulation-grid .field input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      margin-top: 0;
+      padding: 0;
+    }
+
+    .simulation-grid .checkbox-row {
+      min-height: 24px;
+    }
+
+    .simulation-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .simulation-list-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .simulation-list-head code {
+      font-family: var(--code-font);
+      font-size: 12px;
+      color: var(--secondary-color);
+      font-weight: 600;
+    }
+
     .planner-card {
       display: grid;
       gap: 12px;
@@ -2503,6 +2571,266 @@
       return base ? `${base} Optional; blank omits this key.` : 'Optional; blank omits this key.';
     }
 
+    function renderScalarControl(host, field, onChange = () => {}) {
+      if (field.kind === 'bool') {
+        const wrapper = document.createElement('label');
+        wrapper.className = 'checkbox-row';
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = Boolean(field.value);
+        input.addEventListener('change', () => {
+          field.value = input.checked;
+          field.value_text = input.checked ? 'true' : 'false';
+          field.is_set = true;
+          onChange(field);
+        });
+        wrapper.appendChild(input);
+        host.appendChild(wrapper);
+        return;
+      }
+      if (Array.isArray(field.options) && field.options.length) {
+        const select = document.createElement('select');
+        if (field.optional) {
+          const blank = document.createElement('option');
+          blank.value = '';
+          blank.textContent = '';
+          select.appendChild(blank);
+        }
+        for (const optionValue of field.options) {
+          const option = document.createElement('option');
+          option.value = String(optionValue);
+          option.textContent = String(optionValue);
+          select.appendChild(option);
+        }
+        select.value = field.value_text ?? '';
+        if (!field.optional && !field.options.map(String).includes(select.value) && field.options.length) {
+          select.value = String(field.options[0]);
+          field.value_text = select.value;
+        }
+        select.addEventListener('change', () => {
+          field.value_text = select.value;
+          field.value = select.value;
+          field.is_set = Boolean(select.value) || !field.optional;
+          onChange(field);
+        });
+        host.appendChild(select);
+        return;
+      }
+      const input = document.createElement(field.type === 'flow_list' ? 'textarea' : 'input');
+      if (field.type !== 'flow_list') input.type = 'text';
+      input.value = field.value_text ?? '';
+      if (field.default_text) {
+        input.placeholder = field.default_text;
+      }
+      input.addEventListener('input', () => {
+        field.value_text = input.value;
+        field.value = input.value;
+        field.is_set = Boolean(input.value.trim()) || !field.optional;
+        onChange(field);
+      });
+      host.appendChild(input);
+      if (field.display_unit) {
+        const unit = document.createElement('div');
+        unit.className = 'hint';
+        unit.textContent = `Display unit: ${field.display_unit}`;
+        host.appendChild(unit);
+      }
+    }
+
+    function renderMappingListItems(field, valueCol) {
+      field.items = Array.isArray(field.items) ? field.items : [];
+      field.items.forEach((item, index) => {
+        const channel = document.createElement('div');
+        channel.className = 'channel-card';
+        const heading = document.createElement('h4');
+        heading.textContent = `${field.key}[${index}]`;
+        channel.appendChild(heading);
+        const inner = document.createElement('div');
+        inner.className = 'kv';
+        field.item_fields.forEach((sub) => {
+          const row = document.createElement('div');
+          row.className = 'kv-row';
+          const value = item[sub.key] ?? '';
+          row.innerHTML = `
+            <div class="key-col">
+              <code>${sub.key}</code>
+              <div class="hint">${sub.display_comment || sub.comment || ''}</div>
+            </div>
+            <div class="value-col"></div>
+          `;
+          const controlHost = row.querySelector('.value-col');
+          if (sub.kind === 'bool') {
+            const wrapper = document.createElement('label');
+            wrapper.className = 'checkbox-row';
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.checked = Boolean(value);
+            input.addEventListener('change', () => {
+              item[sub.key] = input.checked;
+            });
+            wrapper.appendChild(input);
+            controlHost.appendChild(wrapper);
+          } else if (Array.isArray(sub.options) && sub.options.length) {
+            const select = document.createElement('select');
+            for (const optionValue of sub.options) {
+              const option = document.createElement('option');
+              option.value = String(optionValue);
+              option.textContent = String(optionValue);
+              select.appendChild(option);
+            }
+            select.value = value === null || value === undefined ? '' : String(value);
+            if (!sub.options.map(String).includes(select.value) && sub.options.length) {
+              select.value = String(sub.options[0]);
+              item[sub.key] = select.value;
+            }
+            select.addEventListener('change', () => {
+              item[sub.key] = select.value;
+            });
+            controlHost.appendChild(select);
+          } else {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = value === null || value === undefined ? '' : String(value);
+            input.addEventListener('input', () => {
+              item[sub.key] = input.value;
+            });
+            controlHost.appendChild(input);
+          }
+          inner.appendChild(row);
+        });
+        channel.appendChild(inner);
+        valueCol.appendChild(channel);
+      });
+    }
+
+    function renderSimulationMapping(field) {
+      const holder = document.createElement('div');
+      holder.className = 'kv-row';
+      holder.innerHTML = `
+        <div class="key-col">
+          <code>${field.key}</code>
+          <div class="hint">${fieldHintText(field)}</div>
+        </div>
+        <div class="value-col"></div>
+      `;
+      const valueCol = holder.querySelector('.value-col');
+      const card = document.createElement('div');
+      card.className = 'simulation-card';
+
+      const scalarGrid = document.createElement('div');
+      scalarGrid.className = 'simulation-grid';
+      for (const sub of (field.scalar_fields || [])) {
+        const row = document.createElement('div');
+        row.className = 'field';
+        row.innerHTML = `
+          <label>${sub.key}</label>
+          <div class="hint">${fieldHintText(sub)}</div>
+        `;
+        renderScalarControl(row, sub);
+        scalarGrid.appendChild(row);
+      }
+      card.appendChild(scalarGrid);
+
+      for (const listField of (field.list_fields || [])) {
+        listField.items = Array.isArray(listField.items) ? listField.items : [];
+        const listBlock = document.createElement('div');
+        listBlock.className = 'simulation-list';
+        const head = document.createElement('div');
+        head.className = 'simulation-list-head';
+        head.innerHTML = `
+          <div>
+            <code>${listField.key}</code>
+            <div class="hint">${listField.display_comment || listField.comment || ''}</div>
+          </div>
+        `;
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn';
+        addBtn.textContent = 'Add';
+        addBtn.addEventListener('click', () => {
+          listField.items.push({ ...(listField.default_item || {}) });
+          listField.is_set = true;
+          renderSections();
+        });
+        head.appendChild(addBtn);
+        listBlock.appendChild(head);
+
+        const itemsHost = document.createElement('div');
+        itemsHost.className = 'planner-block-list';
+        listField.items.forEach((item, index) => {
+          const block = document.createElement('div');
+          block.className = 'planner-block';
+          const blockHead = document.createElement('div');
+          blockHead.className = 'planner-block-head';
+          const strong = document.createElement('strong');
+          strong.textContent = `${listField.key}[${index}]`;
+          const removeBtn = document.createElement('button');
+          removeBtn.className = 'btn danger';
+          removeBtn.textContent = 'Delete';
+          removeBtn.addEventListener('click', () => {
+            listField.items.splice(index, 1);
+            listField.is_set = true;
+            renderSections();
+          });
+          blockHead.appendChild(strong);
+          blockHead.appendChild(removeBtn);
+          block.appendChild(blockHead);
+          const grid = document.createElement('div');
+          grid.className = 'planner-block-grid';
+          for (const sub of (listField.item_fields || [])) {
+            const cell = document.createElement('div');
+            cell.innerHTML = `<label>${sub.key}</label>`;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = item[sub.key] === null || item[sub.key] === undefined ? '' : String(item[sub.key]);
+            input.addEventListener('input', () => {
+              item[sub.key] = input.value;
+              listField.is_set = true;
+            });
+            cell.appendChild(input);
+            if (sub.display_comment || sub.comment) {
+              const hint = document.createElement('div');
+              hint.className = 'hint';
+              hint.textContent = sub.display_comment || sub.comment;
+              cell.appendChild(hint);
+            }
+            grid.appendChild(cell);
+          }
+          block.appendChild(grid);
+          itemsHost.appendChild(block);
+        });
+        if (!listField.items.length) {
+          const empty = document.createElement('div');
+          empty.className = 'planner-empty';
+          empty.textContent = 'No entries';
+          itemsHost.appendChild(empty);
+        }
+        listBlock.appendChild(itemsHost);
+        card.appendChild(listBlock);
+      }
+
+      const extraRow = document.createElement('div');
+      extraRow.className = 'kv-row';
+      extraRow.innerHTML = `
+        <div class="key-col">
+          <code>extra</code>
+          <div class="hint">Additional simulation keys not represented above.</div>
+        </div>
+        <div class="value-col"></div>
+      `;
+      const extraHost = extraRow.querySelector('.value-col');
+      const extraTextarea = document.createElement('textarea');
+      extraTextarea.value = field.extra_text || '';
+      extraTextarea.rows = Math.max(3, Math.min(10, extraTextarea.value.split('\n').length + 1));
+      extraTextarea.addEventListener('input', () => {
+        field.extra_text = extraTextarea.value;
+      });
+      extraHost.appendChild(extraTextarea);
+      card.appendChild(extraRow);
+
+      valueCol.appendChild(card);
+      return holder;
+    }
+
 	    function renderSections() {
 	      const model = currentModel();
 	      if (!model) return;
@@ -2617,6 +2945,36 @@
               valueCol.appendChild(channel);
             });
             kv.appendChild(holder);
+            continue;
+          }
+
+          if (field.type === 'simulation_mapping') {
+            kv.appendChild(renderSimulationMapping(field));
+            continue;
+          }
+
+          if (field.type === 'mapping') {
+            const row = document.createElement('div');
+            row.className = 'kv-row';
+            row.innerHTML = `
+              <div class="key-col">
+                <code>${field.key}</code>
+                <div class="hint">${fieldHintText(field)}</div>
+              </div>
+              <div class="value-col"></div>
+            `;
+            const controlHost = row.querySelector('.value-col');
+            const textarea = document.createElement('textarea');
+            textarea.value = field.value_text ?? '';
+            textarea.rows = Math.max(5, Math.min(16, textarea.value.split('\n').length + 1));
+            if (field.default_text) {
+              textarea.placeholder = field.default_text;
+            }
+            textarea.addEventListener('input', () => {
+              field.value_text = textarea.value;
+            });
+            controlHost.appendChild(textarea);
+            kv.appendChild(row);
             continue;
           }
 
@@ -2779,6 +3137,7 @@
     function gatherSavePayloadForTab(tabName) {
       const model = modelForTab(tabName);
       const scalars = {};
+      const mappings = {};
       const mappingLists = {};
       if (!model) {
         throw new Error(`Missing config model for ${tabName}.`);
@@ -2795,6 +3154,28 @@
             } else {
               mappingLists[field.key] = field.items;
             }
+          } else if (field.type === 'simulation_mapping') {
+            const simScalars = {};
+            for (const sub of (field.scalar_fields || [])) {
+              simScalars[sub.key] = {
+                value: sub.kind === 'bool' ? Boolean(sub.value) : (sub.value_text ?? ''),
+                is_set: Boolean(sub.is_set),
+              };
+            }
+            const simLists = {};
+            for (const listField of (field.list_fields || [])) {
+              simLists[listField.key] = {
+                items: listField.items || [],
+                is_set: Boolean(listField.is_set),
+              };
+            }
+            mappings[field.key] = {
+              scalars: simScalars,
+              lists: simLists,
+              extra_text: field.extra_text || '',
+            };
+          } else if (field.type === 'mapping') {
+            mappings[field.key] = field.value_text ?? '';
           } else if (field.type === 'profiling_modules') {
             scalars[field.key] = Array.isArray(field.selected) ? field.selected : [];
           } else if (field.kind === 'bool') {
@@ -2808,6 +3189,7 @@
       return {
         name: tabName,
         scalars,
+        mappings,
         mapping_lists: mappingLists,
         cpu_cores: model.cpu_cores.values,
       };

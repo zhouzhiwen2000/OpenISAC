@@ -17,6 +17,8 @@
 #include "Common.hpp"
 #include "OFDMCore.hpp"
 
+class SimRadio; // channel-simulator radio handle (no USRP)
+
 struct SharedSensingRuntime {
     size_t sensing_symbol_stride = 20;
     bool enable_mti = true;
@@ -97,6 +99,14 @@ public:
         const std::string& tx_clock_source,
         const std::string& tx_time_source,
         const uhd::usrp::multi_usrp::sptr& tx_usrp,
+        std::vector<std::unique_ptr<SensingChannel>>& channels
+    );
+
+    // Channel-simulator variant: attach each sensing channel's RX stream to the
+    // hub's "rx.sens<logical_id>" shared-memory ring instead of a USRP.
+    static void initialize_rx_hardware_and_sync_sim(
+        const Config& cfg,
+        SimRadio* sim_radio,
         std::vector<std::unique_ptr<SensingChannel>>& channels
     );
 

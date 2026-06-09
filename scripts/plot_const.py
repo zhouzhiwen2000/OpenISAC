@@ -1,20 +1,18 @@
-import socket
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-import struct
 
-# UDP receiver configuration
-UDP_IP = "0.0.0.0"  # Listen on all interfaces
+import zmq
+from sensing_runtime_protocol import make_debug_sub_conflate, make_tcp_endpoint
+
+# Receiver configuration
+HOST = "127.0.0.1"  # Backend host (PUB-binds this debug stream port)
 UDP_PORT = 12346    # Port number
 FFT_SIZE = 1024     # OFDM symbol FFT size (number of subcarriers)
-MAX_PACKET_SIZE = 8192  # Maximum packet size (1024 points * 8 bytes/complex)
 SHOW_GUARD_BAND = False  # Macro switch: whether to display guard band constellation points
 
-# Create UDP socket
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((UDP_IP, UDP_PORT))
-sock.settimeout(0.001)  # Set timeout for non-blocking behavior
+# Create ZeroMQ SUB socket (CONFLATE: only the latest frame is kept).
+sock = make_debug_sub_conflate(make_tcp_endpoint(HOST, UDP_PORT))
 
 # Define subcarrier indices:
 # - pilot_indices: Pilot subcarrier indices
@@ -58,21 +56,21 @@ def update(frame):
     
     # Try to receive new data
     try:
-        # Receive UDP packet
-        data, addr = sock.recvfrom(MAX_PACKET_SIZE)
-        
+        # Receive latest ZMQ message
+        data = sock.recv(flags=zmq.NOBLOCK)
+
         # Check if packet size is valid (FFT_SIZE * 8 bytes)
         if len(data) != FFT_SIZE * 8:
             return data_plot, guard_plot, pilot_plot
-            
+
         # Convert byte data to complex array
         symbol = np.frombuffer(data, dtype=np.complex64)
         if symbol.size != FFT_SIZE:
             return data_plot, guard_plot, pilot_plot
-            
+
         current_symbol = symbol  # Update current symbol
-        
-    except socket.timeout:  # Skip if no data
+
+    except zmq.Again:  # Skip if no data
         pass
     except Exception as e:  # Catch other exceptions
         print(f"Error: {e}")

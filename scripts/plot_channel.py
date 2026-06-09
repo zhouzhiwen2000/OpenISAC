@@ -1,17 +1,18 @@
-import socket
 from matplotlib.pylab import fftshift
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-UDP_IP = "0.0.0.0"
+import zmq
+from sensing_runtime_protocol import make_debug_sub_conflate, make_tcp_endpoint
+
+# Backend host (the C++ backend PUB-binds this debug stream port).
+HOST = "127.0.0.1"
 UDP_PORT = 12348
 FFT_SIZE = 1024
 
-# Configure UDP receiver
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((UDP_IP, UDP_PORT))
-sock.settimeout(0.2)
+# Configure ZeroMQ SUB receiver (CONFLATE: only the latest frame is kept).
+sock = make_debug_sub_conflate(make_tcp_endpoint(HOST, UDP_PORT))
 
 # Create plotting window with three subplots
 fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 13), constrained_layout=True)
@@ -43,7 +44,7 @@ ax3.set_title('Channel Response - Magnitude')
 
 def update(frame):
     try:
-        data, _ = sock.recvfrom(FFT_SIZE * 8)
+        data = sock.recv(flags=zmq.NOBLOCK)
         if len(data) == FFT_SIZE * 8:
             # Data processing
             cdata = np.frombuffer(data, dtype=np.complex64)
@@ -71,7 +72,7 @@ def update(frame):
             mag_max = np.max(magnitude)
             ax3.set_ylim(0, mag_max * 1.1)
             
-    except socket.timeout:
+    except zmq.Again:
         pass
     return line1, line2, line3
 

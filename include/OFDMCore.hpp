@@ -797,7 +797,8 @@ private:
         const size_t block_count = values.size() / _block_size;
         for (size_t block = 0; block < block_count; ++block) {
             const T* const block_ptr = values_ptr + block * _block_size;
-            #pragma omp simd simdlen(16)
+            // No omp simd: the map[i] indirection forces a gather; measured ~1.18x
+            // slower than the scalar loop the compiler picks on its own.
             for (size_t i = 0; i < _block_size; ++i) {
                 scratch_ptr[i] = block_ptr[map[i]];
             }
@@ -1184,24 +1185,80 @@ public:
         const std::vector<int>& subcarrier_indices
     ) {
         const size_t fft_size = symbol.size();
-        
-        #pragma omp simd simdlen(16)
-        for (size_t j = 0; j < fft_size; ++j) {
-            const float phase = beta_rel * subcarrier_indices[j] + phase_diff_CFO;
-            
-            // First multiply by H_inv (complex multiplication)
-            const float hinv_real = H_inv[j].real();
-            const float hinv_imag = H_inv[j].imag();
-            const float sym_real = symbol[j].real();
-            const float sym_imag = symbol[j].imag();
-            const float eq_re = sym_real * hinv_real - sym_imag * hinv_imag;
-            const float eq_im = sym_real * hinv_imag + sym_imag * hinv_real;
-            
-            // Then rotate by -phase (derotate)
-            const float c = std::cos(phase);
-            const float s = std::sin(phase);
-            symbol[j] = std::complex<float>(eq_re * c + eq_im * s, eq_im * c - eq_re * s);
-        }
+        if (fft_size == 0) return;
+
+        // The derotation phase is phase(j) = phase_diff_CFO + beta_rel * idx(j).
+        // For the standard FFT-shift layout idx(j) increments by exactly 1 within
+        // each contiguous run, so the derotation phasor exp(-j*phase) follows a
+        // geometric recurrence: phasor(j+1) = phasor(j) * step, step = exp(-j*beta_rel).
+        // We exploit this with a *blocked* recurrence: a width-W lane vector is
+        // advanced by step^W per block, so the per-element transcendentals (one
+        // sin/cos pair per subcarrier in the old code, ~100K per frame) collapse to
+        // W sincos per run. Each block stays vectorizable (no cross-lane dependency).
+        constexpr size_t W = 16;
+        const std::complex<float> step = std::polar(1.0f, -beta_rel);
+        const std::complex<float> step_block = std::polar(1.0f, -beta_rel * static_cast<float>(W));
+
+        auto* __restrict__ sym_ptr = symbol.data();
+        const auto* __restrict__ hinv_ptr = H_inv.data();
+
+        // Process a contiguous run [start, end) whose subcarrier index increments by
+        // +1 each step, starting from idx0 = subcarrier_indices[start].
+        auto process_run = [&](size_t start, size_t end, int idx0) {
+            if (start >= end) return;
+            const float theta0 = phase_diff_CFO + beta_rel * static_cast<float>(idx0);
+            // Lane phasors: lane[w] = exp(-j*(theta0 + w*beta_rel)).
+            std::complex<float> lane[W];
+            for (size_t w = 0; w < W; ++w) {
+                lane[w] = std::polar(1.0f, -(theta0 + beta_rel * static_cast<float>(w)));
+            }
+            size_t j = start;
+            // Full vectorizable blocks of W.
+            for (; j + W <= end; j += W) {
+                #pragma omp simd simdlen(16)
+                for (size_t w = 0; w < W; ++w) {
+                    const size_t idx = j + w;
+                    const float hinv_real = hinv_ptr[idx].real();
+                    const float hinv_imag = hinv_ptr[idx].imag();
+                    const float sym_real = sym_ptr[idx].real();
+                    const float sym_imag = sym_ptr[idx].imag();
+                    const float eq_re = sym_real * hinv_real - sym_imag * hinv_imag;
+                    const float eq_im = sym_real * hinv_imag + sym_imag * hinv_real;
+                    const float c = lane[w].real();
+                    const float s = lane[w].imag(); // s already carries the -sin sign
+                    sym_ptr[idx] = std::complex<float>(eq_re * c - eq_im * s,
+                                                       eq_im * c + eq_re * s);
+                }
+                // Advance every lane by one full block.
+                #pragma omp simd simdlen(16)
+                for (size_t w = 0; w < W; ++w) {
+                    lane[w] *= step_block;
+                }
+            }
+            // Scalar tail (run length not a multiple of W).
+            std::complex<float> phasor = lane[0];
+            for (; j < end; ++j) {
+                const float hinv_real = hinv_ptr[j].real();
+                const float hinv_imag = hinv_ptr[j].imag();
+                const float sym_real = sym_ptr[j].real();
+                const float sym_imag = sym_ptr[j].imag();
+                const float eq_re = sym_real * hinv_real - sym_imag * hinv_imag;
+                const float eq_im = sym_real * hinv_imag + sym_imag * hinv_real;
+                const float c = phasor.real();
+                const float s = phasor.imag();
+                sym_ptr[j] = std::complex<float>(eq_re * c - eq_im * s,
+                                                 eq_im * c + eq_re * s);
+                phasor *= step;
+            }
+        };
+
+        // Split into contiguous +1 runs at the FFT-shift discontinuity. For the
+        // standard layout this is [0, half) (idx 0..half-1) and [half, fft) (idx
+        // -half..-1); deriving idx0 from subcarrier_indices keeps it correct for the
+        // actual layout passed in.
+        const size_t half = fft_size / 2;
+        process_run(0, half, subcarrier_indices[0]);
+        process_run(half, fft_size, subcarrier_indices[half]);
     }
 
 private:
@@ -1545,7 +1602,7 @@ public:
             const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
             float* __restrict__ out_ptr = llr_ptr + sym_idx * num_data_sc * 2;
             
-            #pragma omp simd simdlen(16)
+            // No omp simd: sym_ptr[data_indices[i]] is a gather; scalar matches it.
             for (size_t i = 0; i < num_data_sc; ++i) {
                 const size_t k = data_indices[i];
                 out_ptr[i * 2]     = sym_ptr[k].real() * llr_scale;
@@ -1569,7 +1626,7 @@ public:
             const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
             float* __restrict__ out_ptr = llr_output + sym_idx * num_data_sc * 2;
             
-            #pragma omp simd simdlen(16)
+            // No omp simd: sym_ptr[data_indices[i]] is a gather; scalar matches it.
             for (size_t i = 0; i < num_data_sc; ++i) {
                 const size_t k = data_indices[i];
                 out_ptr[i * 2]     = sym_ptr[k].real() * llr_scale;
@@ -1618,8 +1675,10 @@ public:
         for (size_t j = 0; j < num_pilots; ++j) {
             auto pilot_index = pilot_positions[j];
             std::complex<double> next_current_sum(0.0, 0.0);
-            
-            #pragma omp simd
+
+            // NOTE: no omp simd here — the body reduces into a complex<double>
+            // accumulator via conj()*mul, which the vectorizer cannot lane-split
+            // anyway. The annotation was a no-op and is intentionally omitted.
             for (size_t i = sync_pos; i < symbols.size() - 1; ++i) {
                 std::complex<float> current_pilot = symbols[i][pilot_index];
                 std::complex<float> next_pilot = symbols[i+1][pilot_index];
@@ -2515,12 +2574,16 @@ public:
 
     void resize(size_t range_fft_size) {
         _range_fft_size = range_fft_size;
-        _state.resize(8 * 2 * _range_fft_size, std::complex<float>(0.0f, 0.0f));
-        reset();
+        // State is kept as separate real/imag planes (SoA): with std::complex AoS
+        // the per-element interleave defeats SIMD and the cascade is compute-bound.
+        // Planar state + planar scratch lets the inner loop vectorize cleanly.
+        _state_re.assign(8 * 2 * _range_fft_size, 0.0f);
+        _state_im.assign(8 * 2 * _range_fft_size, 0.0f);
     }
 
     void reset() {
-        std::fill(_state.begin(), _state.end(), std::complex<float>(0.0f, 0.0f));
+        std::fill(_state_re.begin(), _state_re.end(), 0.0f);
+        std::fill(_state_im.begin(), _state_im.end(), 0.0f);
     }
 
     /**
@@ -2543,40 +2606,82 @@ public:
         };
 
         const size_t N_alloc = _range_fft_size;
+        const size_t scratch_needed = num_symbols * N_alloc;
+        if (_buf_re.size() < scratch_needed) {
+            _buf_re.resize(scratch_needed);
+            _buf_im.resize(scratch_needed);
+        }
 
+        // Deinterleave the processed region of each symbol row into real/imag planes.
+        for (size_t i = 0; i < num_symbols; ++i) {
+            const std::complex<float>* __restrict__ sd = buffer.data() + i * N_alloc;
+            float* __restrict__ re = _buf_re.data() + i * N_alloc;
+            float* __restrict__ im = _buf_im.data() + i * N_alloc;
+            #pragma omp simd
+            for (size_t col = 0; col < N_proc; ++col) {
+                re[col] = sd[col].real();
+                im[col] = sd[col].imag();
+            }
+        }
+
+        // 8-stage cascade on planar data (stage -> symbol -> col); the recurrence
+        // lives on the symbol axis, so each stage's state plane stays resident
+        // across the symbol loop.
         for (int stage = 0; stage < 8; ++stage) {
             const float b0 = SOS[stage][0];
             const float b1 = SOS[stage][1];
             const float b2 = SOS[stage][2];
-            const float a1 = SOS[stage][4]; 
+            const float a1 = SOS[stage][4];
             const float a2 = SOS[stage][5];
 
-            std::complex<float>* s0_arr = &_state[stage * 2 * N_alloc]; 
-            std::complex<float>* s1_arr = &_state[stage * 2 * N_alloc + N_alloc];
+            float* __restrict__ s0_re = &_state_re[stage * 2 * N_alloc];
+            float* __restrict__ s0_im = &_state_im[stage * 2 * N_alloc];
+            float* __restrict__ s1_re = &_state_re[stage * 2 * N_alloc + N_alloc];
+            float* __restrict__ s1_im = &_state_im[stage * 2 * N_alloc + N_alloc];
 
             for (size_t i = 0; i < num_symbols; ++i) {
-                std::complex<float>* symbol_data = buffer.data() + i * N_alloc;
+                float* __restrict__ re = _buf_re.data() + i * N_alloc;
+                float* __restrict__ im = _buf_im.data() + i * N_alloc;
 
                 #pragma omp simd
                 for (size_t col = 0; col < N_proc; ++col) {
-                    std::complex<float> x = symbol_data[col];
-                    std::complex<float> s0 = s0_arr[col];
-                    std::complex<float> s1 = s1_arr[col];
+                    const float xr = re[col];
+                    const float xi = im[col];
+                    const float p0r = s0_re[col];
+                    const float p0i = s0_im[col];
+                    const float p1r = s1_re[col];
+                    const float p1i = s1_im[col];
 
-                    std::complex<float> y = x * b0 + s0;
-                    std::complex<float> new_s0 = x * b1 - y * a1 + s1;
-                    std::complex<float> new_s1 = x * b2 - y * a2;
+                    const float yr = xr * b0 + p0r;
+                    const float yi = xi * b0 + p0i;
+                    s0_re[col] = xr * b1 - yr * a1 + p1r;
+                    s0_im[col] = xi * b1 - yi * a1 + p1i;
+                    s1_re[col] = xr * b2 - yr * a2;
+                    s1_im[col] = xi * b2 - yi * a2;
 
-                    symbol_data[col] = y;
-                    s0_arr[col] = new_s0;
-                    s1_arr[col] = new_s1;
+                    re[col] = yr;
+                    im[col] = yi;
                 }
+            }
+        }
+
+        // Interleave the filtered planes back into the buffer (processed region only).
+        for (size_t i = 0; i < num_symbols; ++i) {
+            std::complex<float>* __restrict__ sd = buffer.data() + i * N_alloc;
+            const float* __restrict__ re = _buf_re.data() + i * N_alloc;
+            const float* __restrict__ im = _buf_im.data() + i * N_alloc;
+            #pragma omp simd
+            for (size_t col = 0; col < N_proc; ++col) {
+                sd[col] = std::complex<float>(re[col], im[col]);
             }
         }
     }
 
 private:
-    AlignedVector _state;
+    AlignedFloatVector _state_re;   // 8 stages x 2 taps x range_fft_size
+    AlignedFloatVector _state_im;
+    AlignedFloatVector _buf_re;     // deinterleave scratch (grows lazily)
+    AlignedFloatVector _buf_im;
     size_t _range_fft_size;
 };
 
@@ -3030,49 +3135,18 @@ public:
     ) {
         const size_t num_symbols =
             (symbol_count > 0) ? std::min(symbol_count, _params.sensing_symbol_num) : _params.sensing_symbol_num;
-        // Apply range window (per symbol)
+        // Fuse range and Doppler windows into a single contiguous per-symbol pass.
+        // The Doppler weight is constant across a symbol row (broadcast scalar), so
+        // symbol_data[j] *= range_window[j] * doppler_window[i] yields the same product
+        // as the previous two passes while avoiding the strided Doppler access (which
+        // walked the buffer with stride range_fft_size, i.e. a gather) and halving the
+        // buffer traffic.
         for (size_t i = 0; i < num_symbols; ++i) {
-            auto* symbol_data = buffer.data() + i * _params.range_fft_size;
+            auto* __restrict__ symbol_data = buffer.data() + i * _params.range_fft_size;
+            const float dw = doppler_window[i];
             #pragma omp simd simdlen(16) aligned(symbol_data: 64)
             for (size_t j = 0; j < _params.fft_size; ++j) {
-                symbol_data[j] *= range_window[j];
-            }
-        }
-
-        // Apply Doppler window (across symbols for each bin)
-        for (size_t bin = 0; bin < _params.fft_size; ++bin) {
-            #pragma omp simd simdlen(16)
-            for (size_t i = 0; i < num_symbols; ++i) {
-                size_t idx = i * _params.range_fft_size + bin;
-                buffer[idx] *= doppler_window[i];
-            }
-        }
-    }
-
-    /**
-     * @brief Compensate phase for sensing symbols (CFO/SFO/delay).
-     */
-    void compensate_phase(
-        std::vector<AlignedVector>& rx_symbols,
-        float CFO,
-        float SFO,
-        float delay_offset,
-        const std::vector<float>& subcarrier_phases_unit_delay,
-        const std::vector<float>& subcarrier_indices,
-        size_t sync_pos
-    ) {
-        for (size_t symbol_idx = 0; symbol_idx < rx_symbols.size(); ++symbol_idx) {
-            auto& rx_symbol = rx_symbols[symbol_idx];
-            int relative_symbol_index = static_cast<int>(symbol_idx) - static_cast<int>(sync_pos);
-            float phase_diff_CFO = CFO * relative_symbol_index;
-            
-            #pragma omp simd simdlen(16)
-            for (size_t j = 0; j < rx_symbol.size(); ++j) {
-                float phase_diff_SFO = SFO * subcarrier_indices[j] * relative_symbol_index;
-                float phase_diff_delay = subcarrier_phases_unit_delay[j] * delay_offset;
-                float phase_diff_total = phase_diff_delay + phase_diff_SFO + phase_diff_CFO;
-                auto phase_diff = std::polar(1.0f, -phase_diff_total);
-                rx_symbol[j] = rx_symbol[j] * phase_diff;
+                symbol_data[j] *= range_window[j] * dw;
             }
         }
     }
@@ -3256,7 +3330,7 @@ inline void extract_range_bin_trace(
     if (range_time_rows == nullptr || stride == 0) {
         return;
     }
-    #pragma omp simd simdlen(16)
+    // No omp simd: strided (stride=range_fft_size) gather; scalar is equal-or-faster.
     for (size_t row = 0; row < num_symbols; ++row) {
         out_trace[row] = range_time_rows[row * stride + range_bin];
     }

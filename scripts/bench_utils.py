@@ -53,7 +53,7 @@ def configure_measurement(
 
 def ensure_distinct_control_ports(mod_cfg: dict, demod_cfg: dict) -> None:
     mod_port = int(mod_cfg.get("control_port", 9999))
-    demod_port = int(demod_cfg.get("control_port", 9999))
+    demod_port = int(demod_cfg.get("control_port", 10000))
     if mod_port == demod_port:
         demod_cfg["control_port"] = mod_port + 1
 

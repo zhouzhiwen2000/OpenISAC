@@ -1,0 +1,99 @@
+# OFDM Modulator Configuration (Channel Simulator — no USRP)
+#
+# Run order:
+#   1. ./ChannelSimulator            (reads this file, creates the shared "air")
+#   2. ./OFDMModulator               (this config copied to Modulator.yaml)
+#   3. ./OFDMDemodulator             (Demodulator_Sim.yaml copied to Demodulator.yaml)
+# All three must share the same simulation.session.
+
+# ===== Radio backend =====
+radio_backend: sim               # "sim" = channel simulator, "uhd" = real USRP
+
+# ===== Channel simulator =====
+simulation:
+  session: oisac_sim             # shared-memory namespace (must match Demodulator + ChannelSimulator)
+  enable_comm_rx: true           # produce the communication RX path (set false to run sensing-only, no OFDMDemodulator)
+  enable_sensing_rx: true        # produce the monostatic sensing RX paths (set false to run comm-only)
+  noise_power_dbfs: -50          # AWGN power per RX channel (dBFS); lower = cleaner. <= -200 disables
+  cfo_hz: 0.0                    # Carrier frequency offset injected on RX (Hz)
+  timing_offset_samples: 0       # Constant sample delay injected on RX
+  array_spacing_m: 0.04283       # Physical ULA element spacing (m); d/lambda scales with center_freq
+                                 # (42.83 mm = lambda/2 @ 3.5 GHz, matches the sensing viewers).
+                                 # Set <= 0 to use the legacy array_spacing_lambda instead.
+  array_spacing_lambda: 0.5      # Legacy: fixed ULA spacing in wavelengths (only used if array_spacing_m <= 0)
+  ring_capacity_samples: 262144  # ~2 frames; keeps TX close to the hub via backpressure
+  steering_override_file: ""     # Optional [num_targets x num_channels] complex<float> matrix; empty = ULA
+  comm_multipath_taps:           # Comm-link direct/LoS + static multipath (decodable component)
+    - { delay_samples: 0,  gain_db: 0,   phase_deg: 0 }
+  targets:                       # Monostatic sensing scatterers (range/velocity/gain/angle, with steering)
+    - { range_m: 30, velocity_mps: 5,  gain_db: -6,  angle_deg: 20 }
+    - { range_m: 75, velocity_mps: -3, gain_db: -12, angle_deg: -10 }
+    - { range_m: 50, velocity_mps: 0, gain_db: -12, angle_deg: 60 }
+  bistatic_targets:              # Independent scene for the bistatic (comm) channel.
+    # Keep these well below the LoS (0 dB) so the comm link stays decodable.
+    # angle_deg is ignored — comm RX is a single antenna.
+    - { range_m: 30, velocity_mps: 5,  gain_db: -20, angle_deg: 0 }
+    - { range_m: 75, velocity_mps: -3, gain_db: -26, angle_deg: 0 }
+
+# ===== OFDM Frame =====
+fft_size: 1024
+cp_length: 128
+sync_pos: 1
+num_symbols: 100
+sensing_symbol_num: 100
+zc_root: 29
+pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
+
+# ===== Sensing FFT =====
+range_fft_size: 1024
+doppler_fft_size: 100
+sensing_output_mode: dense
+enable_backend_sensing_processing: false
+
+# ===== RF / Sampling =====
+sample_rate: 50000000
+bandwidth: 50000000
+center_freq: 2400000000
+tx_gain: 60                      # ignored in sim, kept for completeness
+tx_channel: 0
+
+# ===== Device / clock (ignored in sim) =====
+device_args: ""
+clock_source: internal
+time_source: "internal"
+wire_format_tx: sc16
+wire_format_rx: sc16
+
+# ===== Measurement mode (internal PRBS — no UDP video source needed) =====
+measurement_enable: false
+measurement_mode: internal_prbs
+measurement_payload_bytes: 1024
+
+# ===== Network Output =====
+udp_input_ip: "0.0.0.0"
+udp_input_port: 50000
+mono_sensing_ip: "0.0.0.0"
+mono_sensing_port: 8888
+control_port: 9999
+sensing_symbol_stride: 20
+
+# ===== Sensing RX Channels (each = one antenna of the ULA) =====
+sensing_rx_channel_count: 4
+sensing_rx_channels:
+  - { usrp_channel: 0, rx_gain: 0, alignment: 0, rx_antenna: "" }
+  - { usrp_channel: 1, rx_gain: 0, alignment: 0, rx_antenna: "" }
+  - { usrp_channel: 2, rx_gain: 0, alignment: 0, rx_antenna: "" }
+  - { usrp_channel: 3, rx_gain: 0, alignment: 0, rx_antenna: "" }
+
+# ===== Runtime / Debug =====
+tx_circular_buffer_size: 32
+data_packet_buffer_size: 32
+paired_frame_queue_size: 64
+profiling_modules: ""
+cpu_cores:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6

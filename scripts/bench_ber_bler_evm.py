@@ -35,12 +35,18 @@ from bench_demodulator_cpu import (
 
 
 def send_control_command(port: int, command: bytes, value: int) -> None:
-    packet = struct.pack("!4s4si", b"CMD ", command, int(value))
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    from sensing_runtime_protocol import (
+        build_control_command,
+        make_control_dealer,
+        make_tcp_endpoint,
+    )
+
+    sock = make_control_dealer(make_tcp_endpoint("127.0.0.1", port))
     try:
-        sock.sendto(packet, ("127.0.0.1", port))
+        sock.send(build_control_command(command, value))
     finally:
-        sock.close()
+        # Linger briefly so the fire-and-forget command flushes before close.
+        sock.close(linger=500)
 
 
 def wait_for_epoch(summary_path: Path, epoch_id: int, timeout_s: float) -> dict[str, str]:

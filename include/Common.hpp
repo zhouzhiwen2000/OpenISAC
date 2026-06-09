@@ -17,12 +17,15 @@
 #include <numeric>
 #include <memory>
 #include <map>
+#include <set>
+#include <utility>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <cstdlib>
 #include <cctype>
@@ -51,6 +54,7 @@
 #include <cstdint>
 #include <yaml-cpp/yaml.h>
 #include "AsyncLogger.hpp"
+#include "ZmqTransport.hpp"
 
 /**
  * @brief STL-compliant Aligned Memory Allocator.
@@ -167,7 +171,63 @@ struct SensingRxChannelConfig {
     int32_t alignment = 63;             // Per-channel alignment offset (samples)
     std::string rx_antenna = "";        // RX antenna for this channel (e.g., TX/RX, RX1)
     bool enable_system_delay_estimation = false; // Enable per-channel system delay estimation mode
-    bool enable_sensing_output = true;  // Enable UDP output for this sensing channel
+    bool enable_sensing_output = true;  // Enable ZMQ output for this sensing channel
+};
+
+/**
+ * @brief A single point scatterer / target used by the channel simulator.
+ *
+ * The simulated RX signal for each antenna is the superposition over targets of
+ * the transmit waveform delayed by tau = 2*range_m/c, frequency-shifted by the
+ * Doppler fd = 2*velocity_mps/lambda, scaled by the linear gain, and weighted by
+ * the array steering vector for angle_deg.
+ */
+struct SimTarget {
+    double range_m = 0.0;       // One-way range in meters (round-trip delay = 2*range/c)
+    double velocity_mps = 0.0;  // Radial velocity in m/s (positive = approaching)
+    double gain_db = 0.0;       // Complex amplitude magnitude in dB
+    double angle_deg = 0.0;     // Angle of arrival in degrees (used for steering vector)
+};
+
+/**
+ * @brief One tap of the simulated communication-link tapped-delay-line channel.
+ */
+struct SimMultipathTap {
+    int delay_samples = 0;      // Integer sample delay
+    double gain_db = 0.0;       // Tap magnitude in dB
+    double phase_deg = 0.0;     // Tap phase in degrees
+};
+
+/**
+ * @brief Channel simulator parameters (used when radio_backend == "sim").
+ *
+ * Shared by the Modulator, Demodulator, and the standalone ChannelSimulator hub.
+ * The `session` string namespaces the POSIX shared-memory segments so all three
+ * processes attach to the same simulated "air".
+ */
+struct SimConfig {
+    std::string session = "oisac_sim";        // shm namespace shared by all processes
+    bool enable_comm_rx = true;                // produce the communication RX channel (run with OFDMDemodulator)
+    bool enable_sensing_rx = true;             // produce the monostatic sensing RX channels (one per antenna)
+    double noise_power_dbfs = -100.0;          // AWGN power per RX channel (dBFS); very low = effectively off
+    double cfo_hz = 0.0;                        // Carrier frequency offset applied to RX (Hz)
+    int timing_offset_samples = 0;             // Constant integer sample delay injected on RX
+    // Physical ULA element spacing in meters. The steering vector's electrical spacing
+    // (d/lambda) is derived from this and `center_freq`, so the simulated angles track
+    // the carrier exactly like a real array would (the sensing viewers invert the
+    // measured phase slope back to an angle using this same PHYSICAL spacing). The
+    // default 42.83 mm equals lambda/2 at 3.5 GHz and matches ANTENNA_SPACING_M in the
+    // viewers; with it the recovered angle is correct at any center_freq.
+    double array_spacing_m = 0.04283;
+    // Legacy: ULA spacing directly in wavelengths (frequency-independent). Only used
+    // when `array_spacing_m` is set to <= 0; prefer `array_spacing_m` for correct
+    // angle recovery across center_freq.
+    double array_spacing_lambda = 0.5;         // ULA element spacing in wavelengths
+    std::vector<SimMultipathTap> comm_multipath_taps; // Comm-link TDL taps (empty => single unit tap)
+    std::vector<SimTarget> targets;            // Point scatterers for monostatic sensing
+    std::vector<SimTarget> bistatic_targets;   // Scatterers for the bistatic (comm) channel; empty => reuse `targets`
+    std::string steering_override_file = "";   // Optional [num_targets x num_rx_channels] complex<float> matrix
+    size_t ring_capacity_samples = 1u << 22;   // Per-stream shm ring capacity (complex<float> samples)
 };
 
 /**
@@ -756,12 +816,14 @@ struct Config {
     std::string device_args = "";
     std::string tx_device_args = "";
     std::string rx_device_args = "";
-    std::string default_ip = "127.0.0.1";
+    std::string radio_backend = "uhd";  // Radio I/O backend: "uhd" (real USRP) or "sim" (channel simulator)
+    SimConfig simulation;               // Channel simulator parameters (used when radio_backend == "sim")
+    std::string default_out_ip = "127.0.0.1";
     bool mono_sensing_output_enabled = true;
-    std::string mono_sensing_ip = "127.0.0.1";
+    std::string mono_sensing_ip = "0.0.0.0";
     int mono_sensing_port = 8888;
     bool enable_bi_sensing = true;
-    std::string bi_sensing_ip = "127.0.0.1";
+    std::string bi_sensing_ip = "0.0.0.0";
     int bi_sensing_port = 8889;
     int control_port = 9999;
     std::string channel_ip = "127.0.0.1";
@@ -791,7 +853,7 @@ struct Config {
     size_t sensing_symbol_stride = 20;     // Default sensing STRD applied at startup
     size_t tx_circular_buffer_size = 8;    // Capacity of modulator frame circular buffer
     size_t data_packet_buffer_size = 32;   // Capacity of modulator encoded packet buffer
-    size_t paired_frame_queue_size = 8;    // Capacity of per-channel RX/TX pairing queues
+    size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
     std::vector<int> available_cores = {0, 1, 2, 3, 4, 5};
     std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, or "all"
     bool measurement_enable = false;
@@ -1536,6 +1598,111 @@ inline bool measurement_mode_enabled(const Config& cfg) {
     return cfg.measurement_enable && cfg.measurement_mode == "internal_prbs";
 }
 
+/**
+ * @brief True when the radio I/O backend is the channel simulator (no USRP).
+ */
+inline bool radio_is_sim(const Config& cfg) {
+    return cfg.radio_backend == "sim";
+}
+
+/**
+ * @brief Emit the radio_backend + simulation block to a YAML emitter.
+ *
+ * Shared by the Modulator and Demodulator config writers so the two stay in sync.
+ */
+inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
+    out << YAML::Key << "radio_backend" << YAML::Value << cfg.radio_backend;
+    out << YAML::Key << "simulation" << YAML::Value << YAML::BeginMap;
+    const SimConfig& sim = cfg.simulation;
+    out << YAML::Key << "session" << YAML::Value << sim.session;
+    out << YAML::Key << "enable_comm_rx" << YAML::Value << sim.enable_comm_rx;
+    out << YAML::Key << "enable_sensing_rx" << YAML::Value << sim.enable_sensing_rx;
+    out << YAML::Key << "noise_power_dbfs" << YAML::Value << sim.noise_power_dbfs;
+    out << YAML::Key << "cfo_hz" << YAML::Value << sim.cfo_hz;
+    out << YAML::Key << "timing_offset_samples" << YAML::Value << sim.timing_offset_samples;
+    out << YAML::Key << "array_spacing_m" << YAML::Value << sim.array_spacing_m;
+    out << YAML::Key << "array_spacing_lambda" << YAML::Value << sim.array_spacing_lambda;
+    out << YAML::Key << "ring_capacity_samples" << YAML::Value << sim.ring_capacity_samples;
+    out << YAML::Key << "steering_override_file" << YAML::Value << sim.steering_override_file;
+    out << YAML::Key << "comm_multipath_taps" << YAML::Value << YAML::BeginSeq;
+    for (const auto& tap : sim.comm_multipath_taps) {
+        out << YAML::BeginMap;
+        out << YAML::Key << "delay_samples" << YAML::Value << tap.delay_samples;
+        out << YAML::Key << "gain_db" << YAML::Value << tap.gain_db;
+        out << YAML::Key << "phase_deg" << YAML::Value << tap.phase_deg;
+        out << YAML::EndMap;
+    }
+    out << YAML::EndSeq;
+    auto emit_target_seq = [&out](const std::vector<SimTarget>& list) {
+        out << YAML::BeginSeq;
+        for (const auto& tgt : list) {
+            out << YAML::BeginMap;
+            out << YAML::Key << "range_m" << YAML::Value << tgt.range_m;
+            out << YAML::Key << "velocity_mps" << YAML::Value << tgt.velocity_mps;
+            out << YAML::Key << "gain_db" << YAML::Value << tgt.gain_db;
+            out << YAML::Key << "angle_deg" << YAML::Value << tgt.angle_deg;
+            out << YAML::EndMap;
+        }
+        out << YAML::EndSeq;
+    };
+    out << YAML::Key << "targets" << YAML::Value;
+    emit_target_seq(sim.targets);
+    out << YAML::Key << "bistatic_targets" << YAML::Value;
+    emit_target_seq(sim.bistatic_targets);
+    out << YAML::EndMap;
+}
+
+/**
+ * @brief Parse the radio_backend + simulation block from a YAML node.
+ *
+ * Shared by the Modulator and Demodulator config loaders. Missing keys keep their
+ * struct defaults so existing (hardware) configs are unaffected.
+ */
+inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
+    if (config["radio_backend"]) cfg.radio_backend = config["radio_backend"].as<std::string>();
+    if (config["simulation"] && config["simulation"].IsMap()) {
+        const YAML::Node& sim_node = config["simulation"];
+        SimConfig& sim = cfg.simulation;
+        if (sim_node["session"]) sim.session = sim_node["session"].as<std::string>();
+        if (sim_node["enable_comm_rx"]) sim.enable_comm_rx = sim_node["enable_comm_rx"].as<bool>();
+        if (sim_node["enable_sensing_rx"]) sim.enable_sensing_rx = sim_node["enable_sensing_rx"].as<bool>();
+        if (sim_node["noise_power_dbfs"]) sim.noise_power_dbfs = sim_node["noise_power_dbfs"].as<double>();
+        if (sim_node["cfo_hz"]) sim.cfo_hz = sim_node["cfo_hz"].as<double>();
+        if (sim_node["timing_offset_samples"]) sim.timing_offset_samples = sim_node["timing_offset_samples"].as<int>();
+        if (sim_node["array_spacing_m"]) sim.array_spacing_m = sim_node["array_spacing_m"].as<double>();
+        if (sim_node["array_spacing_lambda"]) sim.array_spacing_lambda = sim_node["array_spacing_lambda"].as<double>();
+        if (sim_node["ring_capacity_samples"]) sim.ring_capacity_samples = sim_node["ring_capacity_samples"].as<size_t>();
+        if (sim_node["steering_override_file"]) sim.steering_override_file = sim_node["steering_override_file"].as<std::string>();
+        if (sim_node["comm_multipath_taps"] && sim_node["comm_multipath_taps"].IsSequence()) {
+            sim.comm_multipath_taps.clear();
+            for (const auto& node : sim_node["comm_multipath_taps"]) {
+                SimMultipathTap tap;
+                if (node["delay_samples"]) tap.delay_samples = node["delay_samples"].as<int>();
+                if (node["gain_db"]) tap.gain_db = node["gain_db"].as<double>();
+                if (node["phase_deg"]) tap.phase_deg = node["phase_deg"].as<double>();
+                sim.comm_multipath_taps.push_back(tap);
+            }
+        }
+        auto load_target_seq = [](const YAML::Node& seq, std::vector<SimTarget>& out_list) {
+            out_list.clear();
+            for (const auto& node : seq) {
+                SimTarget tgt;
+                if (node["range_m"]) tgt.range_m = node["range_m"].as<double>();
+                if (node["velocity_mps"]) tgt.velocity_mps = node["velocity_mps"].as<double>();
+                if (node["gain_db"]) tgt.gain_db = node["gain_db"].as<double>();
+                if (node["angle_deg"]) tgt.angle_deg = node["angle_deg"].as<double>();
+                out_list.push_back(tgt);
+            }
+        };
+        if (sim_node["targets"] && sim_node["targets"].IsSequence()) {
+            load_target_seq(sim_node["targets"], sim.targets);
+        }
+        if (sim_node["bistatic_targets"] && sim_node["bistatic_targets"].IsSequence()) {
+            load_target_seq(sim_node["bistatic_targets"], sim.bistatic_targets);
+        }
+    }
+}
+
 inline uint32_t measurement_effective_prbs_seed(
     uint32_t base_seed,
     uint32_t epoch_id,
@@ -1893,9 +2060,11 @@ inline Config make_default_modulator_config() {
     cfg.sensing_symbol_stride = 20;
     cfg.tx_circular_buffer_size = 8;
     cfg.data_packet_buffer_size = 32;
-    cfg.paired_frame_queue_size = 8;
+    cfg.paired_frame_queue_size = 16;
     cfg.udp_input_ip = "0.0.0.0";
     cfg.udp_input_port = 50000;
+    cfg.radio_backend = "uhd";
+    cfg.simulation = SimConfig{};
     cfg.measurement_enable = false;
     cfg.measurement_mode = "";
     cfg.measurement_run_id = "";
@@ -1966,7 +2135,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;
-    out << YAML::Key << "default_ip" << YAML::Value << cfg.default_ip;
+    emit_simulation_config(out, cfg);
     out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
     out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
     out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
@@ -2093,7 +2262,7 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
                 cfg.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing_rx_channels.size());
             }
         }
-        if (config["default_ip"]) cfg.default_ip = config["default_ip"].as<std::string>();
+        load_simulation_config(config, cfg);
         if (config["measurement_enable"]) cfg.measurement_enable = config["measurement_enable"].as<bool>();
         if (config["measurement_mode"]) cfg.measurement_mode = config["measurement_mode"].as<std::string>();
         if (config["measurement_run_id"]) cfg.measurement_run_id = config["measurement_run_id"].as<std::string>();
@@ -2121,9 +2290,6 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
 }
 
 inline void normalize_modulator_sensing_channels(Config& cfg) {
-    if (cfg.default_ip.empty()) {
-        cfg.default_ip = "127.0.0.1";
-    }
     normalize_sensing_fft_sizes(cfg, "modulator sensing");
     normalize_sensing_view_bins(cfg, "modulator sensing");
     if (cfg.cuda_mod_pipeline_slots == 0) {
@@ -2204,7 +2370,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
     }
 
     if (cfg.mono_sensing_ip.empty()) {
-        cfg.mono_sensing_ip = cfg.default_ip;
+        cfg.mono_sensing_ip = "0.0.0.0";
     }
     if (cfg.mono_sensing_port <= 0) {
         LOG_G_WARN() << "mono_sensing_port=" << cfg.mono_sensing_port
@@ -2243,7 +2409,7 @@ inline Config make_default_demodulator_config() {
     cfg.enable_bi_sensing = true;
     cfg.bi_sensing_ip = "";
     cfg.bi_sensing_port = 8889;
-    cfg.control_port = 9999;
+    cfg.control_port = 10000;
     cfg.channel_ip = "";
     cfg.channel_port = 12348;
     cfg.pdf_ip = "";
@@ -2273,6 +2439,8 @@ inline Config make_default_demodulator_config() {
     cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
     cfg.enable_backend_sensing_processing = false;
     cfg.sensing_symbol_stride = 20;
+    cfg.radio_backend = "uhd";
+    cfg.simulation = SimConfig{};
     cfg.measurement_enable = false;
     cfg.measurement_mode = "";
     cfg.measurement_run_id = "";
@@ -2344,7 +2512,8 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "hardware_sync" << YAML::Value << cfg.hardware_sync;
     out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
-    out << YAML::Key << "default_ip" << YAML::Value << cfg.default_ip;
+    out << YAML::Key << "default_out_ip" << YAML::Value << cfg.default_out_ip;
+    emit_simulation_config(out, cfg);
     out << YAML::Key << "ocxo_pi_kp_fast" << YAML::Value << cfg.ocxo_pi_kp_fast;
     out << YAML::Key << "ocxo_pi_ki_fast" << YAML::Value << cfg.ocxo_pi_ki_fast;
     out << YAML::Key << "ocxo_pi_kp_slow" << YAML::Value << cfg.ocxo_pi_kp_slow;
@@ -2477,7 +2646,10 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["hardware_sync"]) cfg.hardware_sync = config["hardware_sync"].as<bool>();
         if (config["hardware_sync_tty"]) cfg.hardware_sync_tty = config["hardware_sync_tty"].as<std::string>();
         if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
-        if (config["default_ip"]) cfg.default_ip = config["default_ip"].as<std::string>();
+        if (config["default_out_ip"]) {
+            cfg.default_out_ip = config["default_out_ip"].as<std::string>();
+        }
+        load_simulation_config(config, cfg);
         if (config["ocxo_pi_kp_fast"]) cfg.ocxo_pi_kp_fast = config["ocxo_pi_kp_fast"].as<double>();
         if (config["ocxo_pi_ki_fast"]) cfg.ocxo_pi_ki_fast = config["ocxo_pi_ki_fast"].as<double>();
         if (config["ocxo_pi_kp_slow"]) cfg.ocxo_pi_kp_slow = config["ocxo_pi_kp_slow"].as<double>();
@@ -2582,12 +2754,12 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
     }
     finalize_data_resource_grid_config(cfg, "Demodulator");
     finalize_sensing_mask_config(cfg, "Demodulator");
-    if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = cfg.default_ip;
-    if (cfg.channel_ip.empty()) cfg.channel_ip = cfg.default_ip;
-    if (cfg.pdf_ip.empty()) cfg.pdf_ip = cfg.default_ip;
-    if (cfg.constellation_ip.empty()) cfg.constellation_ip = cfg.default_ip;
-    if (cfg.vofa_debug_ip.empty()) cfg.vofa_debug_ip = cfg.default_ip;
-    if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_ip;
+    if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = "0.0.0.0";
+    if (cfg.channel_ip.empty()) cfg.channel_ip = cfg.default_out_ip;
+    if (cfg.pdf_ip.empty()) cfg.pdf_ip = cfg.default_out_ip;
+    if (cfg.constellation_ip.empty()) cfg.constellation_ip = cfg.default_out_ip;
+    if (cfg.vofa_debug_ip.empty()) cfg.vofa_debug_ip = cfg.default_out_ip;
+    if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_out_ip;
 }
 
 inline void log_demodulator_sync_mode(const Config& cfg) {
@@ -3151,7 +3323,7 @@ enum class SensingViewerWireDataFormat : uint32_t {
 inline constexpr uint32_t kSensingMetadataFlagCfarEnabled = 1u << 0;
 inline constexpr uint32_t kSensingMetadataFlagMicroDopplerEnabled = 1u << 1;
 
-inline constexpr uint32_t kSensingViewerParamsVersion = 5u;
+inline constexpr uint32_t kSensingViewerParamsVersion = 7u;
 inline constexpr uint32_t kSensingViewerFlagCompactMask = 1u << 0;
 inline constexpr uint32_t kSensingViewerFlagCompactLocalDelayDoppler = 1u << 1;
 inline constexpr uint32_t kSensingViewerFlagSkipSensingFft = 1u << 2;
@@ -3182,10 +3354,15 @@ struct SensingViewerParamsPacket {
     uint32_t os_cfar_rank_percent_x100 = 0;
     uint32_t os_cfar_suppress_doppler = 0;
     uint32_t os_cfar_suppress_range = 0;
+    // V6/V7 additions — zero in older packets; viewers treat 0 as "not provided".
+    // V7 stores center_freq / 100 so uint32 covers RF carriers well above mmWave.
+    uint32_t center_freq_hz_div100 = 0; // center_freq / 100 (units: 100 Hz; uint32 covers up to ~429 GHz)
+    uint32_t sample_rate_hz_div100 = 0; // sample_rate / 100 (units: 100 Hz; uint32 covers up to ~429 GHz)
+    uint32_t antenna_spacing_um = 0;    // physical ULA element spacing in micrometres (0 = not provided)
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SensingViewerParamsPacket) == 76, "SensingViewerParamsPacket size mismatch");
+static_assert(sizeof(SensingViewerParamsPacket) == 88, "SensingViewerParamsPacket size mismatch");
 
 inline std::vector<uint8_t> serialize_sensing_metadata(
     const SensingMetadata& metadata,
@@ -3429,7 +3606,8 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     bool bistatic = false,
     uint32_t stream_channel_count = 1,
     uint32_t stream_channel_mask = 0x1u,
-    bool aggregated_stream = false)
+    bool aggregated_stream = false,
+    double antenna_spacing_m = 0.0)
 {
     SensingViewerParamsPacket packet{};
     std::memcpy(packet.header, "CTRL", 4);
@@ -3457,6 +3635,19 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     packet.os_cfar_rank_percent_x100 = htonl(rank_percent_x100);
     packet.os_cfar_suppress_doppler = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_doppler)));
     packet.os_cfar_suppress_range = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_range)));
+    // V7: physical radio parameters so the viewer can auto-configure axes and AoA.
+    if (cfg.center_freq > 0.0) {
+        packet.center_freq_hz_div100 = htonl(static_cast<uint32_t>(
+            std::llround(std::clamp(cfg.center_freq / 100.0, 0.0, 4294967295.0))));
+    }
+    if (cfg.sample_rate > 0.0) {
+        packet.sample_rate_hz_div100 = htonl(static_cast<uint32_t>(
+            std::llround(std::clamp(cfg.sample_rate / 100.0, 0.0, 4294967295.0))));
+    }
+    if (antenna_spacing_m > 0.0) {
+        packet.antenna_spacing_um = htonl(static_cast<uint32_t>(
+            std::llround(std::clamp(antenna_spacing_m * 1e6, 0.0, 4294967295.0))));
+    }
     return packet;
 }
 
@@ -3483,7 +3674,7 @@ public:
         memset(&dest_addr_, 0, sizeof(dest_addr_));
         dest_addr_.sin_family = AF_INET;
         dest_addr_.sin_port = htons(port);
-        
+
         // Convert and validate IP address
         if (inet_pton(AF_INET, ip.c_str(), &dest_addr_.sin_addr) <= 0) {
             close(sockfd_);
@@ -3508,10 +3699,10 @@ public:
     // Basic send method (usable by derived classes)
     template <typename T>
     void send_raw(const T* data, size_t size_bytes) {
-        ssize_t bytes_sent = sendto(sockfd_, data, size_bytes, 0, 
-                                  reinterpret_cast<struct sockaddr*>(&dest_addr_), 
+        ssize_t bytes_sent = sendto(sockfd_, data, size_bytes, 0,
+                                  reinterpret_cast<struct sockaddr*>(&dest_addr_),
                                   sizeof(dest_addr_));
-        
+
         // Complete error checking and handling
         if (bytes_sent < 0) {
             throw std::runtime_error("UDP send failed: " + std::string(strerror(errno)));
@@ -3524,13 +3715,58 @@ public:
 
 /**
  * @brief Simple UDP Data Sender.
- * 
+ *
  * A general-purpose UDP sender that inherits from UdpBaseSender.
  * Provides template methods to send raw data or standard containers (e.g., std::vector).
  */
 class UdpSender : public UdpBaseSender {
 public:
     UdpSender(const std::string& ip, uint16_t port) : UdpBaseSender(ip, port) {}
+
+    template <typename T>
+    void send(const T* data, size_t size_bytes) {
+        send_raw(data, size_bytes);
+    }
+
+    template <typename Container>
+    void send_container(const Container& data) {
+        send(data.data(), data.size() * sizeof(typename Container::value_type));
+    }
+};
+
+/**
+ * @brief ZeroMQ PUB sender for Backend->Frontend visualization streams.
+ *
+ * Backend binds a TCP PUB endpoint and frontend scripts connect with SUB.
+ * This is intentionally separate from UdpSender because it does not use UDP.
+ */
+class ZmqPubSender {
+protected:
+    std::shared_ptr<zmq_transport::SharedPubSocket> pub_;
+
+public:
+    ZmqPubSender(const std::string& ip, uint16_t port) {
+        pub_ = zmq_transport::bind_pub(zmq_transport::make_tcp_endpoint(ip, port));
+    }
+
+    virtual ~ZmqPubSender() = default;
+
+    template <typename T>
+    void send_raw(const T* data, size_t size_bytes) {
+        pub_->send_single(static_cast<const void*>(data), size_bytes);
+    }
+
+    void send_frame(const std::vector<zmq_transport::MsgPart>& parts) {
+        pub_->send_multipart(parts);
+    }
+};
+
+/**
+ * @brief ZeroMQ PUB sender for byte-array debug streams.
+ */
+class ZmqByteSender : public ZmqPubSender {
+public:
+    ZmqByteSender(const std::string& ip, uint16_t port) : ZmqPubSender(ip, port) {}
 
     template <typename T>
     void send(const T* data, size_t size_bytes) {
@@ -3590,13 +3826,13 @@ private:
 };
 
 /**
- * @brief Lock-free SPSC UDP Sender for sensing data.
+ * @brief Lock-free SPSC ZeroMQ PUB sender for sensing data.
  *
  * Specialized sender for high-throughput sensing data. A single producer thread
  * enqueues payloads into a bounded lock-free ring, and a background consumer
- * thread handles UDP packetization/transmission asynchronously.
+ * thread serializes frames into ZMQ messages asynchronously.
  */
-class SensingDataSender : public UdpBaseSender {
+class SensingDataSender : public ZmqPubSender {
 public:
     enum class PayloadFormat {
         Dense,
@@ -3619,7 +3855,7 @@ public:
         int port,
         bool enabled = true,
         SensingOnWireFormat wire_data_format = SensingOnWireFormat::ComplexFloat32)
-        : UdpBaseSender(ip, port),
+        : ZmqPubSender(ip, port),
           _enabled(enabled),
           _wire_data_format(wire_data_format),
           _data_queue(64) {}
@@ -3791,58 +4027,53 @@ private:
                 break;
             }
 
-            // Send data if available
-            const bool has_inline = !frame_data.data.empty();
-            const bool has_external = frame_data.external_data != nullptr && frame_data.external_size > 0;
-            if (has_inline || has_external) {
-                if (frame_data.format == PayloadFormat::CompactMask) {
-                    send_compact_format(frame_data);
-                } else {
-                    send_data_with_original_format(frame_data);
-                }
-            }
-            if (!frame_data.metadata.empty()) {
-                send_metadata_frame(frame_data.metadata, frame_data.first_symbol_index);
-            }
+            _send_frame(frame_data);
         }
     }
 
-    void send_data_with_original_format(const AlignedVector& data, uint64_t first_symbol_index) {
-        send_data_with_original_format_impl(data.data(), data.size(), first_symbol_index);
-    }
+    // Emit one frame as a single ZMQ (multipart) message:
+    //   part 0 = data payload (may be empty)
+    //   part 1 = metadata sidecar (only when present)
+    // The previous 60 KB UDP chunking and the !III reassembly header are gone:
+    // ZMQ delivers arbitrarily large multipart messages atomically.
+    void _send_frame(const FrameData& frame_data) {
+        const bool has_inline = !frame_data.data.empty();
+        const bool has_external = frame_data.external_data != nullptr && frame_data.external_size > 0;
 
-    void send_data_with_original_format(const FrameData& frame_data) {
-        if (frame_data.external_data != nullptr && frame_data.external_size > 0) {
-            send_data_with_original_format_impl(
-                frame_data.external_data,
-                frame_data.external_size,
-                frame_data.first_symbol_index
-            );
+        std::vector<uint8_t> data_payload;
+        if (has_inline || has_external) {
+            if (frame_data.format == PayloadFormat::CompactMask) {
+                data_payload = _build_compact_payload(frame_data);
+            } else {
+                data_payload = _build_dense_payload(frame_data);
+            }
+        }
+
+        const bool has_metadata = !frame_data.metadata.empty();
+        if (data_payload.empty() && !has_metadata) {
             return;
         }
-        send_data_with_original_format_impl(
-            frame_data.data.data(),
-            frame_data.data.size(),
-            frame_data.first_symbol_index
-        );
+
+        std::vector<zmq_transport::MsgPart> parts;
+        parts.push_back({data_payload.data(), data_payload.size()});
+        if (has_metadata) {
+            parts.push_back({frame_data.metadata.data(), frame_data.metadata.size()});
+        }
+        send_frame(parts);
     }
 
-    void send_compact_format(const FrameData& frame_data) {
-        if (frame_data.external_data != nullptr && frame_data.external_size > 0) {
-            send_compact_format_impl(
-                frame_data.external_data,
-                frame_data.external_size,
-                frame_data.mask_hash,
-                frame_data.first_symbol_index
-            );
-            return;
+    static const std::complex<float>* _frame_data_ptr(const FrameData& fd) {
+        if (fd.external_data != nullptr && fd.external_size > 0) {
+            return fd.external_data;
         }
-        send_compact_format_impl(
-            frame_data.data.data(),
-            frame_data.data.size(),
-            frame_data.mask_hash,
-            frame_data.first_symbol_index
-        );
+        return fd.data.data();
+    }
+
+    static size_t _frame_data_size(const FrameData& fd) {
+        if (fd.external_data != nullptr && fd.external_size > 0) {
+            return fd.external_size;
+        }
+        return fd.data.size();
     }
 
     static uint16_t _float32_to_half_bits(float value) {
@@ -3933,66 +4164,38 @@ private:
             payload_bytes + data_size * sizeof(std::complex<float>));
     }
 
-    void send_data_with_original_format_impl(
-        const std::complex<float>* data_ptr,
-        size_t data_size,
-        uint64_t first_symbol_index
-    ) {
-        const size_t chunk_size = 60000;
+    // Dense payload: raw on-wire complex samples, no header (the viewer reads
+    // the geometry from the params packet).
+    std::vector<uint8_t> _build_dense_payload(const FrameData& frame_data) const {
+        const std::complex<float>* data_ptr = _frame_data_ptr(frame_data);
+        const size_t data_size = _frame_data_size(frame_data);
         std::vector<uint8_t> encoded_payload;
+        if (data_ptr == nullptr || data_size == 0) {
+            return encoded_payload;
+        }
         encoded_payload.reserve(data_size * sensing_on_wire_complex_bytes(_wire_data_format));
         _append_payload_bytes(encoded_payload, data_ptr, data_size);
-        size_t total_chunks = (encoded_payload.size() + chunk_size - 1) / chunk_size;
-        // Packet Header: [Frame ID | Total Chunks | Current Chunk Index]
-        // Reuse frame_id field to carry first OFDM symbol index (lower 32 bits)
-        const uint32_t frame_id = static_cast<uint32_t>(first_symbol_index & 0xFFFFFFFFu);
-        
-        for (size_t i = 0; i < total_chunks; i++) {
-            // Prepare packet header
-            uint32_t header[3] = {
-                htonl(frame_id),
-                htonl(static_cast<uint32_t>(total_chunks)),
-                htonl(static_cast<uint32_t>(i))
-            };
-            // Calculate current chunk size
-            size_t offset = i * chunk_size;
-            size_t remaining = encoded_payload.size() - offset;
-            size_t current_chunk_size = (remaining < chunk_size) ? remaining : chunk_size;
-            
-            // Construct complete packet
-            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
-            memcpy(packet.data(), header, sizeof(header));
-            memcpy(packet.data() + sizeof(header), encoded_payload.data() + offset, current_chunk_size);
-            
-            try {
-                send_raw(packet.data(), packet.size());
-            } catch (const std::exception& e) {
-                LOG_G_WARN() << "UDP send error: " << e.what();
-            }
-        }
+        return encoded_payload;
     }
 
-    void send_compact_format_impl(
-        const std::complex<float>* data_ptr,
-        size_t data_size,
-        uint32_t mask_hash,
-        uint64_t frame_start_symbol_index
-    ) {
-        if (data_ptr == nullptr || data_size == 0) {
-            return;
-        }
-        const size_t chunk_size = 60000;
+    // Compact payload: CompactSensingFrameHeader followed by on-wire samples.
+    std::vector<uint8_t> _build_compact_payload(const FrameData& frame_data) const {
+        const std::complex<float>* data_ptr = _frame_data_ptr(frame_data);
+        const size_t data_size = _frame_data_size(frame_data);
         std::vector<uint8_t> encoded_payload;
+        if (data_ptr == nullptr || data_size == 0) {
+            return encoded_payload;
+        }
         encoded_payload.reserve(
             sizeof(CompactSensingFrameHeader) +
             data_size * sensing_on_wire_complex_bytes(_wire_data_format));
-        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
 
         CompactSensingFrameHeader compact_header{};
         compact_header.magic_version = htonl(kCompactSensingMagicVersion);
-        compact_header.mask_hash = htonl(mask_hash);
+        compact_header.mask_hash = htonl(frame_data.mask_hash);
         compact_header.re_count = htonl(static_cast<uint32_t>(data_size));
-        compact_header.frame_start_symbol_index = host_to_network_u64(frame_start_symbol_index);
+        compact_header.frame_start_symbol_index =
+            host_to_network_u64(frame_data.first_symbol_index);
 
         const auto* compact_header_bytes = reinterpret_cast<const uint8_t*>(&compact_header);
         encoded_payload.insert(
@@ -4000,85 +4203,23 @@ private:
             compact_header_bytes,
             compact_header_bytes + sizeof(CompactSensingFrameHeader));
         _append_payload_bytes(encoded_payload, data_ptr, data_size);
-        const size_t payload_bytes = encoded_payload.size();
-        const auto* data_bytes = encoded_payload.data();
-        const size_t total_chunks = (payload_bytes + chunk_size - 1) / chunk_size;
-
-        for (size_t i = 0; i < total_chunks; ++i) {
-            uint32_t header[3] = {
-                htonl(frame_id),
-                htonl(static_cast<uint32_t>(total_chunks)),
-                htonl(static_cast<uint32_t>(i))
-            };
-
-            const size_t payload_offset = i * chunk_size;
-            const size_t remaining = payload_bytes - payload_offset;
-            const size_t current_chunk_size = (remaining < chunk_size) ? remaining : chunk_size;
-            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
-            std::memcpy(packet.data(), header, sizeof(header));
-
-            std::memcpy(
-                packet.data() + sizeof(header),
-                data_bytes + payload_offset,
-                current_chunk_size);
-
-            try {
-                send_raw(packet.data(), packet.size());
-            } catch (const std::exception& e) {
-                LOG_G_WARN() << "UDP send error: " << e.what();
-            }
-        }
+        return encoded_payload;
     }
 
-    void send_metadata_frame(
-        const std::vector<uint8_t>& metadata,
-        uint64_t frame_start_symbol_index)
-    {
-        if (metadata.empty()) {
-            return;
-        }
-
-        const size_t chunk_size = 60000;
-        const size_t total_chunks = (metadata.size() + chunk_size - 1) / chunk_size;
-        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
-
-        for (size_t i = 0; i < total_chunks; ++i) {
-            uint32_t header[3] = {
-                htonl(frame_id),
-                htonl(static_cast<uint32_t>(total_chunks) | 0x80000000u),
-                htonl(static_cast<uint32_t>(i))
-            };
-            const size_t offset = i * chunk_size;
-            const size_t remaining = metadata.size() - offset;
-            const size_t current_chunk_size = std::min(remaining, chunk_size);
-            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
-            std::memcpy(packet.data(), header, sizeof(header));
-            std::memcpy(
-                packet.data() + sizeof(header),
-                metadata.data() + static_cast<std::ptrdiff_t>(offset),
-                current_chunk_size);
-            try {
-                send_raw(packet.data(), packet.size());
-            } catch (const std::exception& e) {
-                LOG_G_WARN() << "UDP send error: " << e.what();
-            }
-        }
-    }
-    
     std::atomic<bool> _running{false};
     SPSCRingBuffer<FrameData> _data_queue;
     std::thread _send_thread;
 };
 
 /**
- * @brief Aggregates per-channel sensing frames and emits a single UDP stream.
+ * @brief Aggregates per-channel sensing frames and emits a single ZeroMQ stream.
  *
  * Each channel owns one SPSC queue into this sender. The background thread
  * waits for matching `first_symbol_index` values across all enabled channels,
  * serializes the per-channel payloads in logical-channel order, and sends a
- * single aggregated chunk stream to the viewer.
+ * single aggregated ZMQ message stream to the viewer.
  */
-class AggregatedSensingDataSender : public UdpBaseSender {
+class AggregatedSensingDataSender : public ZmqPubSender {
 public:
     using FrameData = SensingDataSender::FrameData;
 
@@ -4089,7 +4230,7 @@ public:
         bool enabled = true,
         size_t per_channel_queue_size = 8,
         SensingOnWireFormat wire_data_format = SensingOnWireFormat::ComplexFloat32)
-        : UdpBaseSender(ip, static_cast<uint16_t>(port)),
+        : ZmqPubSender(ip, static_cast<uint16_t>(port)),
           _enabled(enabled && !channel_ids.empty()),
           _wire_data_format(wire_data_format),
           _channel_ids(std::move(channel_ids)),
@@ -4264,7 +4405,6 @@ private:
               present(channel_count, 0) {}
     };
 
-    static constexpr size_t kChunkSizeBytes = 60000;
     static constexpr size_t kMaxPendingAggregateFrames = 4;
 
     int32_t _channel_index(uint32_t channel_id) const {
@@ -4340,36 +4480,6 @@ private:
             raw_bytes + payload_complex_count * sizeof(std::complex<float>));
     }
 
-    void _send_chunked_payload(
-        const std::vector<uint8_t>& payload,
-        uint64_t frame_start_symbol_index,
-        const char* error_prefix,
-        bool metadata_sidecar = false)
-    {
-        const size_t total_chunks = (payload.size() + kChunkSizeBytes - 1) / kChunkSizeBytes;
-        const uint32_t frame_id = static_cast<uint32_t>(frame_start_symbol_index & 0xFFFFFFFFu);
-        const uint32_t total_chunks_field =
-            static_cast<uint32_t>(total_chunks) | (metadata_sidecar ? 0x80000000u : 0u);
-        for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
-            uint32_t header[3] = {
-                htonl(frame_id),
-                htonl(total_chunks_field),
-                htonl(static_cast<uint32_t>(chunk_idx))
-            };
-            const size_t offset = chunk_idx * kChunkSizeBytes;
-            const size_t remaining = payload.size() - offset;
-            const size_t current_chunk_size = std::min(remaining, kChunkSizeBytes);
-            std::vector<uint8_t> packet(sizeof(header) + current_chunk_size);
-            std::memcpy(packet.data(), header, sizeof(header));
-            std::memcpy(packet.data() + sizeof(header), payload.data() + offset, current_chunk_size);
-            try {
-                send_raw(packet.data(), packet.size());
-            } catch (const std::exception& e) {
-                LOG_G_WARN() << error_prefix << e.what();
-            }
-        }
-    }
-
     void _drop_oldest_pending_frame() {
         if (_pending_frames.empty()) {
             return;
@@ -4413,11 +4523,10 @@ private:
             _append_wire_payload(payload, pending.frames[i]);
         }
 
-        _send_chunked_payload(
-            payload,
-            frame_start_symbol_index,
-            "[Sensing Aggregate] UDP send error: ");
-
+        // Build the optional metadata sidecar (only when every channel
+        // provided metadata). It travels as part 1 of the same multipart
+        // message; the previous 0x80000000 chunk-header flag is gone.
+        std::vector<uint8_t> metadata_payload;
         bool have_all_metadata = true;
         bool any_metadata = false;
         for (size_t i = 0; i < channel_count; ++i) {
@@ -4429,41 +4538,38 @@ private:
             LOG_G_WARN() << "[Sensing Aggregate] dropping metadata sidecar for frame "
                          << frame_start_symbol_index
                          << " because not all channels provided metadata";
-            return;
-        }
-        if (!have_all_metadata) {
-            return;
-        }
-
-        std::vector<uint8_t> metadata_payload;
-        metadata_payload.reserve(sizeof(AggregatedSensingMetadataHeader));
-        AggregatedSensingMetadataHeader metadata_header{};
-        std::memcpy(
-            metadata_header.magic,
-            kAggregatedSensingMetadataMagic,
-            sizeof(metadata_header.magic));
-        metadata_header.channel_count = static_cast<uint32_t>(channel_count);
-        metadata_header.channel_mask = _channel_mask;
-        metadata_header.reserved = 0;
-        metadata_header.frame_start_symbol_index = frame_start_symbol_index;
-        const auto* metadata_header_bytes =
-            reinterpret_cast<const uint8_t*>(&metadata_header);
-        metadata_payload.insert(
-            metadata_payload.end(),
-            metadata_header_bytes,
-            metadata_header_bytes + sizeof(metadata_header));
-
-        for (size_t i = 0; i < channel_count; ++i) {
+        } else if (have_all_metadata) {
+            metadata_payload.reserve(sizeof(AggregatedSensingMetadataHeader));
+            AggregatedSensingMetadataHeader metadata_header{};
+            std::memcpy(
+                metadata_header.magic,
+                kAggregatedSensingMetadataMagic,
+                sizeof(metadata_header.magic));
+            metadata_header.channel_count = static_cast<uint32_t>(channel_count);
+            metadata_header.channel_mask = _channel_mask;
+            metadata_header.reserved = 0;
+            metadata_header.frame_start_symbol_index = frame_start_symbol_index;
+            const auto* metadata_header_bytes =
+                reinterpret_cast<const uint8_t*>(&metadata_header);
             metadata_payload.insert(
                 metadata_payload.end(),
-                pending.frames[i].metadata.begin(),
-                pending.frames[i].metadata.end());
+                metadata_header_bytes,
+                metadata_header_bytes + sizeof(metadata_header));
+
+            for (size_t i = 0; i < channel_count; ++i) {
+                metadata_payload.insert(
+                    metadata_payload.end(),
+                    pending.frames[i].metadata.begin(),
+                    pending.frames[i].metadata.end());
+            }
         }
-        _send_chunked_payload(
-            metadata_payload,
-            frame_start_symbol_index,
-            "[Sensing Aggregate] metadata UDP send error: ",
-            true);
+
+        std::vector<zmq_transport::MsgPart> parts;
+        parts.push_back({payload.data(), payload.size()});
+        if (!metadata_payload.empty()) {
+            parts.push_back({metadata_payload.data(), metadata_payload.size()});
+        }
+        send_frame(parts);
     }
 
     void run() {
@@ -4818,10 +4924,17 @@ private:
  * Supports a custom command protocol with a header, command ID, and integer parameter.
  * Used for runtime configuration changes (e.g., gain, frequency, alignment).
  */
+// Bidirectional control/params channel. Migrated from raw UDP to a ZeroMQ
+// ROUTER socket: the backend binds ROUTER, each frontend connects a DEALER.
+// A peer is identified by its DEALER routing id (ControlPeer) instead of a
+// sockaddr_in. The ROUTER socket is owned by the single poll thread; replies
+// posted from other threads are queued and flushed by that thread.
 class ControlCommandHandler {
 public:
+    using ControlPeer = zmq_transport::PeerId;
     using Callback = std::function<void(int32_t value)>;
-    
+    using RequestCallback = std::function<void(int32_t value, const ControlPeer& peer)>;
+
     // Command structure definition
     #pragma pack(push, 1)
     struct ControlCommand {
@@ -4830,12 +4943,15 @@ public:
         int32_t value;  // Parameter value
     };
     #pragma pack(pop)
-    
+
     static_assert(sizeof(ControlCommand) == 12, "ControlCommand size mismatch");
 
-    ControlCommandHandler(int port) : _port(port), _running(false) {
-        // Create and bind socket
-        _create_socket();
+    ControlCommandHandler(int port)
+        : ControlCommandHandler("0.0.0.0", port) {}
+
+    ControlCommandHandler(const std::string& bind_ip, int port) : _port(port), _running(false) {
+        _router = std::make_unique<zmq_transport::ControlRouter>(
+            zmq_transport::make_tcp_endpoint(bind_ip, _port));
     }
 
     ~ControlCommandHandler() {
@@ -4851,7 +4967,6 @@ public:
     void stop() {
         if (!_running) return;
         _running = false;
-        close(_socket);
         if (_thread.joinable()) {
             _thread.join();
         }
@@ -4865,140 +4980,240 @@ public:
 
     void register_request(const std::string& command, Callback callback) {
         std::lock_guard<std::mutex> lock(_mutex);
+        _request_handlers[command] =
+            [callback = std::move(callback)](int32_t value, const ControlPeer&) {
+                callback(value);
+            };
+    }
+
+    void register_request(const std::string& command, RequestCallback callback) {
+        std::lock_guard<std::mutex> lock(_mutex);
         _request_handlers[command] = std::move(callback);
     }
 
-    // Send heartbeat to the sensing receiver to maintain NAT mapping
-    void send_heartbeat(const std::string& dest_ip, int dest_port) {
-        if (_socket < 0) return;
+    // Send a readiness/heartbeat ("RDY ") packet. With ZMQ the TCP link is
+    // persistent (no NAT mapping to keep alive), but the RDY signal still tells
+    // connected viewers the backend is up. The ip/port arguments are retained
+    // for source compatibility but ignored: the message is broadcast to recent
+    // control peers (ROUTER can only address known DEALER ids).
+    void send_heartbeat(const std::string& /*dest_ip*/, int /*dest_port*/) {
+        broadcast_heartbeat();
+    }
 
-        struct sockaddr_in dest_addr;
-        memset(&dest_addr, 0, sizeof(dest_addr));
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(dest_port);
-        if (inet_pton(AF_INET, dest_ip.c_str(), &dest_addr.sin_addr) <= 0) {
-            return;
+    void broadcast_heartbeat() {
+        const ControlCommand hb = _make_heartbeat();
+        _broadcast(&hb, sizeof(hb));
+    }
+
+    bool send_heartbeat_to_last_peer() {
+        ControlPeer peer;
+        if (!_get_last_control_peer(peer)) {
+            return false;
         }
-
-        // Send a "CTRL_RDY" packet (Header + "RDY " + 0)
-        ControlCommand hb;
-        memcpy(hb.header, "CTRL", 4);
-        memcpy(hb.command, "RDY ", 4);
-        hb.value = 0; // Value doesn't matter
-
-        sendto(_socket, &hb, sizeof(hb), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+        const ControlCommand hb = _make_heartbeat();
+        _send_to(peer, &hb, sizeof(hb));
+        return true;
     }
 
     void send_sensing_viewer_params(
-        const std::string& dest_ip,
-        int dest_port,
+        const std::string& /*dest_ip*/,
+        int /*dest_port*/,
         const SensingViewerParamsPacket& packet)
     {
-        if (_socket < 0) return;
+        _broadcast(&packet, sizeof(packet));
+    }
 
-        struct sockaddr_in dest_addr;
-        std::memset(&dest_addr, 0, sizeof(dest_addr));
-        dest_addr.sin_family = AF_INET;
-        dest_addr.sin_port = htons(dest_port);
-        if (inet_pton(AF_INET, dest_ip.c_str(), &dest_addr.sin_addr) <= 0) {
-            return;
+    void send_sensing_viewer_params(
+        const ControlPeer& peer,
+        const SensingViewerParamsPacket& packet)
+    {
+        _send_to(peer, &packet, sizeof(packet));
+    }
+
+    bool send_sensing_viewer_params_to_last_peer(const SensingViewerParamsPacket& packet) {
+        ControlPeer peer;
+        if (!_get_last_control_peer(peer)) {
+            return false;
         }
-
-        sendto(_socket, &packet, sizeof(packet), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+        send_sensing_viewer_params(peer, packet);
+        return true;
     }
 
 private:
-    void _create_socket() {
-        _socket = socket(AF_INET, SOCK_DGRAM, 0);
-        if (_socket < 0) {
-            throw std::runtime_error("Failed to create control socket: " + std::string(strerror(errno)));
+    bool _get_last_control_peer(ControlPeer& peer) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const auto now = std::chrono::steady_clock::now();
+        _prune_peers_locked(now);
+        if (!_has_last_control_peer) {
+            return false;
         }
-        
-        // Set socket options
-        int opt = 1;
-        setsockopt(_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        
-        // Bind to port
-        struct sockaddr_in serv_addr;
-        memset(&serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_addr.s_addr = INADDR_ANY;
-        serv_addr.sin_port = htons(_port);
-        
-        if (bind(_socket, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-            throw std::runtime_error("Control socket bind failed: " + std::string(strerror(errno)));
+        peer = _last_control_peer;
+        return true;
+    }
+
+    ControlCommand _make_heartbeat() const {
+        ControlCommand hb;
+        std::memcpy(hb.header, "CTRL", 4);
+        std::memcpy(hb.command, "RDY ", 4);
+        hb.value = 0;
+        return hb;
+    }
+
+    // Queue an outbound message to every recently active control peer.
+    void _broadcast(const void* data, size_t size) {
+        std::vector<ControlPeer> peers;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            const auto now = std::chrono::steady_clock::now();
+            _prune_peers_locked(now);
+            peers.reserve(_peers.size());
+            for (const auto& item : _peers) {
+                peers.push_back(item.first);
+            }
         }
-        
-        // Set timeout options
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 10000; // 10ms timeout
-        setsockopt(_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        for (const auto& peer : peers) {
+            _router->post_send(peer, data, size);
+        }
+    }
+
+    void _send_to(const ControlPeer& peer, const void* data, size_t size) {
+        _router->post_send(peer, data, size);
     }
 
     void _run() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
-        ControlCommand cmd;
-        struct sockaddr_in cli_addr;
-        socklen_t cli_len = sizeof(cli_addr);
-        
+        ControlPeer identity;
+        std::vector<uint8_t> payload;
+
         while (_running) {
-            ssize_t n = recvfrom(_socket, &cmd, sizeof(cmd), 0,
-                                (struct sockaddr*)&cli_addr, &cli_len);
-            
-            if (n <= 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    continue; // Normal timeout
-                } else if (errno != 0) {
-                    LOG_G_WARN() << "Control recv error: " << strerror(errno);
-                    continue;
-                }
+            if (_router->recv(identity, payload)) {
+                _dispatch(identity, payload);
             }
-            
-            if (n != sizeof(cmd)) {
-                LOG_G_WARN() << "Received partial command (" << n << " bytes)";
-                continue;
-            }
-            
-            const std::string header_str(cmd.header, 4);
-            std::unordered_map<std::string, Callback>* handlers = nullptr;
-            if (header_str == "CMD ") {
-                handlers = &_handlers;
-            } else if (header_str == "REQ ") {
-                handlers = &_request_handlers;
-            } else {
-                LOG_G_WARN() << "Invalid command header received";
-                continue;
-            }
-            
-            int32_t value = ntohl(cmd.value); // Network to host byte order
-            std::string command_str(cmd.command, 4);
-            
-            // Find and execute handler
+            // Flush replies/heartbeats queued by other threads (the ROUTER
+            // socket is only ever touched on this thread).
+            _router->flush();
+        }
+    }
+
+    void _dispatch(const ControlPeer& identity, const std::vector<uint8_t>& payload) {
+        if (payload.size() != sizeof(ControlCommand)) {
+            LOG_G_WARN() << "Received malformed control command (" << payload.size() << " bytes)";
+            return;
+        }
+        ControlCommand cmd;
+        std::memcpy(&cmd, payload.data(), sizeof(cmd));
+
+        const std::string header_str(cmd.header, 4);
+        const int32_t value = ntohl(cmd.value);  // Network to host byte order
+        const std::string command_str(cmd.command, 4);
+
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            _record_peer_locked(identity, std::chrono::steady_clock::now());
+        }
+
+        if (header_str == "CMD ") {
+            Callback callback;
             {
                 std::lock_guard<std::mutex> lock(_mutex);
-                auto it = handlers->find(command_str);
-                if (it != handlers->end()) {
-                    try {
-                        it->second(value);
-                    } catch (const std::exception& e) {
-                        LOG_G_WARN() << "Error processing command '" << command_str 
-                                     << "': " << e.what();
-                    }
-                } else {
-                    LOG_G_WARN() << "Unknown command: " << command_str;
+                auto it = _handlers.find(command_str);
+                if (it != _handlers.end()) {
+                    callback = it->second;
                 }
+            }
+            if (!callback) {
+                LOG_G_WARN() << "Unknown command: " << command_str;
+                return;
+            }
+            try {
+                callback(value);
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "Error processing command '" << command_str
+                             << "': " << e.what();
+            }
+        } else if (header_str == "REQ ") {
+            RequestCallback callback;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                auto it = _request_handlers.find(command_str);
+                if (it != _request_handlers.end()) {
+                    callback = it->second;
+                }
+            }
+            if (!callback) {
+                LOG_G_WARN() << "Unknown command: " << command_str;
+                return;
+            }
+            try {
+                callback(value, identity);
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "Error processing command '" << command_str
+                             << "': " << e.what();
+            }
+        } else {
+            LOG_G_WARN() << "Invalid command header received";
+        }
+    }
+
+    void _record_peer_locked(
+        const ControlPeer& identity,
+        std::chrono::steady_clock::time_point now)
+    {
+        if (identity.empty()) {
+            return;
+        }
+        _peers[identity] = now;
+        _last_control_peer = identity;
+        _has_last_control_peer = true;
+        _prune_peers_locked(now);
+    }
+
+    void _prune_peers_locked(std::chrono::steady_clock::time_point now) const {
+        for (auto it = _peers.begin(); it != _peers.end();) {
+            if (now - it->second > kControlPeerTtl) {
+                it = _peers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        while (_peers.size() > kMaxControlPeers) {
+            auto oldest = _peers.begin();
+            for (auto it = std::next(_peers.begin()); it != _peers.end(); ++it) {
+                if (it->second < oldest->second) {
+                    oldest = it;
+                }
+            }
+            _peers.erase(oldest);
+        }
+
+        if (_has_last_control_peer && _peers.find(_last_control_peer) == _peers.end()) {
+            _has_last_control_peer = false;
+            if (!_peers.empty()) {
+                auto newest = _peers.begin();
+                for (auto it = std::next(_peers.begin()); it != _peers.end(); ++it) {
+                    if (it->second > newest->second) {
+                        newest = it;
+                    }
+                }
+                _last_control_peer = newest->first;
+                _has_last_control_peer = true;
             }
         }
     }
-    
+
     int _port;
-    int _socket = -1;
+    std::unique_ptr<zmq_transport::ControlRouter> _router;
     std::atomic<bool> _running{false};
     std::thread _thread;
-    std::mutex _mutex;
+    mutable std::mutex _mutex;
     std::unordered_map<std::string, Callback> _handlers;
-    std::unordered_map<std::string, Callback> _request_handlers;
+    std::unordered_map<std::string, RequestCallback> _request_handlers;
+    static constexpr size_t kMaxControlPeers = 64;
+    static constexpr std::chrono::seconds kControlPeerTtl{30};
+    mutable bool _has_last_control_peer = false;
+    mutable ControlPeer _last_control_peer;
+    mutable std::unordered_map<ControlPeer, std::chrono::steady_clock::time_point> _peers;
 };
 
 /**

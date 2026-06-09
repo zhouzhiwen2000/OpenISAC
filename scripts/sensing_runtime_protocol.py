@@ -5,6 +5,11 @@ import struct
 
 import numpy as np
 
+try:
+    import zmq
+except ImportError:  # pragma: no cover - surfaced lazily by the transport helpers
+    zmq = None
+
 
 CTRL_HEADER = b"CTRL"
 CMD_HEADER = b"CMD "
@@ -35,7 +40,8 @@ WIRE_DATA_FORMAT_COMPLEX_FLOAT16 = 1
 PARAMS_PACKET_STRUCT_V1 = struct.Struct("!4s4s11I")
 PARAMS_PACKET_STRUCT_V3 = struct.Struct("!4s4s13I")
 PARAMS_PACKET_STRUCT_V4 = struct.Struct("!4s4s14I")
-PARAMS_PACKET_STRUCT = struct.Struct("!4s4s17I")
+PARAMS_PACKET_STRUCT_V5 = struct.Struct("!4s4s17I")   # same layout as old "current"
+PARAMS_PACKET_STRUCT    = struct.Struct("!4s4s20I")   # V7: +center_freq_hz_div100, sample_rate_hz_div100, antenna_spacing_um
 COMPACT_HEADER_STRUCT = struct.Struct("!IIIQ")
 AGGREGATE_HEADER_STRUCT = struct.Struct("!IIIIQ")
 REQUEST_PACKET_STRUCT = struct.Struct("!4s4si")
@@ -72,6 +78,10 @@ class ViewerRuntimeParams:
     backend_os_rank_percent: float = 75.0
     backend_os_suppress_doppler: int = 2
     backend_os_suppress_range: int = 2
+    # V6 additions — 0.0 / None means the backend did not supply the value.
+    center_freq_hz: float = 0.0          # 0.0 = not provided
+    sample_rate_hz: float = 0.0          # 0.0 = not provided
+    antenna_spacing_m: float = 0.0       # 0.0 = not provided (only sent in sim mode)
 
     def is_compact_mask(self) -> bool:
         return bool(self.flags & FLAG_COMPACT_MASK)
@@ -187,6 +197,95 @@ class DecodedSensingMetadata:
     md_extent: list[float] | None
 
 
+# ---------------------------------------------------------------------------
+# ZeroMQ transport
+#
+# The Backend<->Frontend link was migrated from raw UDP to ZeroMQ:
+#   - Sensing data streams: backend PUB (bind) -> frontend SUB (connect).
+#     A whole frame is one (possibly multipart) message: part 0 is the data
+#     payload, an optional part 1 carries the metadata sidecar. The previous
+#     60 KB UDP chunking and the !III reassembly header are gone.
+#   - Debug plot streams (channel/const/pdf): PUB -> SUB with CONFLATE so the
+#     viewer only ever sees the latest frame.
+#   - Control/params channel: backend ROUTER (bind) <-> frontend DEALER
+#     (connect). Commands are still 12-byte REQUEST_PACKET_STRUCT payloads.
+# ---------------------------------------------------------------------------
+
+
+def _require_zmq():
+    if zmq is None:
+        raise RuntimeError(
+            "pyzmq is required for the Backend<->Frontend transport. "
+            "Install it with `pip install pyzmq` (see requirements.txt)."
+        )
+    return zmq
+
+
+def make_tcp_endpoint(ip: str, port: int) -> str:
+    """Build a tcp:// connect endpoint for the frontend side.
+
+    An empty / wildcard backend bind address resolves to localhost for the
+    connecting frontend.
+    """
+    host = (ip or "").strip()
+    if host in ("", "0.0.0.0", "*"):
+        host = "127.0.0.1"
+    return f"tcp://{host}:{int(port)}"
+
+
+def make_data_sub(endpoint: str, rcvhwm: int = 4, conflate: bool = False):
+    """SUB socket for a sensing data stream (small HWM, drop-old semantics)."""
+    z = _require_zmq()
+    ctx = z.Context.instance()
+    sock = ctx.socket(z.SUB)
+    sock.setsockopt(z.LINGER, 0)
+    if conflate:
+        # CONFLATE keeps only the most recent message; it must be set before
+        # connect and is incompatible with multipart messages.
+        sock.setsockopt(z.CONFLATE, 1)
+    else:
+        sock.setsockopt(z.RCVHWM, int(rcvhwm))
+    sock.connect(endpoint)
+    sock.setsockopt(z.SUBSCRIBE, b"")
+    return sock
+
+
+def make_debug_sub_conflate(endpoint: str):
+    """SUB socket for a single-part debug plot stream (latest frame only)."""
+    return make_data_sub(endpoint, conflate=True)
+
+
+def make_control_dealer(endpoint: str, identity: bytes | str | None = None):
+    """DEALER socket for the bidirectional control/params channel."""
+    z = _require_zmq()
+    ctx = z.Context.instance()
+    sock = ctx.socket(z.DEALER)
+    sock.setsockopt(z.LINGER, 0)
+    if identity is not None:
+        if isinstance(identity, str):
+            identity = identity.encode()
+        sock.setsockopt(z.IDENTITY, identity)
+    sock.connect(endpoint)
+    return sock
+
+
+def recv_sensing_frame(sock, flags: int = 0):
+    """Receive one sensing frame as (data_bytes, metadata_bytes_or_None).
+
+    Returns None when called non-blocking and nothing is available.
+    """
+    z = _require_zmq()
+    try:
+        parts = sock.recv_multipart(flags=flags)
+    except z.Again:
+        return None
+    if not parts:
+        return None
+    data = parts[0]
+    metadata = parts[1] if len(parts) > 1 and parts[1] else None
+    return data, metadata
+
+
 def build_params_request(value: int = 0) -> bytes:
     return REQUEST_PACKET_STRUCT.pack(REQ_HEADER, PARAMS_COMMAND, int(value))
 
@@ -202,96 +301,77 @@ def build_system_response_calibration_command(value: int = 0) -> bytes:
 def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
     if len(data) < PARAMS_PACKET_STRUCT_V1.size:
         return None
+    # Defaults for fields not present in older packet versions.
+    os_cfar_rank_percent_x100 = 7500
+    os_cfar_suppress_doppler = 2
+    os_cfar_suppress_range = 2
+    wire_data_format = WIRE_DATA_FORMAT_COMPLEX_FLOAT32
+    stream_channel_count = 1
+    stream_channel_mask = 1
+    center_freq_raw = 0
+    sample_rate_hz_div100 = 0
+    antenna_spacing_um = 0
+
     if len(data) >= PARAMS_PACKET_STRUCT.size:
+        # V6/V7: includes center_freq, sample_rate, antenna_spacing.
+        # V6 encoded center_freq * 10 and overflowed above ~429 MHz; V7 uses
+        # center_freq / 100 to cover RF carriers with 100 Hz resolution.
         (
-            header,
-            command,
-            version,
-            flags,
-            frame_format,
-            wire_rows,
-            wire_cols,
-            active_rows,
-            active_cols,
-            frame_symbol_period,
-            range_fft_size,
-            doppler_fft_size,
-            compact_mask_hash,
-            wire_data_format,
-            stream_channel_count,
-            stream_channel_mask,
-            os_cfar_rank_percent_x100,
-            os_cfar_suppress_doppler,
-            os_cfar_suppress_range,
+            header, command, version, flags, frame_format,
+            wire_rows, wire_cols, active_rows, active_cols,
+            frame_symbol_period, range_fft_size, doppler_fft_size,
+            compact_mask_hash, wire_data_format, stream_channel_count,
+            stream_channel_mask, os_cfar_rank_percent_x100,
+            os_cfar_suppress_doppler, os_cfar_suppress_range,
+            center_freq_raw, sample_rate_hz_div100, antenna_spacing_um,
         ) = PARAMS_PACKET_STRUCT.unpack_from(data)
+    elif len(data) >= PARAMS_PACKET_STRUCT_V5.size:
+        # V5 (17 uint32 fields, no radio params)
+        (
+            header, command, version, flags, frame_format,
+            wire_rows, wire_cols, active_rows, active_cols,
+            frame_symbol_period, range_fft_size, doppler_fft_size,
+            compact_mask_hash, wire_data_format, stream_channel_count,
+            stream_channel_mask, os_cfar_rank_percent_x100,
+            os_cfar_suppress_doppler, os_cfar_suppress_range,
+        ) = PARAMS_PACKET_STRUCT_V5.unpack_from(data)
     elif len(data) >= PARAMS_PACKET_STRUCT_V4.size:
         (
-            header,
-            command,
-            version,
-            flags,
-            frame_format,
-            wire_rows,
-            wire_cols,
-            active_rows,
-            active_cols,
-            frame_symbol_period,
-            range_fft_size,
-            doppler_fft_size,
-            compact_mask_hash,
-            wire_data_format,
-            stream_channel_count,
+            header, command, version, flags, frame_format,
+            wire_rows, wire_cols, active_rows, active_cols,
+            frame_symbol_period, range_fft_size, doppler_fft_size,
+            compact_mask_hash, wire_data_format, stream_channel_count,
             stream_channel_mask,
         ) = PARAMS_PACKET_STRUCT_V4.unpack_from(data)
-        os_cfar_rank_percent_x100 = 7500
-        os_cfar_suppress_doppler = 2
-        os_cfar_suppress_range = 2
     elif len(data) >= PARAMS_PACKET_STRUCT_V3.size:
         (
-            header,
-            command,
-            version,
-            flags,
-            frame_format,
-            wire_rows,
-            wire_cols,
-            active_rows,
-            active_cols,
-            frame_symbol_period,
-            range_fft_size,
-            doppler_fft_size,
-            compact_mask_hash,
-            stream_channel_count,
-            stream_channel_mask,
+            header, command, version, flags, frame_format,
+            wire_rows, wire_cols, active_rows, active_cols,
+            frame_symbol_period, range_fft_size, doppler_fft_size,
+            compact_mask_hash, stream_channel_count, stream_channel_mask,
         ) = PARAMS_PACKET_STRUCT_V3.unpack_from(data)
-        wire_data_format = WIRE_DATA_FORMAT_COMPLEX_FLOAT32
-        os_cfar_rank_percent_x100 = 7500
-        os_cfar_suppress_doppler = 2
-        os_cfar_suppress_range = 2
     else:
         (
-            header,
-            command,
-            version,
-            flags,
-            frame_format,
-            wire_rows,
-            wire_cols,
-            active_rows,
-            active_cols,
-            frame_symbol_period,
-            range_fft_size,
-            doppler_fft_size,
+            header, command, version, flags, frame_format,
+            wire_rows, wire_cols, active_rows, active_cols,
+            frame_symbol_period, range_fft_size, doppler_fft_size,
             compact_mask_hash,
         ) = PARAMS_PACKET_STRUCT_V1.unpack_from(data)
-        wire_data_format = WIRE_DATA_FORMAT_COMPLEX_FLOAT32
-        stream_channel_count = 1
-        stream_channel_mask = 1
-        os_cfar_rank_percent_x100 = 7500
-        os_cfar_suppress_doppler = 2
-        os_cfar_suppress_range = 2
+
     if header != CTRL_HEADER or command != PARAMS_COMMAND:
         return None
+
+    if int(center_freq_raw) > 0:
+        center_freq_hz = (
+            float(int(center_freq_raw)) * 100.0
+            if int(version) >= 7
+            else float(int(center_freq_raw)) / 10.0
+        )
+    else:
+        center_freq_hz = 0.0
+    sample_rate_hz = float(int(sample_rate_hz_div100)) * 100.0 if int(sample_rate_hz_div100) > 0 else 0.0
+    antenna_spacing_m = float(int(antenna_spacing_um)) * 1e-6 if int(antenna_spacing_um) > 0 else 0.0
+
     return ViewerRuntimeParams(
         version=int(version),
         flags=int(flags),
@@ -310,6 +390,9 @@ def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
         backend_os_rank_percent=float(int(os_cfar_rank_percent_x100)) / 100.0,
         backend_os_suppress_doppler=max(0, int(os_cfar_suppress_doppler)),
         backend_os_suppress_range=max(0, int(os_cfar_suppress_range)),
+        center_freq_hz=center_freq_hz,
+        sample_rate_hz=sample_rate_hz,
+        antenna_spacing_m=antenna_spacing_m,
     )
 
 

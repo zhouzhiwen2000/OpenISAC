@@ -26,6 +26,7 @@
 #include "LDPCCodec.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
+#include "SimStreamer.hpp"
 #include <functional>
 #include <unordered_map>
 #include <memory>
@@ -143,7 +144,7 @@ public:
         _fft_out(cfg.fft_size),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         _data_resource_layout(build_data_resource_grid_layout(cfg)),
-        _control_handler(cfg.control_port),
+        _control_handler(cfg.mono_sensing_ip, cfg.control_port),
         _measurement_enabled(measurement_mode_enabled(cfg)),
         _frame_pool(32, [&cfg]() {
             return AlignedVector(cfg.samples_per_frame());
@@ -308,6 +309,7 @@ public:
 private:
     Config _cfg;
     uhd::usrp::multi_usrp::sptr _tx_usrp;
+    std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
     uhd::tx_streamer::sptr _tx_stream;
     size_t _tx_chunk_samps = 0;
 
@@ -431,6 +433,11 @@ private:
 
     void _build_sensing_channels() {
         _aggregated_sensing_sender.reset();
+        if (radio_is_sim(_cfg) && !_cfg.simulation.enable_sensing_rx) {
+            _sensing_channels.clear();
+            LOG_G_INFO() << "[Sensing] disabled in simulation (simulation.enable_sensing_rx=false).";
+            return;
+        }
         std::vector<uint32_t> aggregate_channel_ids;
         aggregate_channel_ids.reserve(_cfg.sensing_rx_channels.size());
         for (uint32_t i = 0; i < _cfg.sensing_rx_channels.size(); ++i) {
@@ -483,6 +490,9 @@ private:
                 },
                 [this](const std::string& ip, int port) {
                     if (_aggregated_sensing_sender) {
+                        if (_control_handler.send_heartbeat_to_last_peer()) {
+                            return;
+                        }
                         _control_handler.send_heartbeat(_cfg.mono_sensing_ip, _cfg.mono_sensing_port);
                         return;
                     }
@@ -578,7 +588,7 @@ private:
         return _shared_sensing_cfg;
     }
 
-    void _send_viewer_params() {
+    SensingViewerParamsPacket _make_viewer_params_packet() {
         const SharedSensingRuntime snapshot = _viewer_params_snapshot();
         const bool aggregated_stream = static_cast<bool>(_aggregated_sensing_sender);
         const uint32_t stream_channel_count = aggregated_stream
@@ -587,6 +597,13 @@ private:
         const uint32_t stream_channel_mask = aggregated_stream
             ? _aggregated_sensing_sender->channel_mask()
             : 0x1u;
+        // In sim mode supply the physical antenna spacing so the viewer can auto-set AoA.
+        const double antenna_spacing_m = radio_is_sim(_cfg)
+            ? (_cfg.simulation.array_spacing_m > 0.0
+                   ? _cfg.simulation.array_spacing_m
+                   : (_cfg.simulation.array_spacing_lambda * 3e8 /
+                      (_cfg.center_freq > 0.0 ? _cfg.center_freq : 1.0)))
+            : 0.0;
         const SensingViewerParamsPacket packet = make_sensing_viewer_params_packet(
             _cfg,
             snapshot.skip_sensing_fft,
@@ -597,18 +614,22 @@ private:
             false,
             stream_channel_count,
             stream_channel_mask,
-            aggregated_stream);
-        if (aggregated_stream) {
-            _control_handler.send_sensing_viewer_params(
-                _cfg.mono_sensing_ip,
-                _cfg.mono_sensing_port,
-                packet);
-            return;
-        }
+            aggregated_stream,
+            antenna_spacing_m);
+        return packet;
+    }
+
+    void _send_viewer_params() {
+        const SensingViewerParamsPacket packet = _make_viewer_params_packet();
         _control_handler.send_sensing_viewer_params(
             _cfg.mono_sensing_ip,
             _cfg.mono_sensing_port,
             packet);
+    }
+
+    void _send_viewer_params(const ControlCommandHandler::ControlPeer& peer) {
+        const SensingViewerParamsPacket packet = _make_viewer_params_packet();
+        _control_handler.send_sensing_viewer_params(peer, packet);
     }
 
     void _register_commands() {
@@ -870,12 +891,16 @@ private:
             request_one(static_cast<uint32_t>(target));
         });
 
-        _control_handler.register_request("PARM", [this](int32_t) {
-            _send_viewer_params();
+        _control_handler.register_request("PARM", [this](int32_t, const ControlCommandHandler::ControlPeer& peer) {
+            _send_viewer_params(peer);
         });
     }
 
     void _init_usrp() {
+        if (radio_is_sim(_cfg)) {
+            _init_sim_radio();
+            return;
+        }
         const std::string tx_device_args = _cfg.tx_device_args.empty() ? _cfg.device_args : _cfg.tx_device_args;
         const std::string tx_clock_source = _cfg.tx_clock_source.empty() ? _cfg.clocksource : _cfg.tx_clock_source;
         const std::string tx_time_source = _cfg.tx_time_source.empty() ?
@@ -927,6 +952,24 @@ private:
         );
     }
 
+    // Channel-simulator backend: attach the TX stream and per-antenna sensing RX
+    // streams to the hub's shared-memory rings instead of a USRP. _tx_usrp stays
+    // null; the existing tx_proc / control paths already guard on it.
+    void _init_sim_radio() {
+        _sim_radio = std::make_unique<SimRadio>();
+        if (!_sim_radio->connect(_cfg.simulation)) {
+            throw std::runtime_error("Modulator: failed to connect to ChannelSimulator session '" +
+                                     _cfg.simulation.session + "'. Start ChannelSimulator first.");
+        }
+        _tx_stream = _sim_radio->make_tx_streamer(_cfg.samples_per_frame());
+        _tx_chunk_samps = _cfg.samples_per_frame();
+        LOG_G_INFO() << "TX radio backend: SIMULATION (session='" << _cfg.simulation.session
+                     << "', no USRP). Sensing channels: " << _sensing_channels.size();
+
+        SensingChannel::initialize_rx_hardware_and_sync_sim(
+            _cfg, _sim_radio.get(), _sensing_channels);
+    }
+
     size_t _send_frame_chunked(
         const std::complex<float>* data,
         size_t total_samps,
@@ -935,6 +978,14 @@ private:
         if (total_samps == 0) {
             return 0;
         }
+
+        // In simulation the hub paces TX via shared-memory backpressure: when a
+        // consumer (e.g. the demodulator on the comm ring) is not yet attached or is
+        // catching up, send() returns short. That is a clean pause, NOT a radio
+        // underflow — treat it as such and keep retrying so the air-frame sequence
+        // stays locked to the samples actually placed on the air (otherwise the
+        // monostatic sensing RX/TX seq pairing drifts apart).
+        const bool is_sim = radio_is_sim(_cfg);
 
         const size_t chunk_samps = _tx_chunk_samps ? _tx_chunk_samps : total_samps;
         size_t total_sent = 0;
@@ -947,6 +998,11 @@ private:
             md.has_time_spec = false;
 
             if (sent == 0) {
+                if (is_sim && _running.load(std::memory_order_relaxed) &&
+                    _sim_radio && _sim_radio->running()) {
+                    // Hub is alive but paused (backpressure); wait for it to drain.
+                    continue;
+                }
                 break;
             }
         }
@@ -1840,9 +1896,17 @@ private:
                     frame_to_send.samples.size(),
                     md);
                 if (sent < frame_to_send.samples.size()) {
-                    _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
-                    LOG_RT_WARN() << "TX Underflow: "
-                                  << (frame_to_send.samples.size() - sent) << " samples";
+                    // In sim mode a short send after the hub stops is a clean shutdown,
+                    // not a radio underflow — skip the underflow restart to avoid
+                    // spurious log noise and frame-seq skips during teardown.
+                    const bool sim_shutting_down =
+                        radio_is_sim(_cfg) &&
+                        (!_sim_radio || !_sim_radio->running());
+                    if (!sim_shutting_down) {
+                        _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
+                        LOG_RT_WARN() << "TX Underflow: "
+                                      << (frame_to_send.samples.size() - sent) << " samples";
+                    }
                 } else if (frame_to_send.symbols) {
                     for (auto& ch : _sensing_channels) {
                         ch->enqueue_tx_symbols(frame_to_send.symbols, frame_start_symbol, air_frame_seq);

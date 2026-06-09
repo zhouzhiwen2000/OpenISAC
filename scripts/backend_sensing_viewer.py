@@ -19,6 +19,8 @@ import yaml
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from sensing_detection import build_detection_views
+import zmq
+
 from sensing_runtime_protocol import (
     AGGREGATE_MAGIC_VERSION,
     CALIBRATE_SYSTEM_RESPONSE_COMMAND,
@@ -27,18 +29,20 @@ from sensing_runtime_protocol import (
     PARAMS_COMMAND,
     READY_COMMAND,
     ViewerRuntimeParams,
+    build_control_command,
     build_params_request,
     decode_aggregate_sensing_metadata_payload,
     decode_aggregate_sensing_payload,
     decode_sensing_metadata_payload,
     decode_sensing_payload,
+    make_control_dealer,
+    make_data_sub,
+    make_tcp_endpoint,
     parse_params_packet,
+    recv_sensing_frame,
 )
 
 
-HEADER_SIZE = 12
-MAX_CHUNK_SIZE = 60000
-SOCKET_BUFFER_SIZE = 8 * 1024 * 1024
 DEFAULT_CONTROL_PORT = 9999
 DEFAULT_PORT_MONO = 8888
 DEFAULT_PORT_BI = 8889
@@ -46,6 +50,8 @@ DEFAULT_DISPLAY_RANGE_BINS = 256
 DEFAULT_DISPLAY_DOPPLER_BINS = 128
 PENDING_BUNDLE_LIMIT = 8
 C_LIGHT_MPS = 299792458.0
+# Physical ULA element spacing in metres.  Overridden by --antenna-spacing-m and
+# the UI field so this default only applies when neither source is given.
 ANTENNA_SPACING_M = 42.83e-3
 PHASE_CALIBRATION_TARGET_SAMPLES = 300
 PHASE_CALIBRATION_PROGRESS_INTERVAL = 25
@@ -81,12 +87,14 @@ class ViewerLaunchConfig:
     mode: str
     port: int
     control_port: int
+    local_control_port: int
     channels: int
     title: str
     expect_backend_processing: bool
     display_range_bins: int
     display_doppler_bins: int
     downsample: int
+    host: str = "127.0.0.1"  # backend host to connect SUB/DEALER sockets to
 
 
 @dataclass
@@ -119,34 +127,6 @@ class DisplayFrame:
     viewer_params: ViewerRuntimeParams
 
 
-class FrameBuffer:
-    def __init__(self) -> None:
-        self.frame_id = -1
-        self.total_chunks = 0
-        self.buffer: list[bytes | None] = []
-        self.received_chunks = 0
-
-    def init(self, frame_id: int, total_chunks: int) -> None:
-        self.frame_id = int(frame_id)
-        self.total_chunks = int(total_chunks)
-        self.buffer = [None] * self.total_chunks
-        self.received_chunks = 0
-
-    def add_chunk(self, chunk_id: int, data: bytes) -> bool:
-        if chunk_id < 0 or chunk_id >= self.total_chunks:
-            return False
-        if self.buffer[chunk_id] is not None:
-            return False
-        self.buffer[chunk_id] = data
-        self.received_chunks += 1
-        return self.received_chunks == self.total_chunks
-
-    def assemble_payload(self) -> tuple[int, bytes]:
-        if self.received_chunks != self.total_chunks or self.total_chunks <= 0:
-            raise ValueError("Frame buffer is incomplete")
-        return self.frame_id, b"".join(self.buffer)  # type: ignore[arg-type]
-
-
 def load_launch_defaults(
     mode_hint: str | None,
     default_mode: str | None,
@@ -158,7 +138,7 @@ def load_launch_defaults(
 
     if inferred_mode == "bi":
         port = DEFAULT_PORT_BI
-        control_port = DEFAULT_CONTROL_PORT
+        control_port = 10000
         channel_count = 1
         title = default_title or "OpenISAC Backend Bi-Sensing Viewer"
     else:
@@ -171,6 +151,7 @@ def load_launch_defaults(
         mode=inferred_mode,
         port=port,
         control_port=control_port,
+        local_control_port=0,
         channels=max(1, channel_count),
         title=title,
         expect_backend_processing=True,
@@ -187,26 +168,88 @@ class BackendViewerRuntime:
         self._viewer_params = LEGACY_VIEWER_PARAMS
         self._params_lock = threading.Lock()
         self._channel_lock = threading.Lock()
-        self._buffer_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._display_queue: Queue[DisplayFrame] = Queue(maxsize=32)
-        self._raw_buffer = FrameBuffer()
-        self._metadata_buffer = FrameBuffer()
         self._pending_bundles: dict[int, PendingBundle] = {}
-        self._sender_ip: str | None = None
+        # ZeroMQ DEALER for the bidirectional control/params channel: it both
+        # sends commands and receives PARM/RDY replies from the backend ROUTER.
+        # The backend host is known up front (connect target), so the control
+        # sender is available immediately rather than discovered from packets.
+        self._host = str(launch_cfg.host)
+        self._sender_ip: str | None = self._host
         self._control_port = int(launch_cfg.control_port)
+        self._control_endpoint = make_tcp_endpoint(self._host, self._control_port)
+        self._control_socket = make_control_dealer(
+            self._control_endpoint, identity=f"viewer-{os.getpid()}"
+        )
+        self._local_control_port = 0
+        self._control_socket_lock = threading.Lock()
         self._last_error: str | None = None
         self._warned_non_backend = False
         self._channels: list[ChannelState] = []
         self._phase_bundle_lock = threading.Lock()
         self._latest_phase_bundle_frame_id: int | None = None
         self._latest_phase_bundle_rd_complex: list[np.ndarray | None] | None = None
+        # Radio params received from PARM V6 packets; drained by the Qt timer.
+        self.radio_params_queue: Queue[dict] = Queue(maxsize=8)
         self.ensure_channel_count(launch_cfg.channels)
+        self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self._control_thread.start()
         self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self._receiver_thread.start()
 
     def stop(self) -> None:
         self._running = False
+        with self._control_socket_lock:
+            try:
+                self._control_socket.close()
+            except Exception:
+                pass
+        if self._control_thread.is_alive():
+            self._control_thread.join(timeout=1.0)
+        if self._receiver_thread.is_alive():
+            self._receiver_thread.join(timeout=1.0)
+
+    def reconnect(self, host: str) -> None:
+        host = (host or "").strip() or "127.0.0.1"
+        self.stop()
+
+        self.launch_cfg.host = host
+        self._host = host
+        self._sender_ip = host
+        self._control_endpoint = make_tcp_endpoint(self._host, self._control_port)
+        self._control_socket = make_control_dealer(
+            self._control_endpoint,
+            identity=f"viewer-{os.getpid()}-{int(time.time() * 1000)}",
+        )
+        self._last_error = None
+        self._warned_non_backend = False
+        with self._params_lock:
+            self._viewer_params = LEGACY_VIEWER_PARAMS
+        with self._pending_lock:
+            self._pending_bundles.clear()
+        while not self._display_queue.empty():
+            try:
+                self._display_queue.get_nowait()
+            except Empty:
+                break
+        while not self.radio_params_queue.empty():
+            try:
+                self.radio_params_queue.get_nowait()
+            except Empty:
+                break
+        with self._phase_bundle_lock:
+            self._latest_phase_bundle_frame_id = None
+            self._latest_phase_bundle_rd_complex = None
+        for channel in self.channels():
+            channel.last_frame_id = -1
+            channel.latest_frame = None
+
+        self._running = True
+        self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self._control_thread.start()
+        self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        self._receiver_thread.start()
 
     def ensure_channel_count(self, count: int, reason: str = "auto-detect") -> bool:
         count = max(1, int(count))
@@ -271,27 +314,20 @@ class BackendViewerRuntime:
     def request_viewer_params(self) -> None:
         if self._sender_ip is None:
             return
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(build_params_request(0), (self._sender_ip, self._control_port))
-            sock.close()
-        except Exception as exc:
-            self._last_error = str(exc)
-            print(f"Failed to request viewer params: {exc}")
+        self._send_control_packet(build_params_request(0), "request viewer params")
 
     def send_control_command(self, cmd_id: bytes, value: int) -> bool:
-        if self._sender_ip is None:
-            print("Control sender not detected yet.")
-            return False
+        packet = build_control_command(cmd_id, int(value))
+        return self._send_control_packet(packet, f"send {cmd_id!r}")
+
+    def _send_control_packet(self, packet: bytes, description: str) -> bool:
         try:
-            packet = struct.pack("!4s4si", b"CMD ", cmd_id, int(value))
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(packet, (self._sender_ip, self._control_port))
-            sock.close()
+            with self._control_socket_lock:
+                self._control_socket.send(packet, flags=zmq.NOBLOCK)
             return True
         except Exception as exc:
             self._last_error = str(exc)
-            print(f"Failed to send {cmd_id!r}: {exc}")
+            print(f"Failed to {description} via {self._control_endpoint}: {exc}")
             return False
 
     def drain_display_queue(self) -> list[DisplayFrame]:
@@ -309,6 +345,19 @@ class BackendViewerRuntime:
         if params.aggregated_stream():
             self.ensure_channel_count(params.stream_channel_count, reason="viewer params")
         print(f"Viewer params: {params.describe()}")
+        # Push any V6 radio params for the Qt main thread to apply.
+        radio = {}
+        if params.center_freq_hz > 0.0:
+            radio['center_freq_hz'] = params.center_freq_hz
+        if params.sample_rate_hz > 0.0:
+            radio['sample_rate_hz'] = params.sample_rate_hz
+        if params.antenna_spacing_m > 0.0:
+            radio['antenna_spacing_m'] = params.antenna_spacing_m
+        if radio:
+            try:
+                self.radio_params_queue.put_nowait(radio)
+            except Exception:
+                pass
 
     def _aggregate_logical_channel_count(self, payload: bytes) -> int | None:
         if len(payload) < 24:
@@ -325,14 +374,55 @@ class BackendViewerRuntime:
         )
         return max(int(channel_count), highest_channel + 1)
 
-    def _update_sender(self, addr: tuple[str, int], update_control_port: bool = False) -> None:
-        sender_ip, sender_port = addr
-        if self._sender_ip is None:
-            self._sender_ip = sender_ip
-            print(f"Detected sender IP: {sender_ip}")
-        if update_control_port and self._control_port != sender_port:
-            self._control_port = sender_port
-            print(f"Control port updated to {sender_port}")
+    def _update_sender(self, addr: tuple[str, int] | None, update_control_port: bool = False) -> None:
+        # With ZeroMQ the backend host/port are fixed connect targets, so there
+        # is nothing to discover from incoming packets. Retained as a no-op for
+        # call-site compatibility.
+        return
+
+    def _handle_control_packet(self, data: bytes, addr: tuple[str, int], _prefix: str) -> bool:
+        if len(data) < 8 or data[:4] != CTRL_HEADER:
+            return False
+
+        command = data[4:8]
+        if command == PARAMS_COMMAND:
+            params = parse_params_packet(data)
+            if params is not None:
+                self._update_sender(addr, update_control_port=True)
+                self._set_viewer_params(params)
+        elif command == READY_COMMAND:
+            self._update_sender(addr, update_control_port=True)
+            if self.get_viewer_params().version == 0 or self._last_error is not None:
+                self.request_viewer_params()
+        return True
+
+    def _control_loop(self) -> None:
+        print(f"[CTRL] DEALER connected to {self._control_endpoint} for viewer params/control replies")
+        poller = zmq.Poller()
+        poller.register(self._control_socket, zmq.POLLIN)
+        while self._running:
+            try:
+                # The DEALER socket is not thread-safe, so poll + recv share the
+                # send lock. A short timeout keeps command-send latency low.
+                with self._control_socket_lock:
+                    events = dict(poller.poll(timeout=100))
+                    if self._control_socket not in events:
+                        continue
+                    parts = self._control_socket.recv_multipart(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                continue
+            except Exception as exc:
+                if self._running:
+                    self._last_error = str(exc)
+                    print(f"[CTRL] Receiver socket error: {exc}")
+                continue
+
+            data = parts[-1] if parts else b""
+            try:
+                self._handle_control_packet(data, None, "[CTRL]")
+            except Exception as exc:
+                self._last_error = str(exc)
+                print(f"[CTRL] Receiver error: {exc}")
 
     def _prune_pending_bundles(self) -> None:
         with self._pending_lock:
@@ -555,70 +645,78 @@ class BackendViewerRuntime:
         self._store_raw_frames(decoded.frame_id, {0: decoded.matrix})
 
     def _receiver_loop(self) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        import time as _time
+        endpoint = make_tcp_endpoint(self._host, self.launch_cfg.port)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_SIZE)
-        except Exception:
-            pass
-
-        try:
-            sock.bind(("0.0.0.0", self.launch_cfg.port))
-            sock.settimeout(0.5)
-            print(f"Listening on UDP port {self.launch_cfg.port}")
+            sock = make_data_sub(endpoint, rcvhwm=4)
         except Exception as exc:
             self._last_error = str(exc)
-            print(f"Socket bind error: {exc}")
+            print(f"Sensing SUB connect error: {exc}")
             return
+        print(f"Subscribed to sensing stream at {endpoint}")
+        poller = zmq.Poller()
+        poller.register(sock, zmq.POLLIN)
 
+        _PARAM_RETRY_INTERVAL = 0.5
+        _param_retry_t = 0.0
+
+        def request_params_if_needed() -> None:
+            nonlocal _param_retry_t
+            if self.get_viewer_params().version != 0:
+                return
+            now = _time.monotonic()
+            if now - _param_retry_t < _PARAM_RETRY_INTERVAL:
+                return
+            self.request_viewer_params()
+            _param_retry_t = now
+
+        # Each ZMQ multipart message is one whole frame: part 0 = data payload,
+        # optional part 1 = metadata sidecar. The previous UDP chunk reassembly
+        # is gone. A local monotonic counter supplies the frame-id hint for
+        # dense frames (compact/aggregate frames carry their own symbol index).
+        frame_counter = 0
         while self._running:
             try:
-                data, addr = sock.recvfrom(MAX_CHUNK_SIZE + HEADER_SIZE)
-            except socket.timeout:
-                continue
+                events = dict(poller.poll(timeout=500))
             except Exception as exc:
-                self._last_error = str(exc)
-                print(f"Receiver socket error: {exc}")
+                if self._running:
+                    self._last_error = str(exc)
+                    print(f"Receiver socket error: {exc}")
+                continue
+
+            if sock not in events:
+                # Periodic params retry: keep requesting when viewer params
+                # haven't arrived yet (e.g. viewer started mid-run).
+                request_params_if_needed()
                 continue
 
             try:
-                self._update_sender(addr)
+                frame = recv_sensing_frame(sock, flags=zmq.NOBLOCK)
+                if frame is None:
+                    continue
+                data_payload, metadata_payload = frame
+                request_params_if_needed()
 
-                if len(data) >= 8 and data[:4] == CTRL_HEADER:
-                    command = data[4:8]
-                    if command == PARAMS_COMMAND:
-                        params = parse_params_packet(data)
-                        if params is not None:
-                            self._update_sender(addr, update_control_port=True)
-                            self._set_viewer_params(params)
-                    elif command == READY_COMMAND:
-                        self._update_sender(addr, update_control_port=True)
-                        if self.get_viewer_params().version == 0 or self._last_error is not None:
-                            self.request_viewer_params()
+                if self.get_viewer_params().version == 0:
+                    if data_payload:
+                        detected_count = self._aggregate_logical_channel_count(data_payload)
+                        if detected_count is not None:
+                            self.ensure_channel_count(detected_count, reason="aggregate frame")
+                    request_params_if_needed()
                     continue
 
-                if len(data) < HEADER_SIZE:
-                    continue
-
-                frame_id, total_chunks, chunk_id = struct.unpack("!III", data[:HEADER_SIZE])
-                is_metadata = bool(total_chunks & 0x80000000)
-                total_chunks &= 0x7FFFFFFF
-                chunk_data = data[HEADER_SIZE:]
-
-                with self._buffer_lock:
-                    buffer = self._metadata_buffer if is_metadata else self._raw_buffer
-                    if buffer.frame_id != frame_id:
-                        buffer.init(frame_id, total_chunks)
-                    if not buffer.add_chunk(chunk_id, chunk_data):
-                        continue
-                    frame_id_done, payload = buffer.assemble_payload()
-
-                self._handle_completed_payload(frame_id_done, payload, is_metadata)
+                frame_counter += 1
+                hint = frame_counter
+                if data_payload:
+                    self._handle_completed_payload(hint, data_payload, is_metadata=False)
+                if metadata_payload:
+                    self._handle_completed_payload(hint, metadata_payload, is_metadata=True)
             except Exception as exc:
                 self._last_error = str(exc)
                 print(f"Receiver error: {exc}")
                 self.request_viewer_params()
 
-        sock.close()
+        sock.close(0)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -657,6 +755,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.phase_calibration_last_doppler_bin = None
         self.phase_calibration_last_saved_path = None
         self.center_freq_hz = 2.4e9
+        self.antenna_spacing_m = ANTENNA_SPACING_M
         self.range_scale_sample_rate_hz = None
         self.range_scale_source = "range bin"
         self.target_sector_zero_range_bin = TARGET_SECTOR_DEFAULT_ZERO_RANGE_BIN
@@ -775,6 +874,18 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         root_layout.addWidget(control_panel, stretch=2)
 
+        connection_row = QtWidgets.QHBoxLayout()
+        connection_row.addWidget(QtWidgets.QLabel("Backend IP:"))
+        self.txt_backend_host = QtWidgets.QLineEdit(runtime.launch_cfg.host or "127.0.0.1")
+        self.txt_backend_host.setPlaceholderText("127.0.0.1")
+        self.txt_backend_host.returnPressed.connect(self._connect_backend)
+        self.btn_connect_backend = QtWidgets.QPushButton("Connect")
+        self.btn_connect_backend.clicked.connect(self._connect_backend)
+        connection_row.addWidget(self.txt_backend_host)
+        connection_row.addWidget(self.btn_connect_backend)
+        control_layout.addLayout(connection_row)
+        control_layout.addSpacing(12)
+
         self.lbl_display = QtWidgets.QLabel("Display: CH1")
         self.lbl_fps = QtWidgets.QLabel("FPS: 0.0")
         self.lbl_queue = QtWidgets.QLabel("Queue: 0")
@@ -871,6 +982,15 @@ class MainWindow(QtWidgets.QMainWindow):
         center_freq_row.addWidget(self.txt_center_freq_ghz)
         center_freq_row.addWidget(btn_center_freq)
         control_layout.addLayout(center_freq_row)
+
+        antenna_spacing_row = QtWidgets.QHBoxLayout()
+        antenna_spacing_row.addWidget(QtWidgets.QLabel("Ant Spacing(mm):"))
+        self.txt_antenna_spacing_mm = QtWidgets.QLineEdit(f"{self.antenna_spacing_m * 1e3:.3f}")
+        btn_antenna_spacing = QtWidgets.QPushButton("Set")
+        btn_antenna_spacing.clicked.connect(self.set_antenna_spacing)
+        antenna_spacing_row.addWidget(self.txt_antenna_spacing_mm)
+        antenna_spacing_row.addWidget(btn_antenna_spacing)
+        control_layout.addLayout(antenna_spacing_row)
 
         sector_range_row = QtWidgets.QHBoxLayout()
         sector_range_row.addWidget(QtWidgets.QLabel("Sector Zero(bin):"))
@@ -1105,6 +1225,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_display_button_text()
         print(f"Display channel switched to CH{self._selected_channel + 1}")
 
+    def _connect_backend(self) -> None:
+        host = self.txt_backend_host.text().strip() or "127.0.0.1"
+        self.txt_backend_host.setText(host)
+        self.btn_connect_backend.setEnabled(False)
+        try:
+            self.runtime.reconnect(host)
+            self._last_render_key = None
+            self._force_ui_refresh = True
+            self._last_params_text = ""
+            self._set_status_label_text(self.lbl_sender, f"Sender: {host}:{self.runtime.launch_cfg.control_port}")
+            self._set_status_label_text(self.lbl_params, "Params: waiting...")
+            self._set_status_label_text(self.lbl_status, f"Status: Connecting to {host}...")
+            print(f"[CTRL] Reconnected viewer sockets to backend {host}")
+        finally:
+            self.btn_connect_backend.setEnabled(True)
+
     def _set_status_label_text(self, label: QtWidgets.QLabel, text: str) -> None:
         elided = label.fontMetrics().elidedText(
             text,
@@ -1263,7 +1399,17 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"Invalid center frequency: {self.txt_center_freq_ghz.text()}")
             self.txt_center_freq_ghz.setText(f"{self.center_freq_hz / 1e9:.6f}")
 
-    def set_target_sector_range(self) -> None:
+    def set_antenna_spacing(self) -> None:
+        try:
+            spacing_mm = float(self.txt_antenna_spacing_mm.text())
+            if spacing_mm <= 0.0:
+                raise ValueError
+            self.antenna_spacing_m = spacing_mm * 1e-3
+            print(f"AoA antenna spacing set to {spacing_mm:.3f} mm")
+            self.update_phase_probe_text()
+        except ValueError:
+            print(f"Invalid antenna spacing: {self.txt_antenna_spacing_mm.text()}")
+            self.txt_antenna_spacing_mm.setText(f"{self.antenna_spacing_m * 1e3:.3f}")
         try:
             zero_bin = max(0, int(self.txt_sector_zero_bin.text()))
             max_bin = max(1, int(self.txt_sector_max_bin.text()))
@@ -1876,7 +2022,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return None, None
         wavelength = C_LIGHT_MPS / self.center_freq_hz
-        sin_theta = np.clip(slope * wavelength / (2.0 * np.pi * ANTENNA_SPACING_M), -1.0, 1.0)
+        sin_theta = np.clip(slope * wavelength / (2.0 * np.pi * self.antenna_spacing_m), -1.0, 1.0)
         aoa_deg = float(np.degrees(np.arcsin(sin_theta)))
         return aoa_deg, slope
 
@@ -2019,6 +2165,27 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _refresh(self) -> None:
+        # Apply radio params received from PARM V6 packets on this (Qt main) thread.
+        while True:
+            try:
+                radio = self.runtime.radio_params_queue.get_nowait()
+            except Exception:
+                break
+            if 'center_freq_hz' in radio:
+                self.center_freq_hz = radio['center_freq_hz']
+                if hasattr(self, 'txt_center_freq_ghz'):
+                    self.txt_center_freq_ghz.setText(f"{self.center_freq_hz / 1e9:.6f}")
+                print(f"[PARM] center_freq auto-set to {self.center_freq_hz / 1e9:.6f} GHz")
+            if 'sample_rate_hz' in radio:
+                self.range_scale_sample_rate_hz = radio['sample_rate_hz']
+                self.range_scale_source = "PARM packet"
+                print(f"[PARM] sample_rate auto-set to {self.range_scale_sample_rate_hz:.0f} Hz")
+            if 'antenna_spacing_m' in radio:
+                self.antenna_spacing_m = radio['antenna_spacing_m']
+                if hasattr(self, 'txt_antenna_spacing_mm'):
+                    self.txt_antenna_spacing_mm.setText(f"{self.antenna_spacing_m * 1e3:.3f}")
+                print(f"[PARM] antenna_spacing auto-set to {self.antenna_spacing_m * 1e3:.3f} mm")
+
         frames = self.runtime.drain_display_queue()
         for frame in frames:
             channel = self.runtime.get_channel(frame.ch_id)
@@ -2182,8 +2349,15 @@ def build_parser(
         default=default_mode or "auto",
         help="Viewer mode",
     )
-    parser.add_argument("--port", type=int, default=None, help="Override sensing UDP port")
-    parser.add_argument("--control-port", type=int, default=None, help="Override control UDP port")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Backend host to connect to (ZeroMQ)")
+    parser.add_argument("--port", type=int, default=None, help="Override sensing stream port")
+    parser.add_argument("--control-port", type=int, default=None, help="Override control port")
+    parser.add_argument(
+        "--local-control-port",
+        type=int,
+        default=None,
+        help="Local UDP port for viewer control replies (0 = auto-assign)",
+    )
     parser.add_argument("--channels", type=int, default=None, help="Override logical channel count")
     parser.add_argument(
         "--display-range-bins",
@@ -2198,6 +2372,15 @@ def build_parser(
         help="Visible doppler bins in the RD heatmap",
     )
     parser.add_argument("--title", type=str, default=default_title, help="Window title override")
+    parser.add_argument(
+        "--antenna-spacing-m",
+        type=float,
+        default=None,
+        help=(
+            "Physical ULA antenna element spacing in metres (default: 42.83e-3 m = "
+            "lambda/2 @ 3.5 GHz). Used for angle-of-arrival estimation."
+        ),
+    )
     return parser
 
 
@@ -2218,10 +2401,14 @@ def main(
         default_title=args.title or default_title,
     )
 
+    if getattr(args, "host", None):
+        launch_cfg.host = str(args.host)
     if args.port is not None:
         launch_cfg.port = int(args.port)
     if args.control_port is not None:
         launch_cfg.control_port = int(args.control_port)
+    if args.local_control_port is not None:
+        launch_cfg.local_control_port = max(0, int(args.local_control_port))
     if args.channels is not None:
         launch_cfg.channels = max(1, int(args.channels))
     if args.display_range_bins is not None:
@@ -2234,6 +2421,10 @@ def main(
     app = QtWidgets.QApplication(sys.argv)
     runtime = BackendViewerRuntime(launch_cfg)
     window = MainWindow(runtime)
+    if args.antenna_spacing_m is not None and args.antenna_spacing_m > 0.0:
+        window.antenna_spacing_m = float(args.antenna_spacing_m)
+        if hasattr(window, "txt_antenna_spacing_mm"):
+            window.txt_antenna_spacing_mm.setText(f"{window.antenna_spacing_m * 1e3:.3f}")
     window.show()
     return app.exec()
 

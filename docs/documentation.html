@@ -89,13 +89,16 @@ git clone https://github.com/zhouzhiwen2000/OpenISAC.git
 </code></pre>
 <h4 id="4-build-openisac">4. Build OpenISAC</h4>
 <p>Build the project using CMake:</p>
-<pre><code class="language-bash">sudo apt-get install libyaml-cpp-dev
+<pre><code class="language-bash">sudo apt-get install libyaml-cpp-dev libzmq3-dev cppzmq-dev
 cd OpenISAC
 mkdir build
 cd build
 cmake ..
 make -j$(nproc)
 </code></pre>
+<blockquote>
+<p>Backend↔Frontend communication (sensing streams + the control/params channel) runs over <strong>ZeroMQ</strong>. The backend binds PUB sockets for the sensing/debug streams and a ROUTER socket for control on the configured listen IP/ports; the sample YAMLs use <code>0.0.0.0</code> for sensing/control listen IPs. Python viewers connect with SUB/DEALER sockets. Point a viewer at a remote backend with its <code>--host &lt;ip&gt;</code> flag or Backend IP field (default <code>127.0.0.1</code>).</p>
+</blockquote>
 <h4 id="5-system-performance-tuning">5. System Performance Tuning</h4>
 <p>Run the provided script to optimize your system settings for real-time processing:</p>
 <pre><code class="language-bash">cd ~/OpenISAC
@@ -236,7 +239,7 @@ cp ../config/Modulator_B210.yaml Modulator.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 </code></pre>
-<p><em>If you are using a separate frontend computer, set <code>default_ip</code> in <code>Modulator.yaml</code> to that frontend IP.</em></p>
+<p><em>If you are using a separate frontend computer, point the monostatic viewer at the BS backend IP with <code>--host</code> or the viewer's Backend IP field.</em></p>
 <h3 id="2-startup-of-the-ue">2. Startup of the UE</h3>
 <pre><code class="language-bash">sudo -s
 cd build
@@ -250,7 +253,7 @@ cp ../config/Demodulator_B210.yaml Demodulator.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 </code></pre>
-<p><em>If you are using a separate frontend computer, set <code>default_ip</code> in <code>Demodulator.yaml</code> to that frontend IP.</em></p>
+<p><em>If you are using a separate frontend computer, point the bistatic viewer at the UE backend IP with <code>--host</code> or the viewer's Backend IP field. Set <code>default_out_ip</code> only for decoded/debug outputs that should be sent to another machine.</em></p>
 <h3 id="3-stream-video-to-the-bs">3. Stream video to the BS</h3>
 <pre><code class="language-bash">ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 3000k -minrate 3000k -maxrate 3000k -bufsize 1M -f rtp -sdp_file video.sdp &quot;rtp://&lt;your IP of the BS&gt;:50000&quot;
 </code></pre>
@@ -293,13 +296,12 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <li>Provides a dedicated CPU-binding editor for <code>cpu_cores</code>, with thread names, generated comments, and per-thread CPU selection.</li>
 <li>Saves the current form back to YAML and starts/stops modulator and demodulator processes from the <code>build/</code> directory.</li>
 <li>Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.</li>
-<li>Includes CPU/CUDA command presets and a custom command field for each tab.</li>
+<li>Includes CPU command presets and a custom command field for each tab.</li>
 <li>Lets you draw payload / sensing-pilot rectangles for <code>data_resource_blocks</code>, or compact sensing rectangles for <code>sensing_mask_blocks</code>, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.</li>
 <li>Includes a <code>Guard Band Grid</code> preset that follows <code>scripts/plot_const.py</code>, i.e. it keeps only subcarriers <code>1..489</code> and <code>535..N-1</code> before the normal sync/pilot stripping rules are applied.</li>
 </ul>
 <p>Notes:</p>
 <ul>
-<li>Default commands are <code>./OFDMModulator</code> and <code>./OFDMDemodulator</code>; switch to the CUDA preset if needed.</li>
 <li>The editor currently targets the runtime YAML files in <code>build/</code>, because the binaries read <code>Modulator.yaml</code> / <code>Demodulator.yaml</code> from their working directory.</li>
 <li><code>Resource Planner</code> edits <code>data_resource_blocks</code>: it decides which RE carry payload and which RE are reserved as <code>sensing_pilot</code>.</li>
 <li><code>Sensing Resource Map</code> edits <code>sensing_mask_blocks</code>: it decides which RE are exported on the compact sensing path when <code>sensing_output_mode=compact_mask</code>.</li>
@@ -390,7 +392,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left"><code>sensing_output_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>dense</code></td>
-<td style="text-align:left">Sensing UDP output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
+<td style="text-align:left">Sensing output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cuda_mod_pipeline_slots</code></td>
@@ -497,14 +499,14 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <tr>
 <td style="text-align:left"><code>mono_sensing_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for monostatic sensing output.</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">ZMQ listen IP for the monostatic sensing stream and control channel. Use <code>0.0.0.0</code> to accept remote viewers, or <code>127.0.0.1</code> for local-only access.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>mono_sensing_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8888</code></td>
-<td style="text-align:left">Destination port for monostatic sensing output.</td>
+<td style="text-align:left">ZeroMQ PUB bind port for the monostatic sensing stream.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>sensing_rx_channel_count</code></td>
@@ -519,22 +521,28 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left">Per-channel sensing RX settings (see table below).</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>default_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Default destination IP for outputs that are not explicitly set.</td>
+<td style="text-align:left"><code>tx_circular_buffer_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">Capacity of the modulated-frame queue feeding TX.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>paired_frame_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">Capacity of each sensing channel's RX/TX frame-pairing queues. Keep this above <code>tx_circular_buffer_size</code> so it can retain TX references while RX startup, network buffering, and alignment complete. A continuously full queue after startup indicates insufficient sensing-processing throughput rather than a need for unlimited buffering.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>control_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>9999</code></td>
-<td style="text-align:left">UDP port for control commands (heartbeat/MTI/etc.).</td>
+<td style="text-align:left">ZeroMQ ROUTER bind port for the bidirectional control channel (commands in, params/heartbeat out).</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>measurement_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU internal measurement mode. When enabled, <code>OFDMModulator</code> generates deterministic PRBS payloads instead of listening on <code>udp_input_*</code>, and <code>OFDMDemodulator</code> switches decoded measurement payloads into BER/BLER/EVM accounting. CUDA binaries ignore this mode.</td>
+<td style="text-align:left">Enable CPU internal measurement mode. When enabled, <code>OFDMModulator</code> generates deterministic PRBS payloads instead of listening on <code>udp_input_*</code>, and <code>OFDMDemodulator</code> switches decoded measurement payloads into BER/BLER/EVM accounting. The CPU binaries handle this mode locally.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>measurement_mode</code></td>
@@ -593,7 +601,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <li>The first affects payload mapping; the second affects sensing output only.</li>
 </ul>
 <p>If <code>data_resource_blocks</code> is enabled, copy the same rectangles and <code>kind</code> values into <code>Demodulator.yaml</code>. If a block overlaps <code>sync_pos</code> or <code>pilot_positions</code>, the built-in sync / pilot RE still take precedence. Priority is always <code>sync symbol &gt; pilot &gt; sensing_pilot &gt; payload/random QPSK</code>.</p>
-<p>When <code>sensing_output_mode=compact_mask</code>, sensing sends one compact UDP packet per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>. In this mode <code>STRD</code> is ignored, because the mask itself defines the sampling pattern. If the mask is &quot;regular&quot; (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime <code>MTI</code> and local Delay-Doppler processing can also be enabled: <code>SKIP=1</code> keeps the raw compact RE output, while <code>SKIP=0</code> switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands <code>range_fft_size</code> and <code>doppler_fft_size</code> when needed so they cover the selected subcarriers and symbols. The compact sensing UDP payload begins with <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>, followed by <code>re_count</code> raw <code>complex&lt;float&gt;</code> values in fixed order. Existing <code>plot_sensing*.py</code> viewers cannot handle non-&quot;regular&quot; compact payloads yet.</p>
+<p>When <code>sensing_output_mode=compact_mask</code>, sensing sends one compact message per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>. In this mode <code>STRD</code> is ignored, because the mask itself defines the sampling pattern. If the mask is &quot;regular&quot; (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime <code>MTI</code> and local Delay-Doppler processing can also be enabled: <code>SKIP=1</code> keeps the raw compact RE output, while <code>SKIP=0</code> switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands <code>range_fft_size</code> and <code>doppler_fft_size</code> when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>, followed by <code>re_count</code> raw <code>complex&lt;float&gt;</code> values in fixed order. Existing <code>plot_sensing*.py</code> viewers cannot handle non-&quot;regular&quot; compact payloads yet.</p>
 <p><code>sensing_rx_channels</code> object fields:</p>
 <table>
 <thead>
@@ -665,7 +673,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <ul>
 <li>If <code>sensing_rx_channels</code> is empty and <code>sensing_rx_channel_count &gt; 0</code>, default channels <code>0..N-1</code> are generated automatically.</li>
 <li>If the count and list size differ, the list is resized to match <code>sensing_rx_channel_count</code>.</li>
-<li>When <code>enable_system_delay_estimation=true</code> for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing UDP output remain disabled.</li>
+<li>When <code>enable_system_delay_estimation=true</code> for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing output remain disabled.</li>
 <li>In practice, keep hardware-specific fields such as <code>device_args</code>, <code>wire_format_*</code>, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.</li>
 </ul>
 <h3 id="ofdm-demodulator">OFDM Demodulator</h3>
@@ -782,7 +790,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left"><code>sensing_output_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>dense</code></td>
-<td style="text-align:left">Bistatic sensing UDP output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
+<td style="text-align:left">Bistatic sensing output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>
@@ -986,19 +994,19 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left"><code>enable_bi_sensing</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable the bistatic sensing pipeline and UDP output. When set to <code>false</code>, both <code>OFDMDemodulator</code> and <code>CUDAOFDMDemodulator</code> skip bistatic sensing channel startup.</td>
+<td style="text-align:left">Enable the bistatic sensing pipeline and output. When set to <code>false</code>, <code>OFDMDemodulator</code> skips bistatic sensing channel startup.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for bistatic sensing output.</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">ZMQ listen IP for the bistatic sensing stream and control channel. Use <code>0.0.0.0</code> to accept remote viewers, or <code>127.0.0.1</code> for local-only access.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8889</code></td>
-<td style="text-align:left">Destination port for bistatic sensing output.</td>
+<td style="text-align:left">ZeroMQ PUB bind port for the bistatic sensing stream.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>channel_ip</code></td>
@@ -1061,22 +1069,22 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left">Destination port for decoded payload output.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>default_ip</code></td>
+<td style="text-align:left"><code>default_out_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Default destination IP used when output IP fields are empty.</td>
+<td style="text-align:left">Default output IP used when output IP fields are empty.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>control_port</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>9999</code></td>
-<td style="text-align:left">UDP port for control commands.</td>
+<td style="text-align:left"><code>10000</code></td>
+<td style="text-align:left">ZeroMQ ROUTER bind port for the bidirectional control channel.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>measurement_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to <code>udp_output_*</code>. CUDA binaries ignore this mode.</td>
+<td style="text-align:left">Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to <code>udp_output_*</code>. The CPU binaries handle this mode locally.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>measurement_mode</code></td>
@@ -1132,7 +1140,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <ul>
 <li><code>data_resource_blocks</code> should normally match the transmitter exactly, including <code>kind</code>.</li>
 <li>If a resource block overlaps <code>sync_pos</code> or <code>pilot_positions</code>, the built-in sync / pilot RE still win. Priority is <code>sync symbol &gt; pilot &gt; sensing_pilot &gt; payload/random QPSK</code>.</li>
-<li>In <code>compact_mask</code> mode, bistatic sensing also sends one compact UDP packet per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>; <code>STRD</code> is ignored in this mode because the mask already defines the sampling pattern.</li>
+<li>In <code>compact_mask</code> mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>; <code>STRD</code> is ignored in this mode because the mask already defines the sampling pattern.</li>
 <li>The compact payload format is the same as on the modulator side: <code>CompactSensingFrameHeader</code> followed by fixed-order raw <code>complex&lt;float&gt;</code> samples.</li>
 </ul>
 <p>Notes:</p>

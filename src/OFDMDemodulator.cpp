@@ -22,6 +22,7 @@
 #include "LDPCCodec.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
+#include "SimStreamer.hpp"
 
 namespace {
 inline int64_t host_now_ns() {
@@ -115,15 +116,15 @@ public:
           _channel_estimator(cfg.fft_size),
           _delay_processor(cfg.fft_size),
           _sync_processor(cfg.sync_samples(), cfg.fft_size, cfg.cp_length, zc_freq_),
-          _control_handler(cfg.control_port),
-          channel_sender_(2, [this](const auto& data) { 
-              channel_udp_->send_container(data); 
+          _control_handler(cfg.bi_sensing_ip, cfg.control_port),
+          channel_sender_(2, [this](const auto& data) {
+              channel_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
-          pdf_sender_(2, [this](const auto& data) { 
-              pdf_udp_->send_container(data); 
+          pdf_sender_(2, [this](const auto& data) {
+              pdf_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
-          constellation_sender_(10, [this](const auto& data) { 
-              constellation_udp_->send_container(data); 
+          constellation_sender_(10, [this](const auto& data) {
+              constellation_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           // Initialize object pools for memory reuse
           _rx_frame_pool(32, [&cfg]() {
@@ -172,7 +173,7 @@ public:
         init_usrp();
         init_filter();
         prepare_fftw();
-        init_udp();
+        init_zmq_publishers();
         if (cfg_.hardware_sync) {
             _hw_sync = std::make_unique<HardwareSyncController>(cfg_.hardware_sync_tty);
             _hw_sync->configure_ocxo_pi(
@@ -271,7 +272,13 @@ private:
     std::vector<int> _payload_subcarrier_indices_flat;
     uhd::usrp::multi_usrp::sptr usrp_;
     uhd::rx_streamer::sptr rx_stream_;
-    
+    std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
+
+    // Current radio time: real USRP clock, or the simulator's shared sample clock.
+    uhd::time_spec_t radio_time_now() const {
+        return _sim_radio ? _sim_radio->time_now() : usrp_->get_time_now();
+    }
+
     AlignedVector zc_freq_;
     int _sensing_pilot_zc_root = 0;
     AlignedVector sensing_pilot_freq_;
@@ -289,6 +296,11 @@ private:
     AlignedVector fft_input_;
     AlignedVector fft_output_;
     fftwf_plan fft_plan_;
+
+    // Persistent per-frame symbol storage (reused across frames to avoid
+    // per-symbol heap allocation in the hot path). Sized once in prepare_fftw().
+    std::vector<AlignedVector> _symbols_buf;     // data symbols (excludes sync)
+    AlignedVector _sync_symbol_freq_buf;         // sync symbol, freq domain
     
     // Core computation instances (manage their own FFT plans)
     ChannelEstimator _channel_estimator;
@@ -303,10 +315,10 @@ private:
 
     using AlignedAlloc = AlignedAllocator<std::complex<float>, 64>;
 
-    // Various UDP senders
-    std::unique_ptr<UdpSender> channel_udp_;
-    std::unique_ptr<UdpSender> pdf_udp_;
-    std::unique_ptr<UdpSender> constellation_udp_;
+    // ZeroMQ publishers for frontend debug streams
+    std::unique_ptr<ZmqByteSender> channel_pub_;
+    std::unique_ptr<ZmqByteSender> pdf_pub_;
+    std::unique_ptr<ZmqByteSender> constellation_pub_;
     std::unique_ptr<VofaPlusDebugSender> vofa_debug_sender_;
     // Control handler
     ControlCommandHandler _control_handler;
@@ -315,6 +327,7 @@ private:
     DataSender<std::complex<float>, AlignedAlloc> pdf_sender_;
     DataSender<std::complex<float>, AlignedAlloc> constellation_sender_;
     uint32_t _reset_count = 0;
+    uint32_t _constellation_frame_counter = 0;
     
     // Sensing related variables
     SPSCRingBuffer<SensingFrame> sensing_queue_{4};
@@ -477,7 +490,8 @@ private:
             const auto* __restrict__ sym_ptr = symbol.data();
             const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
             const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
-            #pragma omp simd reduction(+:err_power_acc, err_count)
+            // No omp simd: sym_ptr[_payload_subcarrier_indices_flat[idx]] is a gather;
+            // scalar matches the vectorized version here.
             for (size_t idx = payload_begin; idx < payload_end; ++idx) {
                 const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
                 const float ref_re = std::copysign(QPSKModulator::SQRT_2_INV, sym_ptr[k].real());
@@ -611,6 +625,10 @@ private:
     }
 
     void init_usrp() {
+        if (radio_is_sim(cfg_)) {
+            init_sim_radio();
+            return;
+        }
         // Use device arguments from configuration
         usrp_ = uhd::usrp::multi_usrp::make(cfg_.device_args);
         usrp_->set_clock_source(cfg_.clocksource);
@@ -641,6 +659,29 @@ private:
         args.args["block_id"] = "radio";
         args.channels = {cfg_.rx_channel};
         rx_stream_ = usrp_->get_rx_stream(args);
+    }
+
+    // Channel-simulator backend: attach to the hub's "rx.comm" ring instead of a USRP.
+    void init_sim_radio() {
+        _sim_radio = std::make_unique<SimRadio>();
+        if (!_sim_radio->connect(cfg_.simulation)) {
+            throw std::runtime_error("Demodulator: failed to connect to ChannelSimulator session '" +
+                                     cfg_.simulation.session + "'. Start ChannelSimulator first.");
+        }
+        rx_stream_ = _sim_radio->make_rx_streamer("rx.comm", cfg_.samples_per_frame());
+        // Present a perfect tune so CFO/predictive-delay math sees zero tuning error.
+        current_rx_tune_.target_rf_freq = cfg_.center_freq;
+        current_rx_tune_.actual_rf_freq = cfg_.center_freq;
+        current_rx_tune_.target_dsp_freq = 0.0;
+        current_rx_tune_.actual_dsp_freq = 0.0;
+        tune_initialized_ = true;
+        // No hardware gain in simulation; expose a benign range so AGC/sweep stay inert.
+        _rx_gain_min_db = 0.0;
+        _rx_gain_max_db = 0.0;
+        _rx_agc.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
+        _sync_search_gain_sweep.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
+        LOG_G_INFO() << "RX radio backend: SIMULATION (session='" << cfg_.simulation.session
+                     << "', no USRP).";
     }
 
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
@@ -825,7 +866,7 @@ private:
             _bistatic_sensing_channel->request_system_response_calibration(target_symbols);
         });
 
-        _control_handler.register_request("PARM", [this](int32_t) {
+        _control_handler.register_request("PARM", [this](int32_t, const ControlCommandHandler::ControlPeer& peer) {
             if (!cfg_.enable_bi_sensing) {
                 return;
             }
@@ -842,11 +883,9 @@ private:
                     snapshot.cfar_os_rank_percent,
                     snapshot.cfar_os_suppress_doppler,
                     snapshot.cfar_os_suppress_range,
-                    true);
-            _control_handler.send_sensing_viewer_params(
-                cfg_.bi_sensing_ip,
-                cfg_.bi_sensing_port,
-                packet);
+                    true,
+                    1u, 0x1u, false, 0.0);
+            _control_handler.send_sensing_viewer_params(peer, packet);
         });
     }
 
@@ -890,7 +929,9 @@ private:
             nullptr,
             nullptr,
             [this](const std::string& ip, int port) {
-                _control_handler.send_heartbeat(ip, port);
+                if (!_control_handler.send_heartbeat_to_last_peer()) {
+                    _control_handler.send_heartbeat(ip, port);
+                }
             },
             [this](size_t hint) {
                 return core_from_hint(cfg_, hint);
@@ -921,9 +962,12 @@ private:
             new_tune_req.target_freq = cfg_.center_freq;
             new_tune_req.dsp_freq = 0.0; // Reset DSP frequency
         }
-        // Apply new tune (update DSP only, fast and does not affect LO)
-        current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.rx_channel);
-
+        // Apply new tune (update DSP only, fast and does not affect LO).
+        // In simulation there is no LO/DSP to retune; software CFO/delay correction
+        // already operates on the received samples, so skip the hardware retune.
+        if (!_sim_radio) {
+            current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.rx_channel);
+        }
     }
     void prepare_fftw() {
         fft_input_.resize(cfg_.fft_size);
@@ -933,14 +977,20 @@ private:
             reinterpret_cast<fftwf_complex*>(fft_output_.data()),
             FFTW_FORWARD, FFTW_MEASURE);
 
+        // Pre-size persistent symbol buffers (data symbols exclude the sync symbol).
+        const size_t data_symbol_count =
+            (cfg_.num_symbols > 0) ? (cfg_.num_symbols - 1) : 0;
+        _symbols_buf.resize(data_symbol_count);
+        for (auto& s : _symbols_buf) s.resize(cfg_.fft_size);
+        _sync_symbol_freq_buf.resize(cfg_.fft_size);
+
         // Note: ChannelEstimator and DelayProcessor now manage their own FFT plans internally
     }
 
-    void init_udp() {
-        // Use IP and port from configuration
-        channel_udp_ = std::make_unique<UdpSender>(cfg_.channel_ip, cfg_.channel_port);
-        pdf_udp_ = std::make_unique<UdpSender>(cfg_.pdf_ip, cfg_.pdf_port);
-        constellation_udp_ = std::make_unique<UdpSender>(cfg_.constellation_ip, cfg_.constellation_port);
+    void init_zmq_publishers() {
+        channel_pub_ = std::make_unique<ZmqByteSender>(cfg_.channel_ip, cfg_.channel_port);
+        pdf_pub_ = std::make_unique<ZmqByteSender>(cfg_.pdf_ip, cfg_.pdf_port);
+        constellation_pub_ = std::make_unique<ZmqByteSender>(cfg_.constellation_ip, cfg_.constellation_port);
         vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.vofa_debug_ip, cfg_.vofa_debug_port, 64);
     }
 
@@ -976,7 +1026,7 @@ private:
         double search_gain_db = 0.0;
         const bool reset_search_gain = _sync_search_gain_sweep.reset_to_default(
             [this](double gain_db) {
-                usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
+                if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
             },
             [this](double gain_db) {
                 _rx_agc.sync_to_gain(gain_db);
@@ -1205,7 +1255,7 @@ private:
                             cfo,
                             current_rx_tune_.actual_rf_freq,
                             current_rx_tune_.actual_dsp_freq,
-                            time_spec_to_ns(usrp_->get_time_now()));
+                            time_spec_to_ns(radio_time_now()));
                 }
                 
                 // Perform initial CFO correction
@@ -1231,10 +1281,10 @@ private:
                 LOG_RT_WARN() << "No valid symbols for CFO estimation";
             }
             if (issued_freq_adjust) {
-                _control_time_gates.mark_freq_adjust_now(usrp_->get_time_now());
+                _control_time_gates.mark_freq_adjust_now(radio_time_now());
             }
             if (issued_alignment) {
-                _control_time_gates.mark_alignment_now(usrp_->get_time_now());
+                _control_time_gates.mark_alignment_now(radio_time_now());
             }
         } else {
             const size_t frame_samples = cfg_.samples_per_frame();
@@ -1244,7 +1294,7 @@ private:
             const bool stepped_search_gain = _sync_search_gain_sweep.on_search_miss(
                 search_equivalent_frames,
                 [this](double gain_db) {
-                    usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
+                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
                 },
                 [this](double gain_db) {
                     _rx_agc.sync_to_gain(gain_db);
@@ -1402,41 +1452,46 @@ private:
             sense_frame.rx_symbols.resize(cfg_.num_symbols);
             sense_frame.tx_symbols.resize(cfg_.num_symbols);
         }
-        
-        std::vector<AlignedVector> symbols;
-        symbols.reserve(cfg_.num_symbols-1);
-        // Pre-create pilot boolean mask
-        static std::vector<uint8_t> pilot_mask;
-        if (pilot_mask.size() != cfg_.fft_size) {
-            pilot_mask.assign(cfg_.fft_size, 0);
-            for (auto p : cfg_.pilot_positions) if (p < pilot_mask.size()) pilot_mask[p] = 1;
-        }
-        AlignedVector sync_symbol_freq;
+
+        // Reuse persistent buffers instead of allocating one AlignedVector per
+        // symbol every frame. _symbols_buf holds the cfg_.num_symbols-1 data
+        // symbols; the sync symbol lands in _sync_symbol_freq_buf.
+        std::vector<AlignedVector>& symbols = _symbols_buf;
+        AlignedVector& sync_symbol_freq = _sync_symbol_freq_buf;
+        const size_t scale_n = cfg_.fft_size;
+        const float scale = 1.0f / sqrtf(static_cast<float>(scale_n));
         size_t pos = 0;
         prof_step_start = ProfileClock::now();
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
-            AlignedVector symbol(cfg_.fft_size);
+            // Target working slot: sync symbol or the matching data slot.
+            const bool is_sync = (i == cfg_.sync_pos);
+            const size_t data_idx = is_sync ? 0 : ((i < cfg_.sync_pos) ? i : i - 1);
+            std::complex<float>* __restrict__ dst =
+                is_sync ? sync_symbol_freq.data() : symbols[data_idx].data();
+
             std::copy(frame.frame_data.begin() + pos + cfg_.cp_length,
                      frame.frame_data.begin() + pos + cfg_.cp_length + cfg_.fft_size,
                      fft_input_.begin());
-            
+
             fftwf_execute(fft_plan_);
-            
-            const float scale = 1.0f / sqrtf(cfg_.fft_size);
-            #pragma omp simd
-            for (size_t j = 0; j < cfg_.fft_size; ++j) {
-                symbol[j] = fft_output_[j] * scale;
-            }
+
+            const std::complex<float>* __restrict__ src = fft_output_.data();
             if (sensing_enabled) {
-                // Write directly to sense_frame.rx_symbols to avoid later copy.
-                sense_frame.rx_symbols[i] = symbol;
-            }
-            
-            if (i == cfg_.sync_pos) {
-                sync_symbol_freq = std::move(symbol);
-            }
-            else {
-                symbols.push_back(std::move(symbol));
+                // Fuse the rx_symbols copy into the scale pass: write the scaled
+                // sample to both the working slot and the sensing buffer in one
+                // sweep, avoiding a separate full-symbol copy afterwards.
+                std::complex<float>* __restrict__ rx = sense_frame.rx_symbols[i].data();
+                #pragma omp simd
+                for (size_t j = 0; j < scale_n; ++j) {
+                    const std::complex<float> v = src[j] * scale;
+                    dst[j] = v;
+                    rx[j] = v;
+                }
+            } else {
+                #pragma omp simd
+                for (size_t j = 0; j < scale_n; ++j) {
+                    dst[j] = src[j] * scale;
+                }
             }
             pos += cfg_.fft_size + cfg_.cp_length;
         }
@@ -1536,7 +1591,7 @@ private:
             }
         }
         if (issued_freq_adjust) {
-            _control_time_gates.mark_freq_adjust_now(usrp_->get_time_now());
+            _control_time_gates.mark_freq_adjust_now(radio_time_now());
         }
         if (vofa_debug_valid && vofa_debug_sender_) {
             const std::array<float, 3> channels{
@@ -1660,7 +1715,7 @@ private:
                     detected_freq_offset,
                     current_rx_tune_.actual_rf_freq,
                     current_rx_tune_.actual_dsp_freq,
-                    time_spec_to_ns(usrp_->get_time_now()));
+                    time_spec_to_ns(radio_time_now()));
         }
         int delay_index_err =
             adjusted_index - cfg_.desired_peak_pos + predictive_delay_samples;
@@ -1674,7 +1729,7 @@ private:
                 frame.usrp_time_ns,
                 _control_time_gates,
                 [this](double gain_db) {
-                    usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
+                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
                 },
                 &agc_adjustment
             );
@@ -1710,7 +1765,7 @@ private:
                     LOG_RT_INFO() << "OCXO PI state reset to fast stage after sync reset.";
                 }
                 _enter_sync_search_state();
-                _control_time_gates.mark_reset_now(usrp_->get_time_now());
+                _control_time_gates.mark_reset_now(radio_time_now());
                 return;
             }
         }
@@ -1748,10 +1803,10 @@ private:
         prof_step_end = ProfileClock::now();
         prof_timing_sync_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         if (issued_alignment) {
-            _control_time_gates.mark_alignment_now(usrp_->get_time_now());
+            _control_time_gates.mark_alignment_now(radio_time_now());
         }
         if (issued_rx_gain_adjust) {
-            _control_time_gates.mark_rx_gain_adjust_now(usrp_->get_time_now());
+            _control_time_gates.mark_rx_gain_adjust_now(radio_time_now());
         }
 
         prof_step_start = ProfileClock::now();
@@ -1781,10 +1836,16 @@ private:
         // PDF data
         pdf_sender_.add_data(std::move(delay_spectrum));
 
-        // Constellation data
-        const size_t last_idx = symbols.size() - 1;
-        auto constellation_copy = symbols[last_idx];
-        constellation_sender_.add_data(std::move(constellation_copy));
+        // Constellation data. The sender throttles the display to 50ms
+        // (LatestOnly), while frames arrive far faster, so copying the full
+        // last symbol every frame is wasted work. Gate the 8KB copy to every
+        // Nth frame — still well above the display refresh rate.
+        constexpr uint32_t kConstellationStride = 8;
+        if ((_constellation_frame_counter++ % kConstellationStride) == 0) {
+            const size_t last_idx = symbols.size() - 1;
+            auto constellation_copy = symbols[last_idx];
+            constellation_sender_.add_data(std::move(constellation_copy));
+        }
         prof_step_end = ProfileClock::now();
         prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         

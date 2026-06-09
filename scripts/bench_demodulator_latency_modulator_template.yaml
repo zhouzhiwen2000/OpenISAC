@@ -3,6 +3,7 @@ fft_size: 1024  # FFT size (subcarrier count)
 cp_length: 128  # Cyclic prefix length (samples)
 sync_pos: 1  # Sync symbol index in one frame
 num_symbols: 100  # Number of OFDM symbols per frame
+cuda_mod_pipeline_slots: 3  # Number of CUDA modulation pipeline slots
 zc_root: 29  # Zadoff-Chu root for sync/preamble
 pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]  # Pilot subcarrier indices
 
@@ -33,10 +34,9 @@ wire_format_rx: sc16  # RX wire format: sc16/sc8
 # ===== Network Output =====
 udp_input_ip: 0.0.0.0  # Bind IP for incoming payload UDP packets
 udp_input_port: 50000  # Bind port for incoming payload UDP packets
-mono_sensing_ip: 192.168.2.178  # Monostatic sensing output IP (channel 0 default)
-mono_sensing_port: 8888  # Monostatic sensing output port (channel 0 default)
-control_port: 9999  # UDP port for runtime control commands
-default_ip: 192.168.2.178  # Default destination IP when per-output IP is empty
+mono_sensing_ip: "0.0.0.0"  # Monostatic sensing ZMQ listen IP
+mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
+control_port: 9999  # ZMQ port for runtime control commands
 
 # ===== Sensing RX Channels =====
 sensing_rx_channel_count: 0  # Number of sensing RX channels (0 disables sensing RX)
@@ -49,7 +49,7 @@ sensing_symbol_stride: 20  # Default STRD applied at startup before runtime comm
 # ===== Runtime / Debug =====
 tx_circular_buffer_size: 32  # Modulator frame circular buffer capacity
 data_packet_buffer_size: 32  # Encoded packet buffer capacity
-paired_frame_queue_size: 32  # Per-channel RX/TX pairing queue capacity
+paired_frame_queue_size: 64  # Keep above tx_circular_buffer_size for RX startup/alignment headroom
 profiling_modules: ""  # Comma-separated modules to profile, or "all"
 cpu_cores:
   - 5  # idx0 (hint 0): _tx_proc

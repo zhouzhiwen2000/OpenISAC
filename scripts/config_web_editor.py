@@ -233,6 +233,31 @@ def encode_profiling_modules(tokens: Any, tab_name: str, fallback: Any) -> str:
     return ",".join(ordered)
 
 
+def mapping_item_keys_from_yaml_line(trimmed: str) -> list[dict[str, str]]:
+    value_part, _comment = split_inline_comment(trimmed)
+    text = value_part.strip()
+    if text.startswith("- "):
+        text = text[2:].strip()
+    if not text:
+        return []
+    if text.startswith("{"):
+        try:
+            parsed = yaml.safe_load(text)
+        except yaml.YAMLError:
+            return []
+        if isinstance(parsed, dict):
+            return [{"key": str(key), "comment": ""} for key in parsed.keys()]
+        return []
+    if ":" not in text:
+        return []
+    item_key, item_rest = text.split(":", 1)
+    item_key = item_key.strip()
+    if not item_key or item_key.startswith("{"):
+        return []
+    _, item_comment = split_inline_comment(item_rest)
+    return [{"key": item_key, "comment": item_comment}]
+
+
 def parse_layout(text: str) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = [{"title": "General", "fields": []}]
     current = sections[0]
@@ -281,15 +306,12 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
                 if sub_stripped.startswith("#"):
                     j += 1
                     continue
-                trimmed = sub_stripped[2:].strip() if sub_stripped.startswith("- ") else sub_stripped
-                if ":" in trimmed:
-                    item_key, item_rest = trimmed.split(":", 1)
-                    item_key = item_key.strip()
-                    _, item_comment = split_inline_comment(item_rest)
+                for item_meta in mapping_item_keys_from_yaml_line(sub_stripped):
+                    item_key = item_meta["key"]
                     if item_key not in seen_item_keys:
                         item_fields.append({
                             "key": item_key,
-                            "comment": item_comment,
+                            "comment": item_meta.get("comment", ""),
                         })
                         seen_item_keys.add(item_key)
                 j += 1
@@ -326,6 +348,8 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
             item_fields = []
             seen_item_keys: set[str] = set()
             saw_mapping_list = False
+            first_content_is_sequence = False
+            saw_child_content = False
             j = i + 1
             while j < len(lines):
                 sub_raw = lines[j]
@@ -338,19 +362,28 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
                 if sub_stripped.startswith("#"):
                     j += 1
                     continue
-                trimmed = sub_stripped[2:].strip() if sub_stripped.startswith("- ") else sub_stripped
-                if ":" in trimmed:
-                    item_key, item_rest = trimmed.split(":", 1)
-                    item_key = item_key.strip()
-                    _, item_comment = split_inline_comment(item_rest)
-                    if item_key not in seen_item_keys:
-                        item_fields.append({
-                            "key": item_key,
-                            "comment": item_comment,
-                        })
-                        seen_item_keys.add(item_key)
-                    saw_mapping_list = True
+                if not saw_child_content:
+                    saw_child_content = True
+                    first_content_is_sequence = sub_stripped.startswith("- ")
+                if first_content_is_sequence:
+                    for item_meta in mapping_item_keys_from_yaml_line(sub_stripped):
+                        item_key = item_meta["key"]
+                        if item_key not in seen_item_keys:
+                            item_fields.append({
+                                "key": item_key,
+                                "comment": item_meta.get("comment", ""),
+                            })
+                            seen_item_keys.add(item_key)
+                        saw_mapping_list = True
                 j += 1
+            if saw_child_content and not first_content_is_sequence:
+                current["fields"].append({
+                    "type": "mapping",
+                    "key": key,
+                    "comment": comment,
+                })
+                i = j
+                continue
             if saw_mapping_list:
                 current["fields"].append({
                     "type": "mapping_list",
@@ -370,6 +403,247 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
         i += 1
 
     return [section for section in sections if section["fields"]]
+
+
+def format_mapping_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    dumped = yaml.safe_dump(value, sort_keys=False, default_flow_style=False, allow_unicode=False)
+    return dumped.strip()
+
+
+def parse_mapping_text(text: str) -> dict[str, Any]:
+    raw = text.strip()
+    if not raw:
+        return {}
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"Invalid YAML mapping: {exc}") from exc
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise RuntimeError("YAML mapping fields must contain a mapping object.")
+    return parsed
+
+
+def append_mapping_lines(lines: list[str], key: str, value: Any, suffix: str) -> None:
+    if not isinstance(value, dict):
+        value = {}
+    if not value:
+        lines.append(f"{key}: {{}}{suffix}")
+        return
+    lines.append(f"{key}:{suffix}")
+    rendered = yaml.safe_dump(value, sort_keys=False, default_flow_style=False, allow_unicode=False).splitlines()
+    for line in rendered:
+        lines.append(f"  {line}")
+
+
+def validate_rendered_yaml(rendered: str) -> None:
+    try:
+        parsed = yaml.safe_load(rendered) if rendered.strip() else {}
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"Rendered YAML is invalid: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Rendered YAML must be a mapping.")
+
+
+def scalar_field_default_text(key: str, kind: str, default_value: Any) -> str:
+    if default_value is None:
+        return ""
+    if kind == "bool":
+        return "true" if bool(default_value) else "false"
+    return format_display_value(key, default_value)
+
+
+def scalar_form_value(
+    key: str,
+    kind: str,
+    value: Any,
+    default_value: Any = None,
+    has_value: bool = True,
+) -> tuple[Any, str]:
+    if kind == "bool":
+        if has_value:
+            bool_value = bool(value)
+            return bool_value, "true" if bool_value else "false"
+        if default_value is not None:
+            bool_value = bool(default_value)
+            return bool_value, ""
+        return False, ""
+    return value, format_display_value(key, value) if has_value else ""
+
+
+def simulation_default_item(list_field: dict[str, Any]) -> dict[str, Any]:
+    item: dict[str, Any] = {}
+    for item_field in list_field.get("item_fields", []):
+        key = str(item_field.get("key", ""))
+        if not key:
+            continue
+        kind = str(item_field.get("kind", "string"))
+        if "default" in item_field:
+            item[key] = copy.deepcopy(item_field.get("default"))
+        elif kind == "bool":
+            item[key] = False
+        elif kind == "int":
+            item[key] = 0
+        elif kind == "float":
+            item[key] = 0.0
+        else:
+            item[key] = ""
+    return item
+
+
+def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_value: bool) -> dict[str, Any]:
+    value_map = copy.deepcopy(value) if isinstance(value, dict) else {}
+    scalar_fields_payload: list[dict[str, Any]] = []
+    known_keys: set[str] = set()
+
+    for scalar_field in field.get("scalar_fields", []):
+        key = str(scalar_field.get("key", ""))
+        if not key:
+            continue
+        known_keys.add(key)
+        field_has_value = has_value and key in value_map
+        raw_value = value_map.get(key)
+        kind = str(scalar_field.get("kind") or detect_kind(raw_value))
+        default_value = scalar_field.get("default")
+        form_value, value_text = scalar_form_value(key, kind, raw_value, default_value, field_has_value)
+        scalar_fields_payload.append({
+            "key": key,
+            "comment": scalar_field.get("comment", ""),
+            "display_comment": display_comment_override(key, scalar_field.get("comment", "")),
+            "kind": kind,
+            "optional": bool(scalar_field.get("optional", False)),
+            "default_text": scalar_field_default_text(key, kind, default_value),
+            "value": form_value,
+            "value_text": value_text,
+            "options": copy.deepcopy(scalar_field.get("options", [])),
+            "is_set": field_has_value,
+        })
+
+    list_fields_payload: list[dict[str, Any]] = []
+    for list_field in field.get("list_fields", []):
+        key = str(list_field.get("key", ""))
+        if not key:
+            continue
+        known_keys.add(key)
+        items = copy.deepcopy(value_map.get(key, []) if has_value else [])
+        if not isinstance(items, list):
+            items = []
+        item_fields = []
+        for item_field in list_field.get("item_fields", []):
+            sample_value = ""
+            for item in items:
+                if isinstance(item, dict) and item_field["key"] in item:
+                    sample_value = item[item_field["key"]]
+                    break
+            item_fields.append({
+                "key": item_field["key"],
+                "comment": item_field.get("comment", ""),
+                "display_comment": display_comment_override(item_field["key"], item_field.get("comment", "")),
+                "kind": item_field.get("kind") or detect_kind(sample_value),
+                "default": copy.deepcopy(item_field.get("default")),
+                "options": copy.deepcopy(item_field.get("options", [])),
+            })
+        list_fields_payload.append({
+            "key": key,
+            "comment": list_field.get("comment", ""),
+            "display_comment": display_comment_override(key, list_field.get("comment", "")),
+            "optional": bool(list_field.get("optional", False)),
+            "is_set": has_value and key in value_map,
+            "item_fields": item_fields,
+            "items": items,
+            "default_item": simulation_default_item(list_field),
+        })
+
+    extra_map = {key: copy.deepcopy(val) for key, val in value_map.items() if key not in known_keys}
+    return {
+        "type": "simulation_mapping",
+        "key": field["key"],
+        "comment": field.get("comment", ""),
+        "display_comment": display_comment_override(field["key"], field.get("comment", "")),
+        "optional": bool(field.get("optional", False)),
+        "is_set": has_value,
+        "scalar_fields": scalar_fields_payload,
+        "list_fields": list_fields_payload,
+        "extra_text": format_mapping_text(extra_map) if extra_map else "",
+    }
+
+
+def normalize_simulation_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(raw, str):
+        return parse_mapping_text(raw)
+    if not isinstance(raw, dict):
+        raise RuntimeError("Invalid simulation payload.")
+
+    result = parse_mapping_text(str(raw.get("extra_text", "")))
+    scalars = raw.get("scalars", {})
+    lists = raw.get("lists", {})
+    if not isinstance(scalars, dict):
+        raise RuntimeError("Invalid simulation scalar payload.")
+    if not isinstance(lists, dict):
+        raise RuntimeError("Invalid simulation list payload.")
+
+    for scalar_field in field.get("scalar_fields", []):
+        key = str(scalar_field.get("key", ""))
+        if not key or key not in scalars:
+            continue
+        kind = str(scalar_field.get("kind") or detect_kind(scalars.get(key)))
+        raw_value = scalars.get(key)
+        if isinstance(raw_value, dict):
+            is_set = bool(raw_value.get("is_set", False))
+            raw_value = raw_value.get("value", "")
+        else:
+            is_set = True
+        if kind == "bool":
+            if scalar_field.get("optional") and not is_set:
+                result.pop(key, None)
+                continue
+            raw_text = str(raw_value).strip().lower()
+            result[key] = raw_text == "true" if isinstance(raw_value, str) else bool(raw_value)
+            continue
+        raw_text = str(raw_value)
+        if scalar_field.get("optional") and not is_set:
+            result.pop(key, None)
+        else:
+            result[key] = parse_display_value(key, raw_text, kind)
+
+    for list_field in field.get("list_fields", []):
+        key = str(list_field.get("key", ""))
+        if not key:
+            continue
+        raw_items = lists.get(key, [])
+        if raw_items is None:
+            raw_items = []
+        list_is_set = True
+        if isinstance(raw_items, dict):
+            list_is_set = bool(raw_items.get("is_set", False))
+            raw_items = raw_items.get("items", [])
+        if not isinstance(raw_items, list):
+            raise RuntimeError(f"Invalid simulation list for {key}.")
+        normalized_items: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            normalized_item: dict[str, Any] = {}
+            for item_field in list_field.get("item_fields", []):
+                item_key = str(item_field.get("key", ""))
+                if not item_key:
+                    continue
+                kind = str(item_field.get("kind") or detect_kind(item.get(item_key)))
+                raw_value = item.get(item_key, "")
+                if kind == "bool":
+                    normalized_item[item_key] = bool(raw_value)
+                else:
+                    normalized_item[item_key] = coerce_scalar(str(raw_value), kind)
+            normalized_items.append(normalized_item)
+        if list_field.get("optional") and not list_is_set and not normalized_items:
+            result.pop(key, None)
+        else:
+            result[key] = normalized_items
+
+    return result
 
 
 def coerce_scalar(text: str, kind: str) -> Any:
@@ -467,6 +741,8 @@ def _sample_field_metadata(sample_value: Any, field: dict[str, Any]) -> dict[str
             metadata.setdefault("item_kind", detect_kind(sample_value[0], "int"))
         else:
             metadata.setdefault("item_kind", "int")
+    elif metadata.get("type") == "mapping":
+        sample_value = sample_value if isinstance(sample_value, dict) else {}
     metadata.setdefault("default", copy.deepcopy(sample_value))
     metadata.setdefault("optional", True)
     return metadata
@@ -570,6 +846,14 @@ def merge_layout_field_metadata(
                     field[attr] = copy.deepcopy(metadata[attr])
                 elif attr == "optional" and attr in metadata:
                     field[attr] = bool(metadata[attr])
+            if (
+                field.get("type") in {"scalar", "mapping"}
+                and metadata.get("type") in {"mapping", "simulation_mapping"}
+            ):
+                field["type"] = metadata["type"]
+            for attr in ("scalar_fields", "list_fields"):
+                if attr in metadata and attr not in field:
+                    field[attr] = copy.deepcopy(metadata[attr])
     return layout_copy
 
 
@@ -735,7 +1019,14 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     if extra_keys:
         layout.append({
             "title": "Other",
-            "fields": [{"type": "scalar", "key": key, "comment": ""} for key in extra_keys],
+            "fields": [
+                {
+                    "type": "mapping" if isinstance(data.get(key), dict) else "flow_list" if isinstance(data.get(key), list) else "scalar",
+                    "key": key,
+                    "comment": "",
+                }
+                for key in extra_keys
+            ],
         })
     return data, layout, exists, source
 
@@ -807,6 +1098,26 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                     sensing_mode = str(data.get("sensing_output_mode", "dense") or "dense").strip().lower()
                     field_payload["mode"] = "custom" if sensing_mode == "compact_mask" else "strd"
                 section_payload["fields"].append(field_payload)
+                continue
+
+            if field["type"] == "simulation_mapping":
+                section_payload["fields"].append(build_simulation_mapping_payload(value, field, has_value))
+                continue
+
+            if field["type"] == "mapping":
+                value_map = copy.deepcopy(value) if isinstance(value, dict) else {}
+                default_value = field.get("default", {})
+                default_text = format_mapping_text(default_value) if isinstance(default_value, dict) else ""
+                section_payload["fields"].append({
+                    "type": "mapping",
+                    "key": key,
+                    "comment": field.get("comment", ""),
+                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "optional": bool(field.get("optional", False)),
+                    "default_text": default_text,
+                    "value_text": format_mapping_text(value_map) if has_value else "",
+                    "is_set": has_value,
+                })
                 continue
 
             if key == "profiling_modules":
@@ -936,6 +1247,10 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                         lines.append(f"{prefix}{item_key}: {format_scalar(value)}{item_suffix}")
                 continue
 
+            if field["type"] in {"mapping", "simulation_mapping"}:
+                append_mapping_lines(lines, key, data.get(key, {}), suffix)
+                continue
+
             value = data.get(key)
             if field["type"] == "flow_list":
                 lines.append(f"{key}: {format_flow_list(value or [])}{suffix}")
@@ -951,19 +1266,25 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
 def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload: dict[str, Any], current_data: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(current_data)
     scalars = payload.get("scalars", {})
+    mappings = payload.get("mappings", {})
     mapping_lists = payload.get("mapping_lists", {})
     cpu_values = payload.get("cpu_cores", [])
     if not isinstance(scalars, dict):
         raise RuntimeError("Invalid scalar payload.")
+    if not isinstance(mappings, dict):
+        raise RuntimeError("Invalid mapping payload.")
     if not isinstance(mapping_lists, dict):
         raise RuntimeError("Invalid mapping list payload.")
 
     kind_map: dict[str, tuple[str, str, bool]] = {}
+    mapping_optionals: dict[str, bool] = {}
     mapping_layouts: dict[str, list[dict[str, Any]]] = {}
     for section in layout:
         for field in section["fields"]:
             if field["type"] == "mapping_list":
                 mapping_layouts[field["key"]] = field["item_fields"]
+            elif field["type"] in {"mapping", "simulation_mapping"}:
+                mapping_optionals[field["key"]] = bool(field.get("optional", False))
             elif field["key"] == "profiling_modules":
                 kind_map[field["key"]] = ("profiling_modules", "", bool(field.get("optional", False)))
             elif field["type"] == "flow_list":
@@ -1002,6 +1323,31 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
                 result.pop(key, None)
             else:
                 result[key] = parse_display_value(key, raw_text, field_kind)
+
+    for key, raw_mapping_text in mappings.items():
+        optional = mapping_optionals.get(key, False)
+        mapping_field = next(
+            (
+                field
+                for section in layout
+                for field in section["fields"]
+                if field.get("key") == key and field.get("type") in {"mapping", "simulation_mapping"}
+            ),
+            {},
+        )
+        if isinstance(raw_mapping_text, str):
+            raw_text = raw_mapping_text
+        else:
+            raw_text = str(raw_mapping_text or "")
+        if optional and (
+            (isinstance(raw_mapping_text, str) and not raw_text.strip()) or
+            (isinstance(raw_mapping_text, dict) and not raw_mapping_text.get("scalars") and not raw_mapping_text.get("lists") and not raw_mapping_text.get("extra_text"))
+        ):
+            result.pop(key, None)
+        elif mapping_field.get("type") == "simulation_mapping":
+            result[key] = normalize_simulation_mapping_payload(raw_mapping_text, mapping_field)
+        else:
+            result[key] = parse_mapping_text(raw_text)
 
     for key, raw_mapping in mapping_lists.items():
         item_layout = mapping_layouts.get(key, [])
@@ -1319,6 +1665,7 @@ class ConfigEditorApp:
         current_data, layout, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         new_data = normalize_payload_data(name, layout, payload, current_data)
         rendered = render_yaml(name, layout, new_data)
+        validate_rendered_yaml(rendered)
         tab.yaml_path.parent.mkdir(parents=True, exist_ok=True)
         tab.yaml_path.write_text(rendered, encoding="utf-8")
         return self.load_config(name)

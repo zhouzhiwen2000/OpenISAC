@@ -23,6 +23,32 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find required libraries
 find_package(UHD REQUIRED)
 
+# Detect whether this UHD version exposes post_output_action / post_input_action
+# on uhd::tx_streamer / uhd::rx_streamer (added in newer UHD releases).
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${UHD_INCLUDE_DIRS})
+set(CMAKE_REQUIRED_LIBRARIES ${UHD_LIBRARIES})
+check_cxx_source_compiles("
+#include <uhd/stream.hpp>
+#include <uhd/rfnoc/actions.hpp>
+struct T : uhd::tx_streamer {
+    size_t get_num_channels() const override { return 0; }
+    size_t get_max_num_samps() const override { return 0; }
+    size_t send(const buffs_type&, size_t, const uhd::tx_metadata_t&, double) override { return 0; }
+    bool recv_async_msg(uhd::async_metadata_t&, double) override { return false; }
+    void post_output_action(const std::shared_ptr<uhd::rfnoc::action_info>&, size_t) override {}
+};
+int main() { return 0; }
+" UHD_HAS_STREAMER_ACTION_HOOKS)
+unset(CMAKE_REQUIRED_INCLUDES)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if(UHD_HAS_STREAMER_ACTION_HOOKS)
+    message(STATUS "UHD: streamer action hooks present — enabling SimStreamer overrides")
+    add_compile_definitions(UHD_HAS_STREAMER_ACTION_HOOKS)
+else()
+    message(STATUS "UHD: streamer action hooks absent (UHD < 4.7) — SimStreamer overrides disabled")
+endif()
+
 set(Boost_NO_BOOST_CMAKE ON)
 find_package(Boost 1.66 REQUIRED)
 
@@ -173,6 +199,38 @@ endif()
 if(NOT OPENISAC_YAMLCPP_TARGET AND NOT YAMLCPP_FOUND)
     message(FATAL_ERROR "yaml-cpp is required.")
 endif()
+
+# ZeroMQ (Backend <-> Frontend transport: sensing streams + control channel).
+# Prefer the cppzmq CMake package (header-only, pulls in libzmq); fall back to
+# pkg-config / manual discovery of libzmq + the cppzmq header.
+find_package(cppzmq CONFIG QUIET)
+if(cppzmq_FOUND AND TARGET cppzmq)
+    set(OPENISAC_ZMQ_LINK cppzmq)
+    set(OPENISAC_ZMQ_INCLUDE_DIRS "")
+else()
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(ZMQ QUIET libzmq)
+    endif()
+    if(NOT ZMQ_FOUND)
+        find_path(ZMQ_INCLUDE_DIRS
+            NAMES zmq.hpp zmq.h
+            HINTS /usr/include /usr/local/include /opt/homebrew/include /opt/local/include
+        )
+        find_library(ZMQ_LIBRARY
+            NAMES zmq
+            HINTS /usr/lib /usr/local/lib /opt/homebrew/lib /opt/local/lib
+        )
+        if(ZMQ_INCLUDE_DIRS AND ZMQ_LIBRARY)
+            set(ZMQ_LIBRARIES "${ZMQ_LIBRARY}")
+            set(ZMQ_FOUND TRUE)
+        endif()
+    endif()
+    if(NOT ZMQ_FOUND)
+        message(FATAL_ERROR "ZeroMQ (libzmq + cppzmq headers) is required.")
+    endif()
+    set(OPENISAC_ZMQ_LINK ${ZMQ_LIBRARIES})
+    set(OPENISAC_ZMQ_INCLUDE_DIRS ${ZMQ_INCLUDE_DIRS})
+endif()
 # Check SIMD instruction set support (common optimization)
 include(CheckCXXCompilerFlag)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
@@ -224,6 +282,10 @@ endif()
 
 set(OPENISAC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(OPENISAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+set(OPENISAC_PLATFORM_LIBS "")
+if(UNIX AND NOT APPLE)
+    list(APPEND OPENISAC_PLATFORM_LIBS rt)
+endif()
 
 #===========================================================
 # Modulator Executable
@@ -231,6 +293,7 @@ set(OPENISAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_executable(OFDMModulator
     ${OPENISAC_SRC_DIR}/OFDMModulator.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
+    ${OPENISAC_SRC_DIR}/SimStreamer.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
     ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
@@ -241,6 +304,7 @@ target_include_directories(OFDMModulator PRIVATE
     ${LIBDPDK_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
     ${YAMLCPP_INCLUDE_DIRS}
+    ${OPENISAC_ZMQ_INCLUDE_DIRS}
     ${OPENISAC_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${Boost_INCLUDE_DIRS}
@@ -256,6 +320,8 @@ target_link_libraries(OFDMModulator PRIVATE
     aff3ct::aff3ct-shared-lib
     ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
+    ${OPENISAC_ZMQ_LINK}
+    ${OPENISAC_PLATFORM_LIBS}
 )
 
 target_compile_options(OFDMModulator PRIVATE
@@ -268,6 +334,7 @@ target_compile_options(OFDMModulator PRIVATE
 add_executable(OFDMDemodulator
     ${OPENISAC_SRC_DIR}/OFDMDemodulator.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
+    ${OPENISAC_SRC_DIR}/SimStreamer.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
     ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
@@ -278,11 +345,12 @@ target_include_directories(OFDMDemodulator PRIVATE
     ${Boost_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
     ${YAMLCPP_INCLUDE_DIRS}
+    ${OPENISAC_ZMQ_INCLUDE_DIRS}
     ${OPENISAC_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(OFDMDemodulator PRIVATE 
+target_link_libraries(OFDMDemodulator PRIVATE
     ${UHD_LIBRARIES}
     ${FFTW3f_LIBRARIES}
     ${FFTW3f_THREADS_LIBRARY}
@@ -291,11 +359,46 @@ target_link_libraries(OFDMDemodulator PRIVATE
     aff3ct::aff3ct-shared-lib
     ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
+    ${OPENISAC_ZMQ_LINK}
+    ${OPENISAC_PLATFORM_LIBS}
 )
 
 target_compile_options(OFDMDemodulator PRIVATE
     ${COMMON_COMPILE_OPTIONS}
     -ffast-math  # Demodulator specific optimization
+)
+
+#===========================================================
+# ChannelSimulator Executable (run the system without USRP)
+#===========================================================
+add_executable(ChannelSimulator
+    ${OPENISAC_SRC_DIR}/ChannelSimulator.cpp
+    ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+    ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+)
+
+target_include_directories(ChannelSimulator PRIVATE
+    ${UHD_INCLUDE_DIRS}
+    ${YAMLCPP_INCLUDE_DIRS}
+    ${OPENISAC_ZMQ_INCLUDE_DIRS}
+    ${OPENISAC_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${Boost_INCLUDE_DIRS}
+)
+
+target_link_libraries(ChannelSimulator PRIVATE
+    ${UHD_LIBRARIES}
+    Threads::Threads
+    OpenMP::OpenMP_CXX
+    ${OPENISAC_YAMLCPP_TARGET}
+    ${YAMLCPP_LIBRARIES}
+    ${OPENISAC_ZMQ_LINK}
+    ${OPENISAC_PLATFORM_LIBS}
+)
+
+target_compile_options(ChannelSimulator PRIVATE
+    ${COMMON_COMPILE_OPTIONS}
+    -ffast-math  # Enable SIMD vectorization of complex<float> arithmetic
 )
 
 #===========================================================

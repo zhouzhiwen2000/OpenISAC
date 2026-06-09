@@ -64,12 +64,18 @@ def _send_control_command(
     command: bytes,
     value: int,
 ) -> None:
-    packet = struct.pack("!4s4si", b"CMD ", command, int(value))
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    from sensing_runtime_protocol import (
+        build_control_command,
+        make_control_dealer,
+        make_tcp_endpoint,
+    )
+
+    sock = make_control_dealer(make_tcp_endpoint(ip, port))
     try:
-        sock.sendto(packet, (ip, port))
+        sock.send(build_control_command(command, value))
     finally:
-        sock.close()
+        # Linger briefly so the fire-and-forget command flushes before close.
+        sock.close(linger=500)
 
 
 def _send_control_triplet(

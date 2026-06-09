@@ -7,7 +7,7 @@ import platform
 import subprocess
 import time
 import threading
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from collections import deque
 from pathlib import Path
 import socket
@@ -26,6 +26,8 @@ except Exception:
 from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
+import zmq
+
 from sensing_runtime_protocol import (
     AGGREGATE_HEADER_STRUCT,
     AGGREGATE_MAGIC_VERSION,
@@ -34,9 +36,24 @@ from sensing_runtime_protocol import (
     PARAMS_COMMAND,
     READY_COMMAND,
     ViewerRuntimeParams,
+    build_control_command,
     build_params_request,
     decode_aggregate_sensing_payload,
+    make_control_dealer,
+    make_data_sub,
+    make_tcp_endpoint,
     parse_params_packet,
+    recv_sensing_frame,
+)
+from viewer_panel_utils import (
+    CollapsibleSection,
+    ViewerSettings,
+    VIEWER_COLORS,
+    apply_viewer_theme,
+    load_viewer_setting,
+    sensing_colormap,
+    set_button_active,
+    style_spectrum_plot,
 )
 from sensing_detection import (
     CleanParams,
@@ -356,6 +373,8 @@ MICRO_DOPPLER_STFT_NPERSEG = 256
 MICRO_DOPPLER_STFT_NOVERLAP = 192
 MICRO_DOPPLER_STFT_NFFT = 256
 C_LIGHT_MPS = 299792458.0
+# Physical ULA element spacing in metres.  Overridden by --antenna-spacing-m and
+# the UI field so this default only applies when neither source is given.
 ANTENNA_SPACING_M = 42.83e-3
 AGGREGATE_FRAME_QUEUE_SIZE = 20
 
@@ -916,10 +935,16 @@ def reset_processing_state():
 def parse_args():
     parser = argparse.ArgumentParser(description="Monostatic sensing viewer (fast, multi-channel)")
     parser.add_argument(
+        "--host",
+        type=str,
+        default=None,
+        help="Backend host to connect ZeroMQ sockets to (overrides saved host)",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=8888,
-        help="UDP port for aggregated multi-channel sensing frames",
+        help="Port for aggregated multi-channel sensing frames",
     )
     parser.add_argument(
         "--channels",
@@ -932,6 +957,12 @@ def parse_args():
         type=int,
         default=DEFAULT_CONTROL_PORT,
         help="Fallback control port before heartbeat detection",
+    )
+    parser.add_argument(
+        "--local-control-port",
+        type=int,
+        default=0,
+        help="Local UDP port for viewer control replies (0 = auto-assign)",
     )
     parser.add_argument(
         "--display-db-min",
@@ -968,6 +999,15 @@ def parse_args():
         type=float,
         default=None,
         help="Micro-Doppler display color scale maximum in dB",
+    )
+    parser.add_argument(
+        "--antenna-spacing-m",
+        type=float,
+        default=None,
+        help=(
+            "Physical ULA antenna element spacing in metres (default: 42.83e-3 m = "
+            "lambda/2 @ 3.5 GHz). Used for angle-of-arrival estimation."
+        ),
     )
     return parser.parse_args()
 
@@ -1027,6 +1067,9 @@ class ChannelRuntime:
 
 args = parse_args()
 UDP_PORT = int(args.port)
+LOCAL_CONTROL_PORT = max(0, int(args.local_control_port))
+if args.antenna_spacing_m is not None and args.antenna_spacing_m > 0.0:
+    ANTENNA_SPACING_M = float(args.antenna_spacing_m)
 shared_display_db_min, shared_display_db_max = sanitize_display_db_range(
     args.display_db_min,
     args.display_db_max,
@@ -1039,12 +1082,33 @@ DISPLAY_MD_DB_MIN, DISPLAY_MD_DB_MAX = sanitize_display_db_range(
     args.micro_doppler_db_min if args.micro_doppler_db_min is not None else shared_display_db_min,
     args.micro_doppler_db_max if args.micro_doppler_db_max is not None else shared_display_db_max,
 )
+_saved_host = load_viewer_setting("plot_sensing_fast", "host")
+HOST = str(getattr(args, "host", None) or _saved_host or "127.0.0.1").strip() or "127.0.0.1"
 initial_channel_count = max(1, int(args.channels))
 CHANNELS = [ChannelRuntime(idx, UDP_PORT, args.control_port) for idx in range(initial_channel_count)]
 if not CHANNELS:
     CHANNELS = [ChannelRuntime(0, 8888, args.control_port)]
+# The backend host is a fixed connect target under ZeroMQ, so every channel's
+# control sender is known up front instead of being discovered from packets.
+for _ch in CHANNELS:
+    _ch.sender_ip = HOST
+
+# ZeroMQ DEALER for the bidirectional control/params channel (commands out,
+# PARM/RDY replies in). Shared across logical channels (one control port).
+CONTROL_ENDPOINT = make_tcp_endpoint(HOST, args.control_port)
+control_socket = make_control_dealer(CONTROL_ENDPOINT, identity=f"sensing-fast-{os.getpid()}")
+LOCAL_CONTROL_PORT = 0
+control_socket_lock = threading.Lock()
+control_tx_queue = Queue(maxsize=256)
+connection_generation = 0
 
 aggregate_frame_queue = Queue(maxsize=AGGREGATE_FRAME_QUEUE_SIZE)
+startup_sync_queue = Queue(maxsize=8)
+startup_sync_lock = threading.Lock()
+startup_sync_queued_generation = None
+# Small queue for radio params received in the PARM packet (V6+).
+# The receiver thread pushes dicts; the Qt timer drains them on the main thread.
+radio_params_queue = Queue(maxsize=8)
 phase_bundle_lock = threading.Lock()
 latest_phase_bundle_frame_id = None
 latest_phase_bundle_rd_complex = None
@@ -1090,6 +1154,61 @@ def _clear_queue(queue_obj):
             break
         except Exception:
             break
+
+
+def _clear_control_tx_queue():
+    _clear_queue(control_tx_queue)
+
+
+def queue_startup_backend_sync():
+    global startup_sync_queued_generation
+    generation = connection_generation
+    with startup_sync_lock:
+        if startup_sync_queued_generation == generation:
+            return
+        startup_sync_queued_generation = generation
+    try:
+        startup_sync_queue.put_nowait(generation)
+    except Exception:
+        pass
+
+
+def reconnect_backend(host):
+    global HOST, CONTROL_ENDPOINT, control_socket, connection_generation
+    host = (host or "").strip() or "127.0.0.1"
+    new_endpoint = make_tcp_endpoint(host, args.control_port)
+    new_socket = make_control_dealer(
+        new_endpoint,
+        identity=f"sensing-fast-{os.getpid()}-{int(time.time() * 1000)}",
+    )
+    with control_socket_lock:
+        old_socket = control_socket
+        HOST = host
+        CONTROL_ENDPOINT = new_endpoint
+        control_socket = new_socket
+        connection_generation += 1
+        _clear_control_tx_queue()
+        try:
+            old_socket.close()
+        except Exception:
+            pass
+
+    for ch in CHANNELS:
+        with ch.sender_lock:
+            ch.sender_ip = HOST
+            ch.control_port = args.control_port
+        set_viewer_params(ch, LEGACY_VIEWER_PARAMS)
+        ch.last_frame_id = None
+        ch.current_display_data = {}
+        ch.last_param_error = None
+        _clear_queue(ch.display_queue)
+        with ch.range_time_lock:
+            ch.range_time_data = None
+        with ch.micro_lock:
+            ch.micro_doppler_buffer.clear()
+    _clear_queue(aggregate_frame_queue)
+    print(f"[CTRL] Reconnected viewer sockets to backend {HOST}")
+    request_viewer_params(0 if CHANNELS else None)
 
 
 def _ensure_channel_count(expected_count, reason="auto-detect"):
@@ -1160,22 +1279,62 @@ def _current_control_channel_id():
     return max(0, min(display_channel, len(CHANNELS) - 1))
 
 
+def _send_control_packet(packet, endpoint, error_prefix):
+    if endpoint is None:
+        return False
+    try:
+        control_tx_queue.put_nowait((packet, endpoint, error_prefix))
+        return True
+    except Full:
+        try:
+            control_tx_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            control_tx_queue.put_nowait((packet, endpoint, error_prefix))
+            return True
+        except Exception as e:
+            print(f"{error_prefix}: control TX queue full: {e}")
+            return False
+    except Exception as e:
+        print(f"{error_prefix}: {e}")
+        return False
+
+
+def _flush_control_tx_queue(local_socket):
+    while True:
+        try:
+            packet, _endpoint, error_prefix = control_tx_queue.get_nowait()
+        except Empty:
+            break
+        except Exception:
+            break
+        try:
+            local_socket.send(packet, flags=zmq.NOBLOCK)
+        except zmq.Again:
+            try:
+                control_tx_queue.put_nowait((packet, _endpoint, error_prefix))
+            except Exception:
+                print(f"{error_prefix} via {CONTROL_ENDPOINT}: send would block")
+            break
+        except Exception as e:
+            print(f"{error_prefix} via {CONTROL_ENDPOINT}: {e}")
+
+
 def send_control_command(cmd_id, value, target_ch_id=None):
     endpoint = _get_control_endpoint(target_ch_id)
     if endpoint is None:
         print("Error: Invalid target channel")
         return
 
-    ip, cport = endpoint
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        command_data = struct.pack("!4s4si", b"CMD ", cmd_id, int(value))
-        sock.sendto(command_data, (ip, cport))
-        sock.close()
+    command_data = build_control_command(cmd_id, int(value))
+    if _send_control_packet(command_data, endpoint, "Failed to send command"):
+        ip, cport = endpoint
         target_desc = "all channels" if target_ch_id is None else f"CH{target_ch_id + 1}"
-        print(f"Sent {cmd_id.decode(errors='ignore').strip()}={value} to {target_desc} via {ip}:{cport}")
-    except Exception as e:
-        print(f"Failed to send command via {ip}:{cport}: {e}")
+        print(
+            f"Sent {cmd_id.decode(errors='ignore').strip()}={value} to {target_desc} "
+            f"via {ip}:{cport} from control port {LOCAL_CONTROL_PORT}"
+        )
 
 
 def send_shared_control_command(cmd_id, value):
@@ -1184,15 +1343,13 @@ def send_shared_control_command(cmd_id, value):
         print("Error: Shared sensing sender not detected yet.")
         return
 
-    ip, cport = endpoint
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        command_data = struct.pack("!4s4si", b"CMD ", cmd_id, int(value))
-        sock.sendto(command_data, (ip, cport))
-        sock.close()
-        print(f"Sent shared {cmd_id.decode(errors='ignore').strip()}={value} via {ip}:{cport}")
-    except Exception as e:
-        print(f"Failed to send shared command via {ip}:{cport}: {e}")
+    command_data = build_control_command(cmd_id, int(value))
+    if _send_control_packet(command_data, endpoint, "Failed to send shared command"):
+        ip, cport = endpoint
+        print(
+            f"Sent shared {cmd_id.decode(errors='ignore').strip()}={value} "
+            f"via {ip}:{cport} from control port {LOCAL_CONTROL_PORT}"
+        )
 
 
 def request_shared_viewer_params():
@@ -1201,13 +1358,7 @@ def request_shared_viewer_params():
         return
 
     request_packet = build_params_request(0)
-    ip, cport = endpoint
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(request_packet, (ip, cport))
-        sock.close()
-    except Exception as e:
-        print(f"Failed to request shared viewer params via {ip}:{cport}: {e}")
+    _send_control_packet(request_packet, endpoint, "Failed to request shared viewer params")
 
 
 def request_viewer_params(target_ch_id=None):
@@ -1216,13 +1367,7 @@ def request_viewer_params(target_ch_id=None):
         return
 
     request_packet = build_params_request(0)
-    ip, cport = endpoint
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(request_packet, (ip, cport))
-        sock.close()
-    except Exception as e:
-        print(f"Failed to request viewer params via {ip}:{cport}: {e}")
+    _send_control_packet(request_packet, endpoint, "Failed to request viewer params")
 
 
 def send_skip_command():
@@ -1230,18 +1375,33 @@ def send_skip_command():
     if ch_id is None:
         return
 
-    for _ in range(100):
-        ch = CHANNELS[ch_id]
-        with ch.sender_lock:
-            if ch.sender_ip is not None:
-                break
-        time.sleep(0.1)
+    ch = CHANNELS[ch_id]
+    with ch.sender_lock:
+        has_sender = ch.sender_ip is not None
+    if not has_sender:
+        print("Error: Shared sensing sender not detected yet.")
+        return
 
     request_shared_viewer_params()
-    time.sleep(0.05)
     send_shared_control_command(b"SKIP", 1)
-    time.sleep(0.05)
     request_shared_viewer_params()
+
+
+def send_startup_backend_sync(strd_value, mti_enabled, tx_gain_value, rx_gain_value):
+    print(
+        f"[CTRL] Syncing startup backend controls: "
+        f"SKIP=1 MTI={1 if mti_enabled else 0} STRD={strd_value} "
+        f"TXGN={tx_gain_value}dB RXGN={rx_gain_value}dB"
+    )
+    send_skip_command()
+    time.sleep(0.02)
+    send_mti_command(mti_enabled)
+    time.sleep(0.02)
+    send_strd_command(strd_value)
+    time.sleep(0.02)
+    send_tx_gain_command(tx_gain_value)
+    time.sleep(0.02)
+    send_rx_gain_command(rx_gain_value)
 
 
 def _queue_display_frame(ch, frame_item):
@@ -1282,6 +1442,20 @@ def _handle_viewer_params(target_channels, params, prefix):
     print(f"{prefix} Viewer params: {params.describe()}")
     if backend_stream_unsupported(params):
         warn_unsupported_backend_params(prefix, params)
+    # Push any radio params the backend provided so the Qt timer can apply them
+    # on the main thread (center_freq, sample_rate, antenna_spacing).
+    radio = {}
+    if params.center_freq_hz > 0.0:
+        radio['center_freq_hz'] = params.center_freq_hz
+    if params.sample_rate_hz > 0.0:
+        radio['sample_rate_hz'] = params.sample_rate_hz
+    if params.antenna_spacing_m > 0.0:
+        radio['antenna_spacing_m'] = params.antenna_spacing_m
+    if radio:
+        try:
+            radio_params_queue.put_nowait(radio)
+        except Exception:
+            pass
 
 
 def _aggregate_logical_channel_count(payload):
@@ -1321,91 +1495,162 @@ def _dispatch_aggregate_payload(frame_id_hint, aggregate_payload, viewer_params,
         _queue_aggregate_frame(bundle_frame_id, channel_frames)
 
 
-def udp_receiver(port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def control_receiver():
+    print(f"[CTRL] DEALER connected to {CONTROL_ENDPOINT} for viewer params/control replies")
+    poller = None
+    local_socket = None
+    local_generation = -1
+    while running:
+        try:
+            # The DEALER socket is not thread-safe, so this thread owns actual
+            # send/recv. UI callbacks enqueue packets instead of touching it.
+            with control_socket_lock:
+                if local_generation != connection_generation:
+                    local_socket = control_socket
+                    local_generation = connection_generation
+                    poller = zmq.Poller()
+                    poller.register(local_socket, zmq.POLLIN)
+                    print(f"[CTRL] DEALER connected to {CONTROL_ENDPOINT} for viewer params/control replies")
+                _flush_control_tx_queue(local_socket)
+                events = dict(poller.poll(timeout=20))
+                if local_socket not in events:
+                    continue
+                parts = local_socket.recv_multipart(flags=zmq.NOBLOCK)
+        except zmq.Again:
+            continue
+        except Exception as e:
+            if running:
+                print(f"[CTRL] Socket error: {e}")
+            continue
+
+        data = parts[-1] if parts else b""
+        try:
+            if len(data) < 8 or data[:4] != CTRL_HEADER:
+                continue
+
+            command = data[4:8]
+            if command == PARAMS_COMMAND:
+                params = parse_params_packet(data)
+                if params is not None:
+                    _handle_viewer_params(CHANNELS, params, "[CTRL]")
+                    queue_startup_backend_sync()
+            elif command == READY_COMMAND:
+                if CHANNELS and (
+                    get_viewer_params(CHANNELS[0]).version == 0
+                    or CHANNELS[0].last_param_error is not None
+                ):
+                    request_viewer_params(0)
+        except Exception as e:
+            print(f"[CTRL] Receiver error: {e}")
+
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_SIZE)
+        control_socket.close()
     except Exception:
         pass
 
-    try:
-        sock.bind((UDP_IP, port))
-        print(f"[AGG] Listening on UDP port {port} for aggregated sensing frames")
-    except Exception as e:
-        print(f"[AGG] Socket bind error: {e}")
-        return
+
+def udp_receiver(port):
+    import time as _time
+    sock = None
+    poller = None
+    local_generation = -1
 
     logged_waiting_for_params = False
+    _last_param_retry_t = 0.0
+    _PARAM_RETRY_INTERVAL = 0.5
+
+    def _request_params_if_needed(reason):
+        nonlocal logged_waiting_for_params, _last_param_retry_t
+        if not CHANNELS or get_viewer_params(CHANNELS[0]).version != 0:
+            return False
+
+        now = _time.monotonic()
+        if now - _last_param_retry_t < _PARAM_RETRY_INTERVAL:
+            return False
+
+        if not logged_waiting_for_params:
+            print(reason)
+            logged_waiting_for_params = True
+        request_viewer_params(0)
+        _last_param_retry_t = now
+        return True
+
     while running:
-        try:
-            data, addr = sock.recvfrom(MAX_CHUNK_SIZE + HEADER_SIZE)
-
-            _update_detected_sender(CHANNELS, addr)
-
-            if len(data) >= 8 and data[:4] == CTRL_HEADER:
-                command = data[4:8]
-                if command == PARAMS_COMMAND:
-                    params = parse_params_packet(data)
-                    if params is not None:
-                        _update_detected_sender(CHANNELS, addr, update_control_port=True)
-                        _handle_viewer_params(CHANNELS, params, "[AGG]")
-                        logged_waiting_for_params = False
-                elif command == READY_COMMAND:
-                    _update_detected_sender(CHANNELS, addr, update_control_port=True)
-                    if CHANNELS and (get_viewer_params(CHANNELS[0]).version == 0 or CHANNELS[0].last_param_error is not None):
-                        request_viewer_params(0)
-                continue
-
-            if len(data) < HEADER_SIZE:
-                continue
-
+        if local_generation != connection_generation:
+            if sock is not None:
+                try:
+                    sock.close(0)
+                except Exception:
+                    pass
+            endpoint = make_tcp_endpoint(HOST, port)
             try:
-                frame_id, total_chunks, chunk_id = struct.unpack("!III", data[:HEADER_SIZE])
-            except struct.error:
+                sock = make_data_sub(endpoint, rcvhwm=4)
+            except Exception as e:
+                print(f"[AGG] Sensing SUB connect error: {e}")
+                _time.sleep(0.5)
                 continue
-            is_metadata = bool(total_chunks & 0x80000000)
-            total_chunks &= 0x7FFFFFFF
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            local_generation = connection_generation
+            logged_waiting_for_params = False
+            print(f"[AGG] Subscribed to aggregated sensing stream at {endpoint}")
 
-            chunk_data = data[HEADER_SIZE:]
-            frame_buffer = CHANNELS[0].metadata_frame_buffer if is_metadata else CHANNELS[0].frame_buffer
-            with CHANNELS[0].buffer_lock:
-                if frame_buffer.frame_id != frame_id:
-                    frame_buffer.init(frame_id, total_chunks)
-                if not frame_buffer.add_chunk(chunk_id, chunk_data):
-                    continue
-
-                viewer_params = get_viewer_params(CHANNELS[0]) if CHANNELS else LEGACY_VIEWER_PARAMS
-                frame_id_done, payload = frame_buffer.assemble_payload()
-                if not viewer_params.aggregated_stream() and viewer_params.version == 0:
-                    if not logged_waiting_for_params:
-                        print("[AGG] Aggregate frame detected before viewer params arrived; requesting params")
-                        logged_waiting_for_params = True
-                    request_viewer_params(0)
-                    continue
-                if len(payload) >= 4 and payload[:4] == b"ASM1":
-                    warn_unsupported_backend_payload("[AGG]", "metadata sidecar", frame_id_done)
-                    continue
-                if backend_stream_unsupported(viewer_params):
-                    warn_unsupported_backend_payload("[AGG]", "aggregate sensing frame", frame_id_done)
-                    continue
-                if len(payload) < 4 or struct.unpack("!I", payload[:4])[0] != AGGREGATE_MAGIC_VERSION:
-                    print("[AGG] Ignoring non-aggregated sensing frame; legacy per-channel UDP mode is no longer supported")
-                    continue
-                _dispatch_aggregate_payload(frame_id_done, payload, viewer_params, "[AGG]")
-
-        except socket.error as e:
-            if getattr(e, "errno", None) != 10054:
+        try:
+            events = dict(poller.poll(timeout=500))
+        except Exception as e:
+            if running:
                 print(f"[AGG] Socket error: {e}")
+            continue
+
+        if sock not in events:
+            # Periodic params retry so a viewer started mid-run converges
+            # without waiting for the next READY heartbeat.
+            _request_params_if_needed("[AGG] Viewer params not yet received; requesting from backend...")
+            continue
+
+        try:
+            frame = recv_sensing_frame(sock, flags=zmq.NOBLOCK)
+            if frame is None:
+                continue
+            data_payload, metadata_payload = frame
+            _request_params_if_needed("[AGG] Viewer params not yet received; requesting from backend...")
+
+            viewer_params = get_viewer_params(CHANNELS[0]) if CHANNELS else LEGACY_VIEWER_PARAMS
+            if not viewer_params.aggregated_stream() and viewer_params.version == 0:
+                if data_payload:
+                    detected_count = _aggregate_logical_channel_count(data_payload)
+                    if detected_count is not None:
+                        _ensure_channel_count(detected_count, reason="aggregate frame")
+                _request_params_if_needed(
+                    "[AGG] Aggregate stream detected before viewer params arrived; requesting params"
+                )
+                continue
+
+            # This fast viewer does not support backend-side processing output.
+            if metadata_payload is not None or backend_stream_unsupported(viewer_params):
+                warn_unsupported_backend_payload("[AGG]", "aggregate sensing frame")
+                continue
+            if not data_payload:
+                continue
+            if len(data_payload) < 4 or struct.unpack("!I", data_payload[:4])[0] != AGGREGATE_MAGIC_VERSION:
+                print("[AGG] Ignoring non-aggregated sensing frame; legacy per-channel mode is no longer supported")
+                continue
+            _dispatch_aggregate_payload(int(0), data_payload, viewer_params, "[AGG]")
+
         except Exception as e:
             print(f"[AGG] Receiver error: {e}")
             for ch in CHANNELS:
                 ch.last_param_error = str(e)
             request_viewer_params(0 if CHANNELS else None)
 
-    sock.close()
+    if sock is not None:
+        sock.close(0)
 
 
 receiver_threads = []
+_ctrl_t = threading.Thread(target=control_receiver, daemon=True)
+_ctrl_t.start()
+receiver_threads.append(_ctrl_t)
 _t = threading.Thread(target=udp_receiver, args=(UDP_PORT,), daemon=True)
 _t.start()
 receiver_threads.append(_t)
@@ -3302,7 +3547,6 @@ def send_strd_command(val):
         strd_limit = get_viewer_params(CHANNELS[ref_idx]).max_strd_value()
         strd_val = max(1, min(strd_limit, int(val)))
         send_shared_control_command(b"STRD", strd_val)
-        time.sleep(0.02)
         request_shared_viewer_params()
     except ValueError:
         print(f"Invalid STRD value: {val}")
@@ -3380,6 +3624,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.phase_calibration_last_doppler_bin = None
         self.phase_calibration_last_saved_path = None
         self.center_freq_hz = 2.4e9
+        self.antenna_spacing_m = ANTENNA_SPACING_M
         self.range_scale_sample_rate_hz = None
         self.range_scale_source = "range bin"
         self.target_sector_zero_range_bin = TARGET_SECTOR_DEFAULT_ZERO_RANGE_BIN
@@ -3393,6 +3638,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.targets_window.resize(820, self._fit_height_to_screen(860))
         targets_layout = QtWidgets.QVBoxLayout(self.targets_window)
         self.target_sector_plot = pg.PlotWidget(title="Target Sector View")
+        style_spectrum_plot(self.target_sector_plot)
         self.target_sector_plot.setLabel('left', 'Forward Range (bin)')
         self.target_sector_plot.setLabel('bottom', 'Cross-Range (bin)')
         self.target_sector_plot.showGrid(x=True, y=True, alpha=0.2)
@@ -3402,8 +3648,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.target_sector_plot.setMinimumHeight(360)
         self.target_sector_sensor_item = pg.ScatterPlotItem(
             [0.0], [0.0], symbol='t', size=14,
-            pen=pg.mkPen('#ffffff', width=1.5),
-            brush=pg.mkBrush(255, 255, 255, 220)
+            pen=pg.mkPen(VIEWER_COLORS["text"], width=1.5),
+            brush=pg.mkBrush(VIEWER_COLORS["text"])
         )
         self.target_sector_outline_item = pg.PlotCurveItem(pen=pg.mkPen((140, 160, 180, 180), width=1.4))
         self.target_sector_base_item = pg.PlotCurveItem(pen=pg.mkPen((90, 105, 120, 150), width=1.0))
@@ -3417,8 +3663,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         self.target_sector_points_item = pg.ScatterPlotItem(
             [], [], size=14,
-            pen=pg.mkPen('#0b132b', width=1.2),
-            brush=pg.mkBrush(255, 145, 77, 210)
+            pen=pg.mkPen(VIEWER_COLORS["window"], width=1.2),
+            brush=pg.mkBrush(VIEWER_COLORS["target"])
         )
         self.target_sector_label_items = []
         self.target_sector_plot.addItem(self.target_sector_outline_item)
@@ -3429,6 +3675,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.target_sector_plot.addItem(item)
         self.target_sector_plot.addItem(self.target_sector_points_item)
         self.target_sector_plot.addItem(self.target_sector_sensor_item)
+
+        sector_range_layout = QtWidgets.QHBoxLayout()
+        sector_range_layout.addWidget(QtWidgets.QLabel("Sector Zero (bin):"))
+        self.txt_sector_zero_bin = QtWidgets.QLineEdit(str(self.target_sector_zero_range_bin))
+        self.txt_sector_zero_bin.setToolTip("Range bin treated as the origin of the target sector view.")
+        sector_range_layout.addWidget(self.txt_sector_zero_bin)
+        sector_range_layout.addWidget(QtWidgets.QLabel("Sector Max (bin):"))
+        self.txt_sector_max_bin = QtWidgets.QLineEdit(str(self.target_sector_max_range_bins))
+        self.txt_sector_max_bin.setToolTip("Maximum relative range shown in the target sector view.")
+        sector_range_layout.addWidget(self.txt_sector_max_bin)
+        btn_sector_range = QtWidgets.QPushButton("Apply Sector Range")
+        btn_sector_range.clicked.connect(self.set_target_sector_range)
+        sector_range_layout.addWidget(btn_sector_range)
+        sector_range_layout.addStretch(1)
+        targets_layout.addLayout(sector_range_layout)
         targets_layout.addWidget(self.target_sector_plot)
         self.targets_text = QtWidgets.QPlainTextEdit()
         self.targets_text.setReadOnly(True)
@@ -3447,22 +3708,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Range-Doppler Plot
         self.rd_plot = pg.PlotWidget(title="Range-Doppler Spectrum")
+        style_spectrum_plot(self.rd_plot)
         # RD uses col-major mapping: x <- first index(doppler), y <- second index(range)
         self.rd_img = pg.ImageItem(axisOrder='col-major')
         self.rd_plot.addItem(self.rd_img)
         self.rd_plot.setLabel('left', 'Range Bin')
         self.rd_plot.setLabel('bottom', 'Doppler Bin')
-        self.rd_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
+        spectrum_cmap = sensing_colormap()
+        self.rd_img.setLookupTable(spectrum_cmap.getLookupTable())
         rd_default_db_levels = get_delay_doppler_display_db_range()
-        self.rd_colorbar = pg.ColorBarItem(values=rd_default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
+        self.rd_colorbar = pg.ColorBarItem(values=rd_default_db_levels, colorMap=spectrum_cmap, interactive=False)
         self.rd_colorbar.setImageItem(self.rd_img, insert_in=self.rd_plot.plotItem)
         self.rd_img.setLevels(rd_default_db_levels)
 
-        self.rd_click_marker = pg.ScatterPlotItem([], [], symbol='x', size=12, pen=pg.mkPen('w', width=2))
+        self.rd_click_marker = pg.ScatterPlotItem(
+            [], [], symbol='x', size=12, pen=pg.mkPen(VIEWER_COLORS["text"], width=2)
+        )
         self.rd_cfar_marker = pg.ScatterPlotItem(
             [], [], symbol='o', size=7,
-            pen=pg.mkPen('#00e5ff', width=1.5),
-            brush=pg.mkBrush(0, 229, 255, 70)
+            pen=pg.mkPen(VIEWER_COLORS["accent"], width=1.7),
+            brush=pg.mkBrush(56, 189, 248, 55)
         )
         self.rd_plot.addItem(self.rd_cfar_marker)
         self.rd_plot.addItem(self.rd_click_marker)
@@ -3472,30 +3737,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Micro-Doppler Plot
         self.md_plot = pg.PlotWidget(title="Micro-Doppler Spectrum")
+        style_spectrum_plot(self.md_plot)
         # MD uses row-major mapping: x <- second index(time), y <- first index(doppler)
         self.md_img = pg.ImageItem(axisOrder='row-major')
         self.md_plot.addItem(self.md_img)
         self.md_plot.setLabel('left', 'Doppler')
         self.md_plot.setLabel('bottom', 'Time')
-        self.md_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
+        self.md_img.setLookupTable(spectrum_cmap.getLookupTable())
         md_default_db_levels = get_micro_doppler_display_db_range()
-        self.md_colorbar = pg.ColorBarItem(values=md_default_db_levels, colorMap=pg.colormap.get('turbo'), interactive=False)
+        self.md_colorbar = pg.ColorBarItem(values=md_default_db_levels, colorMap=spectrum_cmap, interactive=False)
         self.md_colorbar.setImageItem(self.md_img, insert_in=self.md_plot.plotItem)
         self.md_img.setLevels(md_default_db_levels)
         plot_layout.addWidget(self.md_plot)
 
         # Phase-Channel Curve Plot
         self.phase_curve_plot = pg.PlotWidget(title="Phase-Channel Curve @ Top Target")
+        style_spectrum_plot(self.phase_curve_plot)
         self.phase_curve_plot.setLabel('left', 'Phase (rad, unwrapped)')
         self.phase_curve_plot.setLabel('bottom', 'Channel Index')
         self.phase_curve_plot.showGrid(x=True, y=True, alpha=0.3)
         self.phase_curve_plot.setYRange(-10.0, 10.0, padding=0.0)
         self.phase_curve_plot.addLegend(offset=(8, 8))
         self.phase_curve_raw_item = self.phase_curve_plot.plot(
-            [], [], pen=pg.mkPen('#f7d154', width=2), symbol='o', symbolSize=6, name='Raw'
+            [], [], pen=pg.mkPen(VIEWER_COLORS["raw"], width=2), symbol='o', symbolSize=6, name='Raw'
         )
         self.phase_curve_comp_item = self.phase_curve_plot.plot(
-            [], [], pen=pg.mkPen('#4cc9f0', width=2), symbol='x', symbolSize=7, name='Calibrated'
+            [], [], pen=pg.mkPen(VIEWER_COLORS["calibrated"], width=2), symbol='x', symbolSize=7, name='Calibrated'
         )
         plot_layout.addWidget(self.phase_curve_plot)
 
@@ -3514,11 +3781,26 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.setWidget(control_panel)
         main_layout.addWidget(control_scroll, stretch=0)
 
+        self._settings = ViewerSettings("plot_sensing_fast")
+
+        connection_row = QtWidgets.QHBoxLayout()
+        connection_row.addWidget(QtWidgets.QLabel("Backend IP:"))
+        self.txt_backend_host = QtWidgets.QLineEdit(HOST or "127.0.0.1")
+        self.txt_backend_host.setPlaceholderText("127.0.0.1")
+        self.txt_backend_host.returnPressed.connect(self.connect_backend)
+        self.btn_connect_backend = QtWidgets.QPushButton("Connect")
+        self.btn_connect_backend.clicked.connect(self.connect_backend)
+        connection_row.addWidget(self.txt_backend_host)
+        connection_row.addWidget(self.btn_connect_backend)
+        control_layout.addLayout(connection_row)
+        control_layout.addSpacing(12)
+
         # Status Labels
         self.lbl_display = QtWidgets.QLabel("Display: CH1")
         self.lbl_fps = QtWidgets.QLabel("FPS: 0.0")
         self.lbl_queue = QtWidgets.QLabel("Queue: 0")
         self.lbl_sender = QtWidgets.QLabel("Sender: Detecting...")
+        self.lbl_status = QtWidgets.QLabel("Status: Waiting for backend stream...")
         self.lbl_params = QtWidgets.QLabel("Params: waiting...")
         self.lbl_buffer = QtWidgets.QLabel("MD Buffer: 0/5000")
         self.lbl_cfar = QtWidgets.QLabel("Detector: off")
@@ -3531,6 +3813,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_fps,
             self.lbl_queue,
             self.lbl_sender,
+            self.lbl_status,
             self.lbl_params,
             self.lbl_buffer,
             self.lbl_cfar,
@@ -3559,18 +3842,19 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_text=self._format_target_sector_scale_text("range bin"),
         )
 
-        control_layout.addSpacing(16)
+        # ── Collapsible Section: Display & View ──
+        self.section_display = CollapsibleSection("Display & View", collapsed=False)
+        disp = self.section_display.content_layout()
 
-        # Display channel selector
         ch_select_layout = QtWidgets.QHBoxLayout()
         ch_select_layout.addWidget(QtWidgets.QLabel("Display CH:"))
         self.combo_display_channel = QtWidgets.QComboBox()
         self.combo_display_channel.currentIndexChanged.connect(self.on_display_channel_changed)
         ch_select_layout.addWidget(self.combo_display_channel)
-        control_layout.addLayout(ch_select_layout)
+        disp.addLayout(ch_select_layout)
         self.refresh_display_button_text()
 
-        control_layout.addSpacing(16)
+        disp.addSpacing(8)
 
         # Range Bin
         rb_layout = QtWidgets.QHBoxLayout()
@@ -3580,7 +3864,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_set_rb.clicked.connect(self.set_range_bin)
         rb_layout.addWidget(self.txt_range_bin)
         rb_layout.addWidget(btn_set_rb)
-        control_layout.addLayout(rb_layout)
+        disp.addLayout(rb_layout)
 
         fft_layout = QtWidgets.QHBoxLayout()
         fft_layout.addWidget(QtWidgets.QLabel("Delay FFT:"))
@@ -3589,7 +3873,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_delay_fft.clicked.connect(self.set_delay_fft_size)
         fft_layout.addWidget(self.txt_delay_fft)
         fft_layout.addWidget(btn_delay_fft)
-        control_layout.addLayout(fft_layout)
+        disp.addLayout(fft_layout)
 
         doppler_fft_layout = QtWidgets.QHBoxLayout()
         doppler_fft_layout.addWidget(QtWidgets.QLabel("Doppler FFT:"))
@@ -3598,7 +3882,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_doppler_fft.clicked.connect(self.set_doppler_fft_size)
         doppler_fft_layout.addWidget(self.txt_doppler_fft)
         doppler_fft_layout.addWidget(btn_doppler_fft)
-        control_layout.addLayout(doppler_fft_layout)
+        disp.addLayout(doppler_fft_layout)
 
         delay_view_layout = QtWidgets.QHBoxLayout()
         delay_view_layout.addWidget(QtWidgets.QLabel("Delay View:"))
@@ -3607,7 +3891,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_delay_view.clicked.connect(self.set_delay_view_bins)
         delay_view_layout.addWidget(self.txt_delay_view)
         delay_view_layout.addWidget(btn_delay_view)
-        control_layout.addLayout(delay_view_layout)
+        disp.addLayout(delay_view_layout)
 
         doppler_view_layout = QtWidgets.QHBoxLayout()
         doppler_view_layout.addWidget(QtWidgets.QLabel("Doppler View:"))
@@ -3616,7 +3900,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_doppler_view.clicked.connect(self.set_doppler_view_bins)
         doppler_view_layout.addWidget(self.txt_doppler_view)
         doppler_view_layout.addWidget(btn_doppler_view)
-        control_layout.addLayout(doppler_view_layout)
+        disp.addLayout(doppler_view_layout)
 
         delay_doppler_db_layout = QtWidgets.QHBoxLayout()
         delay_doppler_db_layout.addWidget(QtWidgets.QLabel("Delay Doppler dB:"))
@@ -3629,7 +3913,7 @@ class MainWindow(QtWidgets.QMainWindow):
         delay_doppler_db_layout.addWidget(self.txt_delay_doppler_db_min)
         delay_doppler_db_layout.addWidget(self.txt_delay_doppler_db_max)
         delay_doppler_db_layout.addWidget(btn_delay_doppler_db)
-        control_layout.addLayout(delay_doppler_db_layout)
+        disp.addLayout(delay_doppler_db_layout)
 
         micro_doppler_db_layout = QtWidgets.QHBoxLayout()
         micro_doppler_db_layout.addWidget(QtWidgets.QLabel("MicroDoppler dB:"))
@@ -3642,7 +3926,13 @@ class MainWindow(QtWidgets.QMainWindow):
         micro_doppler_db_layout.addWidget(self.txt_micro_doppler_db_min)
         micro_doppler_db_layout.addWidget(self.txt_micro_doppler_db_max)
         micro_doppler_db_layout.addWidget(btn_micro_doppler_db)
-        control_layout.addLayout(micro_doppler_db_layout)
+        disp.addLayout(micro_doppler_db_layout)
+
+        control_layout.addWidget(self.section_display)
+
+        # ── Collapsible Section: Delay Estimation ──
+        self.section_superres = CollapsibleSection("Delay Estimation", collapsed=True)
+        superres_sec = self.section_superres.content_layout()
 
         self.superres_controls = QtWidgets.QWidget()
         superres_layout = QtWidgets.QVBoxLayout(self.superres_controls)
@@ -3669,16 +3959,12 @@ class MainWindow(QtWidgets.QMainWindow):
         superres_threshold_layout.addWidget(self.txt_superres_peak_rel)
         superres_threshold_layout.addWidget(btn_superres_apply)
         superres_layout.addLayout(superres_threshold_layout)
-        control_layout.addWidget(self.superres_controls)
+        superres_sec.addWidget(self.superres_controls)
+        control_layout.addWidget(self.section_superres)
 
-        # Micro-Doppler Toggle
-        self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
-        self.btn_md.setCheckable(True)
-        self.btn_md.setChecked(True)
-        self.btn_md.clicked.connect(self.toggle_micro_doppler)
-        self.btn_md.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
-        control_layout.addWidget(self.btn_md)
-        control_layout.addSpacing(12)
+        # ── Collapsible Section: Target Detection ──
+        self.section_detection = CollapsibleSection("Target Detection", collapsed=True)
+        det_sec = self.section_detection.content_layout()
 
         self.local_detector_selector = QtWidgets.QWidget()
         local_detector_select_layout = QtWidgets.QHBoxLayout(self.local_detector_selector)
@@ -3689,13 +3975,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_local_detector.addItem("CLEAN", LOCAL_DETECTOR_CLEAN)
         self.combo_local_detector.currentIndexChanged.connect(self.on_local_detector_changed)
         local_detector_select_layout.addWidget(self.combo_local_detector)
-        control_layout.addWidget(self.local_detector_selector)
+        det_sec.addWidget(self.local_detector_selector)
 
         self.btn_cfar = QtWidgets.QPushButton("Local OS-CFAR: OFF")
         self.btn_cfar.setCheckable(True)
         self.btn_cfar.setChecked(False)
         self.btn_cfar.clicked.connect(self.toggle_cfar)
-        control_layout.addWidget(self.btn_cfar)
+        det_sec.addWidget(self.btn_cfar)
 
         self.local_detector_controls = QtWidgets.QWidget()
         local_detector_layout = QtWidgets.QVBoxLayout(self.local_detector_controls)
@@ -3794,7 +4080,12 @@ class MainWindow(QtWidgets.QMainWindow):
         clean_dc_layout.addWidget(btn_clean_apply)
         local_clean_layout.addLayout(clean_dc_layout)
         local_detector_layout.addWidget(self.local_clean_controls)
-        control_layout.addWidget(self.local_detector_controls)
+        det_sec.addWidget(self.local_detector_controls)
+        control_layout.addWidget(self.section_detection)
+
+        # ── Collapsible Section: Clustering ──
+        self.section_cluster = CollapsibleSection("Clustering", collapsed=True)
+        clust_sec = self.section_cluster.content_layout()
 
         self.cluster_controls = QtWidgets.QWidget()
         cluster_gap_layout = QtWidgets.QHBoxLayout(self.cluster_controls)
@@ -3808,11 +4099,13 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_cluster_apply = QtWidgets.QPushButton("Apply DBSCAN")
         btn_cluster_apply.clicked.connect(self.apply_target_cluster_settings)
         cluster_gap_layout.addWidget(btn_cluster_apply)
-        control_layout.addWidget(self.cluster_controls)
+        clust_sec.addWidget(self.cluster_controls)
+        control_layout.addWidget(self.section_cluster)
 
-        control_layout.addSpacing(20)
+        # ── Collapsible Section: Alignment ──
+        self.section_align = CollapsibleSection("Alignment", collapsed=True)
+        align_sec = self.section_align.content_layout()
 
-        # Alignment
         align_layout = QtWidgets.QHBoxLayout()
         align_layout.addWidget(QtWidgets.QLabel("Delay:"))
         self.txt_delay = QtWidgets.QLineEdit("0")
@@ -3820,17 +4113,20 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_apply.clicked.connect(self.apply_alignment)
         align_layout.addWidget(self.txt_delay)
         align_layout.addWidget(btn_apply)
-        control_layout.addLayout(align_layout)
+        align_sec.addLayout(align_layout)
 
         quick_layout = QtWidgets.QHBoxLayout()
         for label, val in [('+57600', 57600), ('-57600', -57600), ('+10', 10), ('-10', -10), ('+1', 1), ('-1', -1)]:
             btn = QtWidgets.QPushButton(label)
             btn.clicked.connect(lambda ch, v=val: send_alignment_command(v))
             quick_layout.addWidget(btn)
-        control_layout.addLayout(quick_layout)
-        control_layout.addSpacing(20)
+        align_sec.addLayout(quick_layout)
+        control_layout.addWidget(self.section_align)
 
-        # STRD
+        # ── Collapsible Section: Hardware & RF ──
+        self.section_hw = CollapsibleSection("Hardware & RF", collapsed=True)
+        hw_sec = self.section_hw.content_layout()
+
         strd_layout = QtWidgets.QHBoxLayout()
         strd_layout.addWidget(QtWidgets.QLabel("STRD:"))
         self.txt_strd = QtWidgets.QLineEdit("20")
@@ -3838,8 +4134,8 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_strd.clicked.connect(self.set_strd)
         strd_layout.addWidget(self.txt_strd)
         strd_layout.addWidget(btn_strd)
-        control_layout.addLayout(strd_layout)
-        
+        hw_sec.addLayout(strd_layout)
+
         tx_gain_layout = QtWidgets.QHBoxLayout()
         tx_gain_layout.addWidget(QtWidgets.QLabel("TX Gain(dB):"))
         self.txt_tx_gain = QtWidgets.QLineEdit("20.0")
@@ -3847,7 +4143,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_tx_gain.clicked.connect(self.set_tx_gain)
         tx_gain_layout.addWidget(self.txt_tx_gain)
         tx_gain_layout.addWidget(btn_tx_gain)
-        control_layout.addLayout(tx_gain_layout)
+        hw_sec.addLayout(tx_gain_layout)
 
         rx_gain_layout = QtWidgets.QHBoxLayout()
         rx_gain_layout.addWidget(QtWidgets.QLabel("RX Gain(dB):"))
@@ -3856,11 +4152,11 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_rx_gain.clicked.connect(self.set_rx_gain)
         rx_gain_layout.addWidget(self.txt_rx_gain)
         rx_gain_layout.addWidget(btn_rx_gain)
-        control_layout.addLayout(rx_gain_layout)
+        hw_sec.addLayout(rx_gain_layout)
 
         btn_hsys_cal = QtWidgets.QPushButton("Calibrate Hsys")
         btn_hsys_cal.clicked.connect(send_system_response_calibration_command)
-        control_layout.addWidget(btn_hsys_cal)
+        hw_sec.addWidget(btn_hsys_cal)
 
         aoa_freq_layout = QtWidgets.QHBoxLayout()
         aoa_freq_layout.addWidget(QtWidgets.QLabel("Center Freq(GHz):"))
@@ -3869,42 +4165,49 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_center_freq.clicked.connect(self.set_center_freq)
         aoa_freq_layout.addWidget(self.txt_center_freq_ghz)
         aoa_freq_layout.addWidget(btn_center_freq)
-        control_layout.addLayout(aoa_freq_layout)
+        hw_sec.addLayout(aoa_freq_layout)
 
-        sector_range_layout = QtWidgets.QHBoxLayout()
-        sector_range_layout.addWidget(QtWidgets.QLabel("Sector Zero(bin):"))
-        self.txt_sector_zero_bin = QtWidgets.QLineEdit(str(self.target_sector_zero_range_bin))
-        sector_range_layout.addWidget(self.txt_sector_zero_bin)
-        sector_range_layout.addWidget(QtWidgets.QLabel("Sector Max(bin):"))
-        self.txt_sector_max_bin = QtWidgets.QLineEdit(str(self.target_sector_max_range_bins))
-        btn_sector_range = QtWidgets.QPushButton("Apply")
-        btn_sector_range.clicked.connect(self.set_target_sector_range)
-        sector_range_layout.addWidget(self.txt_sector_max_bin)
-        sector_range_layout.addWidget(btn_sector_range)
-        control_layout.addLayout(sector_range_layout)
+        aoa_spacing_layout = QtWidgets.QHBoxLayout()
+        aoa_spacing_layout.addWidget(QtWidgets.QLabel("Ant Spacing(mm):"))
+        self.txt_antenna_spacing_mm = QtWidgets.QLineEdit(f"{self.antenna_spacing_m * 1e3:.3f}")
+        btn_antenna_spacing = QtWidgets.QPushButton("Set")
+        btn_antenna_spacing.clicked.connect(self.set_antenna_spacing)
+        aoa_spacing_layout.addWidget(self.txt_antenna_spacing_mm)
+        aoa_spacing_layout.addWidget(btn_antenna_spacing)
+        hw_sec.addLayout(aoa_spacing_layout)
 
         self.btn_calibrate = QtWidgets.QPushButton("Calibrate Phase")
         self.btn_calibrate.clicked.connect(self.calibrate_phase_bias)
-        control_layout.addWidget(self.btn_calibrate)
+        hw_sec.addWidget(self.btn_calibrate)
         self._refresh_phase_calibration_button()
-        control_layout.addSpacing(20)
+        control_layout.addWidget(self.section_hw)
 
-        # Toggles
+        # ── Collapsible Section: Processing Toggles ──
+        self.section_toggles = CollapsibleSection("Processing Toggles", collapsed=False)
+        toggles_sec = self.section_toggles.content_layout()
+
+        # Micro-Doppler Toggle
+        self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
+        self.btn_md.setCheckable(True)
+        self.btn_md.setChecked(True)
+        self.btn_md.clicked.connect(self.toggle_micro_doppler)
+        toggles_sec.addWidget(self.btn_md)
+
         self.btn_mti = QtWidgets.QPushButton("MTI")
         self.update_toggle_style(self.btn_mti, enable_mti)
         self.btn_mti.clicked.connect(self.toggle_mti)
-        control_layout.addWidget(self.btn_mti)
+        toggles_sec.addWidget(self.btn_mti)
 
         self.btn_range_win = QtWidgets.QPushButton("Range Window")
         self.update_toggle_style(self.btn_range_win, enable_range_window)
         self.btn_range_win.clicked.connect(self.toggle_range_win)
-        control_layout.addWidget(self.btn_range_win)
+        toggles_sec.addWidget(self.btn_range_win)
 
         self.btn_doppler_win = QtWidgets.QPushButton("Doppler Window")
         self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
         self.btn_doppler_win.clicked.connect(self.toggle_doppler_win)
-        control_layout.addWidget(self.btn_doppler_win)
-        control_layout.addSpacing(20)
+        toggles_sec.addWidget(self.btn_doppler_win)
+        control_layout.addWidget(self.section_toggles)
 
         # Save
         save_layout = QtWidgets.QHBoxLayout()
@@ -3914,6 +4217,10 @@ class MainWindow(QtWidgets.QMainWindow):
             save_layout.addWidget(btn)
         control_layout.addLayout(save_layout)
         control_layout.addStretch()
+
+        # ── Load saved settings, then connect persistence ──
+        self._load_and_apply_settings()
+        self._connect_settings_persistence()
 
         self._auto_load_latest_phase_calibration()
 
@@ -3931,7 +4238,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._force_ui_refresh = True
         self.targets_window.show()
 
-        threading.Thread(target=send_skip_command, daemon=True).start()
         self.combo_delay_estimator.blockSignals(True)
         self.combo_delay_estimator.setCurrentIndex(
             self.combo_delay_estimator.findData(delay_estimator_mode)
@@ -3963,6 +4269,224 @@ class MainWindow(QtWidgets.QMainWindow):
         # Keep the right control panel wide enough instead of shrinking it by DPI.
         return max(1, int(round(float(value))))
 
+    # ── Settings Persistence ──────────────────────────────────────────
+
+    def _load_and_apply_settings(self):
+        """Load saved viewer settings and apply them to UI widgets."""
+        global show_micro_doppler, cfar_enabled
+        global enable_mti, enable_range_window, enable_doppler_window
+        global delay_estimator_mode, local_detector_mode
+        s = self._settings
+
+        def _restore_text(key, widget):
+            value = s.get(key)
+            if value is not None:
+                widget.setText(str(value))
+
+        def _restore_combo(key, combo):
+            value = s.get(key)
+            if value is None:
+                return
+            idx = combo.findData(value)
+            if idx >= 0:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+
+        # Connection
+        saved_host = s.get("host")
+        if saved_host:
+            self.txt_backend_host.setText(str(saved_host))
+        # Display
+        for key, widget in [
+            ("range_bin", self.txt_range_bin),
+            ("delay_fft", self.txt_delay_fft),
+            ("doppler_fft", self.txt_doppler_fft),
+            ("delay_view", self.txt_delay_view),
+            ("doppler_view", self.txt_doppler_view),
+            ("rd_db_min", self.txt_delay_doppler_db_min),
+            ("rd_db_max", self.txt_delay_doppler_db_max),
+            ("md_db_min", self.txt_micro_doppler_db_min),
+            ("md_db_max", self.txt_micro_doppler_db_max),
+            ("superres_peak_rel", self.txt_superres_peak_rel),
+            ("cfar_rank", self.txt_local_cfar_rank),
+            ("cfar_train_d", self.txt_local_cfar_train_d),
+            ("cfar_train_r", self.txt_local_cfar_train_r),
+            ("cfar_guard_d", self.txt_local_cfar_guard_d),
+            ("cfar_guard_r", self.txt_local_cfar_guard_r),
+            ("cfar_suppress_d", self.txt_local_cfar_suppress_d),
+            ("cfar_suppress_r", self.txt_local_cfar_suppress_r),
+            ("cfar_alpha", self.txt_local_cfar_alpha),
+            ("cfar_min_range", self.txt_local_cfar_min_range),
+            ("cfar_min_power", self.txt_local_cfar_min_power),
+            ("cfar_dc_excl", self.txt_local_cfar_dc_excl),
+            ("clean_loop_gain", self.txt_clean_loop_gain),
+            ("clean_max_targets", self.txt_clean_max_targets),
+            ("clean_min_range", self.txt_clean_min_range),
+            ("clean_min_power", self.txt_clean_min_power),
+            ("clean_dc_excl", self.txt_clean_dc_excl),
+            ("dbscan_min_samples", self.txt_cluster_min_samples),
+            ("sector_zero_bin", self.txt_sector_zero_bin),
+            ("sector_max_bin", self.txt_sector_max_bin),
+        ]:
+            _restore_text(key, widget)
+        _restore_combo("delay_estimator", self.combo_delay_estimator)
+        _restore_combo("local_detector", self.combo_local_detector)
+        selected_estimator = self.combo_delay_estimator.currentData()
+        if selected_estimator in DELAY_ESTIMATOR_CHOICES:
+            delay_estimator_mode = selected_estimator
+        selected_detector = self.combo_local_detector.currentData()
+        if selected_detector in {LOCAL_DETECTOR_CLEAN, LOCAL_DETECTOR_OS_CFAR}:
+            local_detector_mode = selected_detector
+        saved_display_channel = s.get("display_channel")
+        if saved_display_channel is not None:
+            try:
+                self.combo_display_channel.setCurrentIndex(int(saved_display_channel))
+            except (TypeError, ValueError):
+                pass
+        # Alignment
+        saved_delay = s.get("alignment_delay")
+        if saved_delay is not None:
+            self.txt_delay.setText(str(saved_delay))
+        # Hardware
+        saved_strd = s.get("strd")
+        if saved_strd is not None:
+            self.txt_strd.setText(str(saved_strd))
+        saved_tx_gain = s.get("tx_gain")
+        if saved_tx_gain is not None:
+            self.txt_tx_gain.setText(str(saved_tx_gain))
+        saved_rx_gain = s.get("rx_gain")
+        if saved_rx_gain is not None:
+            self.txt_rx_gain.setText(str(saved_rx_gain))
+        saved_cf = s.get("center_freq_ghz")
+        if saved_cf is not None:
+            self.txt_center_freq_ghz.setText(str(saved_cf))
+        saved_as = s.get("ant_spacing_mm")
+        if saved_as is not None:
+            self.txt_antenna_spacing_mm.setText(str(saved_as))
+
+        show_micro_doppler = bool(s.get("show_micro_doppler", show_micro_doppler))
+        cfar_enabled = bool(s.get("cfar_enabled", cfar_enabled))
+        enable_mti = bool(s.get("enable_mti", enable_mti))
+        enable_range_window = bool(s.get("enable_range_window", enable_range_window))
+        enable_doppler_window = bool(s.get("enable_doppler_window", enable_doppler_window))
+        self.btn_md.setChecked(show_micro_doppler)
+        self.toggle_micro_doppler()
+        self.btn_cfar.setChecked(cfar_enabled)
+        self.update_toggle_style(self.btn_mti, enable_mti)
+        self.update_toggle_style(self.btn_range_win, enable_range_window)
+        self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
+
+        # Apply restored processing/display values after all widgets are populated.
+        self.set_range_bin()
+        self.set_delay_fft_size()
+        self.set_doppler_fft_size()
+        self.set_delay_view_bins()
+        self.set_doppler_view_bins()
+        self.apply_delay_doppler_display_db_range()
+        self.apply_micro_doppler_display_db_range()
+        self.apply_superres_settings()
+        if self.combo_local_detector.currentData() == LOCAL_DETECTOR_CLEAN:
+            self.apply_local_cfar_settings()
+            self.apply_clean_settings()
+        else:
+            self.apply_clean_settings()
+            self.apply_local_cfar_settings()
+        self.apply_target_cluster_settings()
+        self.set_target_sector_range()
+        self.refresh_detector_controls(force=True)
+        # Section collapsed states
+        for sec_name, sec_attr in [
+            ("display", "section_display"),
+            ("superres", "section_superres"),
+            ("detection", "section_detection"),
+            ("cluster", "section_cluster"),
+            ("align", "section_align"),
+            ("hw", "section_hw"),
+            ("toggles", "section_toggles"),
+        ]:
+            collapsed = s.get(f"section_{sec_name}_collapsed")
+            if collapsed is not None and hasattr(self, sec_attr):
+                getattr(self, sec_attr).set_collapsed(bool(collapsed))
+
+    def _connect_settings_persistence(self):
+        """Wire widget changes to auto-save settings."""
+        s = self._settings
+
+        def _sv(key, widget, coerce=None):
+            widget.textChanged.connect(lambda v: s.set(key, coerce(v) if coerce else v))
+
+        def _save_detector_choice(_idx):
+            s.set("local_detector", self.combo_local_detector.currentData())
+            s.set("enable_range_window", enable_range_window)
+            s.set("enable_doppler_window", enable_doppler_window)
+
+        _sv("host", self.txt_backend_host)
+        _sv("range_bin", self.txt_range_bin)
+        _sv("delay_fft", self.txt_delay_fft)
+        _sv("doppler_fft", self.txt_doppler_fft)
+        _sv("delay_view", self.txt_delay_view)
+        _sv("doppler_view", self.txt_doppler_view)
+        _sv("rd_db_min", self.txt_delay_doppler_db_min)
+        _sv("rd_db_max", self.txt_delay_doppler_db_max)
+        _sv("md_db_min", self.txt_micro_doppler_db_min)
+        _sv("md_db_max", self.txt_micro_doppler_db_max)
+        _sv("superres_peak_rel", self.txt_superres_peak_rel)
+        _sv("cfar_rank", self.txt_local_cfar_rank)
+        _sv("cfar_train_d", self.txt_local_cfar_train_d)
+        _sv("cfar_train_r", self.txt_local_cfar_train_r)
+        _sv("cfar_guard_d", self.txt_local_cfar_guard_d)
+        _sv("cfar_guard_r", self.txt_local_cfar_guard_r)
+        _sv("cfar_suppress_d", self.txt_local_cfar_suppress_d)
+        _sv("cfar_suppress_r", self.txt_local_cfar_suppress_r)
+        _sv("cfar_alpha", self.txt_local_cfar_alpha)
+        _sv("cfar_min_range", self.txt_local_cfar_min_range)
+        _sv("cfar_min_power", self.txt_local_cfar_min_power)
+        _sv("cfar_dc_excl", self.txt_local_cfar_dc_excl)
+        _sv("clean_loop_gain", self.txt_clean_loop_gain)
+        _sv("clean_max_targets", self.txt_clean_max_targets)
+        _sv("clean_min_range", self.txt_clean_min_range)
+        _sv("clean_min_power", self.txt_clean_min_power)
+        _sv("clean_dc_excl", self.txt_clean_dc_excl)
+        _sv("dbscan_min_samples", self.txt_cluster_min_samples)
+        _sv("sector_zero_bin", self.txt_sector_zero_bin)
+        _sv("sector_max_bin", self.txt_sector_max_bin)
+        _sv("alignment_delay", self.txt_delay)
+        _sv("strd", self.txt_strd)
+        _sv("tx_gain", self.txt_tx_gain)
+        _sv("rx_gain", self.txt_rx_gain)
+        _sv("center_freq_ghz", self.txt_center_freq_ghz)
+        _sv("ant_spacing_mm", self.txt_antenna_spacing_mm)
+
+        self.combo_delay_estimator.currentIndexChanged.connect(
+            lambda _idx: s.set("delay_estimator", self.combo_delay_estimator.currentData())
+        )
+        self.combo_local_detector.currentIndexChanged.connect(_save_detector_choice)
+        self.combo_display_channel.currentIndexChanged.connect(
+            lambda idx: s.set("display_channel", int(idx))
+        )
+        self.btn_md.clicked.connect(lambda: s.set("show_micro_doppler", self.btn_md.isChecked()))
+        self.btn_cfar.clicked.connect(lambda: s.set("cfar_enabled", self.btn_cfar.isChecked()))
+        self.btn_mti.clicked.connect(lambda: s.set("enable_mti", enable_mti))
+        self.btn_range_win.clicked.connect(lambda: s.set("enable_range_window", enable_range_window))
+        self.btn_doppler_win.clicked.connect(lambda: s.set("enable_doppler_window", enable_doppler_window))
+
+        # Persist section collapsed states on toggle
+        for sec_name, sec_attr in [
+            ("display", self.section_display),
+            ("superres", self.section_superres),
+            ("detection", self.section_detection),
+            ("cluster", self.section_cluster),
+            ("align", self.section_align),
+            ("hw", self.section_hw),
+            ("toggles", self.section_toggles),
+        ]:
+            sec_attr.header_button().clicked.connect(
+                lambda _checked, n=sec_name, sec=sec_attr: s.set(
+                    f"section_{n}_collapsed", sec.is_collapsed()
+                )
+            )
+
     def _compute_control_panel_width(self):
         # Prioritize control usability on small screens: reserve more width for the right panel.
         dynamic_width = int(self.width() * 0.45)
@@ -3992,12 +4516,31 @@ class MainWindow(QtWidgets.QMainWindow):
         label.setText(elided)
         label.setToolTip(text)
 
+    def _connect_current_backend(self, auto=False):
+        host = self.txt_backend_host.text().strip() or "127.0.0.1"
+        self.txt_backend_host.setText(host)
+        if auto and host == HOST:
+            self._set_status_label_text(self.lbl_sender, f"Sender: {host}:{args.control_port}")
+            return
+
+        self.btn_connect_backend.setEnabled(False)
+        try:
+            reconnect_backend(host)
+            self._set_status_label_text(self.lbl_sender, f"Sender: {host}:{args.control_port}")
+            self._set_status_label_text(self.lbl_params, "Params: waiting...")
+            self._set_status_label_text(self.lbl_status, f"Status: Connecting to {host}...")
+        finally:
+            self.btn_connect_backend.setEnabled(True)
+
+    def connect_backend(self):
+        self._connect_current_backend(auto=False)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._apply_control_panel_width()
 
     def update_toggle_style(self, btn, state):
-        btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
+        set_button_active(btn, state)
 
     def _enforce_clean_window_policy(self, announce=False):
         global enable_range_window, enable_doppler_window
@@ -4103,7 +4646,7 @@ class MainWindow(QtWidgets.QMainWindow):
         detector_label = get_local_detector_label() if not using_superres else get_delay_estimator_label()
         detector_state = cfar_enabled if not using_superres else True
         self.btn_cfar.setText(f"{detector_label}: {'ON' if detector_state else 'OFF'}")
-        self.btn_cfar.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
+        set_button_active(self.btn_cfar, detector_state)
         if changed_windows:
             reset_processing_state()
 
@@ -4415,6 +4958,18 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"Invalid center frequency: {self.txt_center_freq_ghz.text()}")
             self.txt_center_freq_ghz.setText(f"{self.center_freq_hz / 1e9:.6f}")
 
+    def set_antenna_spacing(self):
+        try:
+            spacing_mm = float(self.txt_antenna_spacing_mm.text())
+            if spacing_mm <= 0.0:
+                raise ValueError
+            self.antenna_spacing_m = spacing_mm * 1e-3
+            print(f"AoA antenna spacing set to {spacing_mm:.3f} mm")
+            self.update_phase_probe_text()
+        except ValueError:
+            print(f"Invalid antenna spacing: {self.txt_antenna_spacing_mm.text()}")
+            self.txt_antenna_spacing_mm.setText(f"{self.antenna_spacing_m * 1e3:.3f}")
+
     def set_target_sector_range(self):
         try:
             zero_bin = max(0, int(self.txt_sector_zero_bin.text()))
@@ -4456,7 +5011,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_calibrate.setText(
                 f"Stop Calibration ({count}/{self.phase_calibration_target_samples})"
             )
-            self.btn_calibrate.setStyleSheet("background-color: khaki;")
+            self.btn_calibrate.setStyleSheet("background-color: #f59e0b;")
         else:
             self.btn_calibrate.setText("Start Phase Calibration")
             self.btn_calibrate.setStyleSheet("")
@@ -4781,15 +5336,19 @@ class MainWindow(QtWidgets.QMainWindow):
             radius = float(entry['range_value'])
             x_pos = radius * np.sin(theta_rad)
             y_pos = max(0.0, radius * np.cos(theta_rad))
-            color = '#ff7f50' if int(entry['rank']) == 1 else '#4cc9f0'
+            color = VIEWER_COLORS["target"] if int(entry['rank']) == 1 else VIEWER_COLORS["calibrated"]
             spots.append({
                 'pos': (x_pos, y_pos),
                 'size': 16 if int(entry['rank']) == 1 else 13,
                 'brush': pg.mkBrush(color),
-                'pen': pg.mkPen('#0b132b', width=1.2),
+                'pen': pg.mkPen(VIEWER_COLORS["window"], width=1.2),
             })
 
-            label = pg.TextItem(text=f"{int(entry['rank'])}", color='w', anchor=(0.5, 1.0))
+            label = pg.TextItem(
+                text=f"{int(entry['rank'])}",
+                color=VIEWER_COLORS["text"],
+                anchor=(0.5, 1.0),
+            )
             label.setPos(x_pos, y_pos)
             self.target_sector_plot.addItem(label)
             self.target_sector_label_items.append(label)
@@ -5273,7 +5832,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             return None, None
         wavelength = C_LIGHT_MPS / self.center_freq_hz
-        sin_theta = np.clip(slope * wavelength / (2.0 * np.pi * ANTENNA_SPACING_M), -1.0, 1.0)
+        sin_theta = np.clip(slope * wavelength / (2.0 * np.pi * self.antenna_spacing_m), -1.0, 1.0)
         aoa_deg = float(np.degrees(np.arcsin(sin_theta)))
         return aoa_deg, slope
 
@@ -5474,6 +6033,42 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_plots(self):
         updated_any = False
+
+        while True:
+            try:
+                startup_sync_queue.get_nowait()
+            except Exception:
+                break
+            strd_value = self.txt_strd.text()
+            mti_enabled = bool(enable_mti)
+            tx_gain_value = self.txt_tx_gain.text()
+            rx_gain_value = self.txt_rx_gain.text()
+            threading.Thread(
+                target=send_startup_backend_sync,
+                args=(strd_value, mti_enabled, tx_gain_value, rx_gain_value),
+                daemon=True,
+            ).start()
+
+        # Apply any radio params received from the backend (PARM V6) on this thread.
+        while True:
+            try:
+                radio = radio_params_queue.get_nowait()
+            except Exception:
+                break
+            if 'center_freq_hz' in radio:
+                self.center_freq_hz = radio['center_freq_hz']
+                if hasattr(self, 'txt_center_freq_ghz'):
+                    self.txt_center_freq_ghz.setText(f"{self.center_freq_hz / 1e9:.6f}")
+                print(f"[PARM] center_freq auto-set to {self.center_freq_hz / 1e9:.6f} GHz")
+            if 'sample_rate_hz' in radio:
+                self.range_scale_sample_rate_hz = radio['sample_rate_hz']
+                self.range_scale_source = "PARM packet"
+                print(f"[PARM] sample_rate auto-set to {self.range_scale_sample_rate_hz:.0f} Hz")
+            if 'antenna_spacing_m' in radio:
+                self.antenna_spacing_m = radio['antenna_spacing_m']
+                if hasattr(self, 'txt_antenna_spacing_mm'):
+                    self.txt_antenna_spacing_mm.setText(f"{self.antenna_spacing_m * 1e3:.3f}")
+                print(f"[PARM] antenna_spacing auto-set to {self.antenna_spacing_m * 1e3:.3f} mm")
 
         # Pull latest display item from each channel
         for ch in CHANNELS:
@@ -5714,6 +6309,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         global running
         running = False
+        self._settings.save_now()
         self.targets_window.close()
         print("Closing application...")
         event.accept()
@@ -5721,6 +6317,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
+    apply_viewer_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

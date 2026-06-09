@@ -4,6 +4,7 @@ cp_length: 128  # Cyclic prefix length (samples)
 sync_pos: 1  # Sync symbol index in one frame
 num_symbols: 100  # Number of OFDM symbols per frame
 sensing_symbol_num: 100  # Number of symbols used in sensing processing
+cuda_demod_pipeline_slots: 3  # Number of CUDA demodulation pipeline slots
 frame_queue_size: 32  # Capacity of the demodulated RX frame queue
 sync_queue_size: 32  # Capacity of the sync-search batch queue
 reset_hold_s: 0.5  # Persistent invalid-delay duration before forcing a hard reset (s)
@@ -62,20 +63,19 @@ sensing_symbol_stride: 20  # Default STRD applied at startup before runtime comm
 
 # ===== Network Output =====
 enable_bi_sensing: false  # Disable bistatic sensing to reduce demodulator load during BER/BLER/EVM runs
-bi_sensing_ip: 127.0.0.1  # Unused when enable_bi_sensing is false
+bi_sensing_ip: "0.0.0.0"  # Unused when enable_bi_sensing is false
 bi_sensing_port: 8889  # Unused when enable_bi_sensing is false
-control_port: 9999  # UDP port for runtime control commands
-channel_ip: ""  # Channel-estimate output IP (empty = use default_ip)
+control_port: 10000  # ZMQ port for runtime control commands
+channel_ip: ""  # Channel-estimate output IP (empty = use default_out_ip)
 channel_port: 12348  # Channel-estimate output port
-pdf_ip: ""  # Delay-spectrum output IP (empty = use default_ip)
+pdf_ip: ""  # Delay-spectrum output IP (empty = use default_out_ip)
 pdf_port: 12349  # Delay-spectrum output port
-constellation_ip: ""  # Constellation output IP (empty = use default_ip)
+constellation_ip: ""  # Constellation output IP (empty = use default_out_ip)
 constellation_port: 12346  # Constellation output port
-udp_output_ip: ""  # Payload output IP (empty = use default_ip)
+udp_output_ip: ""  # Payload output IP (empty = use default_out_ip)
 udp_output_port: 50001  # Payload output port
 
 # ===== Runtime / Debug =====
-default_ip: 127.0.0.1  # Default IP for outputs when per-output IP is empty
 vofa_debug_ip: ""  # VOFA+ debug output IP
 vofa_debug_port: 12347  # VOFA+ debug output port
 profiling_modules: ""  # Enable demodulation/snr only when debugging

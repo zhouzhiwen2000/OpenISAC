@@ -6,7 +6,7 @@ import platform
 import subprocess
 import time
 import threading
-from queue import Queue
+from queue import Queue, Empty, Full
 from collections import deque
 import socket
 import struct
@@ -17,21 +17,38 @@ import scipy.io as sio
 from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
+import zmq
+
 from sensing_runtime_protocol import (
     CALIBRATE_SYSTEM_RESPONSE_COMMAND,
     CTRL_HEADER,
     PARAMS_COMMAND,
     READY_COMMAND,
     ViewerRuntimeParams,
+    build_control_command,
     build_params_request,
     decode_sensing_payload,
+    make_control_dealer,
+    make_data_sub,
+    make_tcp_endpoint,
     parse_params_packet,
+    recv_sensing_frame,
 )
 from sensing_detection import (
     CleanParams,
     build_detection_views,
     estimate_clean_padding,
     run_local_psf_clean,
+)
+from viewer_panel_utils import (
+    CollapsibleSection,
+    ViewerSettings,
+    VIEWER_COLORS,
+    apply_viewer_theme,
+    load_viewer_setting,
+    sensing_colormap,
+    set_button_active,
+    style_spectrum_plot,
 )
 
 # ====== Backend Detection ======
@@ -213,7 +230,8 @@ except Exception:
 # ====== Global Configuration ======
 UDP_IP = "0.0.0.0"
 UDP_PORT = 8889  # Bi-sensing uses port 8889
-CONTROL_PORT = 9999
+CONTROL_PORT = 10000
+LOCAL_CONTROL_PORT = 0
 FFT_SIZE = 1024
 NUM_SYMBOLS = 100
 MAX_CHUNK_SIZE = 60000
@@ -268,6 +286,9 @@ DISPLAY_DOWNSAMPLE = 2
 
 raw_frame_queue = Queue(maxsize=RAW_QUEUE_SIZE)
 display_queue = Queue(maxsize=DISPLAY_QUEUE_SIZE)
+startup_sync_queue = Queue(maxsize=8)
+startup_sync_lock = threading.Lock()
+startup_sync_queued_generation = None
 buffer_lock = threading.Lock()
 sender_ip = None
 sender_lock = threading.Lock()
@@ -281,6 +302,30 @@ micro_doppler_buffer = deque(maxlen=BUFFER_LENGTH)
 viewer_params = LEGACY_VIEWER_PARAMS
 viewer_params_lock = threading.Lock()
 last_param_error = None
+
+# Minimal CLI so the backend host / ports can be overridden (defaults match
+# the bi-sensing stream).
+import argparse as _argparse
+_parser = _argparse.ArgumentParser(description="Bistatic sensing viewer (fast)")
+_parser.add_argument("--host", type=str, default=None, help="Backend host (ZeroMQ, overrides saved host)")
+_parser.add_argument("--port", type=int, default=UDP_PORT, help="Bi-sensing stream port")
+_parser.add_argument("--control-port", type=int, default=CONTROL_PORT, help="Control port")
+_args, _ = _parser.parse_known_args()
+_saved_host = load_viewer_setting("plot_bi_sensing_fast", "host")
+HOST = str(_args.host or _saved_host or "127.0.0.1").strip() or "127.0.0.1"
+UDP_PORT = int(_args.port)
+CONTROL_PORT = int(_args.control_port)
+# The backend host is a fixed connect target under ZeroMQ, so the control
+# sender is known up front rather than discovered from incoming packets.
+sender_ip = HOST
+
+# ZeroMQ DEALER for the bidirectional control/params channel.
+CONTROL_ENDPOINT = make_tcp_endpoint(HOST, CONTROL_PORT)
+control_socket = make_control_dealer(CONTROL_ENDPOINT, identity=f"bi-sensing-{os.getpid()}")
+LOCAL_CONTROL_PORT = 0
+control_socket_lock = threading.Lock()
+control_tx_queue = Queue(maxsize=256)
+connection_generation = 0
 
 
 def get_processing_range_fft_size():
@@ -408,6 +453,29 @@ def reset_processing_state():
     current_display_data = {}
 
 
+def _clear_control_tx_queue():
+    while True:
+        try:
+            control_tx_queue.get_nowait()
+        except Empty:
+            break
+        except Exception:
+            break
+
+
+def queue_startup_backend_sync():
+    global startup_sync_queued_generation
+    generation = connection_generation
+    with startup_sync_lock:
+        if startup_sync_queued_generation == generation:
+            return
+        startup_sync_queued_generation = generation
+    try:
+        startup_sync_queue.put_nowait(generation)
+    except Exception:
+        pass
+
+
 def get_viewer_params():
     with viewer_params_lock:
         return viewer_params
@@ -418,6 +486,43 @@ def set_viewer_params(params):
     with viewer_params_lock:
         viewer_params = params
     last_param_error = None
+
+
+def reconnect_backend(host):
+    global HOST, sender_ip, CONTROL_ENDPOINT, control_socket, connection_generation
+    global last_param_error, range_time_data
+    host = (host or "").strip() or "127.0.0.1"
+    new_endpoint = make_tcp_endpoint(host, CONTROL_PORT)
+    new_socket = make_control_dealer(
+        new_endpoint,
+        identity=f"bi-sensing-{os.getpid()}-{int(time.time() * 1000)}",
+    )
+    with control_socket_lock:
+        old_socket = control_socket
+        HOST = host
+        sender_ip = host
+        CONTROL_ENDPOINT = new_endpoint
+        control_socket = new_socket
+        connection_generation += 1
+        _clear_control_tx_queue()
+        try:
+            old_socket.close()
+        except Exception:
+            pass
+
+    set_viewer_params(LEGACY_VIEWER_PARAMS)
+    last_param_error = None
+    while not raw_frame_queue.empty():
+        try:
+            raw_frame_queue.get_nowait()
+        except Exception:
+            break
+    with range_time_lock:
+        range_time_data = None
+    with micro_lock:
+        micro_doppler_buffer.clear()
+    print(f"[CTRL] Reconnected viewer sockets to backend {HOST}")
+    request_viewer_params()
 
 
 def backend_stream_unsupported(params):
@@ -466,25 +571,68 @@ class FrameBuffer:
 current_frame = FrameBuffer()
 current_metadata_frame = FrameBuffer()
 
+
+def _control_endpoint():
+    with sender_lock:
+        if sender_ip is None:
+            return None
+        return sender_ip, CONTROL_PORT
+
+
+def _send_control_packet(packet, endpoint, error_prefix):
+    if endpoint is None:
+        return False
+    try:
+        control_tx_queue.put_nowait((packet, endpoint, error_prefix))
+        return True
+    except Full:
+        try:
+            control_tx_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            control_tx_queue.put_nowait((packet, endpoint, error_prefix))
+            return True
+        except Exception as e:
+            print(f"{error_prefix}: control TX queue full: {e}")
+            return False
+    except Exception as e:
+        print(f"{error_prefix}: {e}")
+        return False
+
+
+def _flush_control_tx_queue(local_socket):
+    while True:
+        try:
+            packet, _endpoint, error_prefix = control_tx_queue.get_nowait()
+        except Empty:
+            break
+        except Exception:
+            break
+        try:
+            local_socket.send(packet, flags=zmq.NOBLOCK)
+        except zmq.Again:
+            try:
+                control_tx_queue.put_nowait((packet, _endpoint, error_prefix))
+            except Exception:
+                print(f"{error_prefix} via {CONTROL_ENDPOINT}: send would block")
+            break
+        except Exception as e:
+            print(f"{error_prefix} via {CONTROL_ENDPOINT}: {e}")
+
+
 def send_skip_command():
     global sender_ip
-    for _ in range(100):
-        with sender_lock:
-            if sender_ip is not None:
-                break
-        time.sleep(0.1)
-    if sender_ip is None:
+    with sender_lock:
+        has_sender = sender_ip is not None
+    if not has_sender:
         print("Error: Cannot send command - sender IP not detected.")
         return
     try:
         request_viewer_params()
-        time.sleep(0.05)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        command_data = struct.pack("!4s4si", b"CMD ", b"SKIP", 1)
-        sock.sendto(command_data, (sender_ip, CONTROL_PORT))
-        print(f"Sent skip FFT command to {sender_ip}: SKIP 1")
-        sock.close()
-        time.sleep(0.05)
+        command_data = build_control_command(b"SKIP", 1)
+        if _send_control_packet(command_data, _control_endpoint(), "Failed to send skip FFT command"):
+            print(f"Sent skip FFT command to {sender_ip}: SKIP 1 from control port {LOCAL_CONTROL_PORT}")
         request_viewer_params()
     except Exception as e:
         print(f"Failed to send skip FFT command: {str(e)}")
@@ -494,84 +642,147 @@ def request_viewer_params():
     global sender_ip
     if sender_ip is None:
         return
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(build_params_request(0), (sender_ip, CONTROL_PORT))
-        sock.close()
-    except Exception as e:
-        print(f"Failed to request viewer params: {e}")
+    _send_control_packet(build_params_request(0), _control_endpoint(), "Failed to request viewer params")
+
+
+def handle_control_packet(data, addr, prefix):
+    global sender_ip, CONTROL_PORT, last_param_error
+    if len(data) < 8 or data[:4] != CTRL_HEADER:
+        return False
+
+    command = data[4:8]
+    if addr is not None:
+        with sender_lock:
+            if sender_ip is None:
+                sender_ip = addr[0]
+                print(f"Detected control sender IP: {sender_ip}")
+            if CONTROL_PORT != addr[1]:
+                CONTROL_PORT = addr[1]
+    if command == PARAMS_COMMAND:
+        params = parse_params_packet(data)
+        if params is not None:
+            set_viewer_params(params)
+            print(f"{prefix} Viewer params: {params.describe()}")
+            if backend_stream_unsupported(params):
+                warn_unsupported_backend_params(params)
+            queue_startup_backend_sync()
+    elif command == READY_COMMAND:
+        if get_viewer_params().version == 0 or last_param_error is not None:
+            request_viewer_params()
+    return True
+
+
+def control_receiver():
+    print(f"[CTRL] DEALER connected to {CONTROL_ENDPOINT} for viewer params/control replies")
+    poller = None
+    local_socket = None
+    local_generation = -1
+    while True:
+        try:
+            # The DEALER socket is not thread-safe, so this thread owns actual
+            # send/recv. UI callbacks enqueue packets instead of touching it.
+            with control_socket_lock:
+                if local_generation != connection_generation:
+                    local_socket = control_socket
+                    local_generation = connection_generation
+                    poller = zmq.Poller()
+                    poller.register(local_socket, zmq.POLLIN)
+                    print(f"[CTRL] DEALER connected to {CONTROL_ENDPOINT} for viewer params/control replies")
+                _flush_control_tx_queue(local_socket)
+                events = dict(poller.poll(timeout=20))
+                if local_socket not in events:
+                    continue
+                parts = local_socket.recv_multipart(flags=zmq.NOBLOCK)
+            data = parts[-1] if parts else b""
+            handle_control_packet(data, None, "[CTRL]")
+        except zmq.Again:
+            continue
+        except Exception as e:
+            print(f"[CTRL] Receiver error: {e}")
 
 def udp_receiver():
     global sender_ip, CONTROL_PORT, last_param_error
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_SIZE)
-    except:
-        pass
-    try:
-        sock.bind((UDP_IP, UDP_PORT))
-        print(f"Listening on UDP port {UDP_PORT}")
-    except Exception as e:
-        print(f"Socket bind error: {e}")
-        sys.exit(1)
-    
+    sock = None
+    poller = None
+    local_generation = -1
+
+    last_param_retry_t = 0.0
+    param_retry_interval = 0.5
+
+    def request_params_if_needed():
+        nonlocal last_param_retry_t
+        if get_viewer_params().version != 0:
+            return
+        now = time.monotonic()
+        if now - last_param_retry_t < param_retry_interval:
+            return
+        request_viewer_params()
+        last_param_retry_t = now
+
+    # Each ZMQ multipart message is one whole frame: part 0 = data payload,
+    # optional part 1 = metadata sidecar (unsupported by this fast viewer).
+    frame_counter = 0
     while True:
-        try:
-            data, addr = sock.recvfrom(MAX_CHUNK_SIZE + HEADER_SIZE)
-            with sender_lock:
-                if sender_ip is None:
-                    sender_ip = addr[0]
-                    print(f"Detected data sender IP: {sender_ip}")
-            if len(data) >= 8 and data[:4] == CTRL_HEADER:
-                command = data[4:8]
-                if CONTROL_PORT != addr[1]:
-                    CONTROL_PORT = addr[1]
-                if command == PARAMS_COMMAND:
-                    params = parse_params_packet(data)
-                    if params is not None:
-                        set_viewer_params(params)
-                        print(f"Viewer params: {params.describe()}")
-                        if backend_stream_unsupported(params):
-                            warn_unsupported_backend_params(params)
-                elif command == READY_COMMAND:
-                    if get_viewer_params().version == 0 or last_param_error is not None:
-                        request_viewer_params()
-                continue
-            if len(data) < HEADER_SIZE:
-                continue
+        if local_generation != connection_generation:
+            if sock is not None:
+                try:
+                    sock.close(0)
+                except Exception:
+                    pass
+            endpoint = make_tcp_endpoint(HOST, UDP_PORT)
             try:
-                frame_id, total_chunks, chunk_id = struct.unpack("!III", data[:HEADER_SIZE])
-            except struct.error:
+                sock = make_data_sub(endpoint, rcvhwm=4)
+            except Exception as e:
+                print(f"Sensing SUB connect error: {e}")
+                time.sleep(0.5)
                 continue
-            is_metadata = bool(total_chunks & 0x80000000)
-            total_chunks &= 0x7FFFFFFF
-            chunk_data = data[HEADER_SIZE:]
-            with buffer_lock:
-                frame_buffer = current_metadata_frame if is_metadata else current_frame
-                if frame_buffer.frame_id != frame_id:
-                    frame_buffer.init(frame_id, total_chunks)
-                if frame_buffer.add_chunk(chunk_id, chunk_data):
-                    runtime_params = get_viewer_params()
-                    if is_metadata:
-                        warn_unsupported_backend_payload("metadata sidecar", frame_id)
-                        continue
-                    if backend_stream_unsupported(runtime_params):
-                        warn_unsupported_backend_payload("sensing frame", frame_id)
-                        continue
-                    frame_data = frame_buffer.assemble_frame(runtime_params)
-                    if raw_frame_queue.full():
-                        try:
-                            raw_frame_queue.get_nowait()
-                        except:
-                            pass
-                    raw_frame_queue.put(frame_data)
-        except socket.error as e:
-            if e.errno != 10054:
-                print(f"Socket error: {e}")
+            poller = zmq.Poller()
+            poller.register(sock, zmq.POLLIN)
+            local_generation = connection_generation
+            print(f"Subscribed to bi-sensing stream at {endpoint}")
+
+        try:
+            events = dict(poller.poll(timeout=500))
+            if sock not in events:
+                request_params_if_needed()
+                continue
+
+            frame = recv_sensing_frame(sock, flags=zmq.NOBLOCK)
+            if frame is None:
+                continue
+            data_payload, metadata_payload = frame
+            request_params_if_needed()
+
+            if get_viewer_params().version == 0:
+                request_params_if_needed()
+                continue
+
+            runtime_params = get_viewer_params()
+            if metadata_payload is not None:
+                warn_unsupported_backend_payload("metadata sidecar", None)
+                continue
+            if backend_stream_unsupported(runtime_params):
+                warn_unsupported_backend_payload("sensing frame", None)
+                continue
+            if not data_payload:
+                continue
+
+            frame_counter += 1
+            decoded = decode_sensing_payload(frame_counter, data_payload, runtime_params)
+            frame_data = (decoded.frame_id, decoded.matrix)
+            if raw_frame_queue.full():
+                try:
+                    raw_frame_queue.get_nowait()
+                except Exception:
+                    pass
+            raw_frame_queue.put(frame_data)
         except Exception as e:
             print(f"Unexpected error in receiver: {str(e)}")
             last_param_error = str(e)
             request_viewer_params()
+
+control_thread = threading.Thread(target=control_receiver, daemon=True)
+control_thread.start()
 
 receiver_thread = threading.Thread(target=udp_receiver, daemon=True)
 receiver_thread.start()
@@ -957,13 +1168,9 @@ def send_command(header, cmd_id, value):
     if sender_ip is None:
         print("Error: Cannot send command - sender IP not detected.")
         return
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(struct.pack("!4s4si", header, cmd_id, int(value)), (sender_ip, CONTROL_PORT))
-        print(f"Sent command {cmd_id} to {sender_ip}: {value}")
-        sock.close()
-    except Exception as e:
-        print(f"Failed to send command: {str(e)}")
+    packet = struct.pack("!4s4si", header, cmd_id, int(value))
+    if _send_control_packet(packet, _control_endpoint(), "Failed to send command"):
+        print(f"Sent command {cmd_id} to {sender_ip}: {value} from control port {LOCAL_CONTROL_PORT}")
 
 def send_alignment_command(val):
     send_command(b"CMD ", b"ALGN", val)
@@ -972,13 +1179,22 @@ def send_strd_command(val):
     try:
         strd_val = max(1, min(get_viewer_params().max_strd_value(), int(val)))
         send_command(b"CMD ", b"STRD", strd_val)
-        time.sleep(0.02)
         request_viewer_params()
     except ValueError:
         print(f"Invalid STRD value: {val}")
 
 def send_mti_command(enabled):
     send_command(b"CMD ", b"MTI ", 1 if enabled else 0)
+
+
+def send_startup_backend_sync(strd_value, mti_enabled):
+    print(f"[CTRL] Syncing startup backend controls: SKIP=1 MTI={1 if mti_enabled else 0} STRD={strd_value}")
+    send_skip_command()
+    time.sleep(0.02)
+    send_mti_command(mti_enabled)
+    time.sleep(0.02)
+    send_strd_command(strd_value)
+
 
 def send_system_response_calibration_command():
     send_command(b"CMD ", CALIBRATE_SYSTEM_RESPONSE_COMMAND, 0)
@@ -1012,32 +1228,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Range-Doppler Plot
         self.rd_plot = pg.PlotWidget(title="Range-Doppler Spectrum (Bi-Sensing)")
+        style_spectrum_plot(self.rd_plot)
         self.rd_img = pg.ImageItem()
         self.rd_plot.addItem(self.rd_img)
         self.rd_plot.setLabel('left', 'Doppler Bin')
         self.rd_plot.setLabel('bottom', 'Range Bin')
-        # Set colormap
-        self.rd_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
-        # Add color bar
-        self.rd_colorbar = pg.ColorBarItem(values=(-40, 20), colorMap=pg.colormap.get('turbo'), interactive=False)
+        spectrum_cmap = sensing_colormap()
+        self.rd_img.setLookupTable(spectrum_cmap.getLookupTable())
+        self.rd_colorbar = pg.ColorBarItem(values=(-40, 20), colorMap=spectrum_cmap, interactive=False)
         self.rd_colorbar.setImageItem(self.rd_img, insert_in=self.rd_plot.plotItem)
         self.rd_cfar_marker = pg.ScatterPlotItem(
             [], [], symbol='o', size=7,
-            pen=pg.mkPen('#00e5ff', width=1.5),
-            brush=pg.mkBrush(0, 229, 255, 70)
+            pen=pg.mkPen(VIEWER_COLORS["accent"], width=1.7),
+            brush=pg.mkBrush(56, 189, 248, 55)
         )
         self.rd_plot.addItem(self.rd_cfar_marker)
         plot_layout.addWidget(self.rd_plot)
 
         # Micro-Doppler Plot
         self.md_plot = pg.PlotWidget(title="Micro-Doppler Spectrum")
+        style_spectrum_plot(self.md_plot)
         self.md_img = pg.ImageItem()
         self.md_plot.addItem(self.md_img)
         self.md_plot.setLabel('left', 'Time')
         self.md_plot.setLabel('bottom', 'Frequency')
-        self.md_img.setLookupTable(pg.colormap.get('turbo').getLookupTable())
-        # Add color bar
-        self.md_colorbar = pg.ColorBarItem(values=(-30, 30), colorMap=pg.colormap.get('turbo'), interactive=False)
+        self.md_img.setLookupTable(spectrum_cmap.getLookupTable())
+        self.md_colorbar = pg.ColorBarItem(values=(-30, 30), colorMap=spectrum_cmap, interactive=False)
         self.md_colorbar.setImageItem(self.md_img, insert_in=self.md_plot.plotItem)
         plot_layout.addWidget(self.md_plot)
 
@@ -1047,6 +1263,20 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout = QtWidgets.QVBoxLayout(control_panel)
         control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
         main_layout.addWidget(control_panel, stretch=1)
+
+        self._settings = ViewerSettings("plot_bi_sensing_fast")
+
+        connection_row = QtWidgets.QHBoxLayout()
+        connection_row.addWidget(QtWidgets.QLabel("Backend IP:"))
+        self.txt_backend_host = QtWidgets.QLineEdit(HOST or "127.0.0.1")
+        self.txt_backend_host.setPlaceholderText("127.0.0.1")
+        self.txt_backend_host.returnPressed.connect(self.connect_backend)
+        self.btn_connect_backend = QtWidgets.QPushButton("Connect")
+        self.btn_connect_backend.clicked.connect(self.connect_backend)
+        connection_row.addWidget(self.txt_backend_host)
+        connection_row.addWidget(self.btn_connect_backend)
+        control_layout.addLayout(connection_row)
+        control_layout.addSpacing(12)
 
         # Status Labels
         self.lbl_fps = QtWidgets.QLabel("FPS: 0.0")
@@ -1070,6 +1300,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.targets_text.setPlainText("Top Targets: waiting detector hits")
         control_layout.addSpacing(20)
 
+        # ── Collapsible Section: Display & View ──
+        self.section_display = CollapsibleSection("Display & View", collapsed=False)
+        disp = self.section_display.content_layout()
+
         # Range Bin
         rb_layout = QtWidgets.QHBoxLayout()
         rb_layout.addWidget(QtWidgets.QLabel("Range Bin:"))
@@ -1078,7 +1312,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_set_rb.clicked.connect(self.set_range_bin)
         rb_layout.addWidget(self.txt_range_bin)
         rb_layout.addWidget(btn_set_rb)
-        control_layout.addLayout(rb_layout)
+        disp.addLayout(rb_layout)
 
         fft_layout = QtWidgets.QHBoxLayout()
         fft_layout.addWidget(QtWidgets.QLabel("Delay FFT:"))
@@ -1087,7 +1321,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_delay_fft.clicked.connect(self.set_delay_fft_size)
         fft_layout.addWidget(self.txt_delay_fft)
         fft_layout.addWidget(btn_delay_fft)
-        control_layout.addLayout(fft_layout)
+        disp.addLayout(fft_layout)
 
         doppler_fft_layout = QtWidgets.QHBoxLayout()
         doppler_fft_layout.addWidget(QtWidgets.QLabel("Doppler FFT:"))
@@ -1096,7 +1330,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_doppler_fft.clicked.connect(self.set_doppler_fft_size)
         doppler_fft_layout.addWidget(self.txt_doppler_fft)
         doppler_fft_layout.addWidget(btn_doppler_fft)
-        control_layout.addLayout(doppler_fft_layout)
+        disp.addLayout(doppler_fft_layout)
 
         delay_view_layout = QtWidgets.QHBoxLayout()
         delay_view_layout.addWidget(QtWidgets.QLabel("Delay View:"))
@@ -1105,7 +1339,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_delay_view.clicked.connect(self.set_delay_view_bins)
         delay_view_layout.addWidget(self.txt_delay_view)
         delay_view_layout.addWidget(btn_delay_view)
-        control_layout.addLayout(delay_view_layout)
+        disp.addLayout(delay_view_layout)
 
         doppler_view_layout = QtWidgets.QHBoxLayout()
         doppler_view_layout.addWidget(QtWidgets.QLabel("Doppler View:"))
@@ -1114,22 +1348,19 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_doppler_view.clicked.connect(self.set_doppler_view_bins)
         doppler_view_layout.addWidget(self.txt_doppler_view)
         doppler_view_layout.addWidget(btn_doppler_view)
-        control_layout.addLayout(doppler_view_layout)
+        disp.addLayout(doppler_view_layout)
 
-        # Micro-Doppler Toggle
-        self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
-        self.btn_md.setCheckable(True)
-        self.btn_md.setChecked(True)
-        self.btn_md.clicked.connect(self.toggle_micro_doppler)
-        self.btn_md.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
-        control_layout.addWidget(self.btn_md)
-        control_layout.addSpacing(12)
+        control_layout.addWidget(self.section_display)
+
+        # ── Collapsible Section: Target Detection ──
+        self.section_detection = CollapsibleSection("Target Detection", collapsed=True)
+        det_sec = self.section_detection.content_layout()
 
         self.btn_cfar = QtWidgets.QPushButton("Local CLEAN: OFF")
         self.btn_cfar.setCheckable(True)
         self.btn_cfar.setChecked(False)
         self.btn_cfar.clicked.connect(self.toggle_cfar)
-        control_layout.addWidget(self.btn_cfar)
+        det_sec.addWidget(self.btn_cfar)
 
         clean_main_layout = QtWidgets.QHBoxLayout()
         clean_main_layout.addWidget(QtWidgets.QLabel("Loop Gain:"))
@@ -1138,7 +1369,7 @@ class MainWindow(QtWidgets.QMainWindow):
         clean_main_layout.addWidget(QtWidgets.QLabel("Max Targets:"))
         self.txt_clean_max_targets = QtWidgets.QLineEdit(str(clean_max_targets))
         clean_main_layout.addWidget(self.txt_clean_max_targets)
-        control_layout.addLayout(clean_main_layout)
+        det_sec.addLayout(clean_main_layout)
 
         clean_misc_layout = QtWidgets.QHBoxLayout()
         clean_misc_layout.addWidget(QtWidgets.QLabel("Min R:"))
@@ -1147,7 +1378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         clean_misc_layout.addWidget(QtWidgets.QLabel("Min P(dB):"))
         self.txt_clean_min_power = QtWidgets.QLineEdit(f"{clean_min_power_db:.1f}")
         clean_misc_layout.addWidget(self.txt_clean_min_power)
-        control_layout.addLayout(clean_misc_layout)
+        det_sec.addLayout(clean_misc_layout)
 
         clean_dc_layout = QtWidgets.QHBoxLayout()
         clean_dc_layout.addWidget(QtWidgets.QLabel("DC Excl:"))
@@ -1156,10 +1387,13 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_clean_apply.clicked.connect(self.apply_clean_settings)
         clean_dc_layout.addWidget(self.txt_clean_dc_excl)
         clean_dc_layout.addWidget(btn_clean_apply)
-        control_layout.addLayout(clean_dc_layout)
-        control_layout.addSpacing(20)
+        det_sec.addLayout(clean_dc_layout)
+        control_layout.addWidget(self.section_detection)
 
-        # Alignment
+        # ── Collapsible Section: Alignment ──
+        self.section_align = CollapsibleSection("Alignment", collapsed=True)
+        align_sec = self.section_align.content_layout()
+
         align_layout = QtWidgets.QHBoxLayout()
         align_layout.addWidget(QtWidgets.QLabel("Delay:"))
         self.txt_delay = QtWidgets.QLineEdit("0")
@@ -1167,17 +1401,20 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_apply.clicked.connect(self.apply_alignment)
         align_layout.addWidget(self.txt_delay)
         align_layout.addWidget(btn_apply)
-        control_layout.addLayout(align_layout)
+        align_sec.addLayout(align_layout)
 
         quick_layout = QtWidgets.QHBoxLayout()
         for label, val in [('+10', 10), ('-10', -10), ('+1', 1), ('-1', -1)]:
             btn = QtWidgets.QPushButton(label)
             btn.clicked.connect(lambda ch, v=val: send_alignment_command(v))
             quick_layout.addWidget(btn)
-        control_layout.addLayout(quick_layout)
-        control_layout.addSpacing(20)
+        align_sec.addLayout(quick_layout)
+        control_layout.addWidget(self.section_align)
 
-        # STRD
+        # ── Collapsible Section: Hardware ──
+        self.section_hw = CollapsibleSection("Hardware", collapsed=True)
+        hw_sec = self.section_hw.content_layout()
+
         strd_layout = QtWidgets.QHBoxLayout()
         strd_layout.addWidget(QtWidgets.QLabel("STRD:"))
         self.txt_strd = QtWidgets.QLineEdit("20")
@@ -1185,30 +1422,39 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_strd.clicked.connect(self.set_strd)
         strd_layout.addWidget(self.txt_strd)
         strd_layout.addWidget(btn_strd)
-        control_layout.addLayout(strd_layout)
-        control_layout.addSpacing(20)
+        hw_sec.addLayout(strd_layout)
 
         btn_hsys_cal = QtWidgets.QPushButton("Calibrate Hsys")
         btn_hsys_cal.clicked.connect(send_system_response_calibration_command)
-        control_layout.addWidget(btn_hsys_cal)
-        control_layout.addSpacing(20)
+        hw_sec.addWidget(btn_hsys_cal)
+        control_layout.addWidget(self.section_hw)
 
-        # Toggles
+        # ── Collapsible Section: Processing Toggles ──
+        self.section_toggles = CollapsibleSection("Processing Toggles", collapsed=False)
+        toggles_sec = self.section_toggles.content_layout()
+
+        # Micro-Doppler Toggle
+        self.btn_md = QtWidgets.QPushButton("Micro-Doppler: ON")
+        self.btn_md.setCheckable(True)
+        self.btn_md.setChecked(True)
+        self.btn_md.clicked.connect(self.toggle_micro_doppler)
+        toggles_sec.addWidget(self.btn_md)
+
         self.btn_mti = QtWidgets.QPushButton("MTI")
         self.update_toggle_style(self.btn_mti, enable_mti)
         self.btn_mti.clicked.connect(self.toggle_mti)
-        control_layout.addWidget(self.btn_mti)
+        toggles_sec.addWidget(self.btn_mti)
 
         self.btn_range_win = QtWidgets.QPushButton("Range Window")
         self.update_toggle_style(self.btn_range_win, enable_range_window)
         self.btn_range_win.clicked.connect(self.toggle_range_win)
-        control_layout.addWidget(self.btn_range_win)
+        toggles_sec.addWidget(self.btn_range_win)
 
         self.btn_doppler_win = QtWidgets.QPushButton("Doppler Window")
         self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
         self.btn_doppler_win.clicked.connect(self.toggle_doppler_win)
-        control_layout.addWidget(self.btn_doppler_win)
-        control_layout.addSpacing(20)
+        toggles_sec.addWidget(self.btn_doppler_win)
+        control_layout.addWidget(self.section_toggles)
 
         # Save
         save_layout = QtWidgets.QHBoxLayout()
@@ -1219,16 +1465,127 @@ class MainWindow(QtWidgets.QMainWindow):
         control_layout.addLayout(save_layout)
         control_layout.addStretch()
 
+        # ── Load saved settings, then connect persistence ──
+        self._load_and_apply_settings()
+        self._connect_settings_persistence()
+
         # Timer
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_plots)
         self.timer.start(1)  # Max FPS
 
-        send_skip_command()
         self.last_update_time = time.time()
         self.frame_count = 0
         self.total_dsp_time = 0.0
         self.targets_window.show()
+
+    # ── Settings Persistence ──────────────────────────────────────────
+
+    def _load_and_apply_settings(self):
+        """Load saved viewer settings and apply them to UI widgets."""
+        global show_micro_doppler, cfar_enabled
+        global enable_mti, enable_range_window, enable_doppler_window
+        s = self._settings
+
+        def _restore_text(key, widget):
+            value = s.get(key)
+            if value is not None:
+                widget.setText(str(value))
+
+        saved_host = s.get("host")
+        if saved_host:
+            self.txt_backend_host.setText(str(saved_host))
+        for key, widget in [
+            ("range_bin", self.txt_range_bin),
+            ("delay_fft", self.txt_delay_fft),
+            ("doppler_fft", self.txt_doppler_fft),
+            ("delay_view", self.txt_delay_view),
+            ("doppler_view", self.txt_doppler_view),
+            ("clean_loop_gain", self.txt_clean_loop_gain),
+            ("clean_max_targets", self.txt_clean_max_targets),
+            ("clean_min_range", self.txt_clean_min_range),
+            ("clean_min_power", self.txt_clean_min_power),
+            ("clean_dc_excl", self.txt_clean_dc_excl),
+        ]:
+            _restore_text(key, widget)
+        saved_delay = s.get("alignment_delay")
+        if saved_delay is not None:
+            self.txt_delay.setText(str(saved_delay))
+        saved_strd = s.get("strd")
+        if saved_strd is not None:
+            self.txt_strd.setText(str(saved_strd))
+
+        show_micro_doppler = bool(s.get("show_micro_doppler", show_micro_doppler))
+        cfar_enabled = bool(s.get("cfar_enabled", cfar_enabled))
+        enable_mti = bool(s.get("enable_mti", enable_mti))
+        enable_range_window = bool(s.get("enable_range_window", enable_range_window))
+        enable_doppler_window = bool(s.get("enable_doppler_window", enable_doppler_window))
+        self.btn_md.setChecked(show_micro_doppler)
+        self.toggle_micro_doppler()
+        self.btn_cfar.setChecked(cfar_enabled)
+        self.toggle_cfar()
+        self.update_toggle_style(self.btn_mti, enable_mti)
+        self.update_toggle_style(self.btn_range_win, enable_range_window)
+        self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
+
+        self.set_range_bin()
+        self.set_delay_fft_size()
+        self.set_doppler_fft_size()
+        self.set_delay_view_bins()
+        self.set_doppler_view_bins()
+        self.apply_clean_settings()
+        # Section collapsed states
+        for sec_name, sec_attr in [
+            ("display", "section_display"),
+            ("detection", "section_detection"),
+            ("align", "section_align"),
+            ("hw", "section_hw"),
+            ("toggles", "section_toggles"),
+        ]:
+            collapsed = s.get(f"section_{sec_name}_collapsed")
+            if collapsed is not None and hasattr(self, sec_attr):
+                getattr(self, sec_attr).set_collapsed(bool(collapsed))
+
+    def _connect_settings_persistence(self):
+        """Wire widget changes to auto-save settings."""
+        s = self._settings
+
+        def _sv(key, widget, coerce=None):
+            widget.textChanged.connect(lambda v: s.set(key, coerce(v) if coerce else v))
+
+        _sv("host", self.txt_backend_host)
+        _sv("range_bin", self.txt_range_bin)
+        _sv("delay_fft", self.txt_delay_fft)
+        _sv("doppler_fft", self.txt_doppler_fft)
+        _sv("delay_view", self.txt_delay_view)
+        _sv("doppler_view", self.txt_doppler_view)
+        _sv("clean_loop_gain", self.txt_clean_loop_gain)
+        _sv("clean_max_targets", self.txt_clean_max_targets)
+        _sv("clean_min_range", self.txt_clean_min_range)
+        _sv("clean_min_power", self.txt_clean_min_power)
+        _sv("clean_dc_excl", self.txt_clean_dc_excl)
+        _sv("alignment_delay", self.txt_delay)
+        _sv("strd", self.txt_strd)
+
+        self.btn_md.clicked.connect(lambda: s.set("show_micro_doppler", self.btn_md.isChecked()))
+        self.btn_cfar.clicked.connect(lambda: s.set("cfar_enabled", self.btn_cfar.isChecked()))
+        self.btn_mti.clicked.connect(lambda: s.set("enable_mti", enable_mti))
+        self.btn_range_win.clicked.connect(lambda: s.set("enable_range_window", enable_range_window))
+        self.btn_doppler_win.clicked.connect(lambda: s.set("enable_doppler_window", enable_doppler_window))
+
+        # Persist section collapsed states on toggle
+        for sec_name, sec_attr in [
+            ("display", self.section_display),
+            ("detection", self.section_detection),
+            ("align", self.section_align),
+            ("hw", self.section_hw),
+            ("toggles", self.section_toggles),
+        ]:
+            sec_attr.header_button().clicked.connect(
+                lambda _checked, n=sec_name, sec=sec_attr: s.set(
+                    f"section_{n}_collapsed", sec.is_collapsed()
+                )
+            )
 
     def _set_status_label_text(self, label, text):
         elided = label.fontMetrics().elidedText(
@@ -1239,8 +1596,26 @@ class MainWindow(QtWidgets.QMainWindow):
         label.setText(elided)
         label.setToolTip(text)
 
+    def _connect_current_backend(self, auto=False):
+        host = self.txt_backend_host.text().strip() or "127.0.0.1"
+        self.txt_backend_host.setText(host)
+        if auto and host == HOST:
+            self._set_status_label_text(self.lbl_sender, f"Sender: {host}:{CONTROL_PORT}")
+            return
+
+        self.btn_connect_backend.setEnabled(False)
+        try:
+            reconnect_backend(host)
+            self._set_status_label_text(self.lbl_sender, f"Sender: {host}:{CONTROL_PORT}")
+            self._set_status_label_text(self.lbl_params, "Params: waiting...")
+        finally:
+            self.btn_connect_backend.setEnabled(True)
+
+    def connect_backend(self):
+        self._connect_current_backend(auto=False)
+
     def update_toggle_style(self, btn, state):
-        btn.setStyleSheet("background-color: lightgreen;" if state else "background-color: lightgray;")
+        set_button_active(btn, state)
 
     def update_top_targets_text(self, latest):
         if latest is None:
@@ -1340,7 +1715,7 @@ class MainWindow(QtWidgets.QMainWindow):
         global cfar_enabled
         cfar_enabled = self.btn_cfar.isChecked()
         self.btn_cfar.setText(f"Local CLEAN: {'ON' if cfar_enabled else 'OFF'}")
-        self.btn_cfar.setStyleSheet("QPushButton:checked { background-color: lightgreen; }")
+        set_button_active(self.btn_cfar, cfar_enabled)
         if not cfar_enabled:
             current_display_data['cfar_points'] = np.empty((0, 2), dtype=np.int32)
             self.rd_cfar_marker.setData([], [])
@@ -1423,6 +1798,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_plots(self):
         global current_display_data, sender_ip, last_param_error
+        while True:
+            try:
+                startup_sync_queue.get_nowait()
+            except Exception:
+                break
+            strd_value = self.txt_strd.text()
+            mti_enabled = bool(enable_mti)
+            threading.Thread(
+                target=send_startup_backend_sync,
+                args=(strd_value, mti_enabled),
+                daemon=True,
+            ).start()
+
         with sender_lock:
             if sender_ip:
                 self._set_status_label_text(self.lbl_sender, f"Sender: {sender_ip}")
@@ -1500,13 +1888,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.last_update_time = current_time
 
     def closeEvent(self, event):
+        self._settings.save_now()
         self.targets_window.close()
         print("Closing application...")
         event.accept()
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
+    apply_viewer_theme(app)
     window = MainWindow()
     window.show()
-    send_skip_command()
     sys.exit(app.exec())
