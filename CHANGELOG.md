@@ -8,6 +8,41 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-09 - V1.1
+
+### Summary
+
+本次更新将 OpenISAC 从硬件优先的 USRP 联调流程扩展到可在本机闭环验证的仿真/可视化工作流。核心变化是引入 ZeroMQ sensing/control 传输、ChannelSimulator 和共享内存 sim streamer，同时刷新配置、前端 viewer、benchmark 模板和公开文档。
+
+### Changes
+
+- 新增 `ChannelSimulator` 可执行程序和 `SimStreamer` / `ShmRing` 共享内存流式后端，支持不接 USRP 的调制端/信道/解调端闭环。
+  影响：开发者可以先用本机仿真链路验证帧格式、同步、解调和感知输出，再切换到真实 USRP 硬件。
+
+- 新增 `config/Modulator_Sim.yaml` 与 `config/Demodulator_Sim.yaml`，并在 CMake / 运行时配置中加入 `sim` backend、output/control endpoint、streamer 和 sensing 元数据参数。
+  影响：仿真模式有独立示例配置，不需要改写 X310/B210 的硬件配置文件。
+
+- 引入 `include/ZmqTransport.hpp`，将 sensing 数据与控制通道迁移到 ZeroMQ PUB / ROUTER sockets，统一后端和 Python viewer 之间的端点配置。
+  影响：前端 viewer 不再依赖临时本地文件或固定进程假设，更容易做远端显示、多进程显示和控制命令扩展。
+
+- 更新 `plot_sensing_fast.py`、`plot_bi_sensing_fast.py`、`backend_sensing_viewer.py` 和 `scripts/sensing_runtime_protocol.py`，支持新的 wire format、backend sensing metadata、面板状态持久化和多 viewer 启动方式。
+  影响：单站/双站感知显示、后端聚合显示和运行时参数握手使用同一套协议约定，前端状态在重复调试时更稳定。
+
+- 扩展 Web 配置编辑器和 schema，使 backend、ZeroMQ endpoint、sim stream、compact/resource-map 参数可以通过 UI 配置。
+  影响：新增参数不需要完全手写 YAML，减少端点、资源映射和仿真配置的拼写错误。
+
+- 刷新 benchmark 模板和工具脚本，使 BER / BLER / EVM、调制/解调 CPU 与 latency、sensing runtime benchmark 使用新的配置字段和 endpoint 约定。
+  影响：性能测试脚本与主程序运行配置保持一致，后续回归测试更容易复现。
+
+- 新增中英文 Channel Simulator 文档，并同步 README、Astro 生成数据和发布到 `docs/` 的静态文档页。
+  影响：公开文档覆盖了无硬件仿真流程、配置入口和新的 viewer 启动方式。
+
+### Notes
+
+- `V1.1` tag 指向 commit `87a8be472211dddfc67e7e8d99abdbc682f2f16c`。
+- 仿真后端用于本机开发和功能验证；真实 USRP 部署仍应使用对应 X310/B210 配置并按硬件链路验证。
+- ZeroMQ viewer 依赖 `pyzmq`，请按新版 `requirements.txt` 更新 Python 环境。
+
 ## 2026-04-04 - 资源映射与紧凑感知更新
 
 ### Summary
