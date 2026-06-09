@@ -4,16 +4,20 @@
 
 
 The `ChannelSimulator` lets you run the full communication **and** multi-channel
-sensing pipeline with no radio attached. It replaces the USRP with a shared-memory
-"air" that applies a configurable channel model: point targets with delay / Doppler /
-gain / steering vector, AWGN, CFO, and timing offset, plus a comm tapped-delay-line
-for the direct/LoS path.
+sensing pipeline with no radio attached. It replaces the USRP with shared-memory
+"air" and builds a scatterer-based multipath channel: the transmitted samples pass
+through a LoS path, optional static multipath paths, and moving scatterers with
+delay / Doppler / gain / array response. A fixed integer timing offset can be folded
+into each path delay; the communication/bistatic receive chain then applies relative
+carrier frequency offset (CFO), and AWGN is added to every RX output. The timing
+offset here is a fixed integer sample offset; the simulator does not model sampling
+frequency offset (SFO).
 
-Each sensing RX channel is treated as one antenna; the steering vector is either a
-parametric uniform linear array (`array_spacing_lambda`) or a fully custom matrix
-loaded from `steering_override_file`. The communication channel is a **realistic
-multipath channel**: the LoS taps plus the same moving target reflections, so the
-demodulator's **bistatic** sensing has detectable range-Doppler targets too.
+Each sensing RX channel is treated as one antenna. The array response can be generated
+from a parametric uniform linear array (ULA, `array_spacing_lambda`) or loaded as a
+custom array manifold matrix from `steering_override_file`. The communication channel
+is a **realistic multipath channel**: a LoS path plus scatterer returns, so the
+demodulator's **bistatic** sensing can also detect range-Doppler targets.
 
 ## How it works
 
@@ -51,18 +55,20 @@ cp ../config/Demodulator_Sim.yaml Demodulator.yaml
 ./OFDMDemodulator
 ```
 
-Start `ChannelSimulator` first. By default the hub applies backpressure, so a path whose
-consumer is absent will pause the simulation — run every enabled receiver. To run only one
-side, disable the other with the flags below (the hub then neither creates nor produces that
-path, so its consumer need not run):
+Start `ChannelSimulator` first. By default the hub uses backpressure: if communication
+RX or sensing RX is enabled but the corresponding consumer process is not reading from
+shared memory, the related ring buffer will fill and the whole simulation will wait.
+Start every enabled receiver; if you only need one side, disable the unused output in
+the `simulation:` block:
 
-- **Sensing only** — set `enable_comm_rx: false`; run `ChannelSimulator` + `OFDMModulator` (no demodulator).
-- **Comm only** — set `enable_sensing_rx: false`; run all three (the modulator builds no sensing channels).
+- **Sensing only** — set `enable_comm_rx: false`; the hub does not produce communication RX output, so run only `ChannelSimulator` + `OFDMModulator` and skip `OFDMDemodulator`.
+- **Comm only** — set `enable_sensing_rx: false`; the hub does not produce sensing RX output, but still run `ChannelSimulator` + `OFDMModulator` + `OFDMDemodulator` because the modulator transmits and the demodulator receives the communication stream.
 
-You can also disable sensing the legacy way by setting `sensing_rx_channel_count: 0`.
+There are two ways to disable sensing RX: set `enable_sensing_rx: false`, or set
+`sensing_rx_channel_count: 0`.
 
-Visualize sensing with `python3 scripts/plot_sensing_fast.py` (RD streaming is started
-by the viewer, exactly as with hardware).
+To view monostatic sensing results, run `python3 scripts/plot_sensing_fast.py`. As in
+hardware mode, RD streaming starts when the viewer connects.
 
 ## Configuring the channel (`simulation:` block in Modulator_Sim.yaml)
 
@@ -73,17 +79,17 @@ simulation:
   enable_comm_rx: true           # produce the comm RX path (false = sensing-only, no demodulator)
   enable_sensing_rx: true        # produce the sensing RX paths (false = comm-only)
   noise_power_dbfs: -50          # AWGN per RX channel; <= -200 disables
-  cfo_hz: 0.0                    # carrier frequency offset on RX
-  timing_offset_samples: 0       # constant RX sample delay
+  cfo_hz: 0.0                    # relative CFO on the communication/bistatic RX
+  timing_offset_samples: 0       # fixed integer sample offset, folded into path delays
   array_spacing_m: 0.04283       # physical ULA spacing (m); d/λ scales with center_freq
                                  # (42.83 mm = λ/2 @ 3.5 GHz, matches the sensing viewers).
                                  # Set <= 0 to fall back to the legacy array_spacing_lambda.
   array_spacing_lambda: 0.5      # legacy fixed spacing (wavelengths); used only if array_spacing_m <= 0
   ring_capacity_samples: 262144  # ~2 frames; small keeps TX close to the hub
-  steering_override_file: ""     # [num_targets x num_channels] complex<float>, row-major; empty = ULA
-  comm_multipath_taps:           # comm direct/LoS + static multipath (decodable component)
+  steering_override_file: ""     # array manifold: [num_targets x num_channels] complex<float>, row-major; empty = ULA
+  comm_multipath_taps:           # communication LoS path + static multipath paths
     - { delay_samples: 0, gain_db: 0, phase_deg: 0 }
-  targets:                       # monostatic sensing scatterers (with steering)
+  targets:                       # monostatic sensing scatterers (with array response)
     - { range_m: 30, velocity_mps: 5,  gain_db: -6,  angle_deg: 20 }
     - { range_m: 75, velocity_mps: -3, gain_db: -12, angle_deg: -10 }
   # bistatic_targets:            # optional independent scene for the bistatic (comm) channel
@@ -92,40 +98,112 @@ simulation:
 
 The number of sensing antennas equals the number of `sensing_rx_channels` entries.
 
-`targets` feeds the monostatic sensing antennas (with steering). The bistatic (comm)
-channel uses `bistatic_targets` when it is non-empty, otherwise it falls back to
-`targets`, so a single scene drives both views by default. `angle_deg` is ignored on
-the bistatic channel (the comm RX is a single antenna).
-A custom steering override file is `num_targets × num_channels` little-endian
-`complex<float>` values in row-major order (target-major).
+`targets` describes the scatterer scene seen by monostatic sensing and generates the
+corresponding array response for each sensing antenna. The bistatic (communication)
+channel can be configured separately with `bistatic_targets`; if it is omitted, the
+simulator reuses `targets`, so the same scatterer scene drives both the monostatic
+and bistatic chains. Because the communication RX is single-antenna, `angle_deg` is
+not used in the bistatic channel calculation. To override the array manifold, provide
+`num_targets × num_channels` little-endian `complex<float>` values in row-major order
+via `steering_override_file`; each row corresponds to one target.
 
 ## Channel model
 
-- Target round-trip delay `τ = 2·range_m/c`, sample delay `round(τ·fs) + timing_offset`.
-- Doppler `fd = 2·velocity_mps/λ`, `λ = c/center_freq`.
-- ULA steering `a_k(θ) = exp(j·2π·(d/λ)·k·sinθ)` for antenna `k`, where the electrical
-  spacing `d/λ = array_spacing_m·center_freq/c` is derived from the physical spacing and
-  the carrier (so the recovered angle is correct at any `center_freq`; the viewers invert
-  the phase slope using the same physical spacing). With `array_spacing_m <= 0` the legacy
-  frequency-independent `array_spacing_lambda` is used instead.
-- Monostatic sensing RX (per antenna `k`):
-  `rx_sens_k[n] = Σ_targets gain·a_k(θ)·tx[n−τ]·e^{j2π fd n/fs} + AWGN`.
-- Comm / bistatic RX (single antenna): a decodable direct path **plus** the same moving
-  target reflections, so the demodulator's bistatic sensing has range-Doppler targets:
-  `rx_comm[n] = (Σ_taps gain·tx[n−delay] + Σ_targets gain·tx[n−τ]·e^{j2π fd n/fs})·e^{j2π cfo n/fs} + AWGN`.
+The model is applied to transmitted samples \(x[n]\) in this order.
 
-By default the `targets` list drives both the monostatic sensing antennas (with steering) and the
-bistatic comm channel (no steering), modelling one coherent scene. Set `bistatic_targets` to give
-the comm/bistatic channel its own independent scatterers. Keep the direct-path
-`comm_multipath_taps` stronger than the targets (e.g. 0 dB vs −6/−12 dB) so the comm link still
-synchronizes and decodes.
+1. For each scatterer, compute integer propagation delay, Doppler, and complex gain; the monostatic sensing path also applies the array manifold vector.
+2. The communication/bistatic path first adds the LoS path and static multipath paths, then adds the scatterer-return components.
+3. The communication/bistatic path applies relative CFO to the whole received signal; the monostatic sensing path does not apply CFO.
+4. AWGN is added to every RX output.
+
+Target round-trip delay, sample delay, and Doppler are:
+
+$$
+\tau_i = \frac{2 R_i}{c}, \qquad
+\ell_i = \operatorname{round}(\tau_i f_s) + n_0, \qquad
+f_{D,i} = \frac{2 v_i}{\lambda}, \qquad
+\lambda = \frac{c}{f_c}
+$$
+
+Here \(R_i\) is `range_m`, \(v_i\) is `velocity_mps`, \(f_s\) is `sample_rate`,
+\(f_c\) is `center_freq`, and \(n_0\) is `timing_offset_samples`. The \(n_0\)
+term is a fixed integer sample offset; the simulator does not model sampling
+frequency offset (SFO).
+
+The ULA array manifold is:
+
+$$
+a_{i,k}(\theta_i) =
+\exp\!\left(j 2\pi \frac{d}{\lambda} k \sin\theta_i\right)
+$$
+
+where \(k\) is the antenna index. The electrical spacing is:
+
+$$
+\frac{d}{\lambda} = \frac{\texttt{array\_spacing\_m}\, f_c}{c}
+$$
+
+It is derived from the physical spacing and carrier frequency, so the recovered angle
+remains correct at any `center_freq`; the viewers invert the phase slope using the
+same physical spacing. With `array_spacing_m <= 0`, the frequency-independent legacy
+parameter `array_spacing_lambda` is used instead. If `steering_override_file` is set,
+the simulator reads \(a_{i,k}\) directly from the array manifold matrix.
+
+For monostatic sensing RX antenna \(k\):
+
+$$
+y_{\mathrm{mono},k}[n]
+= \sum_i g_i\, a_{i,k}(\theta_i)\, x[n-\ell_i]\,
+  e^{j 2\pi f_{D,i} n / f_s}
+  + w_k[n]
+$$
+
+The monostatic sensing channel shares the simulator clock with the transmitter and
+does not apply relative CFO. The simulator does not model sampling frequency offset
+(SFO). In the equation above, \(w_k[n]\) is AWGN.
+
+The communication/bistatic RX is single-antenna. The LoS/static multipath paths first
+form the communication multipath component:
+
+$$
+u_{\mathrm{LoS}}[n] =
+\sum_p h_p\, x[n-\ell_p],
+\qquad
+\ell_p = d_p + n_0
+$$
+
+Here \(d_p\) comes from `comm_multipath_taps[].delay_samples`, and \(h_p\) is determined
+by `gain_db` and `phase_deg`. Scatterer-return components are added to the same
+communication channel:
+
+$$
+u[n] =
+u_{\mathrm{LoS}}[n]
++ \sum_i g_i\, x[n-\ell_i]\, e^{j 2\pi f_{D,i} n / f_s}
+$$
+
+The communication/bistatic chain then applies relative CFO and AWGN:
+
+$$
+y_{\mathrm{comm}}[n] =
+u[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_s}
++ w_{\mathrm{comm}}[n]
+$$
+
+By default, `targets` drives both the monostatic sensing antennas (with array manifold)
+and the bistatic communication channel (single-antenna, no array manifold), modelling
+one coherent scene. Set `bistatic_targets` to give the bistatic/communication channel
+its own independent scatterers. `comm_multipath_taps` configures the delay, gain, and
+initial phase of the LoS path and static multipath paths.
 
 ## Notes / limits
 
 - Each process stops cleanly on Ctrl-C (SIGINT), independently of the others; the hub
   unlinks its shared memory on exit.
 - Not real-time: pacing is by shared-memory backpressure (correctness over speed).
-- Timed TX bursts are approximated as a continuous stream; RX sync recovers framing.
 - Keep `ring_capacity_samples` small (≈ a couple of frames) so the transmitter cannot
   race far ahead of the hub and overflow the monostatic TX/RX pairing queue.
-```
+- The simulator does not model sampling frequency offset (SFO); `timing_offset_samples`
+  is only a fixed integer sample offset.
+- The simulator does not model fractional delay; all propagation delays and configured
+  timing offsets are quantized to integer samples.
