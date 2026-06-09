@@ -43,6 +43,129 @@
 - 仿真后端用于本机开发和功能验证；真实 USRP 部署仍应使用对应 X310/B210 配置并按硬件链路验证。
 - ZeroMQ viewer 依赖 `pyzmq`，请按新版 `requirements.txt` 更新 Python 环境。
 
+## 2026-06-02 - 通信帧格式与感知响应标定
+
+### Summary
+
+本次更新聚焦 CPU 公共链路上的通信包格式一致性、解调端对齐，以及感知响应的幅度/相位标定能力，为后续仿真链路和前端显示协议收敛打基础。
+
+### Changes
+
+- 统一 CPU 调制端与解调端的 LDPC packet framing，并把公共帧打包/解包逻辑沉到 `include/OFDMCore.hpp`。
+  影响：调制端和解调端不再各自维护一套容易漂移的 packet framing 规则，降低 payload 解析和 BER/BLER 统计不一致的风险。
+
+- 新增 LDPC block interleaving 支持，并更新 X310/B210 示例配置中的相关字段。
+  影响：CPU 公开链路可以使用更一致的数据块组织方式，便于做链路质量测试和后续参数 sweep。
+
+- 改进解调端 delay alignment 和 `predictive_delay` 配置开关。
+  影响：解调端可以更稳健地处理时延预测和帧边界对齐，降低同步漂移对通信/感知结果的影响。
+
+- 新增 sensing response calibration，并将校准元数据接入后端、viewer 和 README/docs。
+  影响：感知显示可以对系统响应做幅度/相位校正，更适合比较不同采集、不同通道或不同硬件设置下的结果。
+
+- 增加 `.gitattributes` 以固定 LF checkout，并完成脚本、配置和捕获辅助文件的换行整理。
+  影响：跨平台编辑和文档生成时更少出现 CRLF/LF 噪声 diff。
+
+### Notes
+
+- LDPC framing、block interleaving 与解调端配置应在 TX/RX 两侧保持一致。
+- 感知响应标定改变的是显示/处理链路中的校准行为，不替代真实硬件链路的系统时延标定。
+
+## 2026-05-09 - Docker 支持与 viewer 布局整理
+
+### Summary
+
+本次更新补充了容器化运行入口，并进一步整理 sensing viewer 的布局尺寸，让公开仓库更容易在干净环境中构建、演示和复现实验。
+
+### Changes
+
+- 新增 `Dockerfile`、`.dockerignore` 和 `docker-entrypoint.sh`。
+  影响：可以用容器环境安装 OpenISAC 依赖并运行基础工具，降低新机器环境配置成本。
+
+- 调整 sensing viewer 的布局 sizing。
+  影响：viewer 在不同窗口尺寸下更稳定，减少控制面板、图像区域和检测结果之间的挤压。
+
+### Notes
+
+- Docker 支持主要用于环境复现和演示；实时 USRP 部署仍需结合宿主机 UHD、USB/网卡、CPU 亲和性和实时权限配置。
+
+## 2026-04-19 至 2026-04-21 - 后端感知元数据、检测与显示增强
+
+### Summary
+
+本阶段集中增强 sensing viewer 和后端感知输出协议，加入后端 RD/CFAR/micro-Doppler 元数据、独立 viewer、显示范围控制、检测控件和 delay superresolution。
+
+### Changes
+
+- 新增 backend sensing metadata 处理，并加入 `backend_sensing_viewer.py`、`plot_backend_sensing.py` 和 `plot_backend_bi_sensing.py`。
+  影响：后端生成的 RD 图、CFAR 检测结果和 micro-Doppler 元数据可以通过独立 viewer 检查，不必全部依赖原始 fast viewer。
+
+- 新增 CA-CFAR target detection 逻辑和 viewer 侧检测控件。
+  影响：感知显示从“只看热力图”扩展到可交互的目标检测调试，更方便评估阈值、保护单元和训练单元设置。
+
+- 改进单站/双站 fast viewer 的显示范围、detector control、聚合 sensing pipeline 和标定显示。
+  影响：不同场景下的距离/速度范围显示更可控，聚合输出与前端标定参数更一致。
+
+- 新增 delay superresolution 显示模式。
+  影响：单站感知 viewer 可以在 Delay 维度进行更细粒度的峰值观察，便于分析近距离或相邻目标。
+
+- 停止维护旧版 `plot_sensing.py` 与 `plot_bi_sensing.py`，将维护重点转到 fast viewer。
+  影响：公开前端减少重复实现，后续协议和 UI 更新集中在同一套 viewer 上。
+
+### Notes
+
+- 后端元数据和 fast viewer 协议需要配套更新；混用旧 viewer 与新后端时可能无法识别新增字段。
+- CA-CFAR 和超分辨显示是可视化/检测辅助能力，实际参数仍应结合采样率、带宽和场景噪声重新调节。
+
+## 2026-04-12 - CPU 链路与媒体流文档更新
+
+### Summary
+
+本次更新围绕 CPU 公开链路的编码/同步稳定性和辅助使用文档展开，补充 LDPC block interleaving、demodulator delay alignment、`predictive_delay` 配置和 RTP MPEG-TS 音频流命令说明。
+
+### Changes
+
+- CPU 调制端和解调端新增 LDPC block interleaving。
+  影响：编码块组织方式更清晰，也更便于后续统一 packet framing 与链路质量统计。
+
+- 改进 demodulator delay alignment，并新增 `predictive_delay` 开关。
+  影响：解调端可以根据配置控制是否使用预测时延，降低错误对齐对解调结果的影响。
+
+- 为 sensing viewer 增加 CA-CFAR target detection 的初始版本。
+  影响：前端开始具备目标检测调试能力，为后续 detector control 和 backend metadata 链路铺路。
+
+- 补充 RTP MPEG-TS audio streaming 命令文档。
+  影响：音频流演示和外部媒体链路测试有了可复用的命令记录。
+
+### Notes
+
+- `predictive_delay` 和 LDPC interleaving 属于链路行为参数，修改后应同步检查调制端、解调端和 benchmark 模板。
+
+## 2026-04-04 至 2026-04-06 - Astro 文档站点迁移与维护
+
+### Summary
+
+本阶段把公开文档站从静态 HTML/CSS 维护方式迁移到 Astro 源码驱动，并保留 GitHub Pages 所需的发布输出和自定义域名文件。
+
+### Changes
+
+- 新增 `site/` Astro 项目结构，包括页面入口、共享组件、站点数据、全局样式和 README 同步生成文件。
+  影响：主页、架构页、信号处理页和中英文内容可以从结构化源码维护，而不是直接手改发布后的 HTML。
+
+- 更新 `scripts/sync_docs_from_readme.py` 和新增 `scripts/publish_docs_site.py`，让 README 教程内容同步到 Astro，再发布到 `docs/`。
+  影响：README 与网站教程内容的同步路径更明确，减少文档重复维护。
+
+- 跟踪 Astro 构建产物所需的 `_astro` 资源、`.nojekyll`、站点图片和 `CNAME`。
+  影响：GitHub Pages 可以正确发布带 hashed asset 的 Astro 静态站，并保留 `openisac.zzw123app.top` 自定义域名。
+
+- 后续对 Astro 源码和公开 UX 文案做维护，使 `site/src/` 与已审核的首页/文档内容保持一致。
+  影响：公开站点更容易继续扩展 Documentation 页面、导航和页面布局。
+
+### Notes
+
+- 修改 README 教程段落后，应先运行 `python3 scripts/sync_docs_from_readme.py`，再运行 `cd site && npm run build` 更新 `docs/`。
+- `docs/` 是发布输出目录；常规内容变更应优先编辑 `README*` 或 `site/src/`。
+
 ## 2026-04-04 - 资源映射与紧凑感知更新
 
 ### Summary
