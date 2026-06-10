@@ -301,7 +301,19 @@ private:
     // per-symbol heap allocation in the hot path). Sized once in prepare_fftw().
     std::vector<AlignedVector> _symbols_buf;     // data symbols (excludes sync)
     AlignedVector _sync_symbol_freq_buf;         // sync symbol, freq domain
-    
+
+    // Persistent scratch for the per-frame demod path. These were previously
+    // re-declared (and thus heap-allocated) inside process_ofdm_frame every
+    // frame; hoisting them to members keeps capacity across frames and removes
+    // per-frame malloc/free, which is what introduces timing jitter on isolated
+    // cores. process_ofdm_frame runs only on the single process thread, so plain
+    // members (no synchronization) are safe.
+    AlignedVector _h_est_buf;                    // channel estimate H_est
+    std::vector<int> _pilot_indices_buf;         // pilot subcarrier indices
+    std::vector<float> _avg_phase_diff_buf;      // per-pilot avg phase diff
+    std::vector<float> _weights_buf;             // per-pilot regression weights
+    AlignedVector _delay_spectrum_buf;           // delay (time-domain) spectrum
+
     // Core computation instances (manage their own FFT plans)
     ChannelEstimator _channel_estimator;
     DelayProcessor _delay_processor;
@@ -1462,6 +1474,13 @@ private:
         const float scale = 1.0f / sqrtf(static_cast<float>(scale_n));
         size_t pos = 0;
         prof_step_start = ProfileClock::now();
+        // Per-symbol FFT is intentionally kept (vs. a frame-wide
+        // fftwf_plan_many_dft or new-array execute straight from frame_data):
+        // each fft_size-point transform stays L1/L2 resident (copy -> in-cache
+        // FFT -> fused scale/scatter). A frame-wide batch adds ~3x the memory
+        // traffic, and skipping the input copy changed nothing -- both measured
+        // no faster in sim, so this stage is FFT-compute + scatter bound, not
+        // copy bound.
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
             // Target working slot: sync symbol or the matching data slot.
             const bool is_sync = (i == cfg_.sync_pos);
@@ -1500,7 +1519,7 @@ private:
 
         // Calculate initial channel response H_est using ChannelEstimator
         prof_step_start = ProfileClock::now();
-        AlignedVector H_est;
+        AlignedVector& H_est = _h_est_buf;  // persistent; estimate_from_sync_lmmse resizes it
         float corrected_impulse_snr_linear_est = 1.0f;
         _channel_estimator.estimate_from_sync_lmmse(
             sync_symbol_freq,
@@ -1515,9 +1534,9 @@ private:
 
         // Estimate frequency offset using FrequencyOffsetEstimator
         prof_step_start = ProfileClock::now();
-        std::vector<int> pilot_indices;
-        std::vector<float> avg_phase_diff;
-        std::vector<float> weights;
+        std::vector<int>& pilot_indices = _pilot_indices_buf;          // persistent scratch
+        std::vector<float>& avg_phase_diff = _avg_phase_diff_buf;      // persistent scratch
+        std::vector<float>& weights = _weights_buf;                    // persistent scratch
         FrequencyOffsetEstimator::compute_pilot_phase_diff(
             symbols, cfg_.pilot_positions, cfg_.fft_size, cfg_.sync_pos,
             pilot_indices, avg_phase_diff, weights
@@ -1668,7 +1687,7 @@ private:
         
         // Compute delay spectrum using DelayProcessor
         prof_step_start = ProfileClock::now();
-        AlignedVector delay_spectrum;
+        AlignedVector& delay_spectrum = _delay_spectrum_buf;  // persistent; resized inside
         _delay_processor.compute_delay_spectrum(H_est, delay_spectrum);
         
         // Find peak in delay spectrum (search within CP range)
