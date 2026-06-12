@@ -179,6 +179,65 @@ inline AlignedVector generate_sensing_pilot_freq(size_t fft_size, int sync_zc_ro
         select_known_sensing_pilot_zc_root(fft_size, sync_zc_root));
 }
 
+inline uint32_t splitmix32(uint32_t x) {
+    x += 0x9E3779B9u;
+    x = (x ^ (x >> 16)) * 0x85EBCA6Bu;
+    x = (x ^ (x >> 13)) * 0xC2B2AE35u;
+    return x ^ (x >> 16);
+}
+
+/**
+ * @brief Generate a deterministic BPSK pilot sequence for a frame symbol.
+ *
+ * The sequence is indexed by absolute OFDM symbol number and subcarrier, so TX and
+ * RX can derive the same reference from YAML alone.
+ */
+inline AlignedVector generate_midframe_bpsk_pilot_freq(
+    size_t fft_size,
+    uint32_t seed,
+    size_t symbol_index)
+{
+    AlignedVector pilot(fft_size);
+    const uint32_t sym_mix = splitmix32(seed ^ static_cast<uint32_t>(symbol_index));
+    for (size_t k = 0; k < fft_size; ++k) {
+        const uint32_t rnd = splitmix32(sym_mix ^ static_cast<uint32_t>(k));
+        pilot[k] = (rnd & 1u) ? std::complex<float>(-1.0f, 0.0f)
+                              : std::complex<float>(1.0f, 0.0f);
+    }
+    return pilot;
+}
+
+inline void overlay_comb_pilot_re(
+    AlignedVector& symbol,
+    const std::vector<size_t>& pilot_positions,
+    const AlignedVector& comb_pilot_seq)
+{
+    for (const size_t k : pilot_positions) {
+        if (k < symbol.size() && k < comb_pilot_seq.size()) {
+            symbol[k] = comb_pilot_seq[k];
+        }
+    }
+}
+
+/**
+ * @brief Generate a mid-frame pilot while preserving comb-pilot RE.
+ *
+ * The non-comb-pilot subcarriers use deterministic BPSK, and the configured
+ * comb pilot positions keep the regular known pilot sequence. This preserves
+ * the normal pilot-phase tracking path on mid-frame pilot symbols.
+ */
+inline AlignedVector generate_midframe_bpsk_pilot_freq(
+    size_t fft_size,
+    uint32_t seed,
+    size_t symbol_index,
+    const std::vector<size_t>& pilot_positions,
+    const AlignedVector& comb_pilot_seq)
+{
+    AlignedVector pilot = generate_midframe_bpsk_pilot_freq(fft_size, seed, symbol_index);
+    overlay_comb_pilot_re(pilot, pilot_positions, comb_pilot_seq);
+    return pilot;
+}
+
 struct LdpcMiniHeader {
     uint8_t version = 1;
     uint8_t flags = 0;
@@ -1158,18 +1217,44 @@ public:
      */
     static void compute_zf_inverse(
         const AlignedVector& H_est,
-        AlignedVector& H_inv
+        AlignedVector& H_inv,
+        float mag_sq_floor = 1e-6f
     ) {
         const size_t fft_size = H_est.size();
         H_inv.resize(fft_size);
+        const float floor_val = std::max(mag_sq_floor, 1e-12f);
         
         #pragma omp simd simdlen(16)
         for (size_t j = 0; j < fft_size; ++j) {
             const float h_real = H_est[j].real();
             const float h_imag = H_est[j].imag();
-            const float mag_sq = h_real * h_real + h_imag * h_imag;
+            const float mag_sq = std::max(h_real * h_real + h_imag * h_imag, floor_val);
             const float inv_mag_sq = 1.0f / mag_sq;
             H_inv[j] = std::complex<float>(h_real * inv_mag_sq, -h_imag * inv_mag_sq);
+        }
+    }
+
+    /**
+     * @brief Compute MMSE/regularized inverse: H_inv = conj(H) / (|H|^2 + noise_var).
+     */
+    static void compute_mmse_inverse(
+        const AlignedVector& H_est,
+        AlignedVector& H_inv,
+        float noise_var,
+        float mag_sq_floor = 1e-6f
+    ) {
+        const size_t fft_size = H_est.size();
+        H_inv.resize(fft_size);
+        const float regularization = std::max(noise_var, 0.0f);
+        const float floor_val = std::max(mag_sq_floor, 1e-12f);
+
+        #pragma omp simd simdlen(16)
+        for (size_t j = 0; j < fft_size; ++j) {
+            const float h_real = H_est[j].real();
+            const float h_imag = H_est[j].imag();
+            const float mag_sq = std::max(h_real * h_real + h_imag * h_imag, floor_val);
+            const float inv_denom = 1.0f / (mag_sq + regularization);
+            H_inv[j] = std::complex<float>(h_real * inv_denom, -h_imag * inv_denom);
         }
     }
 
@@ -1201,6 +1286,20 @@ public:
 
         auto* __restrict__ sym_ptr = symbol.data();
         const auto* __restrict__ hinv_ptr = H_inv.data();
+
+        if (std::abs(phase_diff_CFO) <= 1e-12f && std::abs(beta_rel) <= 1e-12f) {
+            #pragma omp simd simdlen(16)
+            for (size_t j = 0; j < fft_size; ++j) {
+                const float hinv_real = hinv_ptr[j].real();
+                const float hinv_imag = hinv_ptr[j].imag();
+                const float sym_real = sym_ptr[j].real();
+                const float sym_imag = sym_ptr[j].imag();
+                sym_ptr[j] = std::complex<float>(
+                    sym_real * hinv_real - sym_imag * hinv_imag,
+                    sym_real * hinv_imag + sym_imag * hinv_real);
+            }
+            return;
+        }
 
         // Process a contiguous run [start, end) whose subcarrier index increments by
         // +1 each step, starting from idx0 = subcarrier_indices[start].

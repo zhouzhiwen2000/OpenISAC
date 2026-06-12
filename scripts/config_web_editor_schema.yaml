@@ -392,6 +392,24 @@ modulator:
       comment: Comb-pilot subcarrier indices
       default: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
       optional: true
+  midframe_pilot_symbols:
+    title: OFDM Frame
+    field:
+      type: flow_list
+      key: midframe_pilot_symbols
+      item_kind: int
+      comment: Mid-frame BPSK pilot symbol indices; comb-pilot RE keep comb-pilot sequence
+      default: []
+      optional: true
+  midframe_pilot_seed:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: midframe_pilot_seed
+      kind: int
+      comment: Deterministic mid-frame BPSK pilot seed; must match TX/RX
+      default: 1296453708
+      optional: true
   range_fft_size:
     title: Sensing FFT
     field:
@@ -815,6 +833,62 @@ demodulator:
       item_kind: int
       comment: Comb-pilot subcarrier indices
       default: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
+      optional: true
+  midframe_pilot_symbols:
+    title: OFDM Frame
+    field:
+      type: flow_list
+      key: midframe_pilot_symbols
+      item_kind: int
+      comment: Mid-frame BPSK pilot symbol indices; comb-pilot RE keep comb-pilot sequence
+      default: []
+      optional: true
+  midframe_pilot_seed:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: midframe_pilot_seed
+      kind: int
+      comment: Deterministic mid-frame BPSK pilot seed; must match TX/RX
+      default: 1296453708
+      optional: true
+  equalizer_mode:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: equalizer_mode
+      kind: string
+      comment: Communication equalizer inverse mode
+      default: mmse
+      optional: true
+      options: [zf, mmse]
+  channel_tracking_mode:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: channel_tracking_mode
+      kind: string
+      comment: Per-symbol comb-pilot tracking mode
+      default: pilot_phase
+      optional: true
+      options: [off, pilot_phase]
+  equalizer_mag_floor:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: equalizer_mag_floor
+      kind: float
+      comment: Lower bound for |H|^2 during channel inversion
+      default: 1.0e-6
+      optional: true
+  channel_tracking_min_pilot_snr:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: channel_tracking_min_pilot_snr
+      kind: float
+      comment: Minimum comb-pilot residual power accepted by per-symbol tracking
+      default: 1.0e-4
       optional: true
   range_fft_size:
     title: Sensing FFT
@@ -1276,7 +1350,7 @@ demodulator:
       key: control_port
       kind: int
       comment: ZMQ port for runtime control commands
-      default: 10000
+      default: 10001
       optional: true
   channel_ip:
     title: Network Output

@@ -11,7 +11,7 @@
 </figure>
 <ul>
   <li><strong>Bit Processing:</strong> Handles UDP payloads, LDPC encoding, and scrambling.</li>
-  <li><strong>OFDM Modulator:</strong> Performs QPSK mapping, comb-pilot insertion, IFFT, and CP insertion. Pads frames with random bits if traffic is low.</li>
+  <li><strong>OFDM Modulator:</strong> Performs QPSK mapping, comb-pilot insertion, optional mid-frame BPSK pilot insertion, IFFT, and CP insertion. Pads frames with random bits if traffic is low.</li>
   <li><strong>Radio I/O:</strong> "USRP-TX" sends waveforms; "USRP-RX" captures radar streams.</li>
   <li><strong>Sensing Thread:</strong> Performs real-time monostatic sensing (OFDM demod, division, Range-Doppler map). Supports "stride" processing to balance load.</li>
 </ul></div> </section><section id="ue-software"> <h2>Software Architecture of UE</h2> <div><p>The UE is also a multi-threaded pipeline designed for robust synchronization and reception.</p>

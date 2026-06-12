@@ -489,7 +489,7 @@ What it does:
 * Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
 * Includes CPU command presets and a custom command field for each tab.
 * Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `sensing_mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
-* Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/comb-pilot stripping rules are applied.
+* Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
 Notes:
 * The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
@@ -526,9 +526,11 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_output_mode` | `string` | `dense` | Sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
 | `cuda_mod_pipeline_slots` | `int` | `2` | Number of CUDA modulation pipeline slots. Values below `1` are clamped to `1`. |
-| `pilot_positions` | `int[]` | `[571,...,451]` | Configurable comb-pilot subcarrier indices. |
-| `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-sync, non-comb-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
-| `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `sensing_output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. Sync-symbol and comb-pilot RE are allowed here, overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
+| `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
+| `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame, such as `[25,50,75]`. These symbols are excluded from payload mapping; configured comb-pilot RE keep the comb-pilot sequence for phase tracking, while the remaining RE in those symbols use deterministic BPSK. |
+| `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match between `Modulator.yaml` and `Demodulator.yaml`. |
+| `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-sync, non-comb-pilot, non-mid-frame-BPSK-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
+| `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `sensing_output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. Sync-symbol, comb-pilot, and mid-frame BPSK pilot RE are allowed here, overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
 | `tx_device_args` | `string` | `""` | TX-specific USRP args. |
 | `rx_device_args` | `string` | `""` | Default sensing RX USRP args. |
@@ -564,7 +566,7 @@ Quick mental model:
 * `sensing_mask_blocks` decides which RE are exported for compact sensing.
 * The first affects payload mapping; the second affects sensing output only.
 
-If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `Demodulator.yaml`. If a block overlaps `sync_pos` or `pilot_positions`, the built-in sync symbol and comb-pilot RE still take precedence. Priority is always `sync symbol > comb-pilot RE > sensing_pilot > payload/random QPSK`.
+If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `Demodulator.yaml`. If a block overlaps `sync_pos`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in sync symbol, comb-pilot RE, and mid-frame BPSK pilots still take precedence. Priority is always `sync symbol > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
 
 When `sensing_output_mode=compact_mask`, sensing sends one compact message per OFDM frame and includes only the RE selected by `sensing_mask_blocks`. In this mode `STRD` is ignored, because the mask itself defines the sampling pattern. If the mask is "regular" (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime `MTI` and local Delay-Doppler processing can also be enabled: `SKIP=1` keeps the raw compact RE output, while `SKIP=0` switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands `range_fft_size` and `doppler_fft_size` when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`, followed by `re_count` raw `complex<float>` values in fixed order. Existing `plot_sensing*.py` viewers cannot handle non-"regular" compact payloads yet.
 
@@ -620,9 +622,15 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `reset_hold_s` | `float` / s | `0.5` | How long invalid delay conditions must persist before the demodulator forces a hard reset back to sync search. Internally this is converted to a frame count from `samples_per_frame / sample_rate`. Values below `0` are clamped to `0.5`. |
 | `range_fft_size` | `int` | `1024` | Range FFT size. |
 | `doppler_fft_size` | `int` | `100` | Doppler FFT size. |
-| `pilot_positions` | `int[]` | `[571,...,451]` | Configurable comb-pilot subcarrier indices. |
+| `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
+| `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame. The receiver uses the full known symbol as an additional channel-estimation anchor, keeps comb-pilot RE available for phase tracking, and excludes the symbol from payload LLR extraction. |
+| `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match the transmitter. |
+| `equalizer_mode` | `string` | `mmse` | Communication equalizer inverse. `zf` uses a floored channel-power denominator; `mmse` adds `noise_var` to that denominator to reduce noise enhancement on deep fades. |
+| `channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking for communication equalization. `off` keeps the sync-only channel estimate, while `pilot_phase` fits common and linear residual phase from comb pilots on each data symbol. |
+| `equalizer_mag_floor` | `float` | `1e-6` | Lower bound for channel magnitude squared during inversion, used by both `zf` and `mmse`. |
+| `channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual power/weight accepted by per-symbol tracking before falling back to the sync-only correction. |
 | `data_resource_blocks` | `object[]` | omitted | Receiver-side communication resource map. It answers: "which RE should be interpreted as payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set `[]` to extract no payload LLR at all. Use the same rectangles and `kind` values as the transmitter. Blocks with `kind: payload` produce payload LLR; blocks with `kind: sensing_pilot` are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root. |
-| `sensing_mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the modulator side: absolute frame-symbol index, raw FFT-bin index, sync-symbol and comb-pilot RE allowed, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
+| `sensing_mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the modulator side: absolute frame-symbol index, raw FFT-bin index, sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | USRP device args. |
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
 | `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
@@ -661,7 +669,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for decoded payload output. |
 | `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
 | `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default output IP used when output IP fields are empty. |
-| `control_port` | `int` | `10000` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
+| `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
 | `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. The CPU binaries handle this mode locally. |
 | `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
 | `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
@@ -674,7 +682,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 
 Receiver-side note:
 * `data_resource_blocks` should normally match the transmitter exactly, including `kind`.
-* If a resource block overlaps `sync_pos` or `pilot_positions`, the built-in sync symbol and comb-pilot RE still win. Priority is `sync symbol > comb-pilot RE > sensing_pilot > payload/random QPSK`.
+* If a resource block overlaps `sync_pos`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in sync symbol, comb-pilot RE, and mid-frame BPSK pilots still win. Priority is `sync symbol > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
 * In `compact_mask` mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by `sensing_mask_blocks`; `STRD` is ignored in this mode because the mask already defines the sampling pattern.
 * The compact payload format is the same as on the modulator side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
 

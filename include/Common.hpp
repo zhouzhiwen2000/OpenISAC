@@ -98,6 +98,11 @@ using AlignedFloatVector = std::vector<float, AlignedAllocator<float, 64>>;
 using AlignedIntVector = std::vector<int, AlignedAllocator<int, 64>>;
 using SymbolVector = std::vector<AlignedVector>;
 
+inline constexpr const char* kEqualizerModeZf = "zf";
+inline constexpr const char* kEqualizerModeMmse = "mmse";
+inline constexpr const char* kChannelTrackingModeOff = "off";
+inline constexpr const char* kChannelTrackingModePilotPhase = "pilot_phase";
+
 /**
  * @brief Zero-copy view over frequency-domain TX symbols for sensing.
  *
@@ -312,11 +317,15 @@ struct DataResourceGridLayout {
     size_t fft_size = 0;
     size_t sync_pos = 0;
     size_t data_symbol_count = 0;
+    size_t midframe_pilot_symbol_count = 0;
     size_t num_non_pilot_subcarriers = 0;
     size_t non_pilot_re_count = 0;
     size_t payload_re_count = 0;
     size_t sensing_pilot_re_count = 0;
 
+    std::vector<int> midframe_pilot_symbols;
+    std::vector<uint8_t> midframe_pilot_symbol_mask;
+    std::vector<int> midframe_pilot_symbol_to_rank;
     std::vector<int> data_symbol_to_actual_symbol;
     std::vector<int> actual_symbol_to_data_symbol;
     std::vector<int> non_pilot_subcarrier_indices;
@@ -805,6 +814,12 @@ struct Config {
     double akf_r_max = 1e3;           // Upper bound of observation noise variance R
 
     std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    std::vector<size_t> midframe_pilot_symbols; // Absolute mid-frame pilot symbols; comb pilot RE are preserved
+    uint32_t midframe_pilot_seed = 0x4D46504Cu; // Deterministic BPSK pilot seed ("MFPL")
+    std::string equalizer_mode = kEqualizerModeMmse; // zf or mmse
+    std::string channel_tracking_mode = kChannelTrackingModePilotPhase; // off or pilot_phase
+    double equalizer_mag_floor = 1e-6; // Lower bound for |H|^2 in channel inversion
+    double channel_tracking_min_pilot_snr = 1e-4; // Minimum pilot residual weight before falling back
     bool data_resource_blocks_configured = false;
     std::vector<DataResourceBlock> data_resource_blocks;
     std::string sensing_output_mode = kSensingOutputModeDense;
@@ -1386,7 +1401,33 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.num_symbols = cfg.num_symbols;
     layout.fft_size = cfg.fft_size;
     layout.sync_pos = cfg.sync_pos;
-    layout.data_symbol_count = cfg.num_symbols - 1;
+    layout.midframe_pilot_symbol_mask.assign(cfg.num_symbols, 0);
+    layout.midframe_pilot_symbol_to_rank.assign(cfg.num_symbols, -1);
+    for (auto sym : cfg.midframe_pilot_symbols) {
+        if (sym >= cfg.num_symbols) {
+            if (log_warnings) {
+                LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
+                             << " outside num_symbols=" << cfg.num_symbols << '.';
+            }
+            continue;
+        }
+        if (sym == cfg.sync_pos) {
+            if (log_warnings) {
+                LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
+                             << " because it overlaps sync_pos.";
+            }
+            continue;
+        }
+        if (layout.midframe_pilot_symbol_mask[sym] != 0) {
+            continue;
+        }
+        layout.midframe_pilot_symbol_to_rank[sym] =
+            static_cast<int>(layout.midframe_pilot_symbols.size());
+        layout.midframe_pilot_symbols.push_back(static_cast<int>(sym));
+        layout.midframe_pilot_symbol_mask[sym] = 1;
+    }
+    layout.midframe_pilot_symbol_count = layout.midframe_pilot_symbols.size();
+    layout.data_symbol_count = cfg.num_symbols - 1 - layout.midframe_pilot_symbol_count;
 
     layout.pilot_mask.assign(cfg.fft_size, 0);
     for (auto pos : cfg.pilot_positions) {
@@ -1411,7 +1452,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.data_symbol_to_actual_symbol.reserve(layout.data_symbol_count);
     layout.actual_symbol_to_data_symbol.assign(cfg.num_symbols, -1);
     for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
-        if (sym == cfg.sync_pos) {
+        if (sym == cfg.sync_pos || layout.midframe_pilot_symbol_mask[sym] != 0) {
             continue;
         }
         layout.actual_symbol_to_data_symbol[sym] =
@@ -1431,7 +1472,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
         layout.non_pilot_offsets[data_sym] = data_sym * layout.num_non_pilot_subcarriers;
     }
 
-    size_t stripped_sync_re = 0;
+    size_t stripped_reserved_symbol_re = 0;
     size_t stripped_pilot_re = 0;
     size_t payload_sensing_pilot_overlap_re = 0;
     if (cfg.data_resource_blocks_configured) {
@@ -1461,11 +1502,11 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             }
 
             for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
-                // sync_pos always keeps the dedicated sync symbol content, so resource blocks
-                // never claim RE from that symbol.
-                if (sym == cfg.sync_pos) {
+                // sync_pos and mid-frame pilot symbols keep their dedicated
+                // content, so resource blocks never claim RE from those symbols.
+                if (sym == cfg.sync_pos || layout.midframe_pilot_symbol_mask[sym] != 0) {
                     if (block.kind == DataResourceBlockKind::Payload) {
-                        stripped_sync_re += block.subcarrier_count;
+                        stripped_reserved_symbol_re += block.subcarrier_count;
                     }
                     continue;
                 }
@@ -1523,10 +1564,10 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.payload_re_count = payload_rank;
 
     if (log_warnings && cfg.data_resource_blocks_configured &&
-        (stripped_sync_re > 0 || stripped_pilot_re > 0)) {
-        LOG_G_WARN() << "data_resource_blocks overlap stripped " << stripped_sync_re
-                     << " sync RE and " << stripped_pilot_re
-                     << " pilot RE. sync_pos and pilot_positions take precedence.";
+        (stripped_reserved_symbol_re > 0 || stripped_pilot_re > 0)) {
+        LOG_G_WARN() << "data_resource_blocks overlap stripped " << stripped_reserved_symbol_re
+                     << " sync/mid-frame-pilot symbol RE and " << stripped_pilot_re
+                     << " pilot RE. sync_pos, pilot_positions, and midframe_pilot_symbols take precedence.";
     }
     if (log_warnings && payload_sensing_pilot_overlap_re > 0) {
         LOG_G_WARN() << "data_resource_blocks contain " << payload_sensing_pilot_overlap_re
@@ -2047,6 +2088,8 @@ inline Config make_default_modulator_config() {
     cfg.tx_channel = 0;
     cfg.zc_root = 29;
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    cfg.midframe_pilot_symbols = {};
+    cfg.midframe_pilot_seed = 0x4D46504Cu;
     cfg.num_symbols = 100;
     cfg.sensing_output_mode = kSensingOutputModeDense;
     cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
@@ -2149,6 +2192,9 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "paired_frame_queue_size" << YAML::Value << cfg.paired_frame_queue_size;
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
+    out << YAML::Key << "midframe_pilot_symbols" << YAML::Value << YAML::Flow
+        << cfg.midframe_pilot_symbols;
+    out << YAML::Key << "midframe_pilot_seed" << YAML::Value << cfg.midframe_pilot_seed;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
     config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
     out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
@@ -2275,6 +2321,12 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         }
         if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
         if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
+        if (config["midframe_pilot_symbols"]) {
+            cfg.midframe_pilot_symbols = config["midframe_pilot_symbols"].as<std::vector<size_t>>();
+        }
+        if (config["midframe_pilot_seed"]) {
+            cfg.midframe_pilot_seed = config["midframe_pilot_seed"].as<uint32_t>();
+        }
         if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Modulator config")) {
             return false;
         }
@@ -2332,6 +2384,10 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
             cfg.measurement_packets_per_point = 1;
         }
     }
+    std::sort(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end());
+    cfg.midframe_pilot_symbols.erase(
+        std::unique(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end()),
+        cfg.midframe_pilot_symbols.end());
     finalize_data_resource_grid_config(cfg, "Modulator");
     finalize_sensing_mask_config(cfg, "Modulator");
 
@@ -2387,6 +2443,8 @@ inline Config make_default_demodulator_config() {
     cfg.cp_length = 128;
     cfg.center_freq = 2.4e9;
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    cfg.midframe_pilot_symbols = {};
+    cfg.midframe_pilot_seed = 0x4D46504Cu;
     cfg.range_fft_size = 1024;
     cfg.doppler_fft_size = 100;
     cfg.num_symbols = 100;
@@ -2435,6 +2493,10 @@ inline Config make_default_demodulator_config() {
     cfg.akf_q_rw_max = 1e1;
     cfg.akf_r_min = 1e-8;
     cfg.akf_r_max = 1e3;
+    cfg.equalizer_mode = kEqualizerModeMmse;
+    cfg.channel_tracking_mode = kChannelTrackingModePilotPhase;
+    cfg.equalizer_mag_floor = 1e-6;
+    cfg.channel_tracking_min_pilot_snr = 1e-4;
     cfg.sensing_output_mode = kSensingOutputModeDense;
     cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
     cfg.enable_backend_sensing_processing = false;
@@ -2541,6 +2603,14 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "enable_backend_sensing_processing" << YAML::Value
         << cfg.enable_backend_sensing_processing;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
+    out << YAML::Key << "midframe_pilot_symbols" << YAML::Value << YAML::Flow
+        << cfg.midframe_pilot_symbols;
+    out << YAML::Key << "midframe_pilot_seed" << YAML::Value << cfg.midframe_pilot_seed;
+    out << YAML::Key << "equalizer_mode" << YAML::Value << cfg.equalizer_mode;
+    out << YAML::Key << "channel_tracking_mode" << YAML::Value << cfg.channel_tracking_mode;
+    out << YAML::Key << "equalizer_mag_floor" << YAML::Value << cfg.equalizer_mag_floor;
+    out << YAML::Key << "channel_tracking_min_pilot_snr" << YAML::Value
+        << cfg.channel_tracking_min_pilot_snr;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
     config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
     out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
@@ -2682,6 +2752,23 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
             cfg.sensing_symbol_stride = config["sensing_symbol_stride"].as<size_t>();
         }
         if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
+        if (config["midframe_pilot_symbols"]) {
+            cfg.midframe_pilot_symbols = config["midframe_pilot_symbols"].as<std::vector<size_t>>();
+        }
+        if (config["midframe_pilot_seed"]) {
+            cfg.midframe_pilot_seed = config["midframe_pilot_seed"].as<uint32_t>();
+        }
+        if (config["equalizer_mode"]) cfg.equalizer_mode = config["equalizer_mode"].as<std::string>();
+        if (config["channel_tracking_mode"]) {
+            cfg.channel_tracking_mode = config["channel_tracking_mode"].as<std::string>();
+        }
+        if (config["equalizer_mag_floor"]) {
+            cfg.equalizer_mag_floor = config["equalizer_mag_floor"].as<double>();
+        }
+        if (config["channel_tracking_min_pilot_snr"]) {
+            cfg.channel_tracking_min_pilot_snr =
+                config["channel_tracking_min_pilot_snr"].as<double>();
+        }
         if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Demodulator config")) {
             return false;
         }
@@ -2731,6 +2818,33 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
         LOG_G_WARN() << "rx_agc_low_threshold_db>=rx_agc_high_threshold_db is invalid. Resetting to 11/13 dB.";
         cfg.rx_agc_low_threshold_db = 11.0;
         cfg.rx_agc_high_threshold_db = 13.0;
+    }
+    if (cfg.equalizer_mode != kEqualizerModeZf &&
+        cfg.equalizer_mode != kEqualizerModeMmse) {
+        LOG_G_WARN() << "Unsupported equalizer_mode='" << cfg.equalizer_mode
+                     << "'. Falling back to '" << kEqualizerModeMmse << "'.";
+        cfg.equalizer_mode = kEqualizerModeMmse;
+    }
+    if (cfg.channel_tracking_mode != kChannelTrackingModeOff &&
+        cfg.channel_tracking_mode != kChannelTrackingModePilotPhase) {
+        LOG_G_WARN() << "Unsupported channel_tracking_mode='" << cfg.channel_tracking_mode
+                     << "'. Falling back to '" << kChannelTrackingModePilotPhase << "'.";
+        cfg.channel_tracking_mode = kChannelTrackingModePilotPhase;
+    }
+    if (cfg.equalizer_mag_floor <= 0.0 || !std::isfinite(cfg.equalizer_mag_floor)) {
+        LOG_G_WARN() << "equalizer_mag_floor is invalid. Falling back to 1e-6.";
+        cfg.equalizer_mag_floor = 1e-6;
+    }
+    if (cfg.channel_tracking_min_pilot_snr <= 0.0 ||
+        !std::isfinite(cfg.channel_tracking_min_pilot_snr)) {
+        LOG_G_WARN() << "channel_tracking_min_pilot_snr is invalid. Falling back to 1e-4.";
+        cfg.channel_tracking_min_pilot_snr = 1e-4;
+    }
+    {
+        std::sort(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end());
+        cfg.midframe_pilot_symbols.erase(
+            std::unique(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end()),
+            cfg.midframe_pilot_symbols.end());
     }
     if (cfg.measurement_enable) {
         if (cfg.measurement_mode.empty()) {

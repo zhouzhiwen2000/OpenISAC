@@ -83,6 +83,24 @@ bool append_csv_row(
         return false;
     }
 }
+
+std::vector<AlignedVector> make_midframe_pilot_sequences(
+    const Config& cfg,
+    const DataResourceGridLayout& layout)
+{
+    std::vector<AlignedVector> sequences;
+    sequences.reserve(layout.midframe_pilot_symbols.size());
+    const AlignedVector comb_pilot_seq = generate_zc_freq(cfg.fft_size, cfg.zc_root);
+    for (const int sym : layout.midframe_pilot_symbols) {
+        sequences.push_back(generate_midframe_bpsk_pilot_freq(
+            cfg.fft_size,
+            cfg.midframe_pilot_seed,
+            static_cast<size_t>(sym),
+            cfg.pilot_positions,
+            comb_pilot_seq));
+    }
+    return sequences;
+}
 } // namespace
 
 /**
@@ -103,6 +121,7 @@ public:
           _measurement_enabled(measurement_mode_enabled(cfg)),
           _data_resource_layout(build_data_resource_grid_layout(cfg)),
           zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
+          _midframe_pilot_seqs(make_midframe_pilot_sequences(cfg, _data_resource_layout)),
           _sensing_pilot_zc_root(select_known_sensing_pilot_zc_root(cfg.fft_size, cfg.zc_root)),
           sensing_pilot_freq_(generate_sensing_pilot_freq(cfg.fft_size, cfg.zc_root)),
           _sync_scratch_buffer(cfg.sync_samples()),
@@ -280,6 +299,7 @@ private:
     }
 
     AlignedVector zc_freq_;
+    std::vector<AlignedVector> _midframe_pilot_seqs;
     int _sensing_pilot_zc_root = 0;
     AlignedVector sensing_pilot_freq_;
     AlignedVector tx_sync_symbol_; 
@@ -301,6 +321,7 @@ private:
     // per-symbol heap allocation in the hot path). Sized once in prepare_fftw().
     std::vector<AlignedVector> _symbols_buf;     // data symbols (excludes sync)
     AlignedVector _sync_symbol_freq_buf;         // sync symbol, freq domain
+    std::vector<AlignedVector> _midframe_symbol_freq_bufs; // full-band pilot symbols
 
     // Persistent scratch for the per-frame demod path. These were previously
     // re-declared (and thus heap-allocated) inside process_ofdm_frame every
@@ -312,6 +333,14 @@ private:
     std::vector<int> _pilot_indices_buf;         // pilot subcarrier indices
     std::vector<float> _avg_phase_diff_buf;      // per-pilot avg phase diff
     std::vector<float> _weights_buf;             // per-pilot regression weights
+    std::vector<int> _tracking_pilot_indices_buf; // per-symbol pilot tracking indices
+    std::vector<float> _tracking_phase_buf;      // per-symbol pilot residual phase
+    std::vector<float> _tracking_weights_buf;    // per-symbol pilot residual weights
+    AlignedVector _tracking_h_inv_buf;           // per-symbol tracked inverse
+    AlignedVector _midframe_tmp_h_buf;           // LS estimate from one full-band pilot
+    AlignedVector _midframe_interp_h_buf;        // time-interpolated channel estimate
+    std::vector<AlignedVector> _channel_anchor_h_bufs;
+    std::vector<int> _channel_anchor_symbols_buf;
     AlignedVector _delay_spectrum_buf;           // delay (time-domain) spectrum
 
     // Core computation instances (manage their own FFT plans)
@@ -425,6 +454,10 @@ private:
     std::atomic<int64_t> _measurement_snr_db_sum_milli{0};
     std::atomic<int64_t> _measurement_evm_rms_sum_micro{0};
     std::atomic<int64_t> _measurement_evm_db_sum_milli{0};
+    std::atomic<int64_t> _measurement_evm_first_db_sum_milli{0};
+    std::atomic<int64_t> _measurement_evm_last_db_sum_milli{0};
+    std::atomic<int64_t> _measurement_evm_max_db_sum_milli{0};
+    std::atomic<int64_t> _measurement_evm_slope_db_sum_milli{0};
     std::atomic<int32_t> _measurement_epoch_tx_gain_x10{std::numeric_limits<int32_t>::min()};
 
     LatencySnapshot _take_latency_snapshot_and_reset() {
@@ -437,23 +470,49 @@ private:
         return snapshot;
     }
 
-    void _record_measurement_frame(double evm_rms) {
+    struct FrameEvmStats {
+        double rms = std::numeric_limits<double>::quiet_NaN();
+        double db = std::numeric_limits<double>::quiet_NaN();
+        double first_db = std::numeric_limits<double>::quiet_NaN();
+        double last_db = std::numeric_limits<double>::quiet_NaN();
+        double max_db = std::numeric_limits<double>::quiet_NaN();
+        double slope_db_per_symbol = std::numeric_limits<double>::quiet_NaN();
+
+        bool valid() const {
+            return std::isfinite(rms) && rms >= 0.0 &&
+                   std::isfinite(db) &&
+                   std::isfinite(first_db) &&
+                   std::isfinite(last_db) &&
+                   std::isfinite(max_db) &&
+                   std::isfinite(slope_db_per_symbol);
+        }
+    };
+
+    void _record_measurement_frame(const FrameEvmStats& evm) {
         if (!_measurement_enabled) {
             return;
         }
         const uint32_t epoch_id = _measurement_active_epoch_id.load(std::memory_order_relaxed);
-        if (epoch_id == 0 || !std::isfinite(evm_rms) || evm_rms < 0.0) {
+        if (epoch_id == 0 || !evm.valid()) {
             return;
         }
         const double snr_db = _snr_db;
-        const double evm_db = 20.0 * std::log10(std::max(evm_rms, 1e-12));
         _measurement_frame_count.fetch_add(1, std::memory_order_relaxed);
         _measurement_snr_db_sum_milli.fetch_add(
             static_cast<int64_t>(std::llround(snr_db * 1000.0)), std::memory_order_relaxed);
         _measurement_evm_rms_sum_micro.fetch_add(
-            static_cast<int64_t>(std::llround(evm_rms * 1.0e6)), std::memory_order_relaxed);
+            static_cast<int64_t>(std::llround(evm.rms * 1.0e6)), std::memory_order_relaxed);
         _measurement_evm_db_sum_milli.fetch_add(
-            static_cast<int64_t>(std::llround(evm_db * 1000.0)), std::memory_order_relaxed);
+            static_cast<int64_t>(std::llround(evm.db * 1000.0)), std::memory_order_relaxed);
+        _measurement_evm_first_db_sum_milli.fetch_add(
+            static_cast<int64_t>(std::llround(evm.first_db * 1000.0)), std::memory_order_relaxed);
+        _measurement_evm_last_db_sum_milli.fetch_add(
+            static_cast<int64_t>(std::llround(evm.last_db * 1000.0)), std::memory_order_relaxed);
+        _measurement_evm_max_db_sum_milli.fetch_add(
+            static_cast<int64_t>(std::llround(evm.max_db * 1000.0)), std::memory_order_relaxed);
+        _measurement_evm_slope_db_sum_milli.fetch_add(
+            static_cast<int64_t>(std::llround(evm.slope_db_per_symbol * 1000.0)),
+            std::memory_order_relaxed);
     }
 
     double _update_llr_snr_filter(double raw_snr_linear) {
@@ -489,19 +548,26 @@ private:
         }
     }
 
-    double _compute_frame_evm_rms(const std::vector<AlignedVector>& symbols) const
+    FrameEvmStats _compute_frame_evm_stats(const std::vector<AlignedVector>& symbols) const
     {
+        FrameEvmStats stats;
         if (symbols.empty() || _payload_subcarrier_indices_flat.empty()) {
-            return std::numeric_limits<double>::quiet_NaN();
+            return stats;
         }
-        const size_t evm_symbol_count = std::min<size_t>(3, symbols.size());
         double err_power_acc = 0.0;
         uint64_t err_count = 0;
-        for (size_t sym_idx = 0; sym_idx < evm_symbol_count; ++sym_idx) {
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        double sum_xx = 0.0;
+        double sum_xy = 0.0;
+        uint64_t per_symbol_count = 0;
+        for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
             const auto& symbol = symbols[sym_idx];
             const auto* __restrict__ sym_ptr = symbol.data();
             const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
             const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+            double sym_err_power_acc = 0.0;
+            uint64_t sym_err_count = 0;
             // No omp simd: sym_ptr[_payload_subcarrier_indices_flat[idx]] is a gather;
             // scalar matches the vectorized version here.
             for (size_t idx = payload_begin; idx < payload_end; ++idx) {
@@ -510,8 +576,9 @@ private:
                 const float ref_im = std::copysign(QPSKModulator::SQRT_2_INV, sym_ptr[k].imag());
                 const float err_re = sym_ptr[k].real() - ref_re;
                 const float err_im = sym_ptr[k].imag() - ref_im;
-                err_power_acc += static_cast<double>(err_re * err_re + err_im * err_im);
-                err_count += 1;
+                const double err_power = static_cast<double>(err_re * err_re + err_im * err_im);
+                sym_err_power_acc += err_power;
+                sym_err_count += 1;
             }
             for (size_t i = 0; i < cfg_.pilot_positions.size(); ++i) {
                 const size_t k = cfg_.pilot_positions[i];
@@ -520,14 +587,220 @@ private:
                 }
                 const float err_re = sym_ptr[k].real() - zc_freq_[k].real();
                 const float err_im = sym_ptr[k].imag() - zc_freq_[k].imag();
-                err_power_acc += static_cast<double>(err_re * err_re + err_im * err_im);
-                err_count += 1;
+                const double err_power = static_cast<double>(err_re * err_re + err_im * err_im);
+                sym_err_power_acc += err_power;
+                sym_err_count += 1;
+            }
+            if (sym_err_count == 0) {
+                continue;
+            }
+            err_power_acc += sym_err_power_acc;
+            err_count += sym_err_count;
+
+            const double sym_rms = std::sqrt(sym_err_power_acc / static_cast<double>(sym_err_count));
+            const double sym_db = 20.0 * std::log10(std::max(sym_rms, 1e-12));
+            if (per_symbol_count == 0) {
+                stats.first_db = sym_db;
+                stats.max_db = sym_db;
+            } else {
+                stats.max_db = std::max(stats.max_db, sym_db);
+            }
+            stats.last_db = sym_db;
+            const double x = static_cast<double>(sym_idx);
+            sum_x += x;
+            sum_y += sym_db;
+            sum_xx += x * x;
+            sum_xy += x * sym_db;
+            ++per_symbol_count;
+        }
+        if (err_count == 0 || per_symbol_count == 0) {
+            return stats;
+        }
+        stats.rms = std::sqrt(err_power_acc / static_cast<double>(err_count));
+        stats.db = 20.0 * std::log10(std::max(stats.rms, 1e-12));
+        stats.slope_db_per_symbol = 0.0;
+        if (per_symbol_count > 1) {
+            const double n = static_cast<double>(per_symbol_count);
+            const double denom = n * sum_xx - sum_x * sum_x;
+            if (std::abs(denom) > 1e-12) {
+                stats.slope_db_per_symbol = (n * sum_xy - sum_x * sum_y) / denom;
             }
         }
-        if (err_count == 0) {
-            return std::numeric_limits<double>::quiet_NaN();
+        return stats;
+    }
+
+    void _compute_channel_inverse(
+        const AlignedVector& H_est,
+        AlignedVector& H_inv,
+        float equalizer_noise_var
+    ) const {
+        const float mag_floor = static_cast<float>(cfg_.equalizer_mag_floor);
+        if (cfg_.equalizer_mode == kEqualizerModeMmse) {
+            ChannelEstimator::compute_mmse_inverse(
+                H_est,
+                H_inv,
+                equalizer_noise_var,
+                mag_floor);
+        } else {
+            ChannelEstimator::compute_zf_inverse(H_est, H_inv, mag_floor);
         }
-        return std::sqrt(err_power_acc / static_cast<double>(err_count));
+    }
+
+    double _estimate_equalizer_noise_var_from_pilots(
+        const std::vector<AlignedVector>& symbols,
+        const AlignedVector& H_est,
+        float global_alpha,
+        float global_beta,
+        double fallback_noise_var
+    ) {
+        if (symbols.empty() || cfg_.pilot_positions.empty() ||
+            _data_resource_layout.data_symbol_to_actual_symbol.size() < symbols.size()) {
+            return fallback_noise_var;
+        }
+
+        const float mag_floor = static_cast<float>(cfg_.equalizer_mag_floor);
+        double err_acc = 0.0;
+        size_t err_count = 0;
+        for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
+            const int actual_symbol = _data_resource_layout.data_symbol_to_actual_symbol[sym_idx];
+            const AlignedVector& symbol_H_base =
+                _interpolated_channel_for_symbol(actual_symbol, H_est);
+            const bool using_midframe_channel = (&symbol_H_base != &H_est);
+            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.sync_pos);
+            const float phase_alpha = using_midframe_channel ? 0.0f : (global_alpha * relative_symbol_index);
+            const float phase_beta = using_midframe_channel ? 0.0f : (global_beta * relative_symbol_index);
+
+            const auto& symbol = symbols[sym_idx];
+            for (const size_t k : cfg_.pilot_positions) {
+                if (k >= symbol.size() || k >= symbol_H_base.size() || k >= zc_freq_.size()) {
+                    continue;
+                }
+                const std::complex<float> h = symbol_H_base[k];
+                const float h_mag_sq = std::max(std::norm(h), mag_floor);
+                const float phase = phase_alpha + phase_beta *
+                    static_cast<float>(_actual_subcarrier_indices[k]);
+                const std::complex<float> phase_rot(std::cos(phase), std::sin(phase));
+                const std::complex<float> pred = h * zc_freq_[k] * phase_rot;
+                const std::complex<float> err = symbol[k] - pred;
+                err_acc += static_cast<double>(std::norm(err) / h_mag_sq);
+                ++err_count;
+            }
+        }
+
+        if (err_count <= 8) {
+            return fallback_noise_var;
+        }
+        return std::min(std::max(err_acc / static_cast<double>(err_count), 1e-6), 1e6);
+    }
+
+    void _estimate_midframe_pilot_ls(
+        const AlignedVector& rx_symbol,
+        const AlignedVector& tx_pilot,
+        AlignedVector& H_est_out
+    ) {
+        const size_t n = std::min(rx_symbol.size(), tx_pilot.size());
+        H_est_out.resize(n);
+        const auto* __restrict__ rx_ptr = rx_symbol.data();
+        const auto* __restrict__ tx_ptr = tx_pilot.data();
+        auto* __restrict__ h_ptr = H_est_out.data();
+
+        #pragma omp simd simdlen(16)
+        for (size_t j = 0; j < n; ++j) {
+            const float rx_re = rx_ptr[j].real();
+            const float rx_im = rx_ptr[j].imag();
+            const float tx_re = tx_ptr[j].real();
+            const float tx_im = tx_ptr[j].imag();
+            h_ptr[j] = std::complex<float>(
+                rx_re * tx_re + rx_im * tx_im,
+                rx_im * tx_re - rx_re * tx_im);
+        }
+    }
+
+    const AlignedVector& _interpolated_channel_for_symbol(int actual_symbol, const AlignedVector& fallback_H)
+    {
+        if (_channel_anchor_symbols_buf.size() < 2) {
+            return fallback_H;
+        }
+        const auto upper = std::upper_bound(
+            _channel_anchor_symbols_buf.begin(),
+            _channel_anchor_symbols_buf.end(),
+            actual_symbol);
+        if (upper == _channel_anchor_symbols_buf.begin()) {
+            return fallback_H;
+        }
+        if (upper == _channel_anchor_symbols_buf.end()) {
+            return _channel_anchor_h_bufs.back();
+        }
+        const size_t hi = static_cast<size_t>(
+            std::distance(_channel_anchor_symbols_buf.begin(), upper));
+        const size_t lo = hi - 1;
+        const int x0 = _channel_anchor_symbols_buf[lo];
+        const int x1 = _channel_anchor_symbols_buf[hi];
+        const float denom = static_cast<float>(x1 - x0);
+        const float t = (denom > 0.0f)
+            ? (static_cast<float>(actual_symbol - x0) / denom)
+            : 0.0f;
+        const auto& h0 = _channel_anchor_h_bufs[lo];
+        const auto& h1 = _channel_anchor_h_bufs[hi];
+        _midframe_interp_h_buf.resize(h0.size());
+        #pragma omp simd simdlen(16)
+        for (size_t j = 0; j < h0.size(); ++j) {
+            _midframe_interp_h_buf[j] = h0[j] * (1.0f - t) + h1[j] * t;
+        }
+        return _midframe_interp_h_buf;
+    }
+
+    bool _fit_symbol_pilot_phase(
+        const AlignedVector& symbol,
+        const AlignedVector& H_base,
+        float& beta_out,
+        float& alpha_out
+    ) {
+        _tracking_pilot_indices_buf.clear();
+        _tracking_phase_buf.clear();
+        _tracking_weights_buf.clear();
+
+        const float denom_floor = static_cast<float>(cfg_.equalizer_mag_floor);
+        const float min_weight = static_cast<float>(cfg_.channel_tracking_min_pilot_snr);
+        for (const size_t k : cfg_.pilot_positions) {
+            if (k >= symbol.size() || k >= H_base.size() || k >= zc_freq_.size()) {
+                continue;
+            }
+            const std::complex<float> denom = H_base[k] * zc_freq_[k];
+            const float denom_power = std::norm(denom);
+            if (!std::isfinite(denom_power) || denom_power <= denom_floor) {
+                continue;
+            }
+
+            const std::complex<float> residual = symbol[k] * std::conj(denom) / denom_power;
+            const float residual_power = std::norm(residual);
+            if (!std::isfinite(residual.real()) ||
+                !std::isfinite(residual.imag()) ||
+                !std::isfinite(residual_power) ||
+                residual_power <= min_weight) {
+                continue;
+            }
+
+            _tracking_pilot_indices_buf.push_back(_actual_subcarrier_indices[k]);
+            _tracking_phase_buf.push_back(std::arg(residual));
+            _tracking_weights_buf.push_back(std::max(denom_power, min_weight));
+        }
+
+        if (_tracking_pilot_indices_buf.size() < 2) {
+            return false;
+        }
+
+        unwrap(_tracking_phase_buf);
+        auto [beta, alpha] = weightedlinearRegression(
+            _tracking_pilot_indices_buf,
+            _tracking_phase_buf,
+            _tracking_weights_buf);
+        if (!std::isfinite(alpha) || !std::isfinite(beta)) {
+            return false;
+        }
+        beta_out = beta;
+        alpha_out = alpha;
+        return true;
     }
 
     void _finalize_measurement_epoch(uint32_t epoch_id) {
@@ -548,6 +821,14 @@ private:
             _measurement_evm_rms_sum_micro.exchange(0, std::memory_order_acq_rel);
         const int64_t evm_db_sum_milli =
             _measurement_evm_db_sum_milli.exchange(0, std::memory_order_acq_rel);
+        const int64_t evm_first_db_sum_milli =
+            _measurement_evm_first_db_sum_milli.exchange(0, std::memory_order_acq_rel);
+        const int64_t evm_last_db_sum_milli =
+            _measurement_evm_last_db_sum_milli.exchange(0, std::memory_order_acq_rel);
+        const int64_t evm_max_db_sum_milli =
+            _measurement_evm_max_db_sum_milli.exchange(0, std::memory_order_acq_rel);
+        const int64_t evm_slope_db_sum_milli =
+            _measurement_evm_slope_db_sum_milli.exchange(0, std::memory_order_acq_rel);
         const int32_t tx_gain_x10 =
             _measurement_epoch_tx_gain_x10.exchange(std::numeric_limits<int32_t>::min(),
                                                     std::memory_order_acq_rel);
@@ -569,6 +850,18 @@ private:
             : std::numeric_limits<double>::quiet_NaN();
         const double evm_db_mean = (frame_count > 0)
             ? (static_cast<double>(evm_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double evm_first_db_mean = (frame_count > 0)
+            ? (static_cast<double>(evm_first_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double evm_last_db_mean = (frame_count > 0)
+            ? (static_cast<double>(evm_last_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double evm_max_db_mean = (frame_count > 0)
+            ? (static_cast<double>(evm_max_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double evm_slope_db_per_symbol_mean = (frame_count > 0)
+            ? (static_cast<double>(evm_slope_db_sum_milli) / 1000.0 / static_cast<double>(frame_count))
             : std::numeric_limits<double>::quiet_NaN();
         const double tx_gain_db = (tx_gain_x10 == std::numeric_limits<int32_t>::min())
             ? std::numeric_limits<double>::quiet_NaN()
@@ -592,6 +885,10 @@ private:
             "estimated_snr_db_mean",
             "evm_rms_mean",
             "evm_db_mean",
+            "evm_first_db_mean",
+            "evm_last_db_mean",
+            "evm_max_db_mean",
+            "evm_slope_db_per_symbol_mean",
         };
         const std::vector<std::string> row{
             cfg_.measurement_run_id,
@@ -608,6 +905,10 @@ private:
             std::to_string(snr_mean),
             std::to_string(evm_rms_mean),
             std::to_string(evm_db_mean),
+            std::to_string(evm_first_db_mean),
+            std::to_string(evm_last_db_mean),
+            std::to_string(evm_max_db_mean),
+            std::to_string(evm_slope_db_per_symbol_mean),
         };
         if (!append_csv_row(_measurement_summary_path, header, row)) {
             LOG_G_WARN() << "Failed to append demodulator measurement row to "
@@ -989,12 +1290,22 @@ private:
             reinterpret_cast<fftwf_complex*>(fft_output_.data()),
             FFTW_FORWARD, FFTW_MEASURE);
 
-        // Pre-size persistent symbol buffers (data symbols exclude the sync symbol).
-        const size_t data_symbol_count =
-            (cfg_.num_symbols > 0) ? (cfg_.num_symbols - 1) : 0;
+        // Pre-size persistent symbol buffers (data symbols exclude sync and
+        // full-band mid-frame pilot symbols).
+        const size_t data_symbol_count = _data_resource_layout.data_symbol_count;
         _symbols_buf.resize(data_symbol_count);
         for (auto& s : _symbols_buf) s.resize(cfg_.fft_size);
         _sync_symbol_freq_buf.resize(cfg_.fft_size);
+        _midframe_symbol_freq_bufs.resize(_data_resource_layout.midframe_pilot_symbol_count);
+        for (auto& s : _midframe_symbol_freq_bufs) s.resize(cfg_.fft_size);
+        _midframe_tmp_h_buf.resize(cfg_.fft_size);
+        _midframe_interp_h_buf.resize(cfg_.fft_size);
+        _channel_anchor_h_bufs.reserve(1 + _data_resource_layout.midframe_pilot_symbol_count);
+        _channel_anchor_symbols_buf.reserve(1 + _data_resource_layout.midframe_pilot_symbol_count);
+        _tracking_h_inv_buf.resize(cfg_.fft_size);
+        _tracking_pilot_indices_buf.reserve(cfg_.pilot_positions.size());
+        _tracking_phase_buf.reserve(cfg_.pilot_positions.size());
+        _tracking_weights_buf.reserve(cfg_.pilot_positions.size());
 
         // Note: ChannelEstimator and DelayProcessor now manage their own FFT plans internally
     }
@@ -1440,6 +1751,16 @@ private:
         static double prof_channel_est_total = 0.0;
         static double prof_cfo_sfo_est_total = 0.0;
         static double prof_equalization_total = 0.0;
+        static double prof_eq_base_inv_total = 0.0;
+        static double prof_eq_channel_select_total = 0.0;
+        static double prof_eq_symbol_inv_total = 0.0;
+        static double prof_eq_pilot_phase_total = 0.0;
+        static double prof_eq_apply_total = 0.0;
+        static uint64_t prof_eq_data_symbols_total = 0;
+        static uint64_t prof_eq_midframe_channel_symbols_total = 0;
+        static uint64_t prof_eq_symbol_inv_count_total = 0;
+        static uint64_t prof_eq_pilot_phase_attempt_total = 0;
+        static uint64_t prof_eq_pilot_phase_success_total = 0;
         static double prof_noise_est_total = 0.0;
         static double prof_remodulate_total = 0.0;
         static double prof_delay_spectrum_total = 0.0;
@@ -1451,7 +1772,13 @@ private:
         constexpr int PROF_REPORT_INTERVAL = 434;
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
-        
+        // Dedicated switch for the per-symbol equalization channel breakdown
+        // (Eq base H_inv / channel select / symbol H_inv / pilot phase / apply).
+        // Kept separate from "latency" so the heavy per-symbol timers can be
+        // toggled independently of end-to-end latency instrumentation.
+        const bool do_eq_breakdown =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("breakdown_eq");
+
         auto prof_step_start = ProfileClock::now();
         auto prof_step_end = prof_step_start;
         // =================================================
@@ -1482,11 +1809,19 @@ private:
         // no faster in sim, so this stage is FFT-compute + scatter bound, not
         // copy bound.
         for (size_t i = 0; i < cfg_.num_symbols; ++i) {
-            // Target working slot: sync symbol or the matching data slot.
             const bool is_sync = (i == cfg_.sync_pos);
-            const size_t data_idx = is_sync ? 0 : ((i < cfg_.sync_pos) ? i : i - 1);
-            std::complex<float>* __restrict__ dst =
-                is_sync ? sync_symbol_freq.data() : symbols[data_idx].data();
+            const int data_idx_int = is_sync ? -1 : _data_resource_layout.actual_symbol_to_data_symbol[i];
+            std::complex<float>* __restrict__ dst = nullptr;
+            if (is_sync) {
+                dst = sync_symbol_freq.data();
+            } else if (data_idx_int >= 0) {
+                dst = symbols[static_cast<size_t>(data_idx_int)].data();
+            } else if (i < _data_resource_layout.midframe_pilot_symbol_to_rank.size()) {
+                const int pilot_rank = _data_resource_layout.midframe_pilot_symbol_to_rank[i];
+                if (pilot_rank >= 0) {
+                    dst = _midframe_symbol_freq_bufs[static_cast<size_t>(pilot_rank)].data();
+                }
+            }
 
             std::copy(frame.frame_data.begin() + pos + cfg_.cp_length,
                      frame.frame_data.begin() + pos + cfg_.cp_length + cfg_.fft_size,
@@ -1503,10 +1838,12 @@ private:
                 #pragma omp simd
                 for (size_t j = 0; j < scale_n; ++j) {
                     const std::complex<float> v = src[j] * scale;
-                    dst[j] = v;
+                    if (dst != nullptr) {
+                        dst[j] = v;
+                    }
                     rx[j] = v;
                 }
-            } else {
+            } else if (dst != nullptr) {
                 #pragma omp simd
                 for (size_t j = 0; j < scale_n; ++j) {
                     dst[j] = src[j] * scale;
@@ -1528,6 +1865,34 @@ private:
             cfg_.cp_length,
             &corrected_impulse_snr_linear_est);
         //_channel_estimator.estimate_from_sync_ls(sync_symbol_freq, zc_freq_, H_est);
+
+        _channel_anchor_symbols_buf.clear();
+        _channel_anchor_h_bufs.clear();
+        _channel_anchor_symbols_buf.push_back(static_cast<int>(cfg_.sync_pos));
+        _channel_anchor_h_bufs.push_back(H_est);
+        if (!_midframe_pilot_seqs.empty()) {
+            for (size_t p = 0; p < _data_resource_layout.midframe_pilot_symbols.size(); ++p) {
+                const int actual_sym = _data_resource_layout.midframe_pilot_symbols[p];
+                if (actual_sym < 0 || p >= _midframe_pilot_seqs.size() ||
+                    p >= _midframe_symbol_freq_bufs.size()) {
+                    continue;
+                }
+                _estimate_midframe_pilot_ls(
+                    _midframe_symbol_freq_bufs[p],
+                    _midframe_pilot_seqs[p],
+                    _midframe_tmp_h_buf);
+                const auto insert_at = std::lower_bound(
+                    _channel_anchor_symbols_buf.begin(),
+                    _channel_anchor_symbols_buf.end(),
+                    actual_sym);
+                const size_t offset = static_cast<size_t>(
+                    std::distance(_channel_anchor_symbols_buf.begin(), insert_at));
+                _channel_anchor_symbols_buf.insert(insert_at, actual_sym);
+                _channel_anchor_h_bufs.insert(
+                    _channel_anchor_h_bufs.begin() + static_cast<std::ptrdiff_t>(offset),
+                    _midframe_tmp_h_buf);
+            }
+        }
 
         prof_step_end = ProfileClock::now();
         prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1622,26 +1987,131 @@ private:
         }
 
         prof_step_start = ProfileClock::now();
-        // Pre-compute H_est inverse (ZF equalizer base) using ChannelEstimator
-        static thread_local AlignedVector H_inv;
-        ChannelEstimator::compute_zf_inverse(H_est, H_inv);
-        
-        for (size_t i = 0; i < symbols.size(); ++i) {
-            auto& symbol = symbols[i];
-            
-            const int relative_symbol_index = (i < cfg_.sync_pos) ? 
-                (static_cast<int>(i) - static_cast<int>(cfg_.sync_pos)) : 
-                (static_cast<int>(i) + 1 - static_cast<int>(cfg_.sync_pos));
-            const float phase_diff_CFO = alpha * relative_symbol_index;
-            const float beta_rel = beta * relative_symbol_index;
+        double prof_eq_base_inv_us = 0.0;
+        double prof_eq_channel_select_us = 0.0;
+        double prof_eq_symbol_inv_us = 0.0;
+        double prof_eq_pilot_phase_us = 0.0;
+        double prof_eq_apply_us = 0.0;
+        uint64_t prof_eq_data_symbols = 0;
+        uint64_t prof_eq_midframe_channel_symbols = 0;
+        uint64_t prof_eq_symbol_inv_count = 0;
+        uint64_t prof_eq_pilot_phase_attempt = 0;
+        uint64_t prof_eq_pilot_phase_success = 0;
+        const double impulse_noise_var = noise_variance_from_snr_linear(
+            std::max<double>(corrected_impulse_snr_linear_est, 1e-6));
+        const float equalizer_noise_var = (cfg_.equalizer_mode == kEqualizerModeMmse)
+            ? static_cast<float>(impulse_noise_var)
+            : 0.0f;
 
-            // Equalization using ChannelEstimator
-            ChannelEstimator::equalize_symbol(symbol, H_inv, phase_diff_CFO, beta_rel, _actual_subcarrier_indices);
+        // Fine-grained equalization sub-timers add several ProfileClock::now()
+        // calls per data symbol (hundreds per frame) to this hot loop. Gate them
+        // behind the breakdown_eq switch so production runs (profiling off) pay
+        // nothing; the coarse per-stage Equalization timer above still always runs.
+        const auto eq_tick = [do_eq_breakdown]() {
+            return do_eq_breakdown ? ProfileClock::now() : ProfileClock::time_point{};
+        };
+        const auto eq_accum = [do_eq_breakdown](double& acc,
+                                                   ProfileClock::time_point t0,
+                                                   ProfileClock::time_point t1) {
+            if (do_eq_breakdown) {
+                acc += std::chrono::duration<double, std::micro>(t1 - t0).count();
+            }
+        };
+
+        // Pre-compute a fallback channel inverse. Mid-frame full-band pilots
+        // provide additional time anchors and may replace this per symbol.
+        static thread_local AlignedVector H_inv;
+        static thread_local AlignedVector last_anchor_H_inv;
+        bool last_anchor_H_inv_valid = false;
+        auto prof_eq_sub_start = eq_tick();
+        _compute_channel_inverse(H_est, H_inv, equalizer_noise_var);
+        auto prof_eq_sub_end = eq_tick();
+        eq_accum(prof_eq_base_inv_us, prof_eq_sub_start, prof_eq_sub_end);
+        const bool use_symbol_tracking =
+            cfg_.channel_tracking_mode != kChannelTrackingModeOff &&
+            !cfg_.pilot_positions.empty();
+
+        for (size_t i = 0; i < symbols.size(); ++i) {
+            ++prof_eq_data_symbols;
+            auto& symbol = symbols[i];
+            const int actual_symbol = _data_resource_layout.data_symbol_to_actual_symbol[i];
+            prof_eq_sub_start = eq_tick();
+            const AlignedVector& symbol_H_base =
+                _interpolated_channel_for_symbol(actual_symbol, H_est);
+            prof_eq_sub_end = eq_tick();
+            eq_accum(prof_eq_channel_select_us, prof_eq_sub_start, prof_eq_sub_end);
+
+            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.sync_pos);
+            const bool using_midframe_channel = (&symbol_H_base != &H_est);
+            if (using_midframe_channel) {
+                ++prof_eq_midframe_channel_symbols;
+            }
+            float phase_diff_CFO = using_midframe_channel ? 0.0f : (alpha * relative_symbol_index);
+            float beta_rel = using_midframe_channel ? 0.0f : (beta * relative_symbol_index);
+            const AlignedVector* symbol_H_inv = &H_inv;
+            const bool using_last_anchor_channel =
+                using_midframe_channel &&
+                !_channel_anchor_h_bufs.empty() &&
+                (&symbol_H_base == &_channel_anchor_h_bufs.back());
+            if (&symbol_H_base != &H_est) {
+                if (using_last_anchor_channel) {
+                    if (!last_anchor_H_inv_valid) {
+                        ++prof_eq_symbol_inv_count;
+                        prof_eq_sub_start = eq_tick();
+                        _compute_channel_inverse(symbol_H_base, last_anchor_H_inv, equalizer_noise_var);
+                        prof_eq_sub_end = eq_tick();
+                        eq_accum(prof_eq_symbol_inv_us, prof_eq_sub_start, prof_eq_sub_end);
+                        last_anchor_H_inv_valid = true;
+                    }
+                    symbol_H_inv = &last_anchor_H_inv;
+                } else {
+                    ++prof_eq_symbol_inv_count;
+                    prof_eq_sub_start = eq_tick();
+                    _compute_channel_inverse(symbol_H_base, _tracking_h_inv_buf, equalizer_noise_var);
+                    prof_eq_sub_end = eq_tick();
+                    eq_accum(prof_eq_symbol_inv_us, prof_eq_sub_start, prof_eq_sub_end);
+                    symbol_H_inv = &_tracking_h_inv_buf;
+                }
+            }
+
+            if (use_symbol_tracking) {
+                float tracked_beta = 0.0f;
+                float tracked_alpha = 0.0f;
+                ++prof_eq_pilot_phase_attempt;
+                prof_eq_sub_start = eq_tick();
+                if (_fit_symbol_pilot_phase(symbol, symbol_H_base, tracked_beta, tracked_alpha)) {
+                    ++prof_eq_pilot_phase_success;
+                    phase_diff_CFO = tracked_alpha;
+                    beta_rel = tracked_beta;
+                }
+                prof_eq_sub_end = eq_tick();
+                eq_accum(prof_eq_pilot_phase_us, prof_eq_sub_start, prof_eq_sub_end);
+            }
+
+            prof_eq_sub_start = eq_tick();
+            ChannelEstimator::equalize_symbol(
+                symbol,
+                *symbol_H_inv,
+                phase_diff_CFO,
+                beta_rel,
+                _actual_subcarrier_indices);
+            prof_eq_sub_end = eq_tick();
+            eq_accum(prof_eq_apply_us, prof_eq_sub_start, prof_eq_sub_end);
         }
         prof_step_end = ProfileClock::now();
         prof_equalization_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        prof_eq_base_inv_total += prof_eq_base_inv_us;
+        prof_eq_channel_select_total += prof_eq_channel_select_us;
+        prof_eq_symbol_inv_total += prof_eq_symbol_inv_us;
+        prof_eq_pilot_phase_total += prof_eq_pilot_phase_us;
+        prof_eq_apply_total += prof_eq_apply_us;
+        prof_eq_data_symbols_total += prof_eq_data_symbols;
+        prof_eq_midframe_channel_symbols_total += prof_eq_midframe_channel_symbols;
+        prof_eq_symbol_inv_count_total += prof_eq_symbol_inv_count;
+        prof_eq_pilot_phase_attempt_total += prof_eq_pilot_phase_attempt;
+        prof_eq_pilot_phase_success_total += prof_eq_pilot_phase_success;
 
-        // ================= SNR / LLR Scale Estimation (Corrected impulse-response SNR) =================
+        // ================= SNR / LLR Scale Estimation =================
         prof_step_start = ProfileClock::now();
         _snr_linear = std::max<double>(corrected_impulse_snr_linear_est, 1e-6);
         _snr_db = 10.0 * std::log10(_snr_linear);
@@ -1661,9 +2131,20 @@ private:
                 if (i == cfg_.sync_pos) {
                     // Sync symbol uses original ZC sequence.
                     sense_frame.tx_symbols[i] = zc_freq_;
+                } else if (i < _data_resource_layout.midframe_pilot_symbol_to_rank.size() &&
+                           _data_resource_layout.midframe_pilot_symbol_to_rank[i] >= 0) {
+                    const size_t pilot_rank = static_cast<size_t>(
+                        _data_resource_layout.midframe_pilot_symbol_to_rank[i]);
+                    if (pilot_rank < _midframe_pilot_seqs.size()) {
+                        sense_frame.tx_symbols[i] = _midframe_pilot_seqs[pilot_rank];
+                    }
                 } else {
                     // Data symbol remodulation is only needed for bistatic sensing.
-                    const size_t symbol_idx = (i < cfg_.sync_pos) ? i : i - 1;
+                    const int symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
+                    if (symbol_idx_int < 0) {
+                        continue;
+                    }
+                    const size_t symbol_idx = static_cast<size_t>(symbol_idx_int);
                     QPSKModulator::remodulate_symbol(
                         symbols[symbol_idx],
                         zc_freq_,
@@ -1874,8 +2355,8 @@ private:
 
         if (_measurement_enabled &&
             _measurement_active_epoch_id.load(std::memory_order_relaxed) != 0) {
-            const double evm_rms = _compute_frame_evm_rms(symbols);
-            _record_measurement_frame(evm_rms);
+            const FrameEvmStats evm = _compute_frame_evm_stats(symbols);
+            _record_measurement_frame(evm);
         }
 
         if (_data_resource_layout.payload_re_count > 0) {
@@ -1917,13 +2398,36 @@ private:
                           prof_equalization_total + prof_noise_est_total + prof_remodulate_total + 
                           prof_delay_spectrum_total + prof_timing_sync_total + prof_sensing_queue_total + 
                           prof_udp_send_total + prof_llr_total;
+            const double avg_eq_symbols =
+                static_cast<double>(prof_eq_data_symbols_total) / static_cast<double>(prof_frame_count);
+            const double avg_eq_midframe_symbols =
+                static_cast<double>(prof_eq_midframe_channel_symbols_total) / static_cast<double>(prof_frame_count);
+            const double avg_eq_symbol_inv_count =
+                static_cast<double>(prof_eq_symbol_inv_count_total) / static_cast<double>(prof_frame_count);
+            const double avg_eq_pilot_phase_attempt =
+                static_cast<double>(prof_eq_pilot_phase_attempt_total) / static_cast<double>(prof_frame_count);
+            const double avg_eq_pilot_phase_success =
+                static_cast<double>(prof_eq_pilot_phase_success_total) / static_cast<double>(prof_frame_count);
             std::ostringstream oss;
             oss << "\n========== process_ofdm_frame Profiling (avg per frame, us) ==========\n"
                 << "FFT (all symbols):    " << prof_fft_total / prof_frame_count << " us\n"
                 << "Channel Estimation:   " << prof_channel_est_total / prof_frame_count << " us\n"
                 << "CFO/SFO Estimation:   " << prof_cfo_sfo_est_total / prof_frame_count << " us\n"
-                << "Equalization:         " << prof_equalization_total / prof_frame_count << " us\n"
-                << "Noise Estimation:     " << prof_noise_est_total / prof_frame_count << " us\n"
+                << "Equalization:         " << prof_equalization_total / prof_frame_count << " us\n";
+            // The Eq sub-breakdown is only timed when breakdown_eq is enabled;
+            // skip it otherwise (the per-symbol sub-timers were gated off, so the
+            // buckets would just read 0 us).
+            if (do_eq_breakdown) {
+                oss << "  Eq base H_inv:      " << prof_eq_base_inv_total / prof_frame_count << " us\n"
+                    << "  Eq channel select:  " << prof_eq_channel_select_total / prof_frame_count << " us"
+                    << " (" << avg_eq_midframe_symbols << "/" << avg_eq_symbols << " midframe-H symbols)\n"
+                    << "  Eq symbol H_inv:    " << prof_eq_symbol_inv_total / prof_frame_count << " us"
+                    << " (" << avg_eq_symbol_inv_count << " calls/frame)\n"
+                    << "  Eq pilot phase fit: " << prof_eq_pilot_phase_total / prof_frame_count << " us"
+                    << " (" << avg_eq_pilot_phase_success << "/" << avg_eq_pilot_phase_attempt << " ok/frame)\n"
+                    << "  Eq apply:           " << prof_eq_apply_total / prof_frame_count << " us\n";
+            }
+            oss << "Noise Estimation:     " << prof_noise_est_total / prof_frame_count << " us\n"
                 << "Remodulation:         " << prof_remodulate_total / prof_frame_count << " us\n"
                 << "Delay Spectrum:       " << prof_delay_spectrum_total / prof_frame_count << " us\n"
                 << "Timing Sync:          " << prof_timing_sync_total / prof_frame_count << " us\n"
@@ -1939,6 +2443,16 @@ private:
             prof_channel_est_total = 0.0;
             prof_cfo_sfo_est_total = 0.0;
             prof_equalization_total = 0.0;
+            prof_eq_base_inv_total = 0.0;
+            prof_eq_channel_select_total = 0.0;
+            prof_eq_symbol_inv_total = 0.0;
+            prof_eq_pilot_phase_total = 0.0;
+            prof_eq_apply_total = 0.0;
+            prof_eq_data_symbols_total = 0;
+            prof_eq_midframe_channel_symbols_total = 0;
+            prof_eq_symbol_inv_count_total = 0;
+            prof_eq_pilot_phase_attempt_total = 0;
+            prof_eq_pilot_phase_success_total = 0;
             prof_noise_est_total = 0.0;
             prof_remodulate_total = 0.0;
             prof_delay_spectrum_total = 0.0;

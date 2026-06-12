@@ -206,7 +206,7 @@ def main() -> None:
         wait_for_demod_sync(demod_unit_name, demod_log_since, args.sync_timeout)
 
         mod_control_port = int(mod_cfg.get("control_port", 9999))
-        demod_control_port = int(demod_cfg.get("control_port", 10000))
+        demod_control_port = int(demod_cfg.get("control_port", 10001))
         for epoch_id, tx_gain_db in enumerate(tx_gains, start=1):
             send_control_command(mod_control_port, b"TXGN", int(round(tx_gain_db * 10.0)))
             time.sleep(args.gain_settle)

@@ -138,7 +138,7 @@ def load_launch_defaults(
 
     if inferred_mode == "bi":
         port = DEFAULT_PORT_BI
-        control_port = 10000
+        control_port = 10001
         channel_count = 1
         title = default_title or "OpenISAC Backend Bi-Sensing Viewer"
     else:

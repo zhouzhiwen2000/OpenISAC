@@ -324,6 +324,7 @@ private:
     
     // Zadoff-Chu sequence
     AlignedVector _zc_seq;
+    std::vector<AlignedVector> _midframe_pilot_seqs;
     AlignedVector _sensing_pilot_seq;
     int _sensing_pilot_zc_root = 0;
     const AlignedVector _blank_frame;
@@ -1086,6 +1087,16 @@ private:
         _sensing_pilot_zc_root =
             select_known_sensing_pilot_zc_root(_cfg.fft_size, _cfg.zc_root);
         _sensing_pilot_seq = generate_zc_freq(_cfg.fft_size, _sensing_pilot_zc_root);
+        _midframe_pilot_seqs.clear();
+        _midframe_pilot_seqs.reserve(_data_resource_layout.midframe_pilot_symbols.size());
+        for (const int sym : _data_resource_layout.midframe_pilot_symbols) {
+            _midframe_pilot_seqs.push_back(generate_midframe_bpsk_pilot_freq(
+                _cfg.fft_size,
+                _cfg.midframe_pilot_seed,
+                static_cast<size_t>(sym),
+                _cfg.pilot_positions,
+                _zc_seq));
+        }
     }
 
     static std::complex<float> _qpsk_symbol_from_int(int sym) {
@@ -1112,6 +1123,17 @@ private:
             // The sync symbol always keeps the dedicated sync ZC sequence.
             if (sym == _cfg.sync_pos) {
                 std::memcpy(template_symbol.data(), _zc_seq.data(),
+                            _cfg.fft_size * sizeof(std::complex<float>));
+                continue;
+            }
+            const int midframe_pilot_rank =
+                (sym < _data_resource_layout.midframe_pilot_symbol_to_rank.size())
+                    ? _data_resource_layout.midframe_pilot_symbol_to_rank[sym]
+                    : -1;
+            if (midframe_pilot_rank >= 0) {
+                const auto& pilot_seq =
+                    _midframe_pilot_seqs[static_cast<size_t>(midframe_pilot_rank)];
+                std::memcpy(template_symbol.data(), pilot_seq.data(),
                             _cfg.fft_size * sizeof(std::complex<float>));
                 continue;
             }
@@ -1604,24 +1626,23 @@ private:
                             _cfg.fft_size * sizeof(std::complex<float>));
                 if (i != _cfg.sync_pos) {
                     const int data_symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
-                    if (data_symbol_idx_int < 0) {
-                        throw std::runtime_error("Invalid payload resource layout for non-sync symbol.");
-                    }
-                    const size_t data_symbol_idx = static_cast<size_t>(data_symbol_idx_int);
-                    const size_t payload_begin = _data_resource_layout.payload_offsets[data_symbol_idx];
-                    const size_t payload_end = _data_resource_layout.payload_offsets[data_symbol_idx + 1];
-                    const size_t payload_count = payload_end - payload_begin;
-                    const size_t payload_available = (payload_begin < data_pool.size())
-                        ? std::min(payload_count, data_pool.size() - payload_begin)
-                        : 0;
-                    auto* __restrict__ fft_ptr = _fft_in.data();
-                    const auto* __restrict__ payload_ptr = modulated_data_pool.data();
-                    const int* __restrict__ payload_sc_ptr =
-                        _payload_subcarrier_indices_flat.data() + payload_begin;
+                    if (data_symbol_idx_int >= 0) {
+                        const size_t data_symbol_idx = static_cast<size_t>(data_symbol_idx_int);
+                        const size_t payload_begin = _data_resource_layout.payload_offsets[data_symbol_idx];
+                        const size_t payload_end = _data_resource_layout.payload_offsets[data_symbol_idx + 1];
+                        const size_t payload_count = payload_end - payload_begin;
+                        const size_t payload_available = (payload_begin < data_pool.size())
+                            ? std::min(payload_count, data_pool.size() - payload_begin)
+                            : 0;
+                        auto* __restrict__ fft_ptr = _fft_in.data();
+                        const auto* __restrict__ payload_ptr = modulated_data_pool.data();
+                        const int* __restrict__ payload_sc_ptr =
+                            _payload_subcarrier_indices_flat.data() + payload_begin;
 
-                    for (size_t payload_idx = 0; payload_idx < payload_available; ++payload_idx) {
-                        const int k = payload_sc_ptr[payload_idx];
-                        fft_ptr[k] = payload_ptr[payload_begin + payload_idx];
+                        for (size_t payload_idx = 0; payload_idx < payload_available; ++payload_idx) {
+                            const int k = payload_sc_ptr[payload_idx];
+                            fft_ptr[k] = payload_ptr[payload_begin + payload_idx];
+                        }
                     }
                 }
                 
