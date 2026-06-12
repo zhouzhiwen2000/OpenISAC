@@ -242,7 +242,7 @@ export const architectureContent = {
 </figure>
 <ul>
   <li><strong>Bit Processing:</strong> Handles UDP payloads, LDPC encoding, and scrambling.</li>
-  <li><strong>OFDM Modulator:</strong> Performs QPSK mapping, pilot insertion, IFFT, and CP insertion. Pads frames with random bits if traffic is low.</li>
+  <li><strong>OFDM Modulator:</strong> Performs QPSK mapping, comb-pilot insertion, IFFT, and CP insertion. Pads frames with random bits if traffic is low.</li>
   <li><strong>Radio I/O:</strong> "USRP-TX" sends waveforms; "USRP-RX" captures radar streams.</li>
   <li><strong>Sensing Thread:</strong> Performs real-time monostatic sensing (OFDM demod, division, Range-Doppler map). Supports "stride" processing to balance load.</li>
 </ul>`,
@@ -294,7 +294,7 @@ export const architectureContent = {
 </figure>
 <ul>
   <li><strong>比特处理：</strong> 处理 UDP 负载、LDPC 编码和加扰。</li>
-  <li><strong>OFDM 调制器：</strong> 执行 QPSK 映射、导频插入、IFFT 和 CP 插入。如果流量较低，则用随机比特填充。</li>
+  <li><strong>OFDM 调制器：</strong> 执行 QPSK 映射、梳状导频插入、IFFT 和 CP 插入。如果流量较低，则用随机比特填充。</li>
   <li><strong>无线电 I/O：</strong> “USRP-TX”发送波形；“USRP-RX”接收雷达回波。</li>
   <li><strong>感知线程：</strong> 执行实时单站感知（OFDM 解调、除法、距离-多普勒图）。支持稀疏处理以降低运算负担。</li>
 </ul>`,
@@ -422,7 +422,7 @@ e^{j2\pi f_{D,s,p} t}} $$</div>
     \bigl( j2\pi ( m-m_{\mathrm{sync}} )( \hat{f}_{o,\gamma}T_O-n\Delta fN_s\Delta \hat{T}_{s,\gamma} )
     \bigr) $$</div>
   </li>
-  <li><strong>CFO/SFO Tracking:</strong> Pilots are used to track residual carrier frequency offset (CFO) and sampling frequency offset (SFO) via Weighted Linear Regression (WLS) on pilot phase errors:
+  <li><strong>CFO/SFO Tracking:</strong> Comb pilots are used to track residual carrier frequency offset (CFO) and sampling frequency offset (SFO) via Weighted Linear Regression (WLS) on comb-pilot phase errors:
     <div class="equation">$$ \hat{\boldsymbol{\theta}}_\gamma = \big( \boldsymbol{A}_\gamma^{{T}} \boldsymbol{W}_\gamma
     \boldsymbol{A}_\gamma \big)^{-1} \boldsymbol{A}_\gamma^{{T}} \boldsymbol{W}_\gamma
     \boldsymbol{\varphi}_{{UE},\gamma} $$</div>
@@ -563,7 +563,7 @@ e^{j2\pi f_{D,s,p} t}} $$</div>
     \bigl( j2\pi ( m-m_{\mathrm{sync}} )( \hat{f}_{o,\gamma}T_O-n\Delta fN_s\Delta \hat{T}_{s,\gamma} )
     \bigr) $$</div>
   </li>
-  <li><strong>CFO/SFO 跟踪：</strong> 通过导频相位误差的加权线性回归 (WLS) 来跟踪残留载波频率偏差 (CFO) 和采样频率偏差 (SFO)：
+  <li><strong>CFO/SFO 跟踪：</strong> 通过梳状导频相位误差的加权线性回归 (WLS) 来跟踪残留载波频率偏差 (CFO) 和采样频率偏差 (SFO)：
     <div class="equation">$$ \hat{\boldsymbol{\theta}}_\gamma = \big( \boldsymbol{A}_\gamma^{{T}} \boldsymbol{W}_\gamma
     \boldsymbol{A}_\gamma \big)^{-1} \boldsymbol{A}_\gamma^{{T}} \boldsymbol{W}_\gamma
     \boldsymbol{\varphi}_{{UE},\gamma} $$</div>

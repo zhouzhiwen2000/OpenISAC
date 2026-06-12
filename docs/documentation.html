@@ -298,7 +298,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <li>Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.</li>
 <li>Includes CPU command presets and a custom command field for each tab.</li>
 <li>Lets you draw payload / sensing-pilot rectangles for <code>data_resource_blocks</code>, or compact sensing rectangles for <code>sensing_mask_blocks</code>, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.</li>
-<li>Includes a <code>Guard Band Grid</code> preset that follows <code>scripts/plot_const.py</code>, i.e. it keeps only subcarriers <code>1..489</code> and <code>535..N-1</code> before the normal sync/pilot stripping rules are applied.</li>
+<li>Includes a <code>Guard Band Grid</code> preset that follows <code>scripts/plot_const.py</code>, i.e. it keeps only subcarriers <code>1..489</code> and <code>535..N-1</code> before the normal sync/comb-pilot stripping rules are applied.</li>
 </ul>
 <p>Notes:</p>
 <ul>
@@ -404,19 +404,19 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <td style="text-align:left"><code>pilot_positions</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[571,...,451]</code></td>
-<td style="text-align:left">Pilot subcarrier indices.</td>
+<td style="text-align:left">Configurable comb-pilot subcarrier indices.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>data_resource_blocks</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">omitted</td>
-<td style="text-align:left">Optional communication resource map. It answers: &quot;which RE are allowed to carry payload?&quot; Omit the key to keep the legacy behavior, where every non-sync, non-pilot RE carries payload. Set <code>[]</code> to disable payload RE entirely. Each block is a rectangle with <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, <code>subcarrier_count</code>, and optional <code>kind</code>. <code>kind: payload</code> means those RE carry real payload. <code>kind: sensing_pilot</code> means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-sync, non-pilot RE outside <code>payload</code> blocks transmit pre-generated QPSK.</td>
+<td style="text-align:left">Optional communication resource map. It answers: &quot;which RE are allowed to carry payload?&quot; Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE carries payload. Set <code>[]</code> to disable payload RE entirely. Each block is a rectangle with <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, <code>subcarrier_count</code>, and optional <code>kind</code>. <code>kind: payload</code> means those RE carry real payload. <code>kind: sensing_pilot</code> means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-sync, non-comb-pilot RE outside <code>payload</code> blocks transmit pre-generated QPSK.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>sensing_mask_blocks</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">omitted</td>
-<td style="text-align:left">Optional compact sensing resource map. It answers: &quot;which RE should be exported on the sensing output path?&quot; It is used only when <code>sensing_output_mode=compact_mask</code>; in <code>dense</code> mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. Sync / pilot RE are allowed here, overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled.</td>
+<td style="text-align:left">Optional compact sensing resource map. It answers: &quot;which RE should be exported on the sensing output path?&quot; It is used only when <code>sensing_output_mode=compact_mask</code>; in <code>dense</code> mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. Sync-symbol and comb-pilot RE are allowed here, overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -600,7 +600,7 @@ Use <code>config/Modulator_X310.yaml</code> or <code>config/Modulator_B210.yaml<
 <li><code>sensing_mask_blocks</code> decides which RE are exported for compact sensing.</li>
 <li>The first affects payload mapping; the second affects sensing output only.</li>
 </ul>
-<p>If <code>data_resource_blocks</code> is enabled, copy the same rectangles and <code>kind</code> values into <code>Demodulator.yaml</code>. If a block overlaps <code>sync_pos</code> or <code>pilot_positions</code>, the built-in sync / pilot RE still take precedence. Priority is always <code>sync symbol &gt; pilot &gt; sensing_pilot &gt; payload/random QPSK</code>.</p>
+<p>If <code>data_resource_blocks</code> is enabled, copy the same rectangles and <code>kind</code> values into <code>Demodulator.yaml</code>. If a block overlaps <code>sync_pos</code> or <code>pilot_positions</code>, the built-in sync symbol and comb-pilot RE still take precedence. Priority is always <code>sync symbol &gt; comb-pilot RE &gt; sensing_pilot &gt; payload/random QPSK</code>.</p>
 <p>When <code>sensing_output_mode=compact_mask</code>, sensing sends one compact message per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>. In this mode <code>STRD</code> is ignored, because the mask itself defines the sampling pattern. If the mask is &quot;regular&quot; (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime <code>MTI</code> and local Delay-Doppler processing can also be enabled: <code>SKIP=1</code> keeps the raw compact RE output, while <code>SKIP=0</code> switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands <code>range_fft_size</code> and <code>doppler_fft_size</code> when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>, followed by <code>re_count</code> raw <code>complex&lt;float&gt;</code> values in fixed order. Existing <code>plot_sensing*.py</code> viewers cannot handle non-&quot;regular&quot; compact payloads yet.</p>
 <p><code>sensing_rx_channels</code> object fields:</p>
 <table>
@@ -832,19 +832,19 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left"><code>pilot_positions</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[571,...,451]</code></td>
-<td style="text-align:left">Pilot subcarrier indices.</td>
+<td style="text-align:left">Configurable comb-pilot subcarrier indices.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>data_resource_blocks</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">omitted</td>
-<td style="text-align:left">Receiver-side communication resource map. It answers: &quot;which RE should be interpreted as payload?&quot; Omit the key to keep the legacy behavior, where every non-sync, non-pilot RE is treated as payload. Set <code>[]</code> to extract no payload LLR at all. Use the same rectangles and <code>kind</code> values as the transmitter. Blocks with <code>kind: payload</code> produce payload LLR; blocks with <code>kind: sensing_pilot</code> are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root.</td>
+<td style="text-align:left">Receiver-side communication resource map. It answers: &quot;which RE should be interpreted as payload?&quot; Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set <code>[]</code> to extract no payload LLR at all. Use the same rectangles and <code>kind</code> values as the transmitter. Blocks with <code>kind: payload</code> produce payload LLR; blocks with <code>kind: sensing_pilot</code> are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>sensing_mask_blocks</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">omitted</td>
-<td style="text-align:left">Receiver-side compact sensing resource map. It answers: &quot;which RE should be exported on the bistatic sensing path in <code>compact_mask</code> mode?&quot; The coordinate system and behavior are the same as on the modulator side: absolute frame-symbol index, raw FFT-bin index, sync / pilot RE allowed, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled.</td>
+<td style="text-align:left">Receiver-side compact sensing resource map. It answers: &quot;which RE should be exported on the bistatic sensing path in <code>compact_mask</code> mode?&quot; The coordinate system and behavior are the same as on the modulator side: absolute frame-symbol index, raw FFT-bin index, sync-symbol and comb-pilot RE allowed, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -1139,7 +1139,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <p>Receiver-side note:</p>
 <ul>
 <li><code>data_resource_blocks</code> should normally match the transmitter exactly, including <code>kind</code>.</li>
-<li>If a resource block overlaps <code>sync_pos</code> or <code>pilot_positions</code>, the built-in sync / pilot RE still win. Priority is <code>sync symbol &gt; pilot &gt; sensing_pilot &gt; payload/random QPSK</code>.</li>
+<li>If a resource block overlaps <code>sync_pos</code> or <code>pilot_positions</code>, the built-in sync symbol and comb-pilot RE still win. Priority is <code>sync symbol &gt; comb-pilot RE &gt; sensing_pilot &gt; payload/random QPSK</code>.</li>
 <li>In <code>compact_mask</code> mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by <code>sensing_mask_blocks</code>; <code>STRD</code> is ignored in this mode because the mask already defines the sampling pattern.</li>
 <li>The compact payload format is the same as on the modulator side: <code>CompactSensingFrameHeader</code> followed by fixed-order raw <code>complex&lt;float&gt;</code> samples.</li>
 </ul>
