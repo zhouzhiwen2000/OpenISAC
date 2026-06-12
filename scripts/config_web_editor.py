@@ -935,7 +935,19 @@ def default_data_resource_block_item(data: dict[str, Any]) -> dict[str, Any]:
     fft_size = max(1, int_or_default(data.get("fft_size"), 1024))
     num_symbols = max(1, int_or_default(data.get("num_symbols"), 100))
     sync_pos = int_or_default(data.get("sync_pos"), 0)
-    data_symbol_candidates = [idx for idx in range(num_symbols) if idx != sync_pos]
+    reserved_symbols = {sync_pos}
+    if bool_value(data.get("enable_sec_sync_symbol", False)) and sync_pos > 0:
+        reserved_symbols.add(sync_pos - 1)
+    midframe_pilot_symbols = data.get("midframe_pilot_symbols", [])
+    if isinstance(midframe_pilot_symbols, list):
+        reserved_symbols.update(
+            int_or_default(sym, -1)
+            for sym in midframe_pilot_symbols
+        )
+    data_symbol_candidates = [
+        idx for idx in range(num_symbols)
+        if idx not in reserved_symbols
+    ]
     symbol_start = data_symbol_candidates[0] if data_symbol_candidates else 0
     symbol_count = min(4, len(data_symbol_candidates)) if data_symbol_candidates else 1
     subcarrier_count = min(128, fft_size)
@@ -961,6 +973,81 @@ def normalized_data_resource_block_items(items: list[Any]) -> list[dict[str, Any
             "subcarrier_count": int_or_zero(item.get("subcarrier_count")),
         })
     return normalized
+
+
+def bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    return bool(value)
+
+
+def cfo_training_symbol_for_data(data: dict[str, Any]) -> int | None:
+    if not bool_value(data.get("enable_cfo_training_sequence", False)):
+        return None
+    num_symbols = max(1, int_or_default(data.get("num_symbols"), 100))
+    sync_pos = int_or_default(data.get("sync_pos"), 0)
+    cfo_symbol = sync_pos + 1
+    if 0 <= cfo_symbol < num_symbols:
+        return cfo_symbol
+    return None
+
+
+def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] | None:
+    cfo_symbol = cfo_training_symbol_for_data(data)
+    blocks = data.get("sensing_mask_blocks")
+    if cfo_symbol is None or not isinstance(blocks, list) or not blocks:
+        return None
+
+    clipped: list[dict[str, Any]] = []
+    removed_re = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        symbol_start = int_or_default(block.get("symbol_start"), 0)
+        symbol_count = int_or_default(block.get("symbol_count"), 0)
+        subcarrier_start = int_or_default(block.get("subcarrier_start"), 0)
+        subcarrier_count = int_or_default(block.get("subcarrier_count"), 0)
+        if symbol_count <= 0 or subcarrier_count <= 0:
+            clipped.append(block)
+            continue
+        symbol_end = symbol_start + symbol_count - 1
+        if cfo_symbol < symbol_start or cfo_symbol > symbol_end:
+            clipped.append(block)
+            continue
+
+        removed_re += subcarrier_count
+        if symbol_start <= cfo_symbol - 1:
+            clipped.append({
+                "symbol_start": symbol_start,
+                "symbol_count": cfo_symbol - symbol_start,
+                "subcarrier_start": subcarrier_start,
+                "subcarrier_count": subcarrier_count,
+            })
+        if cfo_symbol + 1 <= symbol_end:
+            clipped.append({
+                "symbol_start": cfo_symbol + 1,
+                "symbol_count": symbol_end - cfo_symbol,
+                "subcarrier_start": subcarrier_start,
+                "subcarrier_count": subcarrier_count,
+            })
+
+    if removed_re <= 0:
+        return None
+    data["sensing_mask_blocks"] = clipped
+    return {
+        "symbol": cfo_symbol,
+        "removed_re": removed_re,
+        "message": (
+            f"CFO training field overlap removed from Sensing Resource Map "
+            f"symbol {cfo_symbol} ({removed_re} RE)."
+        ),
+    }
 
 
 def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> list[dict[str, Any]]:
@@ -1664,11 +1751,15 @@ class ConfigEditorApp:
         tab = self.tab_config(name)
         current_data, layout, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         new_data = normalize_payload_data(name, layout, payload, current_data)
+        warning = clip_sensing_mask_blocks_around_cfo(new_data)
         rendered = render_yaml(name, layout, new_data)
         validate_rendered_yaml(rendered)
         tab.yaml_path.parent.mkdir(parents=True, exist_ok=True)
         tab.yaml_path.write_text(rendered, encoding="utf-8")
-        return self.load_config(name)
+        result = self.load_config(name)
+        if warning is not None:
+            result["warning"] = warning
+        return result
 
     def process_snapshot(self, name: str) -> dict[str, Any]:
         self.tab_config(name)

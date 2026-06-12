@@ -1172,6 +1172,34 @@
         .filter((value) => value !== null);
     }
 
+    function fieldBoolValue(model, key, fallback = false) {
+      const field = findField(model, key);
+      if (!field) return fallback;
+      if (typeof field.value === 'boolean') return field.value;
+      const raw = field.value_text ?? field.value ?? '';
+      if (typeof raw === 'string') {
+        const normalized = raw.trim().toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+      }
+      return Boolean(raw);
+    }
+
+    function uniqueSortedInts(values, minInclusive, maxExclusive) {
+      return [...new Set(values
+        .filter((value) => Number.isInteger(value) && value >= minInclusive && value < maxExclusive))]
+        .sort((left, right) => left - right);
+    }
+
+    function symbolRowsToBlocks(symbols, config) {
+      return symbols.map((symbol) => ({
+        symbol_start: symbol,
+        symbol_count: 1,
+        subcarrier_start: 0,
+        subcarrier_count: Math.max(1, config.fftSize),
+      }));
+    }
+
 	    function plannerConfig(tabName = specialPlannerTabs.has(currentTab) ? 'modulator' : currentTab) {
       const model = modelForTab(tabName);
       if (!model) {
@@ -1179,6 +1207,13 @@
           fftSize: 1024,
           numSymbols: 100,
           syncPos: 1,
+          secSyncPos: null,
+          cfoTrainingPos: null,
+          zcSyncSymbols: [1],
+          cfoTrainingSymbols: [],
+          midframePilotSymbols: [],
+          reservedSymbolSet: new Set([1]),
+          midframePilotSymbolSet: new Set(),
           pilotPositions: [],
           pilotSet: new Set(),
           dataSymbols: Array.from({ length: 99 }, (_value, index) => index + 1),
@@ -1201,18 +1236,40 @@
         numSymbols - 1,
         Math.max(0, parseIntOrNull(findField(model, 'sync_pos')?.value_text ?? '') ?? 0),
       );
+      const enableSecSyncSymbol = fieldBoolValue(model, 'enable_sec_sync_symbol', false);
+      const enableCfoTrainingSequence = fieldBoolValue(model, 'enable_cfo_training_sequence', false);
+      const secSyncPos = enableSecSyncSymbol && syncPos > 0 ? syncPos - 1 : null;
+      const cfoTrainingPos = enableCfoTrainingSequence && syncPos + 1 < numSymbols ? syncPos + 1 : null;
 	      const pilotPositions = parseFlowListInts(findField(model, 'pilot_positions'))
 	        .filter((value) => value >= 0 && value < fftSize);
+      const midframePilotSymbols = uniqueSortedInts(
+        parseFlowListInts(findField(model, 'midframe_pilot_symbols')),
+        0,
+        numSymbols,
+      );
         const dataResourceField = findField(model, 'data_resource_blocks');
         const sensingPilotBlocks = (!dataResourceField || plannerMode(dataResourceField) !== 'custom')
           ? []
           : plannerBlocks(dataResourceField)
             .filter((block) => payloadBlockKind(block) === 'sensing_pilot');
 	      const pilotSet = new Set(pilotPositions);
+      const zcSyncSymbols = uniqueSortedInts(
+        [syncPos, secSyncPos].filter((value) => value !== null),
+        0,
+        numSymbols,
+      );
+      const cfoTrainingSymbols = uniqueSortedInts(
+        cfoTrainingPos === null ? [] : [cfoTrainingPos],
+        0,
+        numSymbols,
+      );
+      const reservedSymbolSet = new Set(zcSyncSymbols);
+      const midframePilotSymbolSet = new Set(midframePilotSymbols);
       const actualToDataSymbol = new Array(numSymbols).fill(-1);
       const dataSymbols = [];
       for (let sym = 0; sym < numSymbols; sym += 1) {
-        if (sym === syncPos) continue;
+        if (reservedSymbolSet.has(sym)) continue;
+        if (midframePilotSymbolSet.has(sym)) continue;
         actualToDataSymbol[sym] = dataSymbols.length;
         dataSymbols.push(sym);
       }
@@ -1227,6 +1284,13 @@
         fftSize,
         numSymbols,
         syncPos,
+        secSyncPos,
+        cfoTrainingPos,
+        zcSyncSymbols,
+        cfoTrainingSymbols,
+        midframePilotSymbols,
+        reservedSymbolSet,
+        midframePilotSymbolSet,
         pilotPositions,
         pilotSet,
         dataSymbols,
@@ -1254,16 +1318,15 @@
     }
 
     function syncSymbolsOnlyPlannerBlocks(config) {
-      return [{
-        symbol_start: config.syncPos,
-        symbol_count: 1,
-        subcarrier_start: 0,
-        subcarrier_count: Math.max(1, config.fftSize),
-      }];
+      return symbolRowsToBlocks([config.syncPos], config);
     }
 
 	    function knownSymbolsOnlyPlannerBlocks(config) {
 	      const blocks = syncSymbolsOnlyPlannerBlocks(config);
+      const extraSyncSymbols = (config.zcSyncSymbols || [])
+        .filter((symbol) => symbol !== config.syncPos);
+      blocks.push(...symbolRowsToBlocks(extraSyncSymbols, config));
+      blocks.push(...symbolRowsToBlocks(config.midframePilotSymbols || [], config));
 	      for (const pilot of config.pilotPositions) {
 	        blocks.push({
 	          symbol_start: 0,
@@ -1380,6 +1443,9 @@
         const rect = plannerBlockToRect(block, config);
         if (!rect) continue;
         for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
+          if (config.cfoTrainingSymbols?.includes(sym)) {
+            continue;
+          }
           const rowBase = sym * config.fftSize;
           for (let sc = rect.subcarrierStart; sc <= rect.subcarrierEnd; sc += 1) {
             mask[rowBase + sc] = 1;
@@ -1521,10 +1587,15 @@
         const mask = new Uint8Array(totalGridRe);
         let selectedCount = 0;
         let overlaps = 0;
+        let rejectedCfoTraining = 0;
         for (const block of blocks) {
           const rect = plannerBlockToRect(block, config);
           if (!rect) continue;
           for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
+            if (config.cfoTrainingSymbols?.includes(sym)) {
+              rejectedCfoTraining += rect.subcarrierEnd - rect.subcarrierStart + 1;
+              continue;
+            }
             const rowBase = sym * config.fftSize;
             for (let sc = rect.subcarrierStart; sc <= rect.subcarrierEnd; sc += 1) {
               const flatIndex = rowBase + sc;
@@ -1544,6 +1615,7 @@
           totalCount: totalGridRe,
           strippedSync: 0,
           strippedPilot: 0,
+          rejectedCfoTraining,
           overlaps,
           blocks,
           compactAnalysis: analyzeSensingCompactMask(blocks, config),
@@ -1555,6 +1627,7 @@
       let payloadCount = 0;
       let sensingPilotCount = 0;
       let strippedSync = 0;
+      let strippedMidframePilot = 0;
       let strippedPilot = 0;
       let overlaps = 0;
       let crossKindOverlap = 0;
@@ -1563,12 +1636,18 @@
         if (!rect) continue;
         const blockKind = payloadBlockKind(block);
 	        for (let sym = rect.symbolStart; sym <= rect.symbolEnd; sym += 1) {
-	          if (sym === config.syncPos) {
+	          if (config.zcSyncSymbols?.includes(sym)) {
               if (blockKind === 'payload') {
 	                strippedSync += rect.subcarrierEnd - rect.subcarrierStart + 1;
               }
 	            continue;
 	          }
+          if (config.midframePilotSymbolSet?.has(sym)) {
+            if (blockKind === 'payload') {
+              strippedMidframePilot += rect.subcarrierEnd - rect.subcarrierStart + 1;
+            }
+            continue;
+          }
           const dataSymbolIndex = config.actualToDataSymbol[sym];
           if (dataSymbolIndex < 0) continue;
           const rowBase = dataSymbolIndex * config.nonPilotPerSymbol;
@@ -1618,6 +1697,7 @@
           sensingPilotCount,
           totalCount: config.totalNonPilotRe,
           strippedSync,
+          strippedMidframePilot,
           strippedPilot,
           overlaps,
           crossKindOverlap,
@@ -1735,6 +1815,65 @@
         }
       }
       return null;
+    }
+
+    function clipSensingMaskBlocksAroundCfoField(items, config) {
+      const cfoSymbols = config.cfoTrainingSymbols || [];
+      if (!cfoSymbols.length || !Array.isArray(items) || !items.length) {
+        return { items: clonePlannerItems(items), removedRe: 0, removedSymbols: [] };
+      }
+      const clipped = [];
+      let removedRe = 0;
+      const removedSymbols = new Set();
+      for (const block of items) {
+        const rect = plannerBlockToRect(block, config);
+        if (!rect) {
+          clipped.push(structuredClone(block));
+          continue;
+        }
+        let ranges = [[rect.symbolStart, rect.symbolEnd]];
+        for (const cfoSymbol of cfoSymbols) {
+          if (cfoSymbol < rect.symbolStart || cfoSymbol > rect.symbolEnd) continue;
+          removedSymbols.add(cfoSymbol);
+          removedRe += rect.subcarrierEnd - rect.subcarrierStart + 1;
+          const nextRanges = [];
+          for (const [start, end] of ranges) {
+            if (cfoSymbol < start || cfoSymbol > end) {
+              nextRanges.push([start, end]);
+              continue;
+            }
+            if (start <= cfoSymbol - 1) nextRanges.push([start, cfoSymbol - 1]);
+            if (cfoSymbol + 1 <= end) nextRanges.push([cfoSymbol + 1, end]);
+          }
+          ranges = nextRanges;
+        }
+        for (const [start, end] of ranges) {
+          clipped.push({
+            symbol_start: start,
+            symbol_count: end - start + 1,
+            subcarrier_start: rect.subcarrierStart,
+            subcarrier_count: rect.subcarrierEnd - rect.subcarrierStart + 1,
+          });
+        }
+      }
+      return {
+        items: clipped,
+        removedRe,
+        removedSymbols: [...removedSymbols].sort((left, right) => left - right),
+      };
+    }
+
+    function sanitizeSensingMaskFieldForTab(tabName, field) {
+      if (!field || plannerKind(field) !== 'sensing_mask' || plannerMode(field) !== 'custom') {
+        return null;
+      }
+      const result = clipSensingMaskBlocksAroundCfoField(plannerBlocks(field), plannerConfig(tabName));
+      if (!result.removedRe) {
+        return null;
+      }
+      field.items = result.items;
+      field.dirty = true;
+      return result;
     }
 
     function makeSensingChannelItem(field, index, existingItems) {
@@ -1908,7 +2047,9 @@
 	      legend.innerHTML = `
 	        <span><i style="background:#d8e8ff;"></i>${isPayloadPlanner ? 'payload area' : 'sensing resource area'}</span>
 	        ${isPayloadPlanner ? '<span><i style="background:#d7f5d1;"></i>sensing pilot area</span>' : ''}
-	        <span><i style="background:#ffddc7;"></i>sync symbol</span>
+	        <span><i style="background:#ffddc7;"></i>ZC sync symbol</span>
+	        <span><i style="background:#ffd6ea;"></i>CFO field</span>
+	        <span><i style="background:#fff1ad;"></i>mid-frame pilot</span>
 	        <span><i style="background:#d7dce2;"></i>pilot subcarriers</span>
 	        <span><i style="background:#87c4ff;"></i>drag preview / block</span>
 	      `;
@@ -1969,11 +2110,15 @@
 	        if (isPayloadPlanner) {
           statItems.push(`sensing pilot RE ${stats.sensingPilotCount || 0}/${stats.totalCount} (${sensingPilotPct}%)`);
 	          statItems.push(`sync stripped ${stats.strippedSync}`);
+          statItems.push(`midframe pilot stripped ${stats.strippedMidframePilot || 0}`);
 	          statItems.push(`pilot stripped ${stats.strippedPilot}`);
           if (stats.crossKindOverlap) {
             statItems.push(`payload/sensing overlap ${stats.crossKindOverlap} (sensing pilot wins)`);
           }
 	        }
+        if (isSensingPlanner && stats.rejectedCfoTraining) {
+          statItems.push(`CFO field removed on save ${stats.rejectedCfoTraining}`);
+        }
 	        if (currentPreset === 'guard_band_grid') {
 	          statItems.push(
 	            isPayloadPlanner && config.fftSize >= 535
@@ -2221,10 +2366,18 @@
           ctx.fillRect(x0, 0, Math.max(1, x1 - x0), height);
         }
 
-        const syncY0 = (config.syncPos / config.numSymbols) * height;
-        const syncY1 = ((config.syncPos + 1) / config.numSymbols) * height;
-        ctx.fillStyle = 'rgba(255, 145, 77, 0.4)';
-        ctx.fillRect(0, syncY0, width, Math.max(1, syncY1 - syncY0));
+        function drawSymbolRows(symbols, fillStyle) {
+          for (const symbol of symbols || []) {
+            const y0 = (symbol / config.numSymbols) * height;
+            const y1 = ((symbol + 1) / config.numSymbols) * height;
+            ctx.fillStyle = fillStyle;
+            ctx.fillRect(0, y0, width, Math.max(1, y1 - y0));
+          }
+        }
+
+        drawSymbolRows(config.zcSyncSymbols || [config.syncPos], 'rgba(255, 145, 77, 0.4)');
+        drawSymbolRows(config.cfoTrainingSymbols || [], 'rgba(244, 114, 182, 0.35)');
+        drawSymbolRows(config.midframePilotSymbols || [], 'rgba(245, 196, 0, 0.34)');
 
         const preview = dragRect(config);
         if (preview) {
@@ -3056,6 +3209,10 @@
             input.addEventListener('change', () => {
               field.value = input.checked;
               field.value_text = input.checked ? 'true' : 'false';
+              if (['enable_sec_sync_symbol', 'enable_cfo_training_sequence'].includes(field.key)) {
+                renderSections();
+                return;
+              }
               if (field.key === 'sensing_rx_channel_count') {
                 renderSections();
                 renderCpuBinding();
@@ -3090,7 +3247,7 @@
                 renderCpuBinding();
                 return;
               }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'pilot_positions'].includes(field.key)) {
+              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'midframe_pilot_symbols', 'pilot_positions'].includes(field.key)) {
                 field.value = select.value;
                 renderSections();
               }
@@ -3111,7 +3268,7 @@
                 renderCpuBinding();
                 return;
               }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'pilot_positions'].includes(field.key)) {
+              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'midframe_pilot_symbols', 'pilot_positions'].includes(field.key)) {
                 field.value = input.value;
                 renderSections();
               }
@@ -3195,6 +3352,29 @@
       };
     }
 
+    function sanitizeBeforeSave(tabName) {
+      const model = modelForTab(tabName);
+      if (!model) return null;
+      const field = findField(model, 'sensing_mask_blocks');
+      return sanitizeSensingMaskFieldForTab(tabName, field);
+    }
+
+    function cfoClipMessage(result) {
+      if (!result || !result.removedRe) return '';
+      const symbols = result.removedSymbols.length
+        ? ` symbol ${result.removedSymbols.join(', ')}`
+        : '';
+      return `CFO training field overlap removed from Sensing Resource Map${symbols} (${result.removedRe} RE).`;
+    }
+
+    function saveWarningMessage(result) {
+      const warning = result?.warning;
+      if (warning && typeof warning.message === 'string') {
+        return warning.message;
+      }
+      return '';
+    }
+
     function gatherSavePayload() {
       return gatherSavePayloadForTab(currentTab);
     }
@@ -3229,8 +3409,10 @@ TX/RX block configs currently ${plannerField.mismatch ? 'differ' : 'match'}.</di
         if (spec.fieldKey === 'sensing_mask_blocks') {
 	        targets.innerHTML = `
 	          <h3>${summaryHeading}</h3>
-	          <div class="mono">Modulator ${spec.metricLabel}: ${txStats.payloadCount}/${txStats.totalCount}${txError ? `\nModulator validate: ${txError}` : ''}
-Demodulator ${spec.metricLabel}: ${rxStats.payloadCount}/${rxStats.totalCount}${rxError ? `\nDemodulator validate: ${rxError}` : ''}</div>
+	          <div class="mono">Modulator ${spec.metricLabel}: ${txStats.payloadCount}/${txStats.totalCount}
+Modulator CFO field removed on save: ${txStats.rejectedCfoTraining || 0}${txError ? `\nModulator validate: ${txError}` : ''}
+Demodulator ${spec.metricLabel}: ${rxStats.payloadCount}/${rxStats.totalCount}
+Demodulator CFO field removed on save: ${rxStats.rejectedCfoTraining || 0}${rxError ? `\nDemodulator validate: ${rxError}` : ''}</div>
 	        `;
         } else {
           const resourceError = txError || rxError;
@@ -3241,6 +3423,7 @@ sensing pilot RE: ${txStats.sensingPilotCount || 0}/${txStats.totalCount}
 overlap ignored: ${txStats.overlaps}
 payload/sensing overlap: ${txStats.crossKindOverlap || 0} (sensing pilot wins)
 sync stripped: ${txStats.strippedSync}
+midframe pilot stripped: ${txStats.strippedMidframePilot || 0}
 pilot stripped: ${txStats.strippedPilot}${resourceError ? `\nvalidate: ${resourceError}` : ''}</div>
 	        `;
         }
@@ -3294,15 +3477,25 @@ pilot stripped: ${txStats.strippedPilot}${resourceError ? `\nvalidate: ${resourc
 	      }
 	      targetField.mode = plannerField.mode;
 	      targetField.items = clonePlannerItems(plannerField.items);
+      const clipResult = sanitizeSensingMaskFieldForTab(tabName, targetField);
 	      const result = await api('/api/config/save', {
 	        method: 'POST',
         body: JSON.stringify(gatherSavePayloadForTab(tabName)),
 	      });
 	      cache[tabName] = { ...cache[tabName], config: result };
+      const savedTargetField = plannerFieldForTab(tabName, spec);
+      if (savedTargetField) {
+        plannerField.mode = plannerMode(savedTargetField);
+        plannerField.items = clonePlannerItems(plannerBlocks(savedTargetField));
+      }
 	      plannerField.dirty = true;
 	      refreshPlannerComparisonState(spec);
 	      renderPlannerPage();
-	      setFlash(`Applied ${spec.fieldKey} to ${APP.tabs[tabName].label}.`, 'ok');
+      const clipNote = cfoClipMessage(clipResult) || saveWarningMessage(result);
+	      setFlash(
+	        `Applied ${spec.fieldKey} to ${APP.tabs[tabName].label}.${clipNote ? ` ${clipNote}` : ''}`,
+	        'ok',
+	      );
 	    }
 
     async function loadConfig(tab, preserveCommand = false) {
@@ -3355,13 +3548,17 @@ pilot stripped: ${txStats.strippedPilot}${resourceError ? `\nvalidate: ${resourc
     }
 
     async function saveCurrentTab(showMessage = true) {
+      const clipResult = sanitizeBeforeSave(currentTab);
       const result = await api('/api/config/save', {
         method: 'POST',
         body: JSON.stringify(gatherSavePayload()),
       });
       cache[currentTab] = { ...cache[currentTab], config: result };
       renderSections();
-      if (showMessage) setFlash('Saved successfully.', 'ok');
+      if (showMessage) {
+        const clipNote = cfoClipMessage(clipResult) || saveWarningMessage(result);
+        setFlash(clipNote ? `Saved successfully. ${clipNote}` : 'Saved successfully.', 'ok');
+      }
     }
 
 	    async function switchTab(tab) {
