@@ -84,7 +84,7 @@ simulation:
   enable_uplink: false           # route UE ul.tx to BS rx.ul; true in BS_Sim_Duplex.yaml
   pacing_enabled: true           # pace shared-memory output to wall-clock sample time
   noise_power_dbfs: -50          # AWGN per RX channel; <= -200 disables
-  cfo_hz: 0.0                    # relative CFO on the communication/bistatic RX
+  cfo_hz: 0.0                    # initial BS->UE CFO; UE->BS is opposite/scaled and follows TX retune
   sample_rate_offset_ppm: 0.0    # UE sample clock offset relative to the BS clock
   timing_offset_samples: 0       # fixed integer sample offset, folded into path delays
   array_spacing_m: 0.04283       # physical ULA spacing (m); d/λ scales with center_freq
@@ -118,11 +118,17 @@ simulator reuses `targets`, so the same scatterer scene drives both the monostat
 and bistatic chains. Because the communication RX is single-antenna, `angle_deg` is
 not used in the bistatic channel calculation. To override the array manifold, provide
 `num_targets × num_channels` little-endian `complex<float>` values in row-major order
-via `steering_override_file`; each row corresponds to one target.
+via `steering_override_file`; each row corresponds to one target. Once a custom
+array-manifold matrix is configured, `targets[].angle_deg` no longer participates in
+the monostatic array-response calculation. Compute the angle-dependent amplitude and
+phase for every antenna element in advance and store those values in the matrix.
 
 When `simulation.enable_uplink` is enabled, the UE->BS simulated uplink uses the
-same communication-channel scene as the BS->UE downlink: `comm_multipath_taps`
-plus the selected bistatic scatterers.
+same communication-channel scene as the BS->UE downlink. In that scene, the
+static multipath components configured by `comm_multipath_taps` and the selected
+bistatic-scatterer components are both superimposed on the direct path; the
+bistatic scatterers come from `bistatic_targets` when configured, or fall back
+to `targets` otherwise.
 
 ## Channel model
 
@@ -131,7 +137,7 @@ The model is applied to transmitted samples $x[n]$ in this order.
 1. For each scatterer, compute integer propagation delay, Doppler, and complex gain; the monostatic sensing path also applies the array manifold vector.
 2. The communication/bistatic path first adds the LoS path and static multipath paths, then adds the scatterer-return components.
 3. The BS->UE communication path is resampled by `1 + sample_rate_offset_ppm * 1e-6`; when uplink simulation is enabled, the UE->BS path is resampled by the reciprocal ratio.
-4. The communication/bistatic path applies relative CFO to the whole received signal; the monostatic sensing path does not apply CFO.
+4. The communication/bistatic path applies relative CFO to the whole received signal: BS->UE uses `cfo_hz`, while UE->BS uses its negative; the monostatic sensing path does not apply CFO.
 5. AWGN is added to every RX output.
 
 Target round-trip delay, sample delay, and Doppler are:
@@ -162,7 +168,9 @@ It is derived from the physical spacing and carrier frequency, so the recovered
 angle remains correct at any `center_freq`; the viewers invert the phase slope using
 the same physical spacing. With `array_spacing_m <= 0`, the frequency-independent
 legacy parameter `array_spacing_lambda` is used instead. If `steering_override_file`
-is set, the simulator reads $a_{i,k}$ directly from the array manifold matrix.
+is set, the simulator reads $a_{i,k}$ directly from the array-manifold matrix instead
+of generating it from `angle_deg`. The custom matrix must therefore already encode
+the target angle's amplitude and phase response at every antenna element.
 
 For monostatic sensing RX antenna $k$:
 
@@ -189,19 +197,39 @@ $$
 u[n] = u_{\mathrm{LoS}}[n] + \sum_i g_i\, x[n-\ell_i]\, e^{j 2\pi f_{D,i} n / f_s}
 $$
 
-With SFO disabled, the communication/bistatic chain then applies relative CFO and AWGN:
+With SFO disabled, the communication/bistatic chain then applies relative CFO and AWGN. The same BS/UE oscillator mismatch has the opposite sign on the reciprocal link:
 
 $$
-y_{\mathrm{comm}}[n] = u[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_s} + w_{\mathrm{comm}}[n]
+y_{\mathrm{DL}}[n] = u_{\mathrm{DL}}[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_{s,\mathrm{UE}}} + w_{\mathrm{DL}}[n]
 $$
+
+$$
+y_{\mathrm{UL}}[n] = u_{\mathrm{UL}}[n]\, e^{-j 2\pi f_{\mathrm{CFO}} n / f_{s,\mathrm{BS}}} + w_{\mathrm{UL}}[n]
+$$
+
+When UE downlink tracking produces an RX frequency correction, the simulation
+backend retunes the uplink TX just like the real-USRP path. Let
+$\alpha=f_{\mathrm{UL}}/f_{\mathrm{DL}}$ ($\alpha=1$ in TDD). Then
+
+$$
+f_{\mathrm{DL,res}} = f_{\mathrm{CFO}} + f_{\mathrm{RX,corr}}, \qquad
+f_{\mathrm{UL,res}} = -\alpha f_{\mathrm{CFO}} - f_{\mathrm{TX,corr}}.
+$$
+
+In TDD, $f_{\mathrm{TX,corr}}=f_{\mathrm{RX,corr}}$; in FDD, the uplink TX
+correction is scaled by the carrier ratio $\alpha$. The shared control block carries
+the logical TX target-carrier correction rather than UHD's API-specific TX
+`dsp_freq` sign.
 
 With `sample_rate_offset_ppm` enabled, the simulator first forms $u[n]$ on the
 source clock and passes it through a 32-tap, 1024-phase Kaiser-windowed sinc
 polyphase resampler. Positive ppm means the UE clock is faster than the BS clock,
 so BS->UE communication produces samples at
-$f_{s,\mathrm{UE}} = f_{s,\mathrm{BS}}(1+\mathrm{ppm}\cdot10^{-6})$. The CFO
-phasor step uses that UE-side sample rate. The reciprocal resampler is used for
-UE->BS uplink output back onto the BS clock.
+$f_{s,\mathrm{UE}} = f_{s,\mathrm{BS}}(1+\mathrm{ppm}\cdot10^{-6})$. The downlink
+CFO phasor step uses that UE-side sample rate. After the reciprocal resampler returns
+UE->BS uplink output to the BS clock, the simulator applies the current residual CFO
+at the BS-side sample rate without resetting the continuous phase when the frequency
+step changes.
 
 By default, `targets` drives both the monostatic sensing antennas (with array manifold)
 and the bistatic communication channel (single-antenna, no array manifold), modelling

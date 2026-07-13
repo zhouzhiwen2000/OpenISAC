@@ -57,6 +57,7 @@ uplink:
   symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
   symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
   guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
+  ue_timing_advance: 0  # Simulation baseline: do not advance uplink TX; propagation delay is applied by ChannelSimulator
   ertm_to_enable: false  # Enable eRTM TO estimation payloads and UE-side TO logs
   ertm_delay_oversample_factor: 10  # eRTM delay-spectrum IFFT oversampling factor
   ertm_dl_rf_delay_samples: 0.0  # Calibrated downlink RF-chain delay for eRTM TO estimation (samples)

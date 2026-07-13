@@ -1,47 +1,49 @@
 ---
 title: UE YAML 参考
-description: UE 运行时配置的分组参考。
+description: UE 运行配置参数、取值和作用说明。
 ---
 
-## 参数说明
+## 使用说明
 
-运行时配置采用层级化 YAML。下面的表格使用完整 YAML 参数名，例如 `uplink.arq_enabled`，避免 BS/UE 或下行/上行里的同名字段混淆。可选 section 可以省略；缺省值由解析器补齐，`config/` 下的样例文件给出了常用硬件、双工和仿真配置。
+`UE` 从启动时的当前工作目录读取 `UE.yaml`。建议先复制与硬件和场景匹配的 `config/UE_*.yaml` 模板，再在副本上修改。配置不会在运行中自动重载；修改后需要重启 UE。
 
-### UE
+下表按 YAML 顶层结构排列，并使用 `uplink.arq_enabled` 这样的完整路径区分同名字段。“典型值”用于说明常见配置，不代表所有模板的默认值。可选配置节省略时，程序使用解析器默认值。
 
-`UE` 从当前工作目录读取 `UE.yaml`。可从 `config/UE_X310.yaml`、`config/UE_B210.yaml`、双工模板或仿真模板开始修改。
+> 帧结构、上下行双工、频率和资源映射等联动参数必须与 BS 配置一致。
 
-#### UE radio
+## 参数表
 
-| 参数 | 类型/单位 | 典型值 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `radio.radio_backend` | `string` | `uhd` | Radio I/O 后端。`uhd` 表示真实 USRP，`sim` 表示信道仿真器。 |
-
-#### UE simulation
+### `radio`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `simulation.session` | `string` | `oisac_sim` | 共享仿真 session 命名空间。 |
+| `radio.radio_backend` | `string` | `uhd` | 无线设备输入/输出后端。`uhd` 使用真实 USRP，`sim` 使用信道仿真器。 |
+
+### `simulation`
+
+| 参数 | 类型/单位 | 典型值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `simulation.session` | `string` | `oisac_sim` | BS、UE 和 `ChannelSimulator` 共用的仿真会话名称；三者必须一致。 |
 | `simulation.enable_comm_rx` | `bool` | `true` | 仿真器生成通信 RX 路径。 |
 | `simulation.enable_sensing_rx` | `bool` | `true` | 仿真器生成感知 RX 路径。 |
 | `simulation.enable_uplink` | `bool` | `false` | 仿真器转发 UE 到 BS 的上行流。 |
-| `simulation.pacing_enabled` | `bool` | `true` | 按真实采样时间 pacing 仿真输出。 |
+| `simulation.pacing_enabled` | `bool` | `true` | 按实时采样速率调节仿真输出节奏。 |
 | `simulation.noise_power_dbfs` | `float` / dBFS | `-100` | 每个 RX 通道的 AWGN 功率。 |
 | `simulation.snr_control_enable` | `bool` | `false` | 通过缩放干净仿真信号维持 `target_snr_db`。 |
 | `simulation.target_snr_db` | `float` / dB | `40` | 开启 SNR 控制时的目标 SNR。 |
 | `simulation.control_port` | `int` | `10002` | ChannelSimulator 控制端口。 |
-| `simulation.cfo_hz` | `float` / Hz | `0` | 初始载波频偏。 |
+| `simulation.cfo_hz` | `float` / Hz | `0` | UE 下行 RX 校正前的 BS→UE 初始载波频偏。UE→BS 初始频偏符号相反，FDD 下还会按上下行载频比缩放；之后随 UE 上行 TX retune 动态更新残余 CFO。 |
 | `simulation.sample_rate_offset_ppm` | `float` / ppm | `0` | UE 相对 BS 的采样钟偏差。 |
 | `simulation.timing_offset_samples` | `int` / samples | `0` | 固定整数采样延迟。 |
 | `simulation.array_spacing_m` | `float` / m | `0.04283` | ULA 物理阵元间距。 |
 | `simulation.array_spacing_lambda` | `float` | `0.5` | 按波长归一化的旧版 ULA 间距。 |
-| `simulation.ring_capacity_samples` | `int` | `262144` | 共享内存 ring 容量。 |
-| `simulation.steering_override_file` | `string` | `""` | 可选 steering matrix 文件。 |
-| `simulation.comm_multipath_taps[]` | `object[]` | 可选 | 通信 tap：`delay_samples`、`gain_db`、`phase_deg`。 |
+| `simulation.ring_capacity_samples` | `int` | `262144` | 每条共享内存数据流的环形缓冲区容量。 |
+| `simulation.steering_override_file` | `string` | `""` | 可选的阵列流形矩阵文件；留空时按 `angle_deg` 生成 ULA 阵列流形。配置该文件后，`angle_deg` 不再参与阵列响应计算，角度对应的幅相响应需预先写入矩阵。 |
+| `simulation.comm_multipath_taps[]` | `object[]` | 可选 | 通信抽头延迟线的静态多径抽头，字段为 `delay_samples`、`gain_db`、`phase_deg`。 |
 | `simulation.targets[]` | `object[]` | 可选 | 单站点目标。 |
 | `simulation.bistatic_targets[]` | `object[]` | 可选 | 双站/通信点目标。 |
 
-#### UE rf_sampling
+### `rf_sampling`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -49,19 +51,19 @@ description: UE 运行时配置的分组参考。
 | `rf_sampling.bandwidth` | `float` / Hz | `50000000` | 模拟带宽。 |
 | `rf_sampling.rx_gain` | `float` / dB | `10` | UE 下行 RX 增益。 |
 | `rf_sampling.rx_agc_enable` | `bool` | `true` | 开启 UE 下行硬件 RX AGC。 |
-| `rf_sampling.rx_agc_low_threshold_db` | `float` / dB | `14` | 滤波后 delay-spectrum 主峰低于该阈值时提高增益。 |
+| `rf_sampling.rx_agc_low_threshold_db` | `float` / dB | `14` | 滤波后时延谱主峰低于该阈值时提高增益。 |
 | `rf_sampling.rx_agc_high_threshold_db` | `float` / dB | `16` | 主峰高于该阈值时降低增益。 |
 | `rf_sampling.rx_agc_max_step_db` | `float` / dB | `1` | 单次 RX AGC 最大步进。 |
 | `rf_sampling.rx_agc_update_frames` | `int` | `4` | 两次 AGC 更新之间最少处理帧数。 |
 
-#### UE usrp_device
+### `usrp_device`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `usrp_device.device_args` | `string` | `addr=...` | USRP device args。 |
+| `usrp_device.device_args` | `string` | `addr=...` | USRP 设备参数，例如网络地址。 |
 | `usrp_device.clock_source` | `string` | `external` | UE 时钟源：`internal`、`external` 或 `gpsdo`。 |
 
-#### UE ofdm_frame
+### `ofdm_frame`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -79,40 +81,40 @@ description: UE 运行时配置的分组参考。
 | `ofdm_frame.midframe_pilot_symbols` | `int[]` | `[]` | 可选帧内 BPSK 导频符号。 |
 | `ofdm_frame.midframe_pilot_seed` | `int` | `1296453708` | 确定性帧内 BPSK 导频种子。 |
 
-#### UE cuda
+### `cuda`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `cuda.cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。 |
-| `cuda.cuda_ldpc_decoder_backend` | `string` | `gpu` | CUDA 解调 LDPC decoder backend：`gpu` 或 `cpu`。 |
-| `cuda.cuda_ldpc_worker_buffers` | `int` | `3` | CUDA LDPC 异步 worker batch buffer 数。 |
+| `cuda.cuda_ldpc_decoder_backend` | `string` | `gpu` | CUDA 解调使用的 LDPC 解码后端：`gpu` 或 `cpu`。 |
+| `cuda.cuda_ldpc_worker_buffers` | `int` | `3` | CUDA LDPC 异步批处理工作缓冲区数。 |
 | `cuda.cuda_ldpc_cross_frame_flush_frames` | `int` | `2` | CUDA LDPC batch decode 前最多累计帧数。 |
 | `cuda.cuda_ldpc_cross_frame_flush_us` | `float` / us | `1000` | CUDA LDPC 跨帧 batch 最长等待时间。 |
 
-#### UE ldpc
+### `ldpc`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `ldpc.fixed_point` | `bool` | `false` | 使用 int16/Q16 CPU LDPC 解码路径。 |
 | `ldpc.fixed_point_scale` | `int` | `16` | int16 饱和前的 LLR 缩放。 |
 
-#### UE downlink
+### `downlink`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `downlink.center_freq` | `float` / Hz | `2400000000` | UE 下行 RF 中心频率。 |
-| `downlink.rx_wire_format` | `string` | `sc16` | UE 下行 RX wire format。 |
+| `downlink.rx_wire_format` | `string` | `sc16` | UE 下行接收的 UHD 样本格式。 |
 | `downlink.rx_channel` | `int` | `0` | UE 下行 RX 通道索引。 |
 | `downlink.equalizer_mode` | `string` | `mmse` | 下行均衡器反演模式：`zf` 或 `mmse`。 |
 | `downlink.channel_tracking_mode` | `string` | `pilot_phase` | 每符号梳状导频跟踪模式。 |
 | `downlink.equalizer_mag_floor` | `float` | `1e-6` | 信道反演时 `|H|^2` 下限。 |
 | `downlink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | 回退前要求的最小梳状导频残差权重。 |
 | `downlink.arq_enabled` | `bool` | `false` | 在 UE 接收端开启下行 ARQ。 |
-| `downlink.arq_ordered_delivery` | `bool` | `false` | 缓存下行 packet 以按序输出 UDP。 |
+| `downlink.arq_ordered_delivery` | `bool` | `false` | 缓存下行数据包，再按序输出 UDP。 |
 | `downlink.arq_window_packets` | `int` | `32767` | 下行 ARQ 接收/重排窗口。 |
-| `downlink.arq_feedback_interval_ms` | `int` / ms | `10` | 下行 ARQ ACK feedback 最小间隔。 |
+| `downlink.arq_feedback_interval_ms` | `int` / ms | `10` | 下行 ARQ ACK 反馈的最小时间间隔。 |
 
-#### UE uplink
+### `uplink`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -125,21 +127,21 @@ description: UE 运行时配置的分组参考。
 | `uplink.guard_symbols` | `int` | `1` | TDD 上行前置 guard 符号数。 |
 | `uplink.tx_gain` | `float` / dB | `0` | UE 上行 TX 增益。 |
 | `uplink.tx_channel` | `int` | `0` | UE 上行 TX 通道索引。 |
-| `uplink.wire_format_tx` | `string` | `sc16` | UE 上行 TX wire format。 |
+| `uplink.wire_format_tx` | `string` | `sc16` | UE 上行发送的 UHD 样本格式。 |
 | `uplink.ue_timing_advance` | `int` / samples | `50` | UE 上行发送 timing advance。 |
-| `uplink.debug_self_channel` | `bool` | `false` | 从 RX 窗口估计 UE self-TX 泄漏信道，用于 `TADV` 调试。 |
-| `uplink.ertm_to_enable` | `bool` | `false` | 开启 eRTM TO payload 消费和 TO 日志。 |
-| `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT 过采样倍数。 |
+| `uplink.debug_self_channel` | `bool` | `false` | 从接收窗口估计 UE 本机发送泄漏信道，用于 `TADV` 调试。 |
+| `uplink.ertm_to_enable` | `bool` | `false` | 开启 eRTM 时偏测量负载的接收处理和 TO 日志。 |
+| `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM 时延谱 IFFT 过采样倍数。 |
 | `uplink.ertm_dl_rf_delay_samples` | `float` / samples | `67.0` | eRTM 方程中的下行 RF 链路校准延迟。 |
 | `uplink.ertm_ul_rf_delay_samples` | `float` / samples | `67.0` | eRTM 方程中的上行 RF 链路校准延迟。 |
 | `uplink.ertm_debug_output_enabled` | `bool` | `false` | 开启 UE 侧 eRTM debug ZMQ 频谱输出。 |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM report 间隔；对比日志时应与 BS 保持一致。 |
 | `uplink.arq_enabled` | `bool` | `false` | 在 UE 发射端开启上行 ARQ。 |
-| `uplink.arq_window_packets` | `int` | `32767` | 上行 ARQ outstanding packet 窗口。 |
+| `uplink.arq_window_packets` | `int` | `32767` | 上行 ARQ 最多允许的未确认数据包数。 |
 | `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | 上行 ARQ 重传超时。 |
 | `uplink.arq_max_retries` | `int` | `5` | 上行最大重传次数；`0` 表示窗口内不限次数。 |
 
-#### UE sync_tracking
+### `sync_tracking`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -150,7 +152,7 @@ description: UE 运行时配置的分组参考。
 | `sync_tracking.predictive_delay` | `bool` | `true` | 使用基于 CFO 的预测性时延补偿。 |
 | `sync_tracking.hardware_sync` | `bool` | `false` | 开启硬件同步模式。 |
 | `sync_tracking.hardware_sync_tty` | `string` | `/dev/ttyUSB0` | 硬件同步控制器串口设备。 |
-| `sync_tracking.desired_peak_pos` | `int` | `20` | alignment 逻辑使用的目标 delay peak 位置。 |
+| `sync_tracking.desired_peak_pos` | `int` | `20` | 定时对齐逻辑使用的目标时延峰位置。 |
 | `sync_tracking.ocxo_pi_kp_fast` | `float` | `30` | OCXO PI 快速阶段比例增益。 |
 | `sync_tracking.ocxo_pi_ki_fast` | `float` | `1` | OCXO PI 快速阶段积分增益。 |
 | `sync_tracking.ocxo_pi_kp_slow` | `float` | `30` | OCXO PI 慢速阶段比例增益。 |
@@ -175,7 +177,7 @@ description: UE 运行时配置的分组参考。
 | `sync_tracking.akf_r_min` | `float` | `1e-8` | 观测噪声方差下界。 |
 | `sync_tracking.akf_r_max` | `float` | `1e3` | 观测噪声方差上界。 |
 
-#### UE sensing
+### `sensing`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -183,21 +185,21 @@ description: UE 运行时配置的分组参考。
 | `sensing.bi_enabled` | `bool` | `true` | 开启双站感知处理。 |
 | `sensing.range_fft_size` | `int` | `1024` | 距离向 FFT 点数。 |
 | `sensing.doppler_fft_size` | `int` | `100` | 多普勒向 FFT 点数。 |
-| `sensing.view_range_bins` | `int` | `0` | 后端 RD view 宽度；`0` 表示完整 range。 |
-| `sensing.view_doppler_bins` | `int` | `0` | 后端 RD view 高度；`0` 表示完整 doppler。 |
+| `sensing.view_range_bins` | `int` | `0` | 后端距离-多普勒视图的距离维宽度；`0` 表示完整距离维。 |
+| `sensing.view_doppler_bins` | `int` | `0` | 后端距离-多普勒视图的多普勒维高度；`0` 表示完整多普勒维。 |
 | `sensing.output_mode` | `string` | `dense` | `dense` 完整输出，或 `compact_mask` 选中 RE 输出。 |
-| `sensing.on_wire_format` | `string` | `complex_float32` | 感知 payload wire format。 |
-| `sensing.backend_processing_enabled` | `bool` | `false` | 在支持时输出后端 RD/CFAR/微多普勒 sidecar。 |
+| `sensing.on_wire_format` | `string` | `complex_float32` | 感知负载的网络传输格式。 |
+| `sensing.backend_processing_enabled` | `bool` | `false` | 在支持时额外输出后端距离-多普勒、CFAR 和微多普勒处理结果。 |
 | `sensing.symbol_stride` | `int` | `20` | dense 模式启动时默认 STRD。 |
 
-#### UE resource_preview
+### `resource_preview`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
 | `resource_preview.data_resource_blocks[]` | `object[]` | 可选 | payload / sensing-pilot RE 矩形；每项包含 `kind`、`symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`。 |
 | `resource_preview.mask_blocks[]` | `object[]` | 可选 | compact 感知 RE 矩形；每项包含 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`。 |
 
-#### UE measurement
+### `measurement`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -210,7 +212,7 @@ description: UE 运行时配置的分组参考。
 | `measurement.measurement_packets_per_point` | `int` | `1` | 每个测量 epoch 期望 packet 数。 |
 | `measurement.measurement_max_packets_per_frame` | `int` | `1` | 每帧最多检查的测量 packet 数；`0` 表示不限。 |
 
-#### UE network_output
+### `network_output`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -218,9 +220,9 @@ description: UE 运行时配置的分组参考。
 | `network_output.udp_input_port` | `int` | `50002` | UE 上行业务 UDP 输入端口。 |
 | `network_output.udp_output_ip` | `string` / IPv4 | `""` | UE 解码下行 UDP 输出目标 IP；空字符串使用 `runtime.default_out_ip`。 |
 | `network_output.udp_output_port` | `int` | `50001` | UE 解码下行 UDP 输出端口。 |
-| `network_output.udp_egress_pacer_enabled` | `bool` | `false` | 开启解码 UDP 输出 pacing。 |
-| `network_output.udp_egress_pacer_target_mbps` | `float` / Mbps | `0` | pacing 目标速率；`0` 自动估计。 |
-| `network_output.udp_egress_pacer_queue_packets` | `int` | `10240` | pacing 队列容量。 |
+| `network_output.udp_egress_pacer_enabled` | `bool` | `false` | 开启解码 UDP 输出速率调节。 |
+| `network_output.udp_egress_pacer_target_mbps` | `float` / Mbps | `0` | UDP 输出目标速率；`0` 时自动估计。 |
+| `network_output.udp_egress_pacer_queue_packets` | `int` | `10240` | UDP 输出调速队列的数据包容量。 |
 | `network_output.udp_egress_pacer_max_delay_ms` | `float` / ms | `0` | 最大排队时间；`0` 关闭按年龄丢包。 |
 | `network_output.bi_sensing_output_enabled` | `bool` | `true` | 开启双站感知 ZMQ 输出。 |
 | `network_output.bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 双站感知/control ZMQ 绑定 IP。 |
@@ -239,7 +241,7 @@ description: UE 运行时配置的分组参考。
 | `network_output.ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | UE eRTM debug PUB IP。 |
 | `network_output.ertm_debug_port` | `int` | `12362` | UE eRTM debug PUB 端口。 |
 
-#### UE cpu_cores
+### `cpu_cores`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -250,7 +252,7 @@ description: UE 运行时配置的分组参考。
 | `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | UE 上行核心：LDPC 编码、调制、TX 发送、UDP 接收。 |
 | `cpu_cores.main_cpu_core` | `int` | `-1` | 主线程 CPU 核；`-1` 表示不绑定。 |
 
-#### UE runtime
+### `runtime`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -258,7 +260,7 @@ description: UE 运行时配置的分组参考。
 | `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug 目标 IP；空字符串使用 `default_out_ip`。 |
 | `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug 目标端口。 |
 
-#### UE logging
+### `logging`
 
 性能剖析与诊断日志共用层级化 `logging.*`。性能项路径以 `_profiling` 结尾（默认关闭，需显式打开，例如 `demod_profiling: info`）。
 

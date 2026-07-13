@@ -69,7 +69,7 @@ common:
       default: 10002
       optional: true
     - key: cfo_hz
-      comment: Initial carrier offset before UE RX correction in Hz
+      comment: Initial BS-to-UE CFO; UE-to-BS is opposite, carrier-ratio-scaled in FDD, and follows UE TX retune
       kind: float
       default: 0.0
       optional: true
@@ -99,7 +99,7 @@ common:
       default: 262144
       optional: true
     - key: steering_override_file
-      comment: Optional steering matrix file; empty uses ULA steering
+      comment: Optional array-manifold matrix; when set, angle_deg is ignored and angle-dependent responses must be encoded in the matrix
       kind: string
       default: ''
       optional: true

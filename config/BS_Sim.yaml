@@ -13,13 +13,13 @@ simulation:
   snr_control_enable: true  # Scale the clean simulated signal before AWGN to maintain target_snr_db
   target_snr_db: 40  # Initial target SNR in dB when snr_control_enable is true
   control_port: 10002  # ChannelSimulator ZMQ control port for runtime SNR commands
-  cfo_hz: 5000  # Initial carrier offset before UE RX correction in Hz
+  cfo_hz: 5000  # Initial BS->UE CFO; UE->BS is opposite/scaled and follows UE TX retune
   sample_rate_offset_ppm: 0  # UE sample-clock offset relative to the BS clock in ppm
   timing_offset_samples: 0  # Constant integer sample delay injected on RX
   array_spacing_m: 0.04283  # Physical ULA element spacing in meters; set <=0 to use array_spacing_lambda
   array_spacing_lambda: 0.5  # Legacy fixed ULA spacing in wavelengths
   ring_capacity_samples: 262144  # Per-stream shared-memory ring capacity in complex samples
-  steering_override_file: ""  # Optional steering matrix file; empty uses ULA steering
+  steering_override_file: ""  # Optional array-manifold matrix; when set, encode angle response in matrix (angle_deg ignored)
   comm_multipath_taps:  # Communication-link tapped-delay-line channel taps
     - delay_samples: 0
       gain_db: -30

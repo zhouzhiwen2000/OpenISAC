@@ -496,10 +496,27 @@ int main(int argc, char** argv) {
     // `simulation.cfo_hz` is the injected transmitter/receiver carrier mismatch.
     // The UE writes its simulated RX frequency correction into the shared
     // control block, so the comm path rotates with the residual CFO after retuning.
-    cf cfo_phasor(1.0f, 0.0f);
+    cf downlink_cfo_phasor(1.0f, 0.0f);
     const double comm_rx_sample_rate = fs * ue_to_bs_sample_rate_ratio;
     double last_logged_rx_freq_correction_hz = 0.0;
     bool have_logged_rx_freq_correction = false;
+
+    // The same BS/UE oscillator mismatch appears with the opposite sign on the
+    // reciprocal UE->BS link. In FDD, the mismatch in Hz scales with carrier
+    // frequency, matching the UE's uplink TX correction mapping.
+    const double uplink_center_freq =
+        (cfg.uplink.duplex.mode == DuplexMode::FDD &&
+         cfg.uplink.duplex.ul_center_freq > 0.0)
+            ? cfg.uplink.duplex.ul_center_freq
+            : cfg.downlink.center_freq;
+    const double uplink_cfo_scale =
+        (cfg.downlink.center_freq > 0.0 && uplink_center_freq > 0.0)
+            ? uplink_center_freq / cfg.downlink.center_freq
+            : 1.0;
+    const double initial_uplink_cfo_hz = -sim.cfo_hz * uplink_cfo_scale;
+    cf uplink_cfo_phasor(1.0f, 0.0f);
+    double last_logged_uplink_tx_correction_hz = 0.0;
+    bool have_logged_uplink_tx_correction = false;
 
     // --- Create shared-memory segments (hub is the creator) ---
     sim_shm::ShmControl ctrl;
@@ -529,7 +546,9 @@ int main(int argc, char** argv) {
         ul_rx_ring.create(sim_shm::make_shm_name(sim.session, "rx.ul"), sim.ring_capacity_samples);
         LOG_G_INFO_M(ChannelSim) << "[ChannelSim] uplink enabled (UE ul.tx -> hub -> BS rx.ul), reciprocal comm channel, taps="
                      << ul_taps.size()
-                     << ", bistatic_targets=" << uplink_bistatic_targets.size();
+                     << ", bistatic_targets=" << uplink_bistatic_targets.size()
+                     << ", initial CFO=" << initial_uplink_cfo_hz
+                     << " Hz (opposite/scaled from downlink)";
     }
 
     std::unique_ptr<ControlCommandHandler> control_handler;
@@ -710,11 +729,11 @@ int main(int argc, char** argv) {
                 static_cast<float>(std::cos(cfo_dphi)),
                 static_cast<float>(std::sin(cfo_dphi)));
             for (size_t n = 0; n < comm_count; ++n) {
-                out_comm[n] *= cfo_phasor;
-                cfo_phasor *= cfo_step;
+                out_comm[n] *= downlink_cfo_phasor;
+                downlink_cfo_phasor *= cfo_step;
             }
-            const float mag = std::abs(cfo_phasor);
-            if (mag > 1e-6f) cfo_phasor /= mag;
+            const float mag = std::abs(downlink_cfo_phasor);
+            if (mag > 1e-6f) downlink_cfo_phasor /= mag;
         }
 
         // --- Target SNR scaling ---
@@ -814,6 +833,31 @@ int main(int argc, char** argv) {
                     }
                     std::copy(ul_sro_out.begin(), ul_sro_out.end(), ul_out.begin());
                 }
+                // Apply reciprocal-link residual CFO on the BS-clock output. The
+                // UE publishes its logical TX carrier correction through the sim
+                // control block whenever downlink tracking retunes the uplink TX.
+                const double uplink_tx_correction_hz = ctrl.uplink_tx_freq_correction_hz();
+                const double residual_uplink_cfo_hz =
+                    initial_uplink_cfo_hz - uplink_tx_correction_hz;
+                if (!have_logged_uplink_tx_correction ||
+                    std::abs(uplink_tx_correction_hz - last_logged_uplink_tx_correction_hz) > 1e-3) {
+                    LOG_G_INFO_M(ChannelSim) << "[ChannelSim] uplink TX frequency correction="
+                                 << uplink_tx_correction_hz << " Hz, residual CFO="
+                                 << residual_uplink_cfo_hz << " Hz";
+                    last_logged_uplink_tx_correction_hz = uplink_tx_correction_hz;
+                    have_logged_uplink_tx_correction = true;
+                }
+                const double uplink_cfo_dphi =
+                    (fs > 0.0) ? (kTwoPi * residual_uplink_cfo_hz / fs) : 0.0;
+                const cf uplink_cfo_step(
+                    static_cast<float>(std::cos(uplink_cfo_dphi)),
+                    static_cast<float>(std::sin(uplink_cfo_dphi)));
+                for (size_t n = 0; n < ul_count; ++n) {
+                    ul_out[n] *= uplink_cfo_phasor;
+                    uplink_cfo_phasor *= uplink_cfo_step;
+                }
+                const float uplink_cfo_mag = std::abs(uplink_cfo_phasor);
+                if (uplink_cfo_mag > 1e-6f) uplink_cfo_phasor /= uplink_cfo_mag;
                 // NOTE: no per-chunk SNR-control scaling on the uplink — the uplink
                 // frame is zero-padded within the DL period, so chunk-wise power
                 // normalization would vary the signal level across the frame and

@@ -8,6 +8,21 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-13 - Astro 文档路由与维护流程整理
+
+### Summary
+
+文档站工具与工作流栏目使用 `tools-workflows` 路由，中英文内容直接在 Astro/Starlight Markdown 源文件中维护。移除已不再使用的 README 到 Astro 同步脚本及相关工作流说明。
+
+### Changes
+
+- 将“模块与功能”更名为“工具与工作流”，并将中英文路由从 `modules` 调整为 `tools-workflows`。
+- 删除 `scripts/sync_docs_from_readme.py`；README 与 Astro 文档站改为独立维护，站点仍通过 `cd site && npm run build` 发布到 `docs/`。
+- 新增中英文“参考总览”入口，改写 YAML 使用说明、脚本命令和按现象排列的故障排查流程，并统一中文参数表中的用户向表达。
+- `ChannelSimulator` 在 UE→BS 上行重采样回 BS 时钟域后施加反向本振失配，并通过共享控制块消费 UE 上行 TX retune，动态更新上行残余 CFO。TDD 直接复用下行 RX 校正量，FDD 的初始失配和 TX 校正都按上下行载频比缩放。
+- 双工仿真模板显式将 BS 上行 RX 窗口偏移和 UE 上行 TX timing advance 设为零，避免继承真实硬件校准默认值而移动仿真直达径。
+- 将 latest-only 调试发送队列的正常丢帧与旧帧替换日志降为 `debug`；真正的发送异常仍保留为 `warning`。
+
 ## 2026-07-12 - 信号处理文档定时与同步模型重构
 
 ### Summary

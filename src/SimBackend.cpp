@@ -98,10 +98,9 @@ SimDevice::SimDevice(const DeviceConfig& cfg)
 
 bool SimDevice::supports(Capability cap) const {
     // The simulator has no real RF front end, no timed-burst engine, no async TX
-    // event path, and no stream restart — every such behavior collapses to a
-    // capability-gated no-op in the engines.
-    (void)cap;
-    return false;
+    // event path, and no stream restart. It does model manual RF/DSP retuning so
+    // the UE can feed both downlink RX and uplink TX corrections back to the hub.
+    return cap == Capability::RfDspTune;
 }
 
 TimeSpec SimDevice::time_now() const {
@@ -111,11 +110,21 @@ TimeSpec SimDevice::time_now() const {
 }
 
 TuneResult SimDevice::set_tx_freq(const TuneRequest& req, size_t /*chan*/) {
+    const bool manual_retune =
+        req.rf_freq_policy == TunePolicy::Manual &&
+        req.dsp_freq_policy == TunePolicy::Manual;
+    const double dsp = (req.dsp_freq_policy == TunePolicy::Manual) ? req.dsp_freq : 0.0;
+    if (manual_retune && _ctrl) {
+        // Share the logical emitted-carrier shift, not UHD's TX DSP sign. The UE
+        // constructs manual requests with target_freq = rf_freq + correction.
+        _ctrl->set_uplink_tx_freq_correction_hz(req.target_freq - req.rf_freq);
+    }
     TuneResult r;
     r.target_rf_freq = req.target_freq != 0.0 ? req.target_freq : _center_freq;
-    r.actual_rf_freq = _center_freq;
+    r.actual_rf_freq =
+        (req.rf_freq_policy == TunePolicy::Manual) ? req.rf_freq : r.target_rf_freq;
     r.target_dsp_freq = req.dsp_freq;
-    r.actual_dsp_freq = (req.dsp_freq_policy == TunePolicy::Manual) ? req.dsp_freq : 0.0;
+    r.actual_dsp_freq = dsp;
     return r;
 }
 

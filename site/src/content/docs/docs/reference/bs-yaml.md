@@ -1,23 +1,25 @@
 ---
 title: BS YAML Reference
-description: Grouped reference for BS runtime configuration.
+description: BS runtime configuration fields, values, and behavior.
 ---
 
-## Parameter Reference
+## How to use this page
 
-The runtime config is hierarchical YAML. The tables below use full YAML paths so similarly named fields, such as `downlink.arq_enabled` and `uplink.arq_enabled`, stay unambiguous. Optional sections can be omitted; missing values use the parser defaults and the sample files under `config/` show common hardware and simulator presets.
+`BS` reads `BS.yaml` from its current working directory at startup. Copy a `config/BS_*.yaml` preset that matches your hardware and scenario, then edit the copy. Configuration is not hot-reloaded; restart the BS after making changes.
 
-### BS
+The tables follow the top-level YAML structure and use full paths such as `uplink.arq_enabled` to distinguish similarly named fields. A typical value is guidance, not a guaranteed default for every preset. If an optional section is omitted, the parser supplies its default values.
 
-`BS` reads `BS.yaml` from its current working directory. Start from `config/BS_X310.yaml`, `config/BS_B210.yaml`, the duplex presets, or the simulator presets.
+> Keep coupled frame-structure, duplex, frequency, and resource-mapping fields consistent with the UE configuration.
 
-#### BS radio
+## Parameter tables
+
+### `radio`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `radio.radio_backend` | `string` | `uhd` | Radio I/O backend. Use `uhd` for real USRPs or `sim` for the shared-memory channel simulator. |
 
-#### BS simulation
+### `simulation`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -30,38 +32,38 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `simulation.snr_control_enable` | `bool` | `false` | Scale the clean simulated signal before AWGN to maintain `target_snr_db`. |
 | `simulation.target_snr_db` | `float` / dB | `40` | Initial SNR target when SNR control is enabled. |
 | `simulation.control_port` | `int` | `10002` | ChannelSimulator ZMQ control port for runtime SNR commands. |
-| `simulation.cfo_hz` | `float` / Hz | `0` | Initial carrier offset injected before UE RX correction. |
+| `simulation.cfo_hz` | `float` / Hz | `0` | Initial BS-to-UE CFO before UE RX correction. The initial UE-to-BS CFO has the opposite sign, is carrier-ratio-scaled in FDD, and its residual then follows UE uplink TX retuning. |
 | `simulation.sample_rate_offset_ppm` | `float` / ppm | `0` | UE sample-clock offset relative to the BS clock. |
 | `simulation.timing_offset_samples` | `int` / samples | `0` | Constant integer sample delay injected on RX. |
 | `simulation.array_spacing_m` | `float` / m | `0.04283` | Physical ULA element spacing; set `<=0` to use `array_spacing_lambda`. |
 | `simulation.array_spacing_lambda` | `float` / lambda | `0.5` | Legacy ULA spacing in wavelengths. |
 | `simulation.ring_capacity_samples` | `int` / samples | `262144` | Per-stream shared-memory ring capacity. |
-| `simulation.steering_override_file` | `string` | `""` | Optional steering matrix file; empty uses ULA steering. |
+| `simulation.steering_override_file` | `string` | `""` | Optional array-manifold matrix file. When empty, the simulator generates a ULA manifold from `angle_deg`. When set, `angle_deg` no longer affects the array response; encode the angle-dependent amplitude and phase directly in the matrix. |
 | `simulation.comm_multipath_taps[]` | `object[]` | optional | Communication tapped-delay-line taps with `delay_samples`, `gain_db`, and `phase_deg`. |
 | `simulation.targets[]` | `object[]` | optional | Monostatic point scatterers with `range_m`, `velocity_mps`, `gain_db`, and `angle_deg`. |
 | `simulation.bistatic_targets[]` | `object[]` | optional | Bistatic/communication point scatterers with the same target fields. |
 
-#### BS rf_sampling
+### `rf_sampling`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `rf_sampling.sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
 | `rf_sampling.bandwidth` | `float` / Hz | `50000000` | Analog bandwidth, usually matching `sample_rate`. |
 
-#### BS usrp_device
+### `usrp_device`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `usrp_device.device_args` | `string` | `addr=...` | Shared USRP device args fallback. |
 
-#### BS clock_time
+### `clock_time`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `clock_time.clock_source` | `string` | `external` | Global clock source: `internal`, `external`, or `gpsdo`. |
 | `clock_time.time_source` | `string` | `internal` | Global time/PPS source; empty follows `clock_source`. |
 
-#### BS ofdm_frame
+### `ofdm_frame`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -78,20 +80,20 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `ofdm_frame.midframe_pilot_symbols` | `int[]` | `[]` | Optional in-frame BPSK pilot symbol indices. |
 | `ofdm_frame.midframe_pilot_seed` | `int` | `1296453708` | Deterministic mid-frame BPSK pilot seed; must match TX/RX. |
 
-#### BS cuda
+### `cuda`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `cuda.cuda_mod_pipeline_slots` | `int` | `3` | CUDA modulation pipeline slots; values below `1` are clamped. |
 
-#### BS ldpc
+### `ldpc`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `ldpc.fixed_point` | `bool` | `false` | Use the int16/Q16 layered-NMS CPU decoder instead of float32. |
 | `ldpc.fixed_point_scale` | `int` | `16` | Power-of-two LLR scale before int16 saturation in fixed-point mode. |
 
-#### BS downlink
+### `downlink`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -107,14 +109,14 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `downlink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Downlink ARQ retransmission timeout. |
 | `downlink.arq_max_retries` | `int` | `5` | Max downlink retransmission retries; `0` means unlimited within the window. |
 
-#### BS downlink_pipeline
+### `downlink_pipeline`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `downlink_pipeline.tx_circular_buffer_size` | `int` | `8` | Capacity of the modulated-frame queue feeding TX. |
 | `downlink_pipeline.data_packet_buffer_size` | `int` | `256` | Capacity of the encoded-packet buffer. |
 
-#### BS uplink
+### `uplink`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -148,7 +150,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `uplink.arq_window_packets` | `int` | `32767` | Uplink ARQ receive/reorder window. |
 | `uplink.arq_feedback_interval_ms` | `int` / ms | `10` | Minimum interval between uplink ARQ ACK feedback packets. |
 
-#### BS sensing
+### `sensing`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -169,7 +171,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `sensing.paired_frame_queue_size` | `int` | `64` | Per-channel RX/TX frame-pairing queue capacity. |
 | `sensing.mask_blocks` | via `resource_preview.mask_blocks` | optional | Runtime sensing mask derived from resource preview. |
 
-#### BS sensing.rx_channels[] fields
+### `sensing.rx_channels[]` fields
 
 | Field | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -186,14 +188,14 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `rx_cpu_core` | `int` | `-1` | CPU core for the channel RX loop. |
 | `processing_cpu_core` | `int` | `-1` | CPU core for the channel sensing-processing loop. |
 
-#### BS resource_preview
+### `resource_preview`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `resource_preview.data_resource_blocks[]` | `object[]` | optional | Payload / sensing-pilot RE rectangles. Each item has `kind`, `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
 | `resource_preview.mask_blocks[]` | `object[]` | optional | Compact sensing RE rectangles with `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
 
-#### BS measurement
+### `measurement`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -206,7 +208,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `measurement.measurement_packets_per_point` | `int` | `1` | Packets sent for one measurement epoch. |
 | `measurement.measurement_max_packets_per_frame` | `int` | `1` | Max measurement packets pulled per frame; `0` means unlimited. |
 
-#### BS network_output
+### `network_output`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -235,7 +237,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `network_output.ertm_debug_port` | `int` | `12362` | eRTM debug PUB port. |
 | `network_output.control_port` | `int` | `9999` | ZMQ ROUTER port for runtime control. |
 
-#### BS cpu_cores
+### `cpu_cores`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -243,7 +245,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | BS uplink cores: RX ingest, OFDM/LLR processing, LDPC decode + UDP output. |
 | `cpu_cores.main_cpu_core` | `int` | `-1` | Main-thread CPU core; `-1` disables binding. |
 
-#### BS logging
+### `logging`
 
 Profile timing dumps and diagnostic logs are gated by the hierarchical logging filter (not a separate `profiling_modules` key).
 

@@ -226,7 +226,7 @@ struct SimConfig {
     bool snr_control_enable = false;           // Enable target-SNR scaling of clean signal before AWGN
     double target_snr_db = 40.0;               // Target SNR when snr_control_enable is true
     int control_port = 10002;                  // ZMQ ROUTER port for ChannelSimulator runtime controls
-    double cfo_hz = 0.0;                        // Initial carrier offset before simulated RX correction (Hz)
+    double cfo_hz = 0.0;                        // Initial BS->UE CFO; reciprocal UL is opposite/scaled and TX-retuned (Hz)
     double sample_rate_offset_ppm = 0.0;        // UE sample clock offset relative to the BS clock (ppm)
     int timing_offset_samples = 0;             // Constant integer sample delay injected on RX
     // Physical ULA element spacing in meters. The steering vector's electrical spacing
@@ -6734,7 +6734,7 @@ public:
                 const uint64_t dropped =
                     queue_full_drop_count_.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (dropped <= 20 || (dropped % 100) == 0) {
-                    LOG_RT_WARN_M(Config) << name_
+                    LOG_RT_DEBUG_M(Config) << name_
                                   << " queue full; dropping newest outbound update"
                                   << ": queue=" << queue_.size() << "/" << queue_.capacity()
                                   << ", dropped=" << dropped;
@@ -6786,7 +6786,7 @@ private:
                         superseded_drop_count_.fetch_add(
                             superseded, std::memory_order_relaxed) + superseded;
                     if (dropped <= 20 || (dropped % 100) < superseded) {
-                        LOG_G_WARN_M(Config) << name_
+                        LOG_G_DEBUG_M(Config) << name_
                                      << " superseded queued updates with the latest frame"
                                      << ": dropped=" << dropped;
                     }

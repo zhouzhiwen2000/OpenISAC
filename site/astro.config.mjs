@@ -52,20 +52,21 @@ const sidebar = [
     ],
   },
   {
-    label: "Modules and Features",
-    translations: { "zh-CN": "模块与功能" },
+    label: "Tools and Workflows",
+    translations: { "zh-CN": "工具与工作流" },
     items: [
-      { label: "Channel Simulator", translations: { "zh-CN": "信道仿真器" }, link: "/docs/modules/channel-simulator/" },
-      { label: "Web Config Console", translations: { "zh-CN": "网页配置台" }, link: "/docs/modules/web-config-console/" },
-      { label: "Calibration Workflows", translations: { "zh-CN": "校准流程" }, link: "/docs/modules/calibration-workflows/" },
-      { label: "Video and UDP Workflows", translations: { "zh-CN": "视频与 UDP 工作流" }, link: "/docs/modules/video-udp-workflows/" },
-      { label: "macOS and Development Notes", translations: { "zh-CN": "macOS 与开发说明" }, link: "/docs/modules/macos-development/" },
+      { label: "Channel Simulator", translations: { "zh-CN": "信道仿真器" }, link: "/docs/tools-workflows/channel-simulator/" },
+      { label: "Web Config Console", translations: { "zh-CN": "网页配置台" }, link: "/docs/tools-workflows/web-config-console/" },
+      { label: "Calibration Workflows", translations: { "zh-CN": "校准流程" }, link: "/docs/tools-workflows/calibration-workflows/" },
+      { label: "Video and UDP Workflows", translations: { "zh-CN": "视频与 UDP 工作流" }, link: "/docs/tools-workflows/video-udp-workflows/" },
+      { label: "macOS and Development Notes", translations: { "zh-CN": "macOS 与开发说明" }, link: "/docs/tools-workflows/macos-development/" },
     ],
   },
   {
     label: "Reference",
     translations: { "zh-CN": "参考" },
     items: [
+      { label: "Reference Overview", translations: { "zh-CN": "参考总览" }, link: "/docs/reference/" },
       { label: "BS YAML Reference", translations: { "zh-CN": "BS YAML 参考" }, link: "/docs/reference/bs-yaml/" },
       { label: "UE YAML Reference", translations: { "zh-CN": "UE YAML 参考" }, link: "/docs/reference/ue-yaml/" },
       { label: "Scripts and Tools", translations: { "zh-CN": "脚本与工具" }, link: "/docs/reference/scripts-tools/" },

@@ -1,23 +1,25 @@
 ---
 title: UE YAML Reference
-description: Grouped reference for UE runtime configuration.
+description: UE runtime configuration fields, values, and behavior.
 ---
 
-## Parameter Reference
+## How to use this page
 
-The runtime config is hierarchical YAML. The tables below use full YAML paths so similarly named fields, such as `downlink.arq_enabled` and `uplink.arq_enabled`, stay unambiguous. Optional sections can be omitted; missing values use the parser defaults and the sample files under `config/` show common hardware and simulator presets.
+`UE` reads `UE.yaml` from its current working directory at startup. Copy a `config/UE_*.yaml` preset that matches your hardware and scenario, then edit the copy. Configuration is not hot-reloaded; restart the UE after making changes.
 
-### UE
+The tables follow the top-level YAML structure and use full paths such as `uplink.arq_enabled` to distinguish similarly named fields. A typical value is guidance, not a guaranteed default for every preset. If an optional section is omitted, the parser supplies its default values.
 
-`UE` reads `UE.yaml` from its current working directory. Start from `config/UE_X310.yaml`, `config/UE_B210.yaml`, the duplex presets, or the simulator presets.
+> Keep coupled frame-structure, duplex, frequency, and resource-mapping fields consistent with the BS configuration.
 
-#### UE radio
+## Parameter tables
+
+### `radio`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `radio.radio_backend` | `string` | `uhd` | Radio I/O backend. Use `uhd` for real USRPs or `sim` for the channel simulator. |
 
-#### UE simulation
+### `simulation`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -30,18 +32,18 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `simulation.snr_control_enable` | `bool` | `false` | Maintain `target_snr_db` by scaling clean simulated signal. |
 | `simulation.target_snr_db` | `float` / dB | `40` | Initial target SNR when SNR control is enabled. |
 | `simulation.control_port` | `int` | `10002` | ChannelSimulator control port. |
-| `simulation.cfo_hz` | `float` / Hz | `0` | Initial carrier offset. |
+| `simulation.cfo_hz` | `float` / Hz | `0` | Initial BS-to-UE CFO before UE RX correction. The initial UE-to-BS CFO has the opposite sign, is carrier-ratio-scaled in FDD, and its residual then follows UE uplink TX retuning. |
 | `simulation.sample_rate_offset_ppm` | `float` / ppm | `0` | UE sample-clock offset relative to BS. |
 | `simulation.timing_offset_samples` | `int` / samples | `0` | Constant integer sample delay. |
 | `simulation.array_spacing_m` | `float` / m | `0.04283` | Physical ULA spacing. |
 | `simulation.array_spacing_lambda` | `float` | `0.5` | Legacy ULA spacing in wavelengths. |
 | `simulation.ring_capacity_samples` | `int` | `262144` | Shared-memory ring capacity. |
-| `simulation.steering_override_file` | `string` | `""` | Optional steering matrix file. |
+| `simulation.steering_override_file` | `string` | `""` | Optional array-manifold matrix file. When empty, the simulator generates a ULA manifold from `angle_deg`. When set, `angle_deg` no longer affects the array response; encode the angle-dependent amplitude and phase directly in the matrix. |
 | `simulation.comm_multipath_taps[]` | `object[]` | optional | Communication taps with `delay_samples`, `gain_db`, and `phase_deg`. |
 | `simulation.targets[]` | `object[]` | optional | Monostatic point scatterers. |
 | `simulation.bistatic_targets[]` | `object[]` | optional | Bistatic/communication point scatterers. |
 
-#### UE rf_sampling
+### `rf_sampling`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -54,14 +56,14 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `rf_sampling.rx_agc_max_step_db` | `float` / dB | `1` | Maximum RX gain step per AGC update. |
 | `rf_sampling.rx_agc_update_frames` | `int` | `4` | Minimum processed-frame interval between AGC updates. |
 
-#### UE usrp_device
+### `usrp_device`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `usrp_device.device_args` | `string` | `addr=...` | USRP device args. |
 | `usrp_device.clock_source` | `string` | `external` | UE clock source: `internal`, `external`, or `gpsdo`. |
 
-#### UE ofdm_frame
+### `ofdm_frame`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -79,7 +81,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `ofdm_frame.midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbols. |
 | `ofdm_frame.midframe_pilot_seed` | `int` | `1296453708` | Deterministic mid-frame BPSK pilot seed. |
 
-#### UE cuda
+### `cuda`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -89,14 +91,14 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `cuda.cuda_ldpc_cross_frame_flush_frames` | `int` | `2` | Max frames accumulated before CUDA LDPC batch decode. |
 | `cuda.cuda_ldpc_cross_frame_flush_us` | `float` / us | `1000` | Max CUDA LDPC cross-frame batch wait time. |
 
-#### UE ldpc
+### `ldpc`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `ldpc.fixed_point` | `bool` | `false` | Use int16/Q16 CPU LDPC decode path. |
 | `ldpc.fixed_point_scale` | `int` | `16` | LLR scale before int16 saturation. |
 
-#### UE downlink
+### `downlink`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -112,7 +114,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `downlink.arq_window_packets` | `int` | `32767` | Downlink ARQ receive/reorder window. |
 | `downlink.arq_feedback_interval_ms` | `int` / ms | `10` | Minimum interval between downlink ARQ ACK feedback packets. |
 
-#### UE uplink
+### `uplink`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -139,7 +141,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Uplink ARQ retransmission timeout. |
 | `uplink.arq_max_retries` | `int` | `5` | Max uplink retransmission retries; `0` means unlimited within the window. |
 
-#### UE sync_tracking
+### `sync_tracking`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -175,7 +177,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `sync_tracking.akf_r_max` | `float` | `1e3` | Observation-noise variance upper bound. |
 | `sync_tracking.desired_peak_pos` | `int` | `20` | Target delay-peak position for alignment logic. |
 
-#### UE sensing
+### `sensing`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -190,14 +192,14 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `sensing.backend_processing_enabled` | `bool` | `false` | Publish backend RD/CFAR/micro-Doppler sidecars when supported. |
 | `sensing.symbol_stride` | `int` | `20` | Default dense-mode STRD applied at startup. |
 
-#### UE resource_preview
+### `resource_preview`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
 | `resource_preview.data_resource_blocks[]` | `object[]` | optional | Payload / sensing-pilot RE rectangles; each item has `kind`, `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
 | `resource_preview.mask_blocks[]` | `object[]` | optional | Compact sensing RE rectangles with `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
 
-#### UE measurement
+### `measurement`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -210,7 +212,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `measurement.measurement_packets_per_point` | `int` | `1` | Expected packets for one measurement epoch. |
 | `measurement.measurement_max_packets_per_frame` | `int` | `1` | Max measurement packets checked per frame; `0` means unlimited. |
 
-#### UE network_output
+### `network_output`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -239,7 +241,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `network_output.ertm_debug_port` | `int` | `12362` | UE eRTM debug PUB port. |
 | `network_output.control_port` | `int` | `10001` | ZMQ ROUTER port for runtime control. |
 
-#### UE cpu_cores
+### `cpu_cores`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -250,7 +252,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | UE uplink cores: LDPC encode, modulation, TX send, UDP receive. |
 | `cpu_cores.main_cpu_core` | `int` | `-1` | Main-thread CPU core; `-1` disables binding. |
 
-#### UE runtime
+### `runtime`
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -258,7 +260,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug destination IP; empty uses `default_out_ip`. |
 | `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug destination port. |
 
-#### UE logging
+### `logging`
 
 Same hierarchical filter as BS (`logging.*`). **Debug** examples: `ertm: debug`, `recovery: info`, `demod.snr: info`. **Performance** (paths end with `_profiling`, off until set): `demod_profiling: info`, `demod_eq_profiling: info`.
 
