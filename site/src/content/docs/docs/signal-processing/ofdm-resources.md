@@ -17,7 +17,17 @@ T_\mathrm{CP}=N_\mathrm{CP}T_s,\qquad
 T_O=N_sT_s=T+T_\mathrm{CP}.
 $$
 
-A frame has $M$ OFDM symbols and duration $T_F=MT_O$. The storage index $n\in\{0,\ldots,N-1\}$ maps to signed subcarrier index $\kappa_n$ and baseband frequency $f_n=\kappa_n\Delta f$. $\operatorname{rect}(\cdot)$ denotes a rectangular symbol window of duration $T_O$.
+A frame has $M$ OFDM symbols and duration $T_F=MT_O$. The FFT index $n\in\{0,\ldots,N-1\}$ maps to the subcarrier index
+
+$$
+\kappa_n=
+\begin{cases}
+n, & 0\le n<\dfrac{N}{2},\\
+n-N, & \dfrac{N}{2}\le n<N.
+\end{cases}
+$$
+
+The corresponding baseband frequency is $f_n=\kappa_n\Delta f$. $\operatorname{rect}(\cdot)$ denotes a rectangular symbol window of duration $T_O$.
 
 ## Continuous OFDM Waveforms
 
@@ -48,7 +58,7 @@ $$
 \mathcal S_\mathrm{UL},
 $$
 
-for downlink, guard, and uplink symbols. The compact uplink frame begins at the first active symbol after the guard interval. In FDD, both links remain continuous on separate carriers:
+for downlink, guard, and uplink symbols. The downlink and uplink share the same frame-wide symbol index $m$. The uplink grid is zero on $\mathcal S_\mathrm{DL}\cup\mathcal S_\mathrm{G}$ and carries active uplink symbols on $\mathcal S_\mathrm{UL}$ after the guard interval. In FDD, both links remain continuous on separate carriers:
 
 $$
 \mathcal S_\mathrm{DL}=\mathcal S_\mathrm{UL}=\mathcal M,
@@ -80,7 +90,14 @@ $$
 =\left\{\frac{1}{\sqrt2}(\pm1\pm j)\right\}.
 $$
 
-The current downlink has at least one full-band ZC per frame and may add a second ZC, a CFO-training field, and mid-frame full-band channel references. The current uplink places one full-band ZC in its first active symbol, followed by comb pilots and QPSK data. Distinct ZC roots identify the two links.
+The downlink always places a main full-band ZC at $m_\mathrm{sync}$. Two acquisition fields may be enabled independently to trade resource overhead for robustness to a larger initial CFO:
+
+- **Second synchronization symbol:** the same ZC OFDM symbol is placed at $m_\mathrm{sync}-1$. The useful parts of the two consecutive ZC symbols provide Schmidl-Cox-type coarse timing and modulo-CFO estimates; the main ZC still provides the final fine timing estimate.
+- **CFO training field:** a symbol whose useful part repeats every $N_\mathrm{CFO}$ samples is placed at $m_\mathrm{sync}+1$. It supplies an independent CFO reference for ambiguity resolution among CFO candidates; it does not replace the final CP-tail CFO refinement.
+
+The compact configuration keeps only the main ZC and is suitable when a stable reference already limits the initial CFO. The second synchronization symbol primarily protects coarse acquisition from CFO-induced degradation of ZC correlation, while the CFO field makes candidate selection more reliable. The CFO field is not a sensing resource. Optional mid-frame full-band references provide additional channel anchors in normal reception.
+
+The current uplink places one full-band ZC in its first active symbol, followed by comb pilots and QPSK data. Distinct ZC roots identify the two links.
 
 ## Sensing Resources
 
@@ -92,14 +109,4 @@ $$
 \{(n,m):m\in\mathcal S_\mathrm{DL}\}.
 $$
 
-Synchronization, pilot, communication-data, and random idle QPSK resources can all contribute when their transmitted symbols are known. Constant-modulus ZC/QPSK prevents element-wise modulation removal from excessively amplifying noise. Uniformly spaced selections support a direct Doppler FFT; nonuniform selections require their actual sampling times.
-
-## Resolution
-
-Using $N$ contiguous subcarriers gives basic delay resolution
-
-$$
-\Delta\tau=\frac{1}{B}.
-$$
-
-The monostatic range resolution is $\Delta r_\mathrm{mono}=c/(2B)$, while LoS-referenced bistatic excess-path resolution is $\Delta d_\mathrm{bi}=c/B$. The cyclic prefix bounds the delay spread that remains free of inter-symbol interference. Greater bandwidth improves delay resolution, while a longer coherent slow-time observation improves Doppler resolution.
+Synchronization, pilot, communication-data, and random idle QPSK resources can all contribute when their transmitted symbols are known. Constant-modulus ZC/QPSK prevents element-wise modulation removal from excessively amplifying noise. Uniformly spaced resources support a direct delay-Doppler 2D FFT; nonuniform resources require their actual frequency locations and sampling times. Resolution and unambiguous-range expressions are given with the [monostatic](/docs/signal-processing/monostatic-sensing/#resolution-and-unambiguous-ranges) and [bistatic](/docs/signal-processing/bistatic-sensing/#bistatic-output-and-resolution) processors where they are used.

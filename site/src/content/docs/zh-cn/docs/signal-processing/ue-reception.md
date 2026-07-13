@@ -3,7 +3,7 @@ title: 下行通信
 description: BS→UE 的信道估计、CFO/SFO 跟踪、均衡、软解映射与 LDPC 解码。
 ---
 
-下行处理从 UE 已完成帧定时并取得第 $\gamma$ 帧的 FFT 栅格 $\boldsymbol Y_\gamma^\mathrm{DL}$ 开始。完整链路依次为
+下行处理从 UE 已利用下行同步字段完成[初始同步](/zh-cn/docs/signal-processing/initial-synchronization/)，并取得第 $\gamma$ 帧的 FFT 网格 $\boldsymbol Y_\gamma^\mathrm{DL}$ 开始。完整链路依次为
 
 $$
 \text{ZC 信道估计}
@@ -32,23 +32,25 @@ H_{n,m,\gamma}^\mathrm{DL}
 +Z_{n,m,\gamma}^\mathrm{DL},
 $$
 
-其中
+其中 $t_{m,\gamma}=(m+\gamma M)T_O$，且
 
 $$
 H_{n,m,\gamma}^\mathrm{DL}
 =\sum_{l=1}^{L_\mathrm{DL}}
-\alpha_l^\mathrm{DL}
+\alpha_l^\mathrm{DL}(t_{m,\gamma})
 e^{j2\pi\left[
 (f_{D,l}^\mathrm{DL}+\Delta\bar f_{c,\gamma}^\mathrm{DL})
-(m+\gamma M)T_O
+(t_{m,\gamma})
 -\kappa_n\Delta f
-(\tau_l^\mathrm{DL}+\bar\tau_{d,\gamma,m}^\mathrm{DL})
+(\tau_{l,\mathrm{prop}}(t_{m,\gamma})
++\tau_\mathrm{DL}^\mathrm{RF}
+-\tau_d^\mathrm{UE}(t_{m,\gamma}))
 \right]}.
 $$
 
-$\Delta\bar f_{c,\gamma}^\mathrm{DL}$ 和 $\bar\tau_{d,\gamma,m}^\mathrm{DL}$ 表示当前帧补偿后仍残留的频偏与时偏。
+$\Delta\bar f_{c,\gamma}^\mathrm{DL}$ 表示当前帧补偿后仍残留的频偏；$\tau_d^\mathrm{UE}(t)$ 是 UE 当前解调窗口相对于下行发射端帧边界的时变偏移。真实传播时延、下行 RF 群时延与 TO 的定义见[信号模型](/zh-cn/docs/signal-processing/signal-model/#双向通信的时延组成)。
 
-## 信道参考与帧内重建
+## 信道参考、残余 CFO/SFO 与帧内重建
 
 全带宽 ZC 给出初始 LS 估计
 
@@ -58,7 +60,52 @@ $$
 {z_n^\mathrm{DL}}.
 $$
 
-该估计在时延域限制到循环前缀支撑区并进行 Wiener 平滑后，得到噪声更低的信道锚点。若帧中还包含全带宽信道参考符号，则每个参考位置都可形成锚点 $\hat H_{n,m_a,\gamma}$。位于相邻锚点 $m_a<m<m_b$ 之间的信道可按
+该估计在时延域限制到循环前缀支撑区并进行 Wiener 平滑后，得到噪声更低的信道锚点。主峰相对 $N_\mathrm{lag}$ 的位置还用于更新下行整数定时；通信仅在累计漂移接近阈值时移动帧起点。
+
+在相邻且都含有相同已知导频的下行符号上，定义
+
+$$
+\bar R_\gamma^\mathrm{DL}[n]
+=\frac{1}{|\mathcal A_\mathrm{DL}|}
+\sum_{m\in\mathcal A_\mathrm{DL}}
+(Y_{n,m,\gamma}^\mathrm{DL})^*
+Y_{n,m+1,\gamma}^\mathrm{DL},
+\qquad n\in\mathcal P,
+$$
+
+其中 $\mathcal A_\mathrm{DL}$ 只包含两个符号都属于下行有效区的索引。相位解缠后满足
+
+$$
+\varphi_\gamma^\mathrm{DL}[n]
+=\arg\bar R_\gamma^\mathrm{DL}[n]
+\approx2\pi\left(
+f_{o,\gamma}^\mathrm{DL}T_O
+-\kappa_n\Delta fN_s\Delta T_{s,\gamma}^\mathrm{DL}
+\right).
+$$
+
+以 $|\bar R_\gamma^\mathrm{DL}[n]|^2$ 为权重拟合截距 $a$ 和子载波斜率 $b$：
+
+$$
+(\hat a,\hat b)
+=\arg\min_{a,b}\sum_{n\in\mathcal P}
+|\bar R_\gamma^\mathrm{DL}[n]|^2
+\left|
+\operatorname{unwrap}(\varphi_\gamma^\mathrm{DL}[n])-a-b\kappa_n
+\right|^2,
+$$
+
+$$
+\hat f_{o,\gamma}^\mathrm{DL}
+=\frac{\hat a}{2\pi T_O},
+\qquad
+\Delta\hat T_{s,\gamma}^\mathrm{DL}
+=-\frac{\hat b}{2\pi\Delta fN_s}.
+$$
+
+公共相位项估计残余 CFO 与主导路径多普勒的合成频移，子载波斜率随符号的变化估计 SFO。二者共同用于补偿下行信道的帧内相位演化。
+
+若帧中还包含全带宽信道参考符号，则每个参考位置都可形成锚点 $\hat H_{n,m_a,\gamma}$。位于相邻锚点 $m_a<m<m_b$ 之间的基准信道可按
 
 $$
 \hat H_{n,m,\gamma}^{\mathrm{base}}
@@ -68,7 +115,17 @@ $$
 \xi_m=\frac{m-m_a}{m_b-m_a}
 $$
 
-插值。随后叠加由导频估计得到的残余 CFO/SFO 相位，使每个数据符号都使用与其时刻对应的 $\hat H_{n,m,\gamma}^\mathrm{DL}$。没有额外锚点时，该过程退化为从同步符号向整帧传播。
+插值。随后叠加由导频估计得到的残余 CFO/SFO 相位，使每个数据符号都使用与其时刻对应的 $\hat H_{n,m,\gamma}^\mathrm{DL}$。没有额外锚点时，从同步符号向第 $m$ 个符号传播：
+
+$$
+\hat H_{n,m,\gamma}^\mathrm{DL}
+=\hat H_{n,m_\mathrm{sync},\gamma}^\mathrm{DL}
+e^{j2\pi(m-m_\mathrm{sync})
+(\hat f_{o,\gamma}^\mathrm{DL}T_O
+-\kappa_n\Delta fN_s\Delta\hat T_{s,\gamma}^\mathrm{DL})}.
+$$
+
+上述残余估计和补偿形式也用于上行，但两条链路各自使用自己的参考资源和观测值。
 
 ## ZF 与 MMSE 均衡
 
@@ -88,7 +145,7 @@ G_{n,m}^{\mathrm{MMSE}}
 {|\hat H_{n,m}^\mathrm{DL}|^2+\hat\sigma_Z^2/E_s}.
 $$
 
-ZF 在高信噪比下保持星座幅度直接，MMSE 在深衰落处限制噪声放大。数据资源上的均衡符号统一写为
+ZF 直接反演估计信道，但会在深衰落处放大噪声；MMSE 通过正则化抑制这种噪声增强。数据资源上的均衡符号统一写为
 
 $$
 \hat d_{n,m,\gamma}^\mathrm{DL}

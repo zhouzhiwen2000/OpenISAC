@@ -3,17 +3,17 @@ title: Uplink Communication
 description: The UE-to-BS compact OFDM frame, duplex timing, channel estimation, equalization, and decoding.
 ---
 
-The uplink reuses $N$, $N_\mathrm{CP}$, $\Delta f$, and the pilot positions, but has an independent grid $\boldsymbol B_\gamma^\mathrm{UL}$ and ZC root. It is a complete UE-to-BS communication link rather than a reversal of downlink symbols. Let $M_\mathrm{UL}$ be the active-symbol count of each local uplink frame: $M_\mathrm{UL}=|\mathcal S_\mathrm{UL}|$ in TDD and $M_\mathrm{UL}=M$ in FDD.
+The uplink reuses $N$, $N_\mathrm{CP}$, $\Delta f$, the frame-wide symbol index $m$, and the pilot positions, but has an independent grid $\boldsymbol B_\gamma^\mathrm{UL}$ and ZC root. The UE has already synchronized to the BS through the downlink; the uplink is a complete UE-to-BS communication link, not a separate initial-acquisition procedure or a reversal of downlink symbols. In TDD, the uplink grid is zero for $m\in\mathcal S_\mathrm{DL}\cup\mathcal S_\mathrm{G}$ and carries uplink symbols only for $m\in\mathcal S_\mathrm{UL}$.
 
 ## Uplink Frame
 
-The first active symbol of every local uplink frame is full-band ZC:
+Let $m_{\mathrm{UL},0}=\min\mathcal S_\mathrm{UL}$. The first active uplink OFDM symbol in the frame is full-band ZC:
 
 $$
-b_{n,0,\gamma}^\mathrm{UL}=z_n^\mathrm{UL}.
+b_{n,m_{\mathrm{UL},0},\gamma}^\mathrm{UL}=z_n^\mathrm{UL}.
 $$
 
-Subsequent symbols carry known pilots on $n\in\mathcal P$ and coded QPSK on $n\in\mathcal D$:
+The remaining symbols with $m\in\mathcal S_\mathrm{UL}\setminus\{m_{\mathrm{UL},0}\}$ carry known pilots on $n\in\mathcal P$ and coded QPSK on $n\in\mathcal D$:
 
 $$
 b_{n,m,\gamma}^\mathrm{UL}=
@@ -39,14 +39,18 @@ $$
 $$
 H_{n,m,\gamma}^\mathrm{UL}
 =\sum_{l=1}^{L_\mathrm{UL}}
-\alpha_l^\mathrm{UL}
+\alpha_l^\mathrm{UL}(t_{m,\gamma}^\mathrm{UL})
 e^{j2\pi\left[
 (f_{D,l}^\mathrm{UL}+\Delta\bar f_{c,\gamma}^\mathrm{UL})
-(m+\gamma M)T_O
+t_{m,\gamma}^\mathrm{UL}
 -\kappa_n\Delta f
-(\tau_l^\mathrm{UL}+\bar\tau_{d,\gamma,m}^\mathrm{UL})
+(\tau_{l,\mathrm{prop}}(t_{m,\gamma}^\mathrm{UL})
++\tau_\mathrm{UL}^\mathrm{RF}
+-\tau_d^\mathrm{BS}(t_{m,\gamma}^\mathrm{UL}))
 \right]}.
 $$
+
+$t_{m,\gamma}^\mathrm{UL}$ is the actual reference time of uplink symbol $m$ within the frame, and $\tau_d^\mathrm{BS}(t)$ is the time-varying offset of the BS's current demodulation window relative to the uplink transmitter frame boundary. See the [Signal Model](/docs/signal-processing/signal-model/#bidirectional-channel-delay-components) for its relation to propagation delay, uplink RF group delay, and the locally observed TO.
 
 The uplink ZC gives
 
@@ -80,7 +84,36 @@ f_{o,\gamma}^\mathrm{UL}T_O
 \right).
 $$
 
-Weighted linear regression again separates the common phase term from the subcarrier slope and propagates the synchronization-symbol channel to every data symbol. If $\mathcal A_\mathrm{UL}$ is empty, the local frame provides no cross-symbol pilot fit. Uplink and downlink estimate these quantities independently rather than assuming ideal reciprocity.
+The same weighted fit used in the downlink gives
+
+$$
+(\hat a_\mathrm{UL},\hat b_\mathrm{UL})
+=\arg\min_{a,b}\sum_{n\in\mathcal P}
+|\bar R_\gamma^\mathrm{UL}[n]|^2
+\left|
+\operatorname{unwrap}(\arg\bar R_\gamma^\mathrm{UL}[n])-a-b\kappa_n
+\right|^2,
+$$
+
+$$
+\hat f_{o,\gamma}^\mathrm{UL}
+=\frac{\hat a_\mathrm{UL}}{2\pi T_O},
+\qquad
+\Delta\hat T_{s,\gamma}^\mathrm{UL}
+=-\frac{\hat b_\mathrm{UL}}{2\pi\Delta fN_s}.
+$$
+
+The channel is propagated as
+
+$$
+\hat H_{n,m,\gamma}^\mathrm{UL}
+=\hat H_{n,0,\gamma}^\mathrm{UL}
+e^{j2\pi m(
+\hat f_{o,\gamma}^\mathrm{UL}T_O
+-\kappa_n\Delta fN_s\Delta\hat T_{s,\gamma}^\mathrm{UL})}.
+$$
+
+If $\mathcal A_\mathrm{UL}$ is empty, the local frame provides no cross-symbol pilot fit. Residual CFO/SFO estimation and compensation have the same form in both directions, but each link uses its own references and observations; communication decoding does not rely on ideal reciprocity.
 
 ## Equalization and Information Recovery
 
@@ -95,4 +128,4 @@ Equalized pilot residuals estimate $\hat\sigma_\mathrm{eq}^2$, which scales the 
 
 ## Relation to eRTM
 
-The uplink also supplies the delay structure in $\hat H^\mathrm{UL}[n]$. Comparing it with the downlink delay profile observed at the UE constrains the relative timing of the two directions and enables separation of BS-side and UE-side timing offsets; see [OTA and eRTM Timing](/docs/signal-processing/ota-ertm-timing/).
+The uplink also supplies the BS-side channel estimate $\hat H_{\mathrm{BS}}[n]$. When both directions are enabled, eRTM combines it with the UE-side downlink estimate $\hat H_{\mathrm{UE}}[n]$ and uses the relationship between the uplink and downlink channels to estimate the timing offsets at the two endpoints; see the [eRTM option in Bistatic Sensing](/docs/signal-processing/bistatic-sensing/#ertm-bidirectional-timing-option).

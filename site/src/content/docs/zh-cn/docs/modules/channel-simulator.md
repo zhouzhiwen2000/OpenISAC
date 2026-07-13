@@ -1,17 +1,17 @@
 ---
 title: 信道仿真器
-description: 无需 USRP 即可运行 OpenISAC 通信与感知流水线。
+description: 不连接 USRP，也能验证 OpenISAC 的通信、单站感知和双站感知流程。
 ---
 
-`ChannelSimulator` 让你在没有任何射频硬件的情况下运行完整的**通信**与**多通道感知**流水线。它用一块共享内存“空口”替代 USRP，并在空口中构造一个基于散射体的多径信道：发射信号经过 LoS 路径、可选静态多径路径，以及一组带时延 / 多普勒 / 增益 / 阵列响应的运动散射体；各路径的整数时延中可以并入固定定时偏移，通信/双站接收链路可以叠加 UE 采样时钟偏差，再叠加相对载波频偏（CFO），最后为每个 RX 输出加入 AWGN。这里的定时偏移是整数样本级的固定偏移；`sample_rate_offset_ppm` 用于建模 BS 与 UE 采样时钟之间的采样频率偏差（SFO）。
+`ChannelSimulator` 用共享内存模拟空口，让你在没有 USRP 的情况下运行 BS、UE、单站感知和双站感知流程。它适合验证配置、处理链路和可视化功能，也可以在接入硬件前复现常见的时延、频偏、采样频率偏差、噪声和多径场景。
 
-每个感知 RX 通道被视为一根天线；阵列响应既可以由均匀线阵（ULA，参数 `array_spacing_lambda`）参数化生成，也可以通过 `steering_override_file` 加载完全自定义的阵列流形矩阵。通信信道是一个**真实的多径信道**：LoS 路径加上散射体散射，因此 UE 的**双站**感知同样能检测到距离-多普勒目标。
+仿真信道可以包含 LoS、静态多径和运动散射体，并为每条路径设置时延、多普勒、增益和阵列响应。每个感知 RX 通道对应一个阵元；可以使用 ULA 模型，也可以加载自定义阵列流形。通信和双站感知共享多径通信信道，因此 UE 端同样能够观察配置的距离–多普勒目标。
 
 ## 工作原理
 
 ![ChannelSimulator 共享内存空口流程图](/images/channel-simulator-flow.png)
 
-三个进程通过以 `simulation.session` 命名的 POSIX 共享内存环形缓冲区相互连接。各引擎通过 YAML 中的 `radio_backend: sim` 选择后端；`radio::SimBackend` 实现与 UHD 后端相同的 OpenISAC radio HAL，因此 BS/UE/感知热路径始终驱动 `radio::ITxStream` / `radio::IRxStream` 接口，而不关心底层是共享内存还是 USRP。`radio_backend: uhd`（默认值）保持硬件行为不变。
+`ChannelSimulator`、BS 和 UE 通过 `simulation.session` 标识的共享内存连接。配置 `radio_backend: sim` 后，BS/UE 使用仿真后端收发样本；改回默认的 `radio_backend: uhd` 即可恢复 USRP 后端，不需要修改通信或感知处理链。
 
 ## 编译
 
@@ -38,7 +38,7 @@ cp ../config/UE_Sim.yaml UE.yaml
 ./UE
 ```
 
-务必先启动 `ChannelSimulator`。默认情况下 hub 按 wall-clock 采样时间做 pacing，同时仍通过共享内存背压（backpressure）流控：如果启用了通信 RX 或感知 RX，却没有启动对应的消费者进程读取共享内存，相关环形缓冲区填满后，整个仿真都会等待。因此，请启动所有已启用的接收端；如果只需要其中一侧，请在 `simulation:` 中关闭不用的输出：
+务必先启动 `ChannelSimulator`，再启动所有已启用输出对应的接收进程。仿真器按实际时间推进，并通过共享内存背压控制数据流；如果某个已启用的输出没有进程读取，缓冲区填满后仿真会暂停等待。如果只验证部分功能，请在 `simulation:` 中关闭不用的输出：
 
 - **仅感知**：设 `enable_comm_rx: false`；hub 不生成通信 RX 输出，只需运行 `ChannelSimulator` + `BS`，无需运行 `UE`。
 - **仅通信**：设 `enable_sensing_rx: false`；hub 不生成感知 RX 输出，但仍需运行 `ChannelSimulator` + `BS` + `UE`，因为 BS 负责发射，UE 负责通信接收。
@@ -63,7 +63,7 @@ simulation:
   cfo_hz: 0.0                    # 通信/双站 RX 上的相对载波频偏
   sample_rate_offset_ppm: 0.0    # UE 采样时钟相对 BS 时钟的 ppm 偏差
   timing_offset_samples: 0       # 固定整数采样偏移，并入路径时延
-  array_spacing_m: 0.04283       # ULA 物理阵元间距（米）；电气间距 d/lambda 随 center_freq 变化
+  array_spacing_m: 0.04283       # ULA 物理阵元间距（米）；归一化阵元间距 d/lambda 随 center_freq 变化
                                  # （42.83 mm = 3.5 GHz 时的 lambda/2，与感知可视化端一致）。
                                  # 设为 <= 0 时回退到旧的 array_spacing_lambda。
   array_spacing_lambda: 0.5      # 旧参数：固定波长间距，仅当 array_spacing_m <= 0 时使用
@@ -110,13 +110,13 @@ $$
 a_{i,k}(\theta_i) = \exp\!\left(j 2\pi \frac{d}{\lambda} k \sin\theta_i\right)
 $$
 
-其中 $k$ 为天线索引；电气间距为：
+其中 $k$ 为天线索引；归一化阵元间距为：
 
 $$
 d_\lambda = \frac{d_m f_c}{c}
 $$
 
-其中 $d_m$ 是 `array_spacing_m`，$d_\lambda$ 是以波长为单位的阵元间距。它由物理间距与载频共同决定，因此任意 `center_freq` 下还原出的角度都正确，可视化端用同一物理间距反算角度。当 `array_spacing_m <= 0` 时退回到与频率无关的旧参数 `array_spacing_lambda`。如果配置 `steering_override_file`，则直接从阵列流形矩阵读取 $a_{i,k}$。
+其中 $d_m$ 是 `array_spacing_m`，$d_\lambda$ 是以波长为单位的归一化阵元间距。它由物理间距与载频共同决定，因此任意 `center_freq` 下还原出的角度都正确，可视化端用同一物理间距反算角度。当 `array_spacing_m <= 0` 时退回到与频率无关的旧参数 `array_spacing_lambda`。如果配置 `steering_override_file`，则直接从阵列流形矩阵读取 $a_{i,k}$。
 
 单站感知 RX 的第 $k$ 根天线为：
 
@@ -148,10 +148,10 @@ $$
 
 默认情况下，`targets` 列表同时驱动单站感知天线（带阵列流形）和双站通信信道（单天线，不使用阵列流形），对应同一个相干场景。设置 `bistatic_targets` 可让双站/通信信道拥有独立的散射体。`comm_multipath_taps` 用于配置 LoS 路径和静态多径路径的时延、增益与初始相位。UE->BS 上行复用同一个通信信道模型，因此仿真 TDD 上行与下行信道形状互易。
 
-## 说明和限制
+## 使用提示与限制
 
-- 每个进程都能通过 Ctrl-C（SIGINT）干净退出，且彼此独立；hub 退出时会清理（unlink）其共享内存。
-- hub 默认启用实时节拍：每个 BS-clock chunk 按 `chunk_samples / sample_rate` 的 wall-clock 时间释放。若需要最快 batch 仿真，可设置 `simulation.pacing_enabled: false`。
-- 将 `ring_capacity_samples` 设小（约几帧），使发射机不会远远跑在 hub 前面，从而避免单站 TX/RX 配对队列溢出。
+- 每个进程都可以用 Ctrl-C 独立退出；`ChannelSimulator` 退出时会清理对应的共享内存。
+- 默认启用实时节拍。需要尽快完成批量仿真时，可设置 `simulation.pacing_enabled: false`。
+- 建议将 `ring_capacity_samples` 控制在约几帧，避免发射端运行过快并造成单站 TX/RX 配对队列溢出。
 - `sample_rate_offset_ppm` 建模一个端点级 UE/BS SFO；`timing_offset_samples` 仍只是固定整数样本偏移，不会随时间漂移。
 - 当前仿真没有建模分数时延；所有传播时延与配置定时偏移都会取整到样本级。

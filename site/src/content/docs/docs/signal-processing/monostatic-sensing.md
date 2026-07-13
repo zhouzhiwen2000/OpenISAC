@@ -25,11 +25,11 @@ $$
 \sum_{p=1}^{P+C}
 \beta_p\boldsymbol a(\theta_p)
 e^{j2\pi\left(f_{D,s,p}t_{m,\gamma}
--\kappa_n\Delta f\tau_{s,p}\right)}
+-\kappa_n\Delta f\tau_{s,p}^\mathrm{link}\right)}
 +\boldsymbol Z_{n,m,\gamma},
 $$
 
-where $t_{m,\gamma}=(\gamma M+m)T_O$. Since $b_{n,m,\gamma}^\mathrm{DL}$ is known, modulation is removed element-wise:
+where $t_{m,\gamma}=(\gamma M+m)T_O$ and $\tau_{s,p}^\mathrm{link}=\tau_{s,p}^\mathrm{prop}+\tau_\mathrm{sens}^\mathrm{RF}$. Since $b_{n,m,\gamma}^\mathrm{DL}$ is known, modulation is removed element-wise:
 
 $$
 \boldsymbol F_{n,m,\gamma}
@@ -38,18 +38,16 @@ $$
 =\sum_{p=1}^{P+C}
 \beta_p\boldsymbol a(\theta_p)
 e^{j2\pi\left(f_{D,s,p}t_{m,\gamma}
--\kappa_n\Delta f\tau_{s,p}\right)}
+-\kappa_n\Delta f\tau_{s,p}^\mathrm{link}\right)}
 +\tilde{\boldsymbol Z}_{n,m,\gamma}.
 $$
 
-Retaining every channel forms the tensor, where $M_\mathrm{sens}$ is the selected sensing-symbol count per frame:
+Retaining every channel forms the tensor, where $M_\mathrm{sens}$ is the sensing-symbol count per frame:
 
 $$
 \mathcal F_\gamma
 \in\mathbb C^{N\times M_\mathrm{sens}\times R}.
 $$
-
-For constant-modulus ZC/QPSK, division is equivalent to conjugate matched multiplication up to a common energy normalization, so random communication data does not destroy echo phase.
 
 ## 2. Array-Channel Calibration
 
@@ -117,18 +115,39 @@ $$
 With signed, FFT-shifted Doppler index $k_f$,
 
 $$
-\hat\tau=\frac{\hat k_\tau}{N_\mathrm{Per}\Delta f},
+\hat\tau^\mathrm{link}=\frac{\hat k_\tau}{N_\mathrm{Per}\Delta f},
 \qquad
 \hat f_D=\frac{\hat k_f}{M_\mathrm{Per}T_\mathrm{slow}},
 $$
 
 $$
-\hat r=\frac{c\hat\tau}{2},
+\hat\tau^\mathrm{prop}
+=\hat\tau^\mathrm{link}-\tau_\mathrm{sens}^\mathrm{RF},
+\qquad
+\hat r=\frac{c\hat\tau^\mathrm{prop}}{2},
 \qquad
 \hat v=\frac{c\hat f_D}{2f_c}.
 $$
 
 Zero padding increases display sampling density, but fundamental range resolution remains set by $B$ and Doppler resolution by coherent duration $M_sT_\mathrm{slow}$.
+
+## Resolution and Unambiguous Ranges
+
+With contiguous bandwidth $B=N\Delta f$, delay resolution is $\Delta\tau=1/B$, giving monostatic range resolution
+
+$$
+\Delta r_\mathrm{mono}=\frac{c}{2B}.
+$$
+
+Uniform subcarrier sampling has circular delay-ambiguity period $1/\Delta f$, corresponding to monostatic range period $c/(2\Delta f)$; the interference-free echo delay should still remain within $T_\mathrm{CP}$. For slow-time interval $T_\mathrm{slow}$ and coherent length $M_s$,
+
+$$
+\Delta f_D=\frac{1}{M_sT_\mathrm{slow}},
+\qquad
+|f_D|<\frac{1}{2T_\mathrm{slow}}.
+$$
+
+The velocity resolution is $c\Delta f_D/(2f_c)$. Zero padding increases display sampling density but does not change these fundamental resolution or ambiguity limits.
 
 ## 5. ULA Angle Processing
 

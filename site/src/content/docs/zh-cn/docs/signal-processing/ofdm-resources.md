@@ -3,7 +3,7 @@ title: OFDM 资源
 description: 连续 OFDM 波形、TDD/FDD 帧划分以及上下行参考与数据资源。
 ---
 
-OpenISAC 的上下行共享同一套 OFDM 数字参数，但使用彼此独立的资源栅格与 ZC 根序列。令 $N$ 为 FFT 大小，$N_\mathrm{CP}$ 为循环前缀采样数，$\Delta f$ 为子载波间隔，则
+OpenISAC 的上下行共享同一套 OFDM 数字参数，但使用彼此独立的资源网格与 ZC 根序列。令 $N$ 为 FFT 大小，$N_\mathrm{CP}$ 为循环前缀采样数，$\Delta f$ 为子载波间隔，则
 
 $$
 T=\frac{1}{\Delta f},\qquad
@@ -17,7 +17,17 @@ T_\mathrm{CP}=N_\mathrm{CP}T_s,\qquad
 T_O=N_sT_s=T+T_\mathrm{CP}.
 $$
 
-一帧包含 $M$ 个 OFDM 符号，帧长为 $T_F=MT_O$。$n\in\{0,\ldots,N-1\}$ 是 FFT 存储位置，对应的有符号子载波索引记为 $\kappa_n$，其基带频率为 $f_n=\kappa_n\Delta f$。$\operatorname{rect}(\cdot)$ 表示持续一个 $T_O$ 的矩形符号窗。
+一帧包含 $M$ 个 OFDM 符号，帧长为 $T_F=MT_O$。$n\in\{0,\ldots,N-1\}$ 是 FFT 索引，其对应的子载波索引为
+
+$$
+\kappa_n=
+\begin{cases}
+n, & 0\le n<\dfrac{N}{2},\\
+n-N, & \dfrac{N}{2}\le n<N.
+\end{cases}
+$$
+
+相应的基带频率为 $f_n=\kappa_n\Delta f$。$\operatorname{rect}(\cdot)$ 表示持续一个 $T_O$ 的矩形符号窗。
 
 ## 连续 OFDM 波形
 
@@ -35,7 +45,7 @@ e^{j2\pi\kappa_n\Delta f(t-mT_O-T_\mathrm{CP})}
 \operatorname{rect}\!\left(\frac{t-mT_O}{T_O}\right).
 $$
 
-$\boldsymbol B_\gamma^x=[b_{n,m,\gamma}^x]\in\mathbb C^{N\times M}$ 是第 $\gamma$ 帧的发送资源栅格；不属于链路 $x$ 的资源取零。连续且等间隔的 OFDM 符号为慢时间处理提供均匀采样，避免不规则分组间隔给多普勒和微多普勒谱引入额外旁瓣。
+$\boldsymbol B_\gamma^x=[b_{n,m,\gamma}^x]\in\mathbb C^{N\times M}$ 是第 $\gamma$ 帧的发送资源网格；不属于链路 $x$ 的资源取零。连续且等间隔的 OFDM 符号为慢时间处理提供均匀采样，避免不规则分组间隔给多普勒和微多普勒谱引入额外旁瓣。
 
 ## TDD 与 FDD 资源集合
 
@@ -48,7 +58,7 @@ $$
 \mathcal S_\mathrm{UL},
 $$
 
-其中 $\mathcal S_\mathrm{DL}$、$\mathcal S_\mathrm{G}$ 和 $\mathcal S_\mathrm{UL}$ 分别为下行、保护和上行符号。上行有效区间在保护符号之后开始，并将第一个有效上行符号作为上行局部帧的 $m=0$。
+其中 $\mathcal S_\mathrm{DL}$、$\mathcal S_\mathrm{G}$ 和 $\mathcal S_\mathrm{UL}$ 分别为下行、保护和上行符号。上下行共享同一个帧内符号索引 $m$；上行资源网格在 $\mathcal S_\mathrm{DL}\cup\mathcal S_\mathrm{G}$ 上置零，并在保护符号之后的 $\mathcal S_\mathrm{UL}$ 上承载有效上行符号。
 
 FDD 在独立载波上同时保持两条链路连续，因此
 
@@ -93,7 +103,14 @@ $$
 =\left\{\frac{1}{\sqrt2}(\pm1\pm j)\right\}.
 $$
 
-当前下行每帧至少包含一个全带宽 ZC 符号，并可增加第二个 ZC、CFO 训练字段和帧中信道参考符号；当前上行在第一个有效上行符号放置一个全带宽 ZC，后续符号使用梳状导频与 QPSK 数据。两条链路采用不同的 ZC 根，便于区分各自的参考信号。
+当前下行每帧至少在 $m_\mathrm{sync}$ 放置一个主 ZC 同步符号。为兼顾训练开销和大初始频偏下的捕获能力，还可独立启用两类字段：
+
+- **第二同步符号**：在 $m_\mathrm{sync}-1$ 放置与主 ZC 相同的 OFDM 符号。两个连续 ZC 的有用部分用于 Schmidl–Cox 型粗定时和模糊 CFO 估计，主 ZC 随后用于精细时偏估计。
+- **CFO 训练字段**：在 $m_\mathrm{sync}+1$ 放置有用部分以 $N_\mathrm{CFO}$ 个采样为周期重复的训练符号。它提供独立的 CFO 参考，用于在多个 CFO 候选之间消除模糊，而不是替代最终的 CP-tail 频偏细化。
+
+紧凑模式只保留主 ZC，适用于初始 CFO 已由高稳参考控制的场景。第二同步符号主要减小大 CFO 对 ZC 定时相关的影响，CFO 训练字段则提高候选 CFO 选择的可靠性；两者可分别启用。CFO 训练字段不作为感知资源。帧内还可插入全带宽信道参考符号，供正常接收状态更新信道锚点。
+
+当前上行在第一个有效上行符号放置一个全带宽 ZC，后续符号使用梳状导频与 QPSK 数据。两条链路采用不同的 ZC 根，便于区分各自的参考信号。
 
 ## 感知资源
 
@@ -105,14 +122,4 @@ $$
 \{(n,m):m\in\mathcal S_\mathrm{DL}\}.
 $$
 
-同步、导频、通信数据和无载荷时的随机 QPSK 都可以参与感知，只要接收端能够获得对应的发送符号。恒模 ZC/QPSK 使逐元素去调制不会因符号幅度过小而显著放大噪声。若只选择部分感知资源，应保持慢时间采样间隔已知；均匀间隔资源可直接使用 Doppler FFT，非均匀资源则需要按实际采样时刻处理。
-
-## 分辨率与无模糊范围
-
-使用连续 $N$ 个子载波时，基本时延分辨率为
-
-$$
-\Delta\tau=\frac{1}{B}.
-$$
-
-因此单站距离分辨率为 $\Delta r_\mathrm{mono}=c/(2B)$，以 LoS 为参考的双站超额路径分辨率为 $\Delta d_\mathrm{bi}=c/B$。循环前缀给出无符号间干扰的最大时延扩展边界；更长的有效带宽改善时延分辨率，而更长的相干慢时间观测改善多普勒分辨率。
+同步、导频、通信数据和无载荷时的随机 QPSK 都可以参与感知，只要接收端能够获得对应的发送符号。恒模 ZC/QPSK 使逐元素去调制不会因符号幅度过小而显著放大噪声。若只选择部分感知资源，应保持慢时间采样间隔已知；均匀间隔资源可直接使用 Delay–Doppler 2D FFT，非均匀资源则需要按实际频率位置和采样时刻处理。时延/距离与多普勒的分辨率和无模糊范围分别在[单站感知](/zh-cn/docs/signal-processing/monostatic-sensing/#分辨率与无模糊范围)和[双站感知](/zh-cn/docs/signal-processing/bistatic-sensing/#双站结果与分辨率)中说明。

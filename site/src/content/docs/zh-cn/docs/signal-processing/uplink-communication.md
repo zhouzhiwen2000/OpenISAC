@@ -3,17 +3,17 @@ title: 上行通信
 description: UE→BS 的紧凑 OFDM 帧、双工时域关系、信道估计、均衡与解码。
 ---
 
-上行使用与下行相同的 $N$、$N_\mathrm{CP}$、$\Delta f$ 和导频位置，但采用独立的发送栅格 $\boldsymbol B_\gamma^\mathrm{UL}$ 与 ZC 根序列。它是一条完整的 UE→BS 通信链路，而不是下行数据符号的简单反向重放。记每个上行局部帧的有效符号数为 $M_\mathrm{UL}$；TDD 中 $M_\mathrm{UL}=|\mathcal S_\mathrm{UL}|$，FDD 中 $M_\mathrm{UL}=M$。
+上行使用与下行相同的 $N$、$N_\mathrm{CP}$、$\Delta f$、帧内符号索引 $m$ 和导频位置，但采用独立的发送资源网格 $\boldsymbol B_\gamma^\mathrm{UL}$ 与 ZC 根序列。UE 已通过下行链路完成与 BS 的初始同步；上行是一条完整的 UE→BS 通信链路，而不是重新执行一套独立初始捕获或简单反向重放下行数据。TDD 中，上行资源网格在 $m\in\mathcal S_\mathrm{DL}\cup\mathcal S_\mathrm{G}$ 时置零，仅在 $m\in\mathcal S_\mathrm{UL}$ 时承载上行符号。
 
 ## 上行帧
 
-在每个上行局部帧中，第一个有效 OFDM 符号为全带宽 ZC：
+令 $m_{\mathrm{UL},0}=\min\mathcal S_\mathrm{UL}$。帧内第一个有效上行 OFDM 符号为全带宽 ZC：
 
 $$
-b_{n,0,\gamma}^\mathrm{UL}=z_n^\mathrm{UL}.
+b_{n,m_{\mathrm{UL},0},\gamma}^\mathrm{UL}=z_n^\mathrm{UL}.
 $$
 
-其余有效符号在 $n\in\mathcal P$ 上放置已知导频，在 $n\in\mathcal D$ 上放置编码 QPSK：
+其余 $m\in\mathcal S_\mathrm{UL}\setminus\{m_{\mathrm{UL},0}\}$ 的符号在 $n\in\mathcal P$ 上放置已知导频，在 $n\in\mathcal D$ 上放置编码 QPSK：
 
 $$
 b_{n,m,\gamma}^\mathrm{UL}=
@@ -39,14 +39,18 @@ $$
 $$
 H_{n,m,\gamma}^\mathrm{UL}
 =\sum_{l=1}^{L_\mathrm{UL}}
-\alpha_l^\mathrm{UL}
+\alpha_l^\mathrm{UL}(t_{m,\gamma}^\mathrm{UL})
 e^{j2\pi\left[
 (f_{D,l}^\mathrm{UL}+\Delta\bar f_{c,\gamma}^\mathrm{UL})
-(m+\gamma M)T_O
+t_{m,\gamma}^\mathrm{UL}
 -\kappa_n\Delta f
-(\tau_l^\mathrm{UL}+\bar\tau_{d,\gamma,m}^\mathrm{UL})
+(\tau_{l,\mathrm{prop}}(t_{m,\gamma}^\mathrm{UL})
++\tau_\mathrm{UL}^\mathrm{RF}
+-\tau_d^\mathrm{BS}(t_{m,\gamma}^\mathrm{UL}))
 \right]}.
 $$
+
+这里 $t_{m,\gamma}^\mathrm{UL}$ 是帧内上行符号 $m$ 的实际参考时刻；$\tau_d^\mathrm{BS}(t)$ 是 BS 当前解调窗口相对于上行发射端帧边界的时变偏移。真实传播时延、上行 RF 群时延与本地观测 TO 的关系见[信号模型](/zh-cn/docs/signal-processing/signal-model/#双向通信的时延组成)。
 
 上行 ZC 的 LS 估计为
 
@@ -80,7 +84,38 @@ f_{o,\gamma}^\mathrm{UL}T_O
 \right).
 $$
 
-因此同样可通过加权线性回归分离公共相位项与子载波相位斜率，并把同步符号处的信道估计传播到各数据符号。若 $\mathcal A_\mathrm{UL}$ 为空，则当前局部帧不进行这种导频跨符号拟合。上行和下行分别估计这些量，不依赖理想互易假设。
+因此采用与下行相同形式的加权线性回归
+
+$$
+(\hat a_\mathrm{UL},\hat b_\mathrm{UL})
+=\arg\min_{a,b}\sum_{n\in\mathcal P}
+|\bar R_\gamma^\mathrm{UL}[n]|^2
+\left|
+\operatorname{unwrap}(\arg\bar R_\gamma^\mathrm{UL}[n])-a-b\kappa_n
+\right|^2,
+$$
+
+并得到
+
+$$
+\hat f_{o,\gamma}^\mathrm{UL}
+=\frac{\hat a_\mathrm{UL}}{2\pi T_O},
+\qquad
+\Delta\hat T_{s,\gamma}^\mathrm{UL}
+=-\frac{\hat b_\mathrm{UL}}{2\pi\Delta fN_s}.
+$$
+
+上行信道随后传播为
+
+$$
+\hat H_{n,m,\gamma}^\mathrm{UL}
+=\hat H_{n,0,\gamma}^\mathrm{UL}
+e^{j2\pi m(
+\hat f_{o,\gamma}^\mathrm{UL}T_O
+-\kappa_n\Delta fN_s\Delta\hat T_{s,\gamma}^\mathrm{UL})}.
+$$
+
+若 $\mathcal A_\mathrm{UL}$ 为空，则当前局部帧不进行导频跨符号拟合。CFO 与 SFO 的残差估计和补偿形式在上下行通用，但两条链路分别使用自己的参考资源与观测量；这里不依赖理想互易性来完成通信解调。
 
 ## 均衡与信息恢复
 
@@ -95,4 +130,4 @@ $$
 
 ## 与 eRTM 的关系
 
-上行不仅提供反向通信，也提供 $\hat H^\mathrm{UL}[n]$ 的时延信息。将其时延谱与 UE 观测到的下行时延谱联合比较，可以估计两个方向的相对定时量，并进一步分离 BS 与 UE 两侧的时偏，详见 [OTA 与 eRTM 定时](/zh-cn/docs/signal-processing/ota-ertm-timing/)。
+上行不仅提供反向通信，也提供 BS 端的上行信道估计 $\hat H_{\mathrm{BS}}[n]$。当上下行同时启用时，eRTM 可将它与 UE 端的下行信道估计 $\hat H_{\mathrm{UE}}[n]$ 联合使用，利用上下行信道间的关系进一步估计 BS 与 UE 两侧的时偏，详见[双站感知中的 eRTM 选项](/zh-cn/docs/signal-processing/bistatic-sensing/#ertm-双向定时选项)。

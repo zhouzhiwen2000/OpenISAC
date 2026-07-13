@@ -8,6 +8,19 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-12 - 信号处理文档定时与同步模型重构
+
+### Summary
+
+中英文信号处理文档重新划分初始同步、链路内残余 CFO/SFO 补偿与双站感知定时：UE 初始同步独立说明单 ZC、第二 ZC、CFO training field、候选 CFO 和 CP-tail 细化；上下行通信分别承接信道估计与残差跟踪；OTA LoS tracking 和 eRTM 作为 UE 双站感知中二选一的时偏补偿方法。
+
+### Changes
+
+- 以统一的 BS/UE 端时偏符号补充 TDD 上下行信道互易关系，并在 eRTM 中同时给出时延幅度谱和加权最大似然两类定时差指标。
+- 将通信路径时延拆分为真实传播时延、固定 RF 群时延和相对于本地解调边界的时变偏差；明确下行 `tau_align` 表示 UE 解调/FFT 边界，并按相邻 DL/UL 参考符号与缓慢变化 TO 的条件推导互易关系。
+- 区分 OTA LoS tracking 的 LoS 相对时延输出与 eRTM 保留真实传播时延的输出，明确 eRTM 不需要 LoS 路径及 FDD 路径集合/散射系数差异对可靠性的影响。
+- 将时延、距离和多普勒的分辨率与无模糊范围移入单站/双站感知处理章节，并将中文“资源栅格”统一为“资源网格”。
+
 ## 2026-07-11 - 运行期丢帧非阻塞化与丢包告警
 
 ### Summary

@@ -25,11 +25,11 @@ $$
 \sum_{p=1}^{P+C}
 \beta_p\boldsymbol a(\theta_p)
 e^{j2\pi\left(f_{D,s,p}t_{m,\gamma}
--\kappa_n\Delta f\tau_{s,p}\right)}
+-\kappa_n\Delta f\tau_{s,p}^\mathrm{link}\right)}
 +\boldsymbol Z_{n,m,\gamma},
 $$
 
-其中 $t_{m,\gamma}=(\gamma M+m)T_O$。由于 $b_{n,m,\gamma}^\mathrm{DL}$ 已知，可以逐元素去除调制：
+其中 $t_{m,\gamma}=(\gamma M+m)T_O$，$\tau_{s,p}^\mathrm{link}=\tau_{s,p}^\mathrm{prop}+\tau_\mathrm{sens}^\mathrm{RF}$。由于 $b_{n,m,\gamma}^\mathrm{DL}$ 已知，可以逐元素去除调制：
 
 $$
 \boldsymbol F_{n,m,\gamma}
@@ -38,18 +38,16 @@ $$
 =\sum_{p=1}^{P+C}
 \beta_p\boldsymbol a(\theta_p)
 e^{j2\pi\left(f_{D,s,p}t_{m,\gamma}
--\kappa_n\Delta f\tau_{s,p}\right)}
+-\kappa_n\Delta f\tau_{s,p}^\mathrm{link}\right)}
 +\tilde{\boldsymbol Z}_{n,m,\gamma}.
 $$
 
-将所有通道保留下来可形成三阶信道张量，其中 $M_\mathrm{sens}$ 是每帧选中的感知符号数：
+将所有通道保留下来可形成三阶信道张量，其中 $M_\mathrm{sens}$ 是每帧感知符号数：
 
 $$
 \mathcal F_\gamma
 \in\mathbb C^{N\times M_\mathrm{sens}\times R}.
 $$
-
-对恒模 ZC/QPSK，除法等价于共轭匹配乘法再做统一能量归一化，不会因随机数据调制而丢失回波相位。
 
 ## 2. 阵列通道校准
 
@@ -117,18 +115,39 @@ $$
 经 FFT 移位后的 Doppler 索引按有符号 $k_f$ 解释：
 
 $$
-\hat\tau=\frac{\hat k_\tau}{N_\mathrm{Per}\Delta f},
+\hat\tau^\mathrm{link}=\frac{\hat k_\tau}{N_\mathrm{Per}\Delta f},
 \qquad
 \hat f_D=\frac{\hat k_f}{M_\mathrm{Per}T_\mathrm{slow}},
 $$
 
 $$
-\hat r=\frac{c\hat\tau}{2},
+\hat\tau^\mathrm{prop}
+=\hat\tau^\mathrm{link}-\tau_\mathrm{sens}^\mathrm{RF},
+\qquad
+\hat r=\frac{c\hat\tau^\mathrm{prop}}{2},
 \qquad
 \hat v=\frac{c\hat f_D}{2f_c}.
 $$
 
 零填充增加显示采样密度，但基本距离分辨率仍由 $B$ 决定，多普勒分辨率仍由相干观测时长 $M_sT_\mathrm{slow}$ 决定。
+
+## 分辨率与无模糊范围
+
+使用连续带宽 $B=N\Delta f$ 时，基本时延分辨率为 $\Delta\tau=1/B$，对应单站距离分辨率
+
+$$
+\Delta r_\mathrm{mono}=\frac{c}{2B}.
+$$
+
+等间隔子载波形成的循环时延无模糊周期为 $1/\Delta f$，对应单站距离周期 $c/(2\Delta f)$；实际无符号间干扰的回波时延仍应落在循环前缀 $T_\mathrm{CP}$ 内。慢时间采样间隔为 $T_\mathrm{slow}$、相干处理长度为 $M_s$ 时，多普勒分辨率和两侧无模糊范围分别为
+
+$$
+\Delta f_D=\frac{1}{M_sT_\mathrm{slow}},
+\qquad
+|f_D|<\frac{1}{2T_\mathrm{slow}}.
+$$
+
+对应速度分辨率为 $c\Delta f_D/(2f_c)$。零填充只增加显示采样密度，不改变这些基本分辨率或无模糊范围。
 
 ## 5. ULA 角度处理
 

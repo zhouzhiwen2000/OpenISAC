@@ -110,13 +110,13 @@ $$
 a_{i,k}(\theta_i) = \exp\!\left(j 2\pi \frac{d}{\lambda} k \sin\theta_i\right)
 $$
 
-where $k$ is the antenna index. The electrical spacing is:
+where $k$ is the antenna index. The normalized element spacing is:
 
 $$
 d_\lambda = \frac{d_m f_c}{c}
 $$
 
-where $d_m$ is `array_spacing_m` and $d_\lambda$ is the spacing in wavelengths. It is derived from the physical spacing and carrier frequency, so the recovered angle remains correct at any `center_freq`; the viewers invert the phase slope using the same physical spacing. With `array_spacing_m <= 0`, the frequency-independent legacy parameter `array_spacing_lambda` is used instead. If `steering_override_file` is set, the simulator reads $a_{i,k}$ directly from the array manifold matrix.
+where $d_m$ is `array_spacing_m` and $d_\lambda$ is the normalized element spacing in wavelengths. It is derived from the physical spacing and carrier frequency, so the recovered angle remains correct at any `center_freq`; the viewers invert the phase slope using the same physical spacing. With `array_spacing_m <= 0`, the frequency-independent legacy parameter `array_spacing_lambda` is used instead. If `steering_override_file` is set, the simulator reads $a_{i,k}$ directly from the array manifold matrix.
 
 For monostatic sensing RX antenna $k$:
 

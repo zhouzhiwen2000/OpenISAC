@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1728" height="1350" viewBox="0 0 1728 1350">
+  <defs>
+    <marker id="arrow-black" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L12,6 L0,12 Z" fill="#000"/></marker>
+    <marker id="arrow-red" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L12,6 L0,12 Z" fill="#f00"/></marker>
+    <marker id="arrow-green" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L12,6 L0,12 Z" fill="#00a94f"/></marker>
+    <marker id="dim-start" markerWidth="10" markerHeight="10" refX="1" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M10,0 L0,5 L10,10 Z" fill="#000"/></marker>
+    <marker id="dim-end" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 Z" fill="#000"/></marker>
+    <marker id="dim-small-start" markerWidth="6" markerHeight="6" refX="1" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M6,0 L0,3 L6,6 Z" fill="#000"/></marker>
+    <marker id="dim-small-end" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L6,3 L0,6 Z" fill="#000"/></marker>
+    <style>
+      .serif{font-family:'Times New Roman',Times,serif;fill:#000}.row{font-size:64px}.sym{font-size:39px}.math{font-family:'Times New Roman',Times,serif;font-style:italic;font-size:54px}.script{font-family:'Times New Roman',Times,serif;font-style:normal;font-size:32px}.italic-script{font-style:italic}.guide{stroke:#111;stroke-width:3;stroke-dasharray:24 16}.blueguide{stroke:#101cff;stroke-width:3;stroke-dasharray:25 15}.blackbox{fill:none;stroke:#000;stroke-width:7}.orangebox{fill:none;stroke:#cc550e;stroke-width:7}.dashblack{stroke-dasharray:27 13}.dashorange{stroke-dasharray:27 13}.dim{stroke:#000;stroke-width:3;fill:none;marker-start:url(#dim-start);marker-end:url(#dim-end)}.dim-small{stroke:#000;stroke-width:3;fill:none;marker-start:url(#dim-small-start);marker-end:url(#dim-small-end)}
+    </style>
+  </defs>
+  <rect width="1728" height="1350" fill="#fff"/>
+
+  <!-- row labels -->
+  <text class="serif row" x="44" y="238">BS Downlink</text>
+  <text class="serif row" x="42" y="464">UE Downlink</text>
+  <text class="serif row" x="83" y="765">UE Uplink</text>
+  <text class="serif row" x="84" y="990">BS Uplink</text>
+
+  <!-- global timing guides -->
+  <path class="blueguide" d="M479 29V1177 M1042 29V1177 M1606 29V1177"/>
+  <path class="guide" d="M639 123V540 M1004 123V661 M1164 797V1215"/>
+
+  <!-- BS downlink -->
+  <rect class="blackbox" x="479" y="172" width="563" height="93"/>
+  <path class="blackbox dashblack" d="M1042 172H1606V265H1042"/>
+  <text class="serif sym" x="626" y="230">OFDM symbol <tspan font-style="italic">k</tspan></text>
+  <text class="serif sym" x="1190" y="230">OFDM symbol <tspan font-style="italic">j</tspan></text>
+  <path class="dim" d="M483 143H635"/><path class="dim" d="M644 143H999"/>
+  <path d="M479 123V181 M639 123V181 M1004 123V181" stroke="#000" stroke-width="3"/>
+  <g><text class="math" x="516" y="99">τ</text><text class="script italic-script" x="550" y="116">l</text><text class="script" x="548" y="66">DL</text></g>
+  <g><text class="math" x="751" y="99">t</text><text class="script" x="779" y="116">rx-tx,</text><text class="script italic-script" x="853" y="116">l</text><text class="script" x="779" y="66">UE</text></g>
+
+  <!-- UE downlink -->
+  <rect class="orangebox" x="572" y="396" width="565" height="95"/>
+  <path class="orangebox dashorange" d="M1137 396H1700V491H1137"/>
+  <text class="serif sym" x="719" y="456">OFDM symbol <tspan font-style="italic">k</tspan></text>
+  <text class="serif sym" x="1285" y="456">OFDM symbol <tspan font-style="italic">j</tspan></text>
+  <path d="M479 265L637 395" fill="none" stroke="#f00" stroke-width="5" marker-end="url(#arrow-red)"/>
+  <path d="M574 482 L590 482 602 481 611 480 619 477 625 469 630 441 635 405 639 445 645 473 653 480 665 477 675 483 688 479 700 482 713 478 723 483 735 481 747 481 760 478 770 480 785 481 800 481 815 480 830 481 846 480 862 481 879 480 896 481 914 480 933 480 950 481 969 480 987 481 1005 480 1023 481 1042 480 1061 481 1080 480 1098 481 1135 480" fill="none" stroke="#001cff" stroke-width="1.8"/>
+  <path d="M572 491V540 M639 491V540 M1004 472V539 M1137 491V539" stroke="#000" stroke-width="3"/>
+  <path class="dim" d="M576 522H635"/><g><text class="math" x="566" y="607">τ</text><text class="script italic-script" x="600" y="624">l</text><text class="script" x="598" y="574">UE</text></g>
+  <path class="dim" d="M1009 546H1132"/><g><text class="math" x="1152" y="583">t</text><text class="script" x="1180" y="600">TA</text><text class="script" x="1180" y="550">UE</text></g>
+
+  <!-- UE uplink -->
+  <path class="orangebox dashorange" d="M441 697H1004V791H441Z"/>
+  <rect class="orangebox" x="1004" y="697" width="567" height="95"/>
+  <text class="serif sym" x="588" y="756">OFDM symbol <tspan font-style="italic">k</tspan></text>
+  <text class="serif sym" x="1155" y="756">OFDM symbol <tspan font-style="italic">j</tspan></text>
+
+  <!-- BS uplink -->
+  <path class="blackbox dashblack" d="M534 923H1098V1017H534Z"/>
+  <rect class="blackbox" x="1098" y="923" width="567" height="95"/>
+  <text class="serif sym" x="681" y="982">OFDM symbol <tspan font-style="italic">k</tspan></text>
+  <text class="serif sym" x="1246" y="982">OFDM symbol <tspan font-style="italic">j</tspan></text>
+  <path d="M1004 790L1161 922" fill="none" stroke="#00a94f" stroke-width="5" marker-end="url(#arrow-green)"/>
+  <path d="M1099 1008 L1112 1007 1124 1006 1136 1005 1144 1004 1150 998 1156 984 1160 937 1164 970 1168 994 1175 1003 1183 996 1190 1007 1200 1004 1210 1007 1220 1004 1231 1006 1242 1005 1255 1006 1267 1003 1278 1006 1290 1005 1303 1006 1317 1004 1330 1006 1344 1005 1358 1006 1373 1004 1388 1006 1404 1005 1421 1006 1438 1005 1455 1006 1472 1005 1490 1006 1510 1005 1530 1006 1551 1005 1573 1006 1596 1005 1620 1006 1663 1005" fill="none" stroke="#001cff" stroke-width="1.8"/>
+  <path d="M1004 792V884 M1164 797V1050 M1098 1018V1064" stroke="#000" stroke-width="3"/>
+  <path class="dim" d="M1009 856H1159"/><g><text class="math" x="1186" y="885">τ</text><text class="script italic-script" x="1220" y="902">l</text><text class="script" x="1218" y="852">UL</text></g>
+  <!-- Adjacent BS timing intervals: DL-to-UL offset and BS receive delay. -->
+  <path d="M1042 1028V1083 M1098 1018V1083 M1164 1018V1083" stroke="#000" stroke-width="3"/>
+  <!-- Explicit arrowheads keep these two short dimensions visible at any SVG scale. -->
+  <path d="M1056 1045H1084 M1112 1045H1150" stroke="#000" stroke-width="3"/>
+  <path d="M1042 1045L1056 1037V1053Z M1098 1045L1084 1037V1053Z M1098 1045L1112 1037V1053Z M1164 1045L1150 1037V1053Z" fill="#000"/>
+  <!-- Leader arrows from the two dimensions to their corresponding symbols. -->
+  <path d="M1070 1045V1098H1018" fill="none" stroke="#000" stroke-width="3" marker-end="url(#arrow-black)"/>
+  <path d="M1131 1045V1098H1204" fill="none" stroke="#000" stroke-width="3" marker-end="url(#arrow-black)"/>
+  <g><text class="math" x="884" y="1090">t</text><text class="script" x="912" y="1107">DL-UL</text><text class="script" x="912" y="1057">BS</text></g>
+  <g><text class="math" x="1215" y="1084">τ</text><text class="script italic-script" x="1249" y="1101">l</text><text class="script" x="1247" y="1051">BS</text></g>
+  <path class="dim" d="M483 1138H1159"/><g><text class="math" x="799" y="1228">t</text><text class="script" x="827" y="1245">tx-rx,</text><text class="script italic-script" x="901" y="1245">l</text><text class="script" x="827" y="1195">BS</text></g>
+
+  <!-- time axis -->
+  <path d="M52 1289H235" stroke="#000" stroke-width="4" marker-end="url(#arrow-black)"/>
+  <text class="math" x="255" y="1310">t</text>
+</svg>
