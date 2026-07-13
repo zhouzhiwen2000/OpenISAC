@@ -1184,6 +1184,10 @@ struct UdpEgressPacerConfig {
     double max_delay_ms = 0.0;        // Drop queued datagrams older than this; <=0 disables age drop
 };
 
+// ARQ sequence comparisons use signed 16-bit distance. The active window must
+// remain below half of the uint16_t sequence space to keep ordering unambiguous.
+inline constexpr int kMaxArqWindowPackets = std::numeric_limits<int16_t>::max();
+
 struct NetworkOutputConfig {
     std::string default_out_ip = "127.0.0.1";
     bool mono_sensing_output_enabled = true;
@@ -1228,7 +1232,7 @@ struct NetworkOutputConfig {
     // ARQ link-layer retransmission
     bool arq_enabled = false;
     bool arq_ordered_delivery = false;
-    int arq_window_packets = 256;        // [1, 256]; bounded to keep ARQ retransmit memory finite
+    int arq_window_packets = 256;        // Default 256; protocol range [1, 32767]
     int arq_ack_bitmap_bits = 64;        // fixed 64 for first pass
     int arq_retransmit_timeout_ms = 100; // RTO in ms; 0 => default RTO
     int arq_max_retries = 5;             // 0 = unlimited within window
@@ -3344,13 +3348,12 @@ inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
 }
 
 inline void normalize_arq_config(NetworkOutputConfig& net) {
-    constexpr int kMaxArqWindowPackets = 256;
     if (net.arq_window_packets < 1) {
         LOG_G_WARN_M(Arq) << "arq_window_packets < 1, clamping to 1.";
         net.arq_window_packets = 1;
     }
     if (net.arq_window_packets > kMaxArqWindowPackets) {
-        LOG_G_WARN_M(Arq) << "arq_window_packets exceeds the bounded ARQ runtime maximum; clamping to "
+        LOG_G_WARN_M(Arq) << "arq_window_packets exceeds the 16-bit sequence half-space; clamping to "
                      << kMaxArqWindowPackets << ".";
         net.arq_window_packets = kMaxArqWindowPackets;
     }

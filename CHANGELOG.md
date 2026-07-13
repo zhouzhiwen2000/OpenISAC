@@ -8,6 +8,18 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-13 - ARQ 协议窗口上限与安全默认值分离
+
+### Summary
+
+ARQ 窗口保留 16 位序列号半空间约束允许的 `32767` 协议上限，同时将 C++ 默认值、配置模板、benchmark 模板和 Web Editor 默认值统一为更保守的 `256`。
+
+### Changes
+
+- `arq_window_packets` 的运行时归一化和 TX/RX 窗口允许范围恢复为 `[1, 32767]`，使显式配置的大窗口不再被强制截断到 `256`。
+- 所有 BS/UE、硬件/仿真和 benchmark YAML 模板继续默认使用 `256`，避免默认配置在 ACK 丢失时保留过多原始 payload 与 LDPC/QPSK 编码副本。
+- Web Editor 和中英文 YAML 参考文档同步区分“默认值 256”与“协议最大值 32767”。
+
 ## 2026-07-13 - Astro 文档路由与维护流程整理
 
 ### Summary

@@ -49,7 +49,7 @@ downlink:
   channel_tracking_min_pilot_snr: 0.0001  # Minimum comb-pilot residual power accepted by per-symbol tracking
   arq_enabled: false  # Enable downlink ARQ on the UE receiver
   arq_ordered_delivery: false  # Buffer downlink packets for in-order UDP delivery
-  arq_window_packets: 32767  # Downlink ARQ receive/reorder window [1, 32767]
+  arq_window_packets: 256  # Downlink ARQ receive/reorder window [1, 32767]
   arq_feedback_interval_ms: 10  # Downlink ARQ ACK feedback interval in ms
   downlink_cpu_cores: [6, 10, 12]  # UE downlink CPU cores: [rx_proc, process_proc, bit_processing_proc]
   sensing_cpu_cores: [11]  # UE bistatic sensing CPU cores: [sensing_process_proc]
@@ -61,7 +61,7 @@ uplink:
   guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
   wire_format_tx: sc16  # Uplink TX wire format; sc16/sc8
   arq_enabled: false  # Enable uplink ARQ on the UE transmitter
-  arq_window_packets: 32767  # Uplink ARQ outstanding packet window [1, 32767]
+  arq_window_packets: 256  # Uplink ARQ outstanding packet window [1, 32767]
   arq_retransmit_timeout_ms: 100  # Uplink ARQ retransmit timeout in ms
   arq_max_retries: 5  # Uplink ARQ max retransmit retries; 0 = unlimited within window
   uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine LDPC encode, modulation, TX send]

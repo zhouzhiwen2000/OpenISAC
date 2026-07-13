@@ -70,7 +70,7 @@ downlink:
   tx_channel: 0  # TX channel index on USRP
   wire_format_tx: sc16  # TX wire format; sc16/sc8
   arq_enabled: false  # Enable downlink ARQ on the BS transmitter
-  arq_window_packets: 32767  # Downlink ARQ outstanding packet window [1, 32767]
+  arq_window_packets: 256  # Downlink ARQ outstanding packet window [1, 32767]
   arq_retransmit_timeout_ms: 100  # Downlink ARQ retransmit timeout in ms
   arq_max_retries: 5  # Downlink ARQ max retransmit retries; 0 = unlimited within window
 
@@ -96,7 +96,7 @@ uplink:
   rx_agc_update_frames: 4  # Apply uplink AGC at most once every N processed frames
   arq_enabled: false  # Enable uplink ARQ on the BS receiver
   arq_ordered_delivery: false  # Buffer uplink packets for in-order UDP delivery
-  arq_window_packets: 32767  # Uplink ARQ receive/reorder window [1, 32767]
+  arq_window_packets: 256  # Uplink ARQ receive/reorder window [1, 32767]
   arq_feedback_interval_ms: 10  # Uplink ARQ ACK feedback interval in ms
 
 # ===== Sensing =====

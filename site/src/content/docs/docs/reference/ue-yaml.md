@@ -111,7 +111,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `downlink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual weight before fallback. |
 | `downlink.arq_enabled` | `bool` | `false` | Enable downlink ARQ on the UE receiver. |
 | `downlink.arq_ordered_delivery` | `bool` | `false` | Buffer downlink packets for in-order UDP delivery. |
-| `downlink.arq_window_packets` | `int` | `32767` | Downlink ARQ receive/reorder window. |
+| `downlink.arq_window_packets` | `int` | `256` | Downlink ARQ receive/reorder window; valid range `1`–`32767`. |
 | `downlink.arq_feedback_interval_ms` | `int` / ms | `10` | Minimum interval between downlink ARQ ACK feedback packets. |
 
 ### `uplink`
@@ -138,7 +138,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `uplink.ertm_debug_output_enabled` | `bool` | `false` | Enable UE-side eRTM debug ZMQ spectra. |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM report cadence; keep matched with BS. |
 | `uplink.arq_enabled` | `bool` | `false` | Enable uplink ARQ on the UE transmitter. |
-| `uplink.arq_window_packets` | `int` | `32767` | Uplink ARQ outstanding packet window. |
+| `uplink.arq_window_packets` | `int` | `256` | Uplink ARQ outstanding packet window; valid range `1`–`32767`. |
 | `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Uplink ARQ retransmission timeout. |
 | `uplink.arq_max_retries` | `int` | `5` | Max uplink retransmission retries; `0` means unlimited within the window. |
 

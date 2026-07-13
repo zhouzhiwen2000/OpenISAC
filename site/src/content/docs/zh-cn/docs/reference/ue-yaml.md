@@ -111,7 +111,7 @@ description: UE 运行配置参数、取值和作用说明。
 | `downlink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | 回退前要求的最小梳状导频残差权重。 |
 | `downlink.arq_enabled` | `bool` | `false` | 在 UE 接收端开启下行 ARQ。 |
 | `downlink.arq_ordered_delivery` | `bool` | `false` | 缓存下行数据包，再按序输出 UDP。 |
-| `downlink.arq_window_packets` | `int` | `32767` | 下行 ARQ 接收/重排窗口。 |
+| `downlink.arq_window_packets` | `int` | `256` | 下行 ARQ 接收/重排窗口；有效范围为 `1`–`32767`。 |
 | `downlink.arq_feedback_interval_ms` | `int` / ms | `10` | 下行 ARQ ACK 反馈的最小时间间隔。 |
 
 ### `uplink`
@@ -138,7 +138,7 @@ description: UE 运行配置参数、取值和作用说明。
 | `uplink.ertm_debug_output_enabled` | `bool` | `false` | 开启 UE 侧 eRTM debug ZMQ 频谱输出。 |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM report 间隔；对比日志时应与 BS 保持一致。 |
 | `uplink.arq_enabled` | `bool` | `false` | 在 UE 发射端开启上行 ARQ。 |
-| `uplink.arq_window_packets` | `int` | `32767` | 上行 ARQ 最多允许的未确认数据包数。 |
+| `uplink.arq_window_packets` | `int` | `256` | 上行 ARQ 最多允许的未确认数据包数；有效范围为 `1`–`32767`。 |
 | `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | 上行 ARQ 重传超时。 |
 | `uplink.arq_max_retries` | `int` | `5` | 上行最大重传次数；`0` 表示窗口内不限次数。 |
 

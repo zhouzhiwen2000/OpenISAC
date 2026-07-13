@@ -931,7 +931,7 @@ bs:
     data_key: downlink.arq_window_packets
     kind: int
     comment: Downlink ARQ outstanding packet window [1, 32767]
-    default: 32767
+    default: 256
     optional: true
     enabled_if:
       key: downlink.arq_enabled
@@ -1202,7 +1202,7 @@ bs:
     data_key: uplink.arq_window_packets
     kind: int
     comment: Uplink ARQ receive/reorder window [1, 32767]
-    default: 32767
+    default: 256
     optional: true
     enabled_if:
       key: uplink.arq_enabled
@@ -1791,7 +1791,7 @@ ue:
     data_key: downlink.arq_window_packets
     kind: int
     comment: Downlink ARQ receive/reorder window [1, 32767]
-    default: 32767
+    default: 256
     optional: true
     enabled_if:
       key: downlink.arq_enabled
@@ -1921,7 +1921,7 @@ ue:
     data_key: uplink.arq_window_packets
     kind: int
     comment: Uplink ARQ outstanding packet window [1, 32767]
-    default: 32767
+    default: 256
     optional: true
     enabled_if:
       key: uplink.arq_enabled

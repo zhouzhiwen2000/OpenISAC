@@ -105,7 +105,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `downlink.tx_time_source` | `string` | `""` | TX time source override. |
 | `downlink.wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
 | `downlink.arq_enabled` | `bool` | `false` | Enable downlink ARQ on the BS transmitter. |
-| `downlink.arq_window_packets` | `int` | `32767` | Downlink ARQ outstanding packet window. |
+| `downlink.arq_window_packets` | `int` | `256` | Downlink ARQ outstanding packet window; valid range `1`–`32767`. |
 | `downlink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Downlink ARQ retransmission timeout. |
 | `downlink.arq_max_retries` | `int` | `5` | Max downlink retransmission retries; `0` means unlimited within the window. |
 
@@ -147,7 +147,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `uplink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual weight before falling back. |
 | `uplink.arq_enabled` | `bool` | `false` | Enable uplink ARQ on the BS receiver. |
 | `uplink.arq_ordered_delivery` | `bool` | `false` | Buffer accepted uplink packets for in-order UDP delivery. |
-| `uplink.arq_window_packets` | `int` | `32767` | Uplink ARQ receive/reorder window. |
+| `uplink.arq_window_packets` | `int` | `256` | Uplink ARQ receive/reorder window; valid range `1`–`32767`. |
 | `uplink.arq_feedback_interval_ms` | `int` / ms | `10` | Minimum interval between uplink ARQ ACK feedback packets. |
 
 ### `sensing`

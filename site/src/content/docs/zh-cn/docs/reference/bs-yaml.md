@@ -105,7 +105,7 @@ description: BS 运行配置参数、取值和作用说明。
 | `downlink.tx_time_source` | `string` | `""` | TX 时间源覆盖。 |
 | `downlink.wire_format_tx` | `string` | `sc16` | UHD 发送样本格式，常用 `sc16` 或 `sc8`。 |
 | `downlink.arq_enabled` | `bool` | `false` | 在 BS 发射端开启下行 ARQ。 |
-| `downlink.arq_window_packets` | `int` | `32767` | 下行 ARQ 最多允许的未确认数据包数。 |
+| `downlink.arq_window_packets` | `int` | `256` | 下行 ARQ 最多允许的未确认数据包数；有效范围为 `1`–`32767`。 |
 | `downlink.arq_retransmit_timeout_ms` | `int` / ms | `100` | 下行 ARQ 重传超时。 |
 | `downlink.arq_max_retries` | `int` | `5` | 下行最大重传次数；`0` 表示窗口内不限次数。 |
 
@@ -147,7 +147,7 @@ description: BS 运行配置参数、取值和作用说明。
 | `uplink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | 回退前要求的最小梳状导频残差权重。 |
 | `uplink.arq_enabled` | `bool` | `false` | 在 BS 接收端开启上行 ARQ。 |
 | `uplink.arq_ordered_delivery` | `bool` | `false` | 缓存上行数据包，再按序输出 UDP。 |
-| `uplink.arq_window_packets` | `int` | `32767` | 上行 ARQ 接收/重排窗口。 |
+| `uplink.arq_window_packets` | `int` | `256` | 上行 ARQ 接收/重排窗口；有效范围为 `1`–`32767`。 |
 | `uplink.arq_feedback_interval_ms` | `int` / ms | `10` | 上行 ARQ ACK 反馈的最小时间间隔。 |
 
 ### `sensing`

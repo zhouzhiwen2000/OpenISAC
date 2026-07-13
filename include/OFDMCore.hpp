@@ -5062,7 +5062,6 @@ public:
     ArqTxWindow() = default;
 
     void configure(const NetworkOutputConfig& net) {
-        constexpr int kMaxArqWindowPackets = 256;
         _window_size = static_cast<uint16_t>(
             std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
         _rto_ms = net.arq_retransmit_timeout_ms > 0
@@ -5248,7 +5247,6 @@ public:
     ArqRxWindow() = default;
 
     void configure(const NetworkOutputConfig& net) {
-        constexpr int kMaxArqWindowPackets = 256;
         _window_size = static_cast<uint16_t>(
             std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
         _ordered = net.arq_ordered_delivery;
