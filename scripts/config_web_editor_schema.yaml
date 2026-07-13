@@ -690,7 +690,7 @@ bs:
     key: data_packet_buffer_size
     kind: int
     comment: Encoded packet buffer capacity
-    default: 32
+    default: 256
     optional: true
 - title: Uplink
   yaml_key: uplink
@@ -922,7 +922,7 @@ bs:
     key: udp_egress_pacer_queue_packets
     kind: int
     comment: UDP egress pacer queue capacity in datagrams
-    default: 512
+    default: 10240
     optional: true
     enabled_if:
       all:
@@ -934,7 +934,7 @@ bs:
     key: udp_egress_pacer_max_delay_ms
     kind: float
     comment: UDP egress pacer max queued packet age in ms; 0 disables age drops
-    default: 250
+    default: 0
     optional: true
     enabled_if:
       all:
@@ -1009,11 +1009,12 @@ bs:
   - type: flow_list
     key: downlink_cpu_cores
     item_kind: int
-    comment: 'BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]'
+    comment: 'BS downlink CPU cores: [TX thread, modulation thread, LDPC encode thread, UDP recv thread]'
     default:
     - 1
     - 2
     - 3
+    - -1
     optional: true
   - type: flow_list
     key: uplink_cpu_cores
@@ -1034,7 +1035,7 @@ bs:
   - type: scalar
     key: profiling_modules
     kind: string
-    comment: Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
+    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc), or "all"
     default: ''
     optional: true
 ue:
@@ -1697,7 +1698,7 @@ ue:
     key: udp_egress_pacer_queue_packets
     kind: int
     comment: UDP egress pacer queue capacity in datagrams
-    default: 512
+    default: 10240
     optional: true
     enabled_if:
       key: udp_egress_pacer_enabled
@@ -1706,7 +1707,7 @@ ue:
     key: udp_egress_pacer_max_delay_ms
     kind: float
     comment: UDP egress pacer max queued packet age in ms; 0 disables age drops
-    default: 250
+    default: 0
     optional: true
     enabled_if:
       key: udp_egress_pacer_enabled
@@ -1812,7 +1813,7 @@ ue:
   - type: flow_list
     key: uplink_cpu_cores
     item_kind: int
-    comment: 'UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]'
+    comment: 'UE uplink CPU cores: [UplinkTxEngine LDPC encode, modulation, TX send, UDP recv thread]'
     default: []
     optional: true
   - type: scalar

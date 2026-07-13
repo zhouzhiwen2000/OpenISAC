@@ -2,6 +2,20 @@
 radio:
   radio_backend: uhd  # Radio I/O backend; uhd = real USRP, sim = channel simulator
 
+# ===== RF / Sampling =====
+rf_sampling:
+  sample_rate: 50000000  # Baseband sample rate (Hz)
+  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
+
+# ===== USRP Device Args =====
+usrp_device:
+  device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # Shared fallback args
+
+# ===== Clock / Time Sources =====
+clock_time:
+  clock_source: external  # Global clock source; internal/external/gpsdo
+  time_source: internal  # Global time source; empty follows clock_source
+
 # ===== OFDM Frame =====
 ofdm_frame:
   fft_size: 1024  # FFT size (subcarrier count)
@@ -20,34 +34,6 @@ ofdm_frame:
 # ===== CUDA =====
 cuda:
   cuda_mod_pipeline_slots: 3  # Number of CUDA modulation pipeline slots
-
-# ===== Sensing =====
-sensing:
-  rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
-  rx_device_args: ""  # Default sensing RX args (empty = use device_args)
-  rx_clock_source: ""  # Sensing RX clock source override (optional)
-  rx_time_source: ""  # Sensing RX time source override (optional)
-  rx_channel_count: 0  # Number of sensing RX channels (0 disables sensing RX)
-  range_fft_size: 1024  # Range FFT size
-  doppler_fft_size: 100  # Doppler FFT size
-  output_mode: dense  # dense or compact_mask
-  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
-  symbol_stride: 20  # Default STRD applied at startup before runtime commands
-  paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
-
-# ===== RF / Sampling =====
-rf_sampling:
-  sample_rate: 50000000  # Baseband sample rate (Hz)
-  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
-
-# ===== USRP Device Args =====
-usrp_device:
-  device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # Shared fallback args
-
-# ===== Clock / Time Sources =====
-clock_time:
-  clock_source: external  # Global clock source; internal/external/gpsdo
-  time_source: internal  # Global time source; empty follows clock_source
 
 # ===== Downlink =====
 downlink:
@@ -77,6 +63,20 @@ uplink:
   rx_time_source: ""  # Uplink RX time source override (optional)
   bs_dl_ul_timing_diff: 0  # BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
 
+# ===== Sensing =====
+sensing:
+  rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
+  rx_device_args: ""  # Default sensing RX args (empty = use device_args)
+  rx_clock_source: ""  # Sensing RX clock source override (optional)
+  rx_time_source: ""  # Sensing RX time source override (optional)
+  rx_channel_count: 0  # Number of sensing RX channels (0 disables sensing RX)
+  range_fft_size: 1024  # Range FFT size
+  doppler_fft_size: 100  # Doppler FFT size
+  output_mode: dense  # dense or compact_mask
+  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
+  paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
+
 # ===== Measurement mode =====
 measurement:
   measurement_enable: false  # Enable internal PRBS measurement traffic
@@ -93,8 +93,8 @@ network_output:
   udp_output_port: 50003  # BS decoded uplink payload UDP destination port
   udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
   udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
-  udp_egress_pacer_queue_packets: 512  # UDP egress pacer queue capacity in datagrams
-  udp_egress_pacer_max_delay_ms: 250  # UDP egress pacer max queued packet age in ms; 0 disables age drops
+  udp_egress_pacer_queue_packets: 10240  # UDP egress pacer queue capacity in datagrams
+  udp_egress_pacer_max_delay_ms: 0  # UDP egress pacer max queued packet age in ms; 0 disables age drops
   mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
   mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
   mono_sensing_output_enabled: false  # Enable monostatic sensing ZMQ output
@@ -108,10 +108,10 @@ network_output:
 
 # ===== CPU Cores =====
 cpu_cores:
-  downlink_cpu_cores: [1, 2, 3]  # BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]
+  downlink_cpu_cores: [1, 2, 3, -1]  # BS downlink CPU cores: [TX thread, modulation thread, LDPC encode thread, UDP recv thread]
   uplink_cpu_cores: [-1, 9, 10]  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
   main_cpu_core: 11  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====
 runtime:
-  profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
+  profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc), or "all"

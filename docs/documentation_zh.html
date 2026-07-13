@@ -579,13 +579,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>512</code></td>
+<td style="text-align:left"><code>10240</code></td>
 <td style="text-align:left">egress pacer 最多缓存的 UDP 数据报数量，超过后丢弃最旧数据报。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
 <td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>250</code></td>
+<td style="text-align:left"><code>0</code></td>
 <td style="text-align:left">egress pacer 中数据报允许排队的最长时间；设为 <code>0</code> 可关闭按年龄丢包。</td>
 </tr>
 <tr>
@@ -730,13 +730,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>data_ingest</code>、<code>sensing_proc</code>；<code>all</code> 表示全部。BS 端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>ldpc_encode</code>、<code>sensing_proc</code>；<code>all</code> 表示全部。BS 端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">BS 下行 CPU 核列表：索引 <code>0</code>、<code>1</code>、<code>2</code> 分别绑定 TX、调制和数据输入线程。</td>
+<td style="text-align:left">BS 下行 CPU 核列表：索引 <code>0..3</code> 分别绑定 <code>_tx_proc</code>、<code>_modulation_proc</code>、<code>_ldpc_encode_proc</code> 和 <code>_udp_recv_proc</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink_cpu_cores</code></td>
@@ -1368,13 +1368,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>512</code></td>
+<td style="text-align:left"><code>10240</code></td>
 <td style="text-align:left">egress pacer 最多缓存的 UDP 数据报数量，超过后丢弃最旧数据报。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
 <td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>250</code></td>
+<td style="text-align:left"><code>0</code></td>
 <td style="text-align:left">egress pacer 中数据报允许排队的最长时间；设为 <code>0</code> 可关闭按年龄丢包。</td>
 </tr>
 <tr>
@@ -1447,7 +1447,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>uplink_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE 上行 CPU 核列表：索引 <code>0</code>、<code>1</code>、<code>2</code> 分别绑定 <code>UplinkTxEngine::_udp_ingest_proc</code>、<code>_mod_proc</code> 和 <code>_tx_proc</code>。</td>
+<td style="text-align:left">UE 上行 CPU 核列表：索引 <code>0..3</code> 分别绑定 <code>UplinkTxEngine::_ldpc_encode_proc</code>、<code>_mod_proc</code>、<code>_tx_proc</code> 和 <code>_udp_recv_proc</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>main_cpu_core</code></td>

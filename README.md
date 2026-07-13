@@ -567,8 +567,8 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `udp_output_port` | `int` | `50003` | BS decoded uplink payload UDP destination port. |
 | `udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress. |
 | `udp_egress_pacer_target_mbps` | `float` | `0` | UDP egress pacer target payload rate. `0` enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate. |
-| `udp_egress_pacer_queue_packets` | `int` | `512` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
-| `udp_egress_pacer_max_delay_ms` | `float` | `250` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
+| `udp_egress_pacer_queue_packets` | `int` | `10240` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
+| `udp_egress_pacer_max_delay_ms` | `float` | `0` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
 | `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
 | `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols, and `center_freq` is ignored. In FDD, `center_freq` defines the UE->BS carrier, while `symbol_start`, `symbol_count`, and `guard_symbols` are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
 | `bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
@@ -592,8 +592,8 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `measurement_payload_bytes` | `int` | `1024` | Bytes per internally generated measurement payload. Values below the internal header size are clamped up. |
 | `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to derive deterministic PRBS payload contents. |
 | `measurement_packets_per_point` | `int` | `1` | Number of measurement payloads sent for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `data_ingest`, and `sensing_proc`; `all` enables every module. BS end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
-| `downlink_cpu_cores` | `int[]` | `[]` | BS downlink CPU cores: index `0` binds TX, `1` binds modulation, and `2` binds data ingest. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `ldpc_encode`, and `sensing_proc`; `all` enables every module. BS end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
+| `downlink_cpu_cores` | `int[]` | `[]` | BS downlink CPU cores: indices `0..3` bind `_tx_proc`, `_modulation_proc`, `_ldpc_encode_proc`, and `_udp_recv_proc`. |
 | `uplink_cpu_cores` | `int[]` | `[]` | BS uplink CPU cores: indices `0`, `1`, and `2` bind RX sample ingest, OFDM/LLR signal processing, and LDPC decode + UDP output. |
 | `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
 
@@ -723,8 +723,8 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `udp_output_port` | `int` | `50001` | UE decoded downlink payload UDP destination port. |
 | `udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress. |
 | `udp_egress_pacer_target_mbps` | `float` | `0` | UDP egress pacer target payload rate. `0` enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate. |
-| `udp_egress_pacer_queue_packets` | `int` | `512` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
-| `udp_egress_pacer_max_delay_ms` | `float` | `250` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
+| `udp_egress_pacer_queue_packets` | `int` | `10240` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
+| `udp_egress_pacer_max_delay_ms` | `float` | `0` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
 | `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value. |
 | `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
 | `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. CUDA binaries ignore this mode. |
@@ -736,7 +736,7 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `measurement_packets_per_point` | `int` | `1` | Expected measurement payload count for each online `MRST` epoch. Values below `1` are clamped to `1`. |
 | `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `sync`, `agc`, `align`, `snr`, and `uplink`; `all` enables every module. `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates, and `uplink` gates `[UL-TX]` timing/waveform diagnostics. |
 | `downlink_cpu_cores` | `int[]` | `[]` | UE downlink CPU cores: indices `0..3` bind `rx_proc`, `process_proc`, `sensing_process_proc`, and `bit_processing_proc`. |
-| `uplink_cpu_cores` | `int[]` | `[]` | UE uplink CPU cores: indices `0`, `1`, and `2` bind `UplinkTxEngine::_udp_ingest_proc`, `_mod_proc`, and `_tx_proc`. |
+| `uplink_cpu_cores` | `int[]` | `[]` | UE uplink CPU cores: indices `0..3` bind `UplinkTxEngine::_ldpc_encode_proc`, `_mod_proc`, `_tx_proc`, and `_udp_recv_proc`. |
 | `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
 
 Receiver-side note:

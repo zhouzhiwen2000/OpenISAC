@@ -2,6 +2,22 @@
 radio:
   radio_backend: uhd  # Radio I/O backend; uhd = real USRP, sim = channel simulator
 
+# ===== RF / Sampling =====
+rf_sampling:
+  sample_rate: 50000000  # Baseband sample rate (Hz)
+  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
+  rx_agc_enable: true  # Enable hardware RX AGC driven by delay-spectrum peak
+  rx_agc_low_threshold_db: 14.0  # Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
+  rx_agc_high_threshold_db: 16.0  # Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
+  rx_agc_max_step_db: 1.0  # Maximum RX gain step per AGC update (dB)
+  rx_agc_update_frames: 4  # Apply AGC at most once every N processed frames
+  rx_gain: 10  # RX gain (dB)
+
+# ===== USRP Device / Link =====
+usrp_device:
+  device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # USRP args
+  clock_source: external  # Clock source; internal/external/gpsdo
+
 # ===== OFDM Frame =====
 ofdm_frame:
   fft_size: 1024  # FFT size (subcarrier count)
@@ -24,31 +40,6 @@ cuda:
   cuda_ldpc_worker_buffers: 3  # Number of CUDA LDPC async worker batch buffers
   cuda_ldpc_cross_frame_flush_frames: 2  # Max frames accumulated before CUDA LDPC batch decode
   cuda_ldpc_cross_frame_flush_us: 1000.0  # Max CUDA LDPC cross-frame batch wait time in microseconds
-
-# ===== Sensing =====
-sensing:
-  bi_enabled: true  # Enable bistatic sensing processing pipeline
-  range_fft_size: 1024  # Range FFT size
-  doppler_fft_size: 100  # Doppler FFT size
-  output_mode: dense  # dense or compact_mask
-  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
-  symbol_stride: 20  # Default STRD applied at startup before runtime commands
-
-# ===== RF / Sampling =====
-rf_sampling:
-  sample_rate: 50000000  # Baseband sample rate (Hz)
-  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
-  rx_agc_enable: true  # Enable hardware RX AGC driven by delay-spectrum peak
-  rx_agc_low_threshold_db: 14.0  # Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
-  rx_agc_high_threshold_db: 16.0  # Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
-  rx_agc_max_step_db: 1.0  # Maximum RX gain step per AGC update (dB)
-  rx_agc_update_frames: 4  # Apply AGC at most once every N processed frames
-  rx_gain: 10  # RX gain (dB)
-
-# ===== USRP Device / Link =====
-usrp_device:
-  device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # USRP args
-  clock_source: external  # Clock source; internal/external/gpsdo
 
 # ===== Downlink =====
 downlink:
@@ -107,6 +98,15 @@ sync_tracking:
   akf_r_max: 1000.0  # Upper bound of observation noise variance R
   desired_peak_pos: 20  # Target delay-peak index for alignment
 
+# ===== Sensing =====
+sensing:
+  bi_enabled: true  # Enable bistatic sensing processing pipeline
+  range_fft_size: 1024  # Range FFT size
+  doppler_fft_size: 100  # Doppler FFT size
+  output_mode: dense  # dense or compact_mask
+  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
+
 # ===== Measurement mode =====
 measurement:
   measurement_enable: false  # Enable internal PRBS measurement traffic
@@ -116,8 +116,8 @@ network_output:
   udp_output_port: 50001  # UE decoded downlink payload UDP destination port
   udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
   udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
-  udp_egress_pacer_queue_packets: 512  # UDP egress pacer queue capacity in datagrams
-  udp_egress_pacer_max_delay_ms: 250  # UDP egress pacer max queued packet age in ms; 0 disables age drops
+  udp_egress_pacer_queue_packets: 10240  # UDP egress pacer queue capacity in datagrams
+  udp_egress_pacer_max_delay_ms: 0  # UDP egress pacer max queued packet age in ms; 0 disables age drops
   self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
   self_channel_port: 12350  # UE self-channel output port
   self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP
@@ -136,7 +136,7 @@ network_output:
 # ===== CPU Cores =====
 cpu_cores:
   downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
-  uplink_cpu_cores: [-1, 5, 6]  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
+  uplink_cpu_cores: [-1, 5, 6, -1]  # UE uplink CPU cores: [UplinkTxEngine LDPC encode, modulation, TX send, UDP recv thread]
   main_cpu_core: 7  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====

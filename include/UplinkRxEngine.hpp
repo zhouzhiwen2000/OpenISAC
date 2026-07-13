@@ -745,11 +745,7 @@ public:
             }
             if (decoded.size() >= hdr.payload_len) {
                 _udp_out->send(reinterpret_cast<const uint8_t*>(decoded.data()), hdr.payload_len);
-                const uint64_t decoded_count = _decoded_count.fetch_add(1, std::memory_order_relaxed) + 1;
-                if ((decoded_count & 0xFFu) == 1) {
-                    LOG_G_INFO() << "[UL-RX] decoded uplink packets: " << decoded_count
-                                 << " (latest seq=" << hdr.seq << ", len=" << hdr.payload_len << ")";
-                }
+                _decoded_count.fetch_add(1, std::memory_order_relaxed);
             }
             symbol_offset = next_off;
         }

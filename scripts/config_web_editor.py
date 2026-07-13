@@ -26,7 +26,7 @@ JS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.js")
 SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
-    "bs": ("all", "modulation", "latency", "data_ingest", "sensing_proc"),
+    "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc"),
     "ue": ("all", "demodulation", "agc", "align", "uplink"),
 }
 
@@ -34,7 +34,7 @@ PROFILING_DESCRIPTIONS: dict[str, str] = {
     "all": "Enable every profiling and diagnostic module for this tab.",
     "modulation": "Show BS frame processing breakdown and load statistics.",
     "latency": "Enable BS end-to-end latency tracking. Requires modulation too.",
-    "data_ingest": "Profile UDP ingest, LDPC encode, and enqueue cost in the BS path.",
+    "ldpc_encode": "Profile LDPC encode and enqueue cost in the BS path.",
     "sensing_proc": "Profile sensing processing in the BS path, including per-channel sensing work.",
     "demodulation": "Show UE per-frame processing breakdown and load statistics.",
     "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",

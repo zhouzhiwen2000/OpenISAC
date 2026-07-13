@@ -955,7 +955,7 @@ struct DownlinkConfig {
 
 struct DownlinkPipelineConfig {
     size_t tx_circular_buffer_size = 8;    // Capacity of BS frame circular buffer
-    size_t data_packet_buffer_size = 32;   // Capacity of BS encoded packet buffer
+    size_t data_packet_buffer_size = 256;  // Capacity of BS encoded packet buffer
 };
 
 struct UplinkConfig {
@@ -1004,8 +1004,8 @@ struct RadioConfig {
 struct UdpEgressPacerConfig {
     bool enabled = false;             // Enable queued/paced UDP egress for decoded payload streams
     double target_mbps = 0.0;         // <=0: auto-estimate from enqueue rate; >0: fixed payload Mbps
-    size_t queue_packets = 512;       // Max queued UDP datagrams before dropping oldest
-    double max_delay_ms = 250.0;      // Drop queued datagrams older than this; <=0 disables age drop
+    size_t queue_packets = 10240;     // Max queued UDP datagrams before dropping oldest
+    double max_delay_ms = 0.0;        // Drop queued datagrams older than this; <=0 disables age drop
 };
 
 struct NetworkOutputConfig {
@@ -1047,13 +1047,13 @@ struct NetworkOutputConfig {
 };
 
 struct CpuCoresConfig {
-    std::vector<int> downlink_cpu_cores; // BS: TX/mod/data-ingest; UE: RX/process/sensing/bit-processing
+    std::vector<int> downlink_cpu_cores; // BS: TX/mod/LDPC-encode/UDP-recv; UE: RX/process/sensing/bit-processing
     std::vector<int> uplink_cpu_cores;   // Dedicated uplink thread cores; empty = no explicit uplink binding
     int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
 };
 
 struct RuntimeConfig {
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, uplink, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, demodulation, agc, align, snr, uplink, or "all"
 };
 
 struct MeasurementConfig {
@@ -2960,7 +2960,7 @@ inline Config make_default_bs_config() {
     cfg.sensing.rx_channel_count = 1;
     cfg.sensing.symbol_stride = 20;
     cfg.downlink_pipeline.tx_circular_buffer_size = 8;
-    cfg.downlink_pipeline.data_packet_buffer_size = 32;
+    cfg.downlink_pipeline.data_packet_buffer_size = 256;
     cfg.sensing.paired_frame_queue_size = 16;
     cfg.network_output.udp_input_ip = "0.0.0.0";
     cfg.network_output.udp_input_port = 50000;
@@ -4705,15 +4705,33 @@ private:
     std::deque<PacerPacket> pacer_queue_;
     std::thread pacer_thread_;
     bool pacer_running_ = false;
-    size_t pacer_dropped_oldest_ = 0;
-    size_t pacer_dropped_stale_ = 0;
+    uint64_t pacer_dropped_oldest_ = 0;
+    uint64_t pacer_dropped_stale_ = 0;
+    uint64_t pacer_enqueued_packets_ = 0;
+    uint64_t pacer_enqueued_bytes_ = 0;
+    uint64_t pacer_sent_packets_ = 0;
+    uint64_t pacer_sent_bytes_ = 0;
+    uint64_t pacer_send_failed_ = 0;
+    size_t pacer_max_queue_depth_ = 0;
     SteadyClock::time_point next_send_time_{};
     SteadyClock::time_point auto_rate_interval_start_{};
+    SteadyClock::time_point pacer_stats_last_log_time_{};
     size_t auto_rate_interval_bytes_ = 0;
     double auto_rate_bytes_per_s_ = 0.0;
+    uint64_t pacer_stats_last_enqueued_bytes_ = 0;
+    uint64_t pacer_stats_last_sent_bytes_ = 0;
+    uint64_t pacer_stats_last_dropped_oldest_ = 0;
+    uint64_t pacer_stats_last_dropped_stale_ = 0;
+    uint64_t pacer_stats_last_send_failed_ = 0;
+    static constexpr double kAutoRateBootstrapMbps = 8.0;
+    static constexpr double kPacerStatsIntervalS = 1.0;
 
     static double mbps_to_bytes_per_s(double mbps) {
         return (mbps * 1000.0 * 1000.0) / 8.0;
+    }
+
+    static double bytes_per_s_to_mbps(double bytes_per_s) {
+        return (bytes_per_s * 8.0) / (1000.0 * 1000.0);
     }
 
     double current_rate_bytes_per_s_locked() const {
@@ -4723,7 +4741,7 @@ private:
         if (auto_rate_bytes_per_s_ > 0.0) {
             return auto_rate_bytes_per_s_;
         }
-        return mbps_to_bytes_per_s(8.0);
+        return mbps_to_bytes_per_s(kAutoRateBootstrapMbps);
     }
 
     void update_auto_rate_locked(size_t size_bytes, SteadyClock::time_point now) {
@@ -4775,6 +4793,9 @@ private:
                 }
             }
             pacer_queue_.push_back(std::move(packet));
+            ++pacer_enqueued_packets_;
+            pacer_enqueued_bytes_ += size_bytes;
+            pacer_max_queue_depth_ = std::max(pacer_max_queue_depth_, pacer_queue_.size());
         }
         pacer_cv_.notify_one();
     }
@@ -4810,6 +4831,93 @@ private:
         return age_ms > pacer_cfg_.max_delay_ms;
     }
 
+    void log_pacer_stats(SteadyClock::time_point now) {
+        if (pacer_stats_last_log_time_ == SteadyClock::time_point{}) {
+            std::lock_guard<std::mutex> lock(pacer_mutex_);
+            pacer_stats_last_log_time_ = now;
+            pacer_stats_last_enqueued_bytes_ = pacer_enqueued_bytes_;
+            pacer_stats_last_sent_bytes_ = pacer_sent_bytes_;
+            pacer_stats_last_dropped_oldest_ = pacer_dropped_oldest_;
+            pacer_stats_last_dropped_stale_ = pacer_dropped_stale_;
+            pacer_stats_last_send_failed_ = pacer_send_failed_;
+            return;
+        }
+
+        const double elapsed_s =
+            std::chrono::duration<double>(now - pacer_stats_last_log_time_).count();
+        if (elapsed_s < kPacerStatsIntervalS) {
+            return;
+        }
+
+        uint64_t enqueued_packets = 0;
+        uint64_t enqueued_bytes = 0;
+        uint64_t dropped_oldest = 0;
+        size_t queue_depth = 0;
+        size_t max_queue_depth = 0;
+        double auto_rate_bytes_per_s = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(pacer_mutex_);
+            enqueued_packets = pacer_enqueued_packets_;
+            enqueued_bytes = pacer_enqueued_bytes_;
+            dropped_oldest = pacer_dropped_oldest_;
+            queue_depth = pacer_queue_.size();
+            max_queue_depth = pacer_max_queue_depth_;
+            auto_rate_bytes_per_s = auto_rate_bytes_per_s_;
+        }
+
+        const uint64_t interval_enqueued_bytes = enqueued_bytes - pacer_stats_last_enqueued_bytes_;
+        const uint64_t interval_sent_bytes = pacer_sent_bytes_ - pacer_stats_last_sent_bytes_;
+        const uint64_t interval_dropped_oldest = dropped_oldest - pacer_stats_last_dropped_oldest_;
+        const uint64_t interval_dropped_stale = pacer_dropped_stale_ - pacer_stats_last_dropped_stale_;
+        const uint64_t interval_send_failed = pacer_send_failed_ - pacer_stats_last_send_failed_;
+        const double enqueue_mbps =
+            bytes_per_s_to_mbps(static_cast<double>(interval_enqueued_bytes) / elapsed_s);
+        const double send_mbps =
+            bytes_per_s_to_mbps(static_cast<double>(interval_sent_bytes) / elapsed_s);
+        const double effective_rate_mbps = bytes_per_s_to_mbps(
+            pacer_cfg_.target_mbps > 0.0
+                ? mbps_to_bytes_per_s(pacer_cfg_.target_mbps)
+                : (auto_rate_bytes_per_s > 0.0
+                       ? auto_rate_bytes_per_s
+                       : mbps_to_bytes_per_s(kAutoRateBootstrapMbps)));
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(3)
+            << "UDP egress pacer stats: mode="
+            << (pacer_cfg_.target_mbps > 0.0 ? "fixed" : "auto")
+            << ", effective_rate_mbps=" << effective_rate_mbps;
+        if (pacer_cfg_.target_mbps <= 0.0) {
+            oss << ", auto_rate_mbps="
+                << bytes_per_s_to_mbps(auto_rate_bytes_per_s);
+        }
+        oss << ", enqueue_mbps=" << enqueue_mbps
+            << ", send_mbps=" << send_mbps
+            << ", queue=" << queue_depth << "/" << pacer_cfg_.queue_packets
+            << ", max_queue=" << max_queue_depth
+            << ", enqueued_pkts=" << enqueued_packets
+            << ", sent_pkts=" << pacer_sent_packets_
+            << ", dropped_oldest=" << dropped_oldest;
+        if (interval_dropped_oldest > 0) {
+            oss << " (+" << interval_dropped_oldest << ")";
+        }
+        oss << ", dropped_stale=" << pacer_dropped_stale_;
+        if (interval_dropped_stale > 0) {
+            oss << " (+" << interval_dropped_stale << ")";
+        }
+        oss << ", send_failed=" << pacer_send_failed_;
+        if (interval_send_failed > 0) {
+            oss << " (+" << interval_send_failed << ")";
+        }
+        LOG_G_INFO() << oss.str();
+
+        pacer_stats_last_log_time_ = now;
+        pacer_stats_last_enqueued_bytes_ = enqueued_bytes;
+        pacer_stats_last_sent_bytes_ = pacer_sent_bytes_;
+        pacer_stats_last_dropped_oldest_ = dropped_oldest;
+        pacer_stats_last_dropped_stale_ = pacer_dropped_stale_;
+        pacer_stats_last_send_failed_ = pacer_send_failed_;
+    }
+
     void pacer_loop() {
         while (true) {
             PacerPacket packet;
@@ -4834,6 +4942,7 @@ private:
                     LOG_G_WARN() << "UDP egress pacer dropped stale packet: dropped="
                                  << pacer_dropped_stale_;
                 }
+                log_pacer_stats(now);
                 continue;
             }
 
@@ -4853,9 +4962,13 @@ private:
 
             try {
                 send_raw(packet.bytes.data(), packet.bytes.size());
+                ++pacer_sent_packets_;
+                pacer_sent_bytes_ += packet.bytes.size();
             } catch (const std::exception& e) {
+                ++pacer_send_failed_;
                 LOG_G_WARN() << "UDP egress pacer send failed: " << e.what();
             }
+            log_pacer_stats(SteadyClock::now());
         }
     }
 };

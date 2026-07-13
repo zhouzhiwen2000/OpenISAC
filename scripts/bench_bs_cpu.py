@@ -42,7 +42,7 @@ def build_mod_role_map(mod_cfg: dict, pid: int) -> dict[tuple[int, str], str]:
     role_map: dict[tuple[int, str], str] = {}
     mod_cores = [int(core) for core in mod_cfg.get("downlink_cpu_cores", [])]
     if mod_cores:
-        base_roles = ["bs:_tx_proc", "bs:_modulation_proc", "bs:_data_ingest_proc"]
+        base_roles = ["bs:_tx_proc", "bs:_modulation_proc", "bs:_ldpc_encode_proc", "bs:_udp_recv_proc"]
         for idx, role in enumerate(base_roles):
             if idx < len(mod_cores) and mod_cores[idx] >= 0:
                 role_map[(pid, str(mod_cores[idx]))] = role

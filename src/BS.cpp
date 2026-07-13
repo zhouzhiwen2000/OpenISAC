@@ -119,7 +119,7 @@ bool append_csv_row(
 struct QueuedTxFrame {
     AlignedVector samples;
     std::shared_ptr<const SymbolVector> symbols;
-    int64_t ingest_time_ns{0};    // T1: UDP packet received by _data_ingest_proc
+    int64_t ingest_time_ns{0};    // T1: UDP packet received by _udp_recv_proc
     int64_t encoded_time_ns{0};   // T2: packet pushed into _data_packet_buffer (after LDPC encode)
     int64_t mod_done_time_ns{0};  // T3: frame pushed into _circular_buffer (after IFFT/CP)
 };
@@ -133,7 +133,8 @@ struct QueuedTxFrame {
  * - tx_thread: Streams generated time-domain frames to USRP.
  * - rx_thread: Receives self-reflected signals (for sensing).
  * - sensing_thread: Processes received signals for further analysis.
- * - data_thread: Ingests user UDP data and performs LDPC encoding.
+ * - ldpc_encode_thread: Converts payload packets into LDPC/QPSK symbols.
+ * - udp_recv_thread: Receives user UDP payloads for downlink transmission.
  */
 class BSEngine {
 public:
@@ -245,7 +246,10 @@ public:
         _next_tx_frame_seq.store(0, std::memory_order_relaxed);
 
         _mod_thread = std::thread(&BSEngine::_modulation_proc, this);
-        _data_thread = std::thread(&BSEngine::_data_ingest_proc, this);
+        _ldpc_encode_thread = std::thread(&BSEngine::_ldpc_encode_proc, this);
+        if (!_measurement_enabled) {
+            _udp_recv_thread = std::thread(&BSEngine::_udp_recv_proc, this);
+        }
 
         // Let modulation prefill as much as possible (prefer full queue) before scheduling TX/RX start.
         bool prefilled_full = false;
@@ -338,10 +342,15 @@ public:
         for (auto& ch : _sensing_channels) {
             ch->stop();
         }
+        const int udp_sock = _udp_sock.load(std::memory_order_acquire);
+        if (udp_sock >= 0) {
+            shutdown(udp_sock, SHUT_RDWR);
+        }
 
         if (_mod_thread.joinable()) _mod_thread.join();
         if (_tx_thread.joinable()) _tx_thread.join();
-        if (_data_thread.joinable()) _data_thread.join();
+        if (_udp_recv_thread.joinable()) _udp_recv_thread.join();
+        if (_ldpc_encode_thread.joinable()) _ldpc_encode_thread.join();
         _tx_async_exit_requested.store(true, std::memory_order_relaxed);
         if (_tx_async_thread.joinable()) _tx_async_thread.join();
 
@@ -400,8 +409,8 @@ private:
 
     // Pre-generated data
     AlignedVector _pregen_symbols;
-    // Data ingest/encoding related
-    std::thread _data_thread;
+    // Payload encoding related
+    std::thread _ldpc_encode_thread;
     
     // Control handler
     ControlCommandHandler _control_handler;
@@ -425,7 +434,7 @@ private:
 
     
     // UDP socket
-    int _udp_sock{-1};
+    std::atomic<int> _udp_sock{-1};
     struct sockaddr_in _udp_addr{};
     
     // Object pools for memory reuse (eliminates per-frame memory allocations)
@@ -436,6 +445,12 @@ private:
     // hold shared_ptr deleters that return objects back into these pools.
     SPSCRingBuffer<QueuedTxFrame> _circular_buffer;
     SPSCRingBuffer<AlignedIntVector> _data_packet_buffer; // Data packet buffer
+    struct RawUdpPacket {
+        std::vector<uint8_t> bytes;
+        int64_t ingest_ns{0};
+    };
+    SPSCRingBuffer<RawUdpPacket> _raw_udp_buffer{256}; // UDP recv -> LDPC encode intermediate buffer
+    std::thread _udp_recv_thread; // UDP recv thread (separate from LDPC encode)
     struct PktTimestamps { int64_t ingest_ns{0}; int64_t encoded_ns{0}; };
     struct LatencyAccumulator {
         std::atomic<int64_t> ldpc_total_ns{0};
@@ -1569,17 +1584,16 @@ private:
     }
 
     /**
-     * @brief Data Ingest and Encoding Thread.
+     * @brief LDPC Encoding Thread.
      * 
-     * Listens on a UDP port for user data.
-     * On packet receipt:
+     * Consumes already-received payload packets from the UDP receive thread.
      * 1. Constructs a protocol header.
      * 2. Performs LDPC encoding on the header and payload.
      * 3. Scrambles and interleaves the encoded bits.
      * 4. Maps interleaved bits to QPSK symbols.
      * 5. Pushes ready-to-modulate packets to the data buffer.
      */
-    void _data_ingest_proc() {
+    void _ldpc_encode_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe(0.2f, true);
         bind_current_thread_from_downlink_hint(_cfg, 2);
@@ -1598,11 +1612,12 @@ private:
             prof_payload_encode_total += profile.payload_encode_us;
             prof_enqueue_total += profile.enqueue_us;
             ++prof_packet_count;
-            if (prof_packet_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("data_ingest")) {
+            if (prof_packet_count >= PROF_REPORT_INTERVAL &&
+                _cfg.should_profile("ldpc_encode")) {
                 const double total =
                     prof_header_encode_total + prof_payload_encode_total + prof_enqueue_total;
                 std::ostringstream oss;
-                oss << "\n========== _data_ingest_proc Profiling (avg per packet, us) ==========\n"
+                oss << "\n========== _ldpc_encode_proc Profiling (avg per packet, us) ==========\n"
                     << "Header Encode:        " << prof_header_encode_total / prof_packet_count << " us\n"
                     << "Payload Encode:       " << prof_payload_encode_total / prof_packet_count << " us\n"
                     << "Enqueue:              " << prof_enqueue_total / prof_packet_count << " us\n"
@@ -1686,13 +1701,29 @@ private:
             return;
         }
 
-        _udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (_udp_sock < 0) {
+        _udp_encode_proc(do_latency_profile, accumulate_profile);
+    }
+
+    void _udp_recv_proc() {
+        bind_current_thread_from_downlink_hint(_cfg, 3);
+        const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) {
             LOG_G_ERROR() << "UDP socket create failed";
             return;
         }
+        _udp_sock.store(sock, std::memory_order_release);
+
+        auto close_sock = [&]() {
+            int expected = sock;
+            if (_udp_sock.compare_exchange_strong(expected, -1, std::memory_order_acq_rel)) {
+                close(sock);
+            }
+        };
+
         int enable = 1;
-        setsockopt(_udp_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+        constexpr int rcvbuf_size = 4 * 1024 * 1024;
+        setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf_size, sizeof(rcvbuf_size));
         memset(&_udp_addr, 0, sizeof(_udp_addr));
         _udp_addr.sin_family = AF_INET;
         _udp_addr.sin_port = htons(static_cast<uint16_t>(_cfg.network_output.udp_input_port));
@@ -1700,22 +1731,20 @@ private:
             _udp_addr.sin_addr.s_addr = INADDR_ANY;
         } else if (inet_pton(AF_INET, _cfg.network_output.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
             LOG_G_ERROR() << "Invalid BS UDP bind IP: " << _cfg.network_output.udp_input_ip;
-            close(_udp_sock);
-            _udp_sock = -1;
+            close_sock();
             return;
         }
-        if (bind(_udp_sock, (sockaddr*)&_udp_addr, sizeof(_udp_addr)) < 0) {
+        if (bind(sock, (sockaddr*)&_udp_addr, sizeof(_udp_addr)) < 0) {
             LOG_G_ERROR() << "UDP bind failed";
-            close(_udp_sock);
-            _udp_sock = -1;
+            close_sock();
             return;
         }
-        fcntl(_udp_sock, F_SETFL, O_NONBLOCK);
+        fcntl(sock, F_SETFL, O_NONBLOCK);
 
         std::vector<uint8_t> udp_buf(25200);
         uint64_t dropped_payload_warn_count = 0;
         while (_running.load(std::memory_order_relaxed)) {
-            const ssize_t recv_len = recv(_udp_sock, udp_buf.data(), udp_buf.size(), 0);
+            const ssize_t recv_len = recv(sock, udp_buf.data(), udp_buf.size(), 0);
             if (recv_len <= 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
@@ -1728,24 +1757,43 @@ private:
                 }
                 continue;
             }
-            const int64_t pkt_ingest_ns = do_latency_profile
-                ? std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::high_resolution_clock::now().time_since_epoch()).count()
-                : 0;
+            RawUdpPacket* pkt = _raw_udp_buffer.producer_slot();
+            if (pkt == nullptr) {
+                static std::atomic<uint64_t> drop_count{0};
+                const uint64_t dc = drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dc <= 20 || (dc % 100) == 0) {
+                    LOG_G_WARN() << "UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
+                }
+                continue;
+            }
+            pkt->bytes.resize(static_cast<size_t>(recv_len));
+            std::memcpy(pkt->bytes.data(), udp_buf.data(), static_cast<size_t>(recv_len));
+            pkt->ingest_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+            _raw_udp_buffer.producer_commit();
+        }
+        close_sock();
+    }
+
+    template <typename AccumulateProfile>
+    void _udp_encode_proc(bool do_latency_profile, AccumulateProfile& accumulate_profile) {
+        while (_running.load(std::memory_order_relaxed)) {
+            RawUdpPacket* pkt = nullptr;
+            while (_running.load(std::memory_order_relaxed)) {
+                pkt = _raw_udp_buffer.consumer_slot();
+                if (pkt != nullptr) break;
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            if (!_running.load(std::memory_order_relaxed) || pkt == nullptr) break;
             EncodePacketProfile profile;
             if (!_encode_and_enqueue_payload(
-                    udp_buf.data(),
-                    static_cast<size_t>(recv_len),
-                    pkt_ingest_ns,
-                    do_latency_profile,
-                    profile)) {
+                    pkt->bytes.data(), pkt->bytes.size(),
+                    pkt->ingest_ns, do_latency_profile, profile)) {
+                _raw_udp_buffer.consumer_pop();
                 break;
             }
+            _raw_udp_buffer.consumer_pop();
             accumulate_profile(profile);
-        }
-        if (_udp_sock >= 0) {
-            close(_udp_sock);
-            _udp_sock = -1;
         }
     }
     /**

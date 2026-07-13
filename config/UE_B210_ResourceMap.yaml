@@ -1,3 +1,19 @@
+# ===== RF / Sampling =====
+rf_sampling:
+  sample_rate: 50000000  # Baseband sample rate (Hz)
+  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
+  rx_agc_enable: true  # Enable hardware RX AGC driven by delay-spectrum peak
+  rx_agc_low_threshold_db: 14.0  # Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
+  rx_agc_high_threshold_db: 16.0  # Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
+  rx_agc_max_step_db: 1.0  # Maximum RX gain step per AGC update (dB)
+  rx_agc_update_frames: 4  # Apply AGC at most once every N processed frames
+  rx_gain: 10  # RX gain (dB)
+
+# ===== USRP Device / Link =====
+usrp_device:
+  device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # USRP args
+  clock_source: external  # Clock source; internal/external/gpsdo
+
 # ===== OFDM Frame =====
 ofdm_frame:
   fft_size: 1024  # FFT size (subcarrier count)
@@ -21,31 +37,6 @@ cuda:
   cuda_ldpc_worker_buffers: 3  # Number of CUDA LDPC async worker batch buffers
   cuda_ldpc_cross_frame_flush_frames: 2  # Max frames accumulated before CUDA LDPC batch decode
   cuda_ldpc_cross_frame_flush_us: 1000  # Max CUDA LDPC cross-frame batch wait time in microseconds
-
-# ===== Sensing =====
-sensing:
-  bi_enabled: true  # Enable bistatic sensing processing pipeline
-  range_fft_size: 1024  # Range FFT size
-  doppler_fft_size: 100  # Doppler FFT size
-  output_mode: dense  # dense or compact_mask
-  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
-  symbol_stride: 20  # Default STRD applied at startup before runtime commands
-
-# ===== RF / Sampling =====
-rf_sampling:
-  sample_rate: 50000000  # Baseband sample rate (Hz)
-  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
-  rx_agc_enable: true  # Enable hardware RX AGC driven by delay-spectrum peak
-  rx_agc_low_threshold_db: 14.0  # Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
-  rx_agc_high_threshold_db: 16.0  # Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
-  rx_agc_max_step_db: 1.0  # Maximum RX gain step per AGC update (dB)
-  rx_agc_update_frames: 4  # Apply AGC at most once every N processed frames
-  rx_gain: 10  # RX gain (dB)
-
-# ===== USRP Device / Link =====
-usrp_device:
-  device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # USRP args
-  clock_source: external  # Clock source; internal/external/gpsdo
 
 # ===== Downlink =====
 downlink:
@@ -98,37 +89,14 @@ sync_tracking:
   akf_r_max: 1.0e3  # Upper bound of observation noise variance R
   desired_peak_pos: 20  # Target delay-peak index for alignment
 
-# ===== Network =====
-network_output:
-  udp_output_ip: ""  # UE decoded downlink payload UDP destination IP (empty = use default_out_ip)
-  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
-  udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
-  udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
-  udp_egress_pacer_queue_packets: 512  # UDP egress pacer queue capacity in datagrams
-  udp_egress_pacer_max_delay_ms: 250  # UDP egress pacer max queued packet age in ms; 0 disables age drops
-  bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
-  bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
-  bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
-  control_port: 10001  # ZMQ port for runtime control commands
-  channel_ip: 0.0.0.0  # Channel-estimate ZMQ listen IP
-  channel_port: 12348  # Channel-estimate output port
-  pdf_ip: 0.0.0.0  # Delay-spectrum ZMQ listen IP
-  pdf_port: 12349  # Delay-spectrum output port
-  constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
-  constellation_port: 12346  # Constellation output port
-
-# ===== CPU Cores =====
-cpu_cores:
-  downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
-  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
-  main_cpu_core: 5  # Main-thread CPU core (-1 disables explicit binding)
-
-# ===== Runtime / Debug =====
-runtime:
-  default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
-  vofa_debug_ip: ""  # VOFA+ debug output IP
-  vofa_debug_port: 12347  # VOFA+ debug output port
-  profiling_modules: ""  # Comma-separated modules to profile, or "all"
+# ===== Sensing =====
+sensing:
+  bi_enabled: true  # Enable bistatic sensing processing pipeline
+  range_fft_size: 1024  # Range FFT size
+  doppler_fft_size: 100  # Doppler FFT size
+  output_mode: dense  # dense or compact_mask
+  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== Resource Preview =====
 resource_preview:
@@ -189,3 +157,35 @@ resource_preview:
       symbol_count: 1  # Number of OFDM symbols in this block
       subcarrier_start: 0  # 0-based FFT-bin start index
       subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+
+# ===== Network =====
+network_output:
+  udp_output_ip: ""  # UE decoded downlink payload UDP destination IP (empty = use default_out_ip)
+  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
+  udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
+  udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
+  udp_egress_pacer_queue_packets: 10240  # UDP egress pacer queue capacity in datagrams
+  udp_egress_pacer_max_delay_ms: 0  # UDP egress pacer max queued packet age in ms; 0 disables age drops
+  bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
+  bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
+  bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
+  control_port: 10001  # ZMQ port for runtime control commands
+  channel_ip: 0.0.0.0  # Channel-estimate ZMQ listen IP
+  channel_port: 12348  # Channel-estimate output port
+  pdf_ip: 0.0.0.0  # Delay-spectrum ZMQ listen IP
+  pdf_port: 12349  # Delay-spectrum output port
+  constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
+  constellation_port: 12346  # Constellation output port
+
+# ===== CPU Cores =====
+cpu_cores:
+  downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
+  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine LDPC encode, modulation, TX send, UDP recv thread]
+  main_cpu_core: 5  # Main-thread CPU core (-1 disables explicit binding)
+
+# ===== Runtime / Debug =====
+runtime:
+  default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
+  vofa_debug_ip: ""  # VOFA+ debug output IP
+  vofa_debug_port: 12347  # VOFA+ debug output port
+  profiling_modules: ""  # Comma-separated modules to profile, or "all"

@@ -579,13 +579,13 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>512</code></td>
+<td style="text-align:left"><code>10240</code></td>
 <td style="text-align:left">Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
 <td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>250</code></td>
+<td style="text-align:left"><code>0</code></td>
 <td style="text-align:left">Maximum queued packet age before the egress pacer drops it. Set <code>0</code> to disable age-based drops.</td>
 </tr>
 <tr>
@@ -730,13 +730,13 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>data_ingest</code>, and <code>sensing_proc</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, and <code>sensing_proc</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">BS downlink CPU cores: index <code>0</code> binds TX, <code>1</code> binds modulation, and <code>2</code> binds data ingest.</td>
+<td style="text-align:left">BS downlink CPU cores: indices <code>0..3</code> bind <code>_tx_proc</code>, <code>_modulation_proc</code>, <code>_ldpc_encode_proc</code>, and <code>_udp_recv_proc</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink_cpu_cores</code></td>
@@ -1368,13 +1368,13 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>512</code></td>
+<td style="text-align:left"><code>10240</code></td>
 <td style="text-align:left">Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
 <td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>250</code></td>
+<td style="text-align:left"><code>0</code></td>
 <td style="text-align:left">Maximum queued packet age before the egress pacer drops it. Set <code>0</code> to disable age-based drops.</td>
 </tr>
 <tr>
@@ -1447,7 +1447,7 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>uplink_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE uplink CPU cores: indices <code>0</code>, <code>1</code>, and <code>2</code> bind <code>UplinkTxEngine::_udp_ingest_proc</code>, <code>_mod_proc</code>, and <code>_tx_proc</code>.</td>
+<td style="text-align:left">UE uplink CPU cores: indices <code>0..3</code> bind <code>UplinkTxEngine::_ldpc_encode_proc</code>, <code>_mod_proc</code>, <code>_tx_proc</code>, and <code>_udp_recv_proc</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>main_cpu_core</code></td>

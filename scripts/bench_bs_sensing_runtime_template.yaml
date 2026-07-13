@@ -51,8 +51,8 @@ downlink:
   tx_time_source: ""  # TX time source override (optional)
   wire_format_tx: sc16  # TX wire format; sc16/sc8
   tx_circular_buffer_size: 32  # BS frame circular buffer capacity
-  data_packet_buffer_size: 32  # Encoded packet buffer capacity
-  downlink_cpu_cores: [5, 7, 8]  # BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]
+  data_packet_buffer_size: 256  # Encoded packet buffer capacity
+  downlink_cpu_cores: [5, 7, 8, -1]  # BS downlink CPU cores: [TX thread, modulation thread, LDPC encode thread, UDP recv thread]
 
 # ===== Uplink =====
 uplink:
@@ -78,4 +78,4 @@ network_output:
 # ===== Runtime / Debug =====
 runtime:
   main_cpu_core: 6  # Main-thread CPU core (-1 disables explicit binding)
-  profiling_modules: sensing_proc  # Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
+  profiling_modules: sensing_proc  # Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc), or "all"

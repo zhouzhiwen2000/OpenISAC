@@ -8,6 +8,17 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-25 - UDP egress pacer 统计日志
+
+### Summary
+
+本次更新为 UDP egress pacer 增加周期性运行统计，方便观察自动检测速率和队列状态。
+
+### Changes
+
+- pacer 启用并有流量时，每约 1 秒打印 `UDP egress pacer stats`，包含 fixed/auto 模式、有效 pacing 速率、自动估计速率、入队/发送 Mbps、队列深度、累计发送包数以及丢包/发送失败计数。
+  影响：调试 decoded payload UDP 输出突发、排队和丢包时，可以直接从 BS/UE 日志判断 pacer 是否按预期估计和限速。
+
 ## 2026-06-24 - YAML 嵌套字段命名收敛
 
 ### Summary

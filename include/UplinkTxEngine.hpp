@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -137,27 +138,31 @@ public:
             _build_period_buffer(*first_frame);
             _period_queue.producer_commit();
         }
-        _ingest_thread = std::thread(&UplinkTxEngine::_udp_ingest_proc, this);
+        _ldpc_encode_thread = std::thread(&UplinkTxEngine::_ldpc_encode_proc, this);
+        _udp_recv_thread = std::thread(&UplinkTxEngine::_udp_recv_proc, this);
         _mod_thread = std::thread(&UplinkTxEngine::_mod_proc, this);
         _tx_thread = std::thread(&UplinkTxEngine::_tx_proc, this);
     }
 
     void stop() {
         _running.store(false);
-        if (_udp_sock >= 0) {
-            ::shutdown(_udp_sock, SHUT_RDWR);
+        const int udp_sock = _udp_sock.load(std::memory_order_acquire);
+        if (udp_sock >= 0) {
+            ::shutdown(udp_sock, SHUT_RDWR);
         }
-        if (_ingest_thread.joinable()) _ingest_thread.join();
+        if (_udp_recv_thread.joinable()) _udp_recv_thread.join();
+        if (_ldpc_encode_thread.joinable()) _ldpc_encode_thread.join();
         if (_mod_thread.joinable()) _mod_thread.join();
         if (_tx_thread.joinable()) _tx_thread.join();
-        if (_udp_sock >= 0) {
-            ::close(_udp_sock);
-            _udp_sock = -1;
-        }
     }
 
 private:
     // ---- One-time setup: build per-symbol frequency templates + payload map ----
+    static int _template_payload_qpsk(size_t payload_rank) {
+        return static_cast<int>(
+            splitmix32(0x554C544Du ^ static_cast<uint32_t>(payload_rank)) & 0x3u);
+    }
+
     void _build_symbol_templates() {
         _symbol_templates.assign(_cfg.ofdm.num_symbols, AlignedVector(_cfg.ofdm.fft_size, {0.0f, 0.0f}));
         _payload_subcarrier_indices_flat.clear();
@@ -175,8 +180,12 @@ private:
                 const size_t k = static_cast<size_t>(_layout.non_pilot_subcarrier_indices[di]);
                 const int payload_rank = _layout.payload_rank[base + di];
                 if (payload_rank >= 0) {
-                    // payload RE: filled per-frame; record the subcarrier.
+                    // Payload RE: prefilled like downlink, then overwritten by
+                    // per-frame UDP payload symbols where available.
                     _payload_subcarrier_indices_flat.push_back(static_cast<int>(k));
+                    if (_link_cfg.uplink.idle_waveform == kUplinkIdleWaveformRandomQpsk) {
+                        tmpl[k] = _qpsk_from_int(_template_payload_qpsk(static_cast<size_t>(payload_rank)));
+                    }
                 } else {
                     // deterministic unit-magnitude filler (RX ignores these REs).
                     tmpl[k] = _zc_seq[k];
@@ -223,16 +232,42 @@ private:
         }
     }
 
-    // ---- UDP payload ingest: recv -> LDPC encode/frame -> packet queue ----
-    void _udp_ingest_proc() {
+    // ---- LDPC encode: raw UDP packet queue -> encoded packet queue ----
+    void _ldpc_encode_proc() {
         bind_current_thread_from_uplink_hint(_link_cfg, 0);
-        _udp_sock = ::socket(AF_INET, SOCK_DGRAM, 0);
-        if (_udp_sock < 0) {
+        while (_running.load(std::memory_order_relaxed)) {
+            RawUdpPacket* pkt = nullptr;
+            while (_running.load(std::memory_order_relaxed)) {
+                pkt = _raw_udp_buffer.consumer_slot();
+                if (pkt != nullptr) break;
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+            if (!_running.load(std::memory_order_relaxed) || pkt == nullptr) break;
+            _encode_and_enqueue_payload(pkt->bytes.data(), pkt->bytes.size());
+            _raw_udp_buffer.consumer_pop();
+        }
+    }
+
+    void _udp_recv_proc() {
+        bind_current_thread_from_uplink_hint(_link_cfg, 3);
+        const int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) {
             LOG_G_ERROR() << "[UL-TX] UDP socket create failed";
             return;
         }
+        _udp_sock.store(sock, std::memory_order_release);
+
+        auto close_sock = [&]() {
+            int expected = sock;
+            if (_udp_sock.compare_exchange_strong(expected, -1, std::memory_order_acq_rel)) {
+                ::close(sock);
+            }
+        };
+
         int enable = 1;
-        ::setsockopt(_udp_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+        ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+        constexpr int rcvbuf_size = 4 * 1024 * 1024;
+        ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf_size, sizeof(rcvbuf_size));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(static_cast<uint16_t>(_link_cfg.network_output.ul_udp_input_port));
@@ -240,13 +275,16 @@ private:
             addr.sin_addr.s_addr = INADDR_ANY;
         } else if (inet_pton(AF_INET, _link_cfg.network_output.ul_udp_input_ip.c_str(), &addr.sin_addr) != 1) {
             LOG_G_ERROR() << "[UL-TX] Invalid ul_udp_input_ip: " << _link_cfg.network_output.ul_udp_input_ip;
+            close_sock();
             return;
         }
-        if (::bind(_udp_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             LOG_G_ERROR() << "[UL-TX] UDP bind failed on " << _link_cfg.network_output.ul_udp_input_ip << ":"
                           << _link_cfg.network_output.ul_udp_input_port;
+            close_sock();
             return;
         }
+        ::fcntl(sock, F_SETFL, O_NONBLOCK);
         if (_link_cfg.should_profile("uplink")) {
             LOG_G_INFO() << "[UL-TX] uplink payload UDP input on " << _link_cfg.network_output.ul_udp_input_ip << ":"
                          << _link_cfg.network_output.ul_udp_input_port;
@@ -254,13 +292,26 @@ private:
 
         std::vector<uint8_t> buf(65536);
         while (_running.load(std::memory_order_relaxed)) {
-            const ssize_t n = ::recvfrom(_udp_sock, buf.data(), buf.size(), 0, nullptr, nullptr);
+            const ssize_t n = ::recvfrom(sock, buf.data(), buf.size(), 0, nullptr, nullptr);
             if (n <= 0) {
                 if (!_running.load(std::memory_order_relaxed)) break;
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
                 continue;
             }
-            _encode_and_enqueue_payload(buf.data(), static_cast<size_t>(n));
+            RawUdpPacket* pkt = _raw_udp_buffer.producer_slot();
+            if (pkt == nullptr) {
+                static std::atomic<uint64_t> drop_count{0};
+                const uint64_t dc = drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dc <= 20 || (dc % 100) == 0) {
+                    LOG_G_WARN() << "[UL-TX] UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
+                }
+                continue;
+            }
+            pkt->bytes.resize(static_cast<size_t>(n));
+            std::memcpy(pkt->bytes.data(), buf.data(), static_cast<size_t>(n));
+            _raw_udp_buffer.producer_commit();
         }
+        close_sock();
     }
 
     void _encode_and_enqueue_payload(const uint8_t* data, size_t len) {
@@ -678,7 +729,13 @@ private:
     Scrambler _scrambler{201600, 0x5A};
     std::atomic<uint32_t> _packet_seq{0};
     std::atomic<uint32_t> _idle_seq{0};
-    SPSCRingBuffer<AlignedIntVector> _packet_buffer{32};
+    SPSCRingBuffer<AlignedIntVector> _packet_buffer{256};
+
+    struct RawUdpPacket {
+        std::vector<uint8_t> bytes;
+    };
+    SPSCRingBuffer<RawUdpPacket> _raw_udp_buffer{256};
+    std::thread _udp_recv_thread;
 
     uhd::tx_streamer::sptr _tx_stream;
     bool _use_timed_tx = false;
@@ -693,10 +750,10 @@ private:
     std::atomic<uint64_t> _tx_error_count{0};
 
     std::atomic<bool> _running{false};
-    std::thread _ingest_thread;
+    std::thread _ldpc_encode_thread;
     std::thread _mod_thread;
     std::thread _tx_thread;
-    int _udp_sock = -1;
+    std::atomic<int> _udp_sock{-1};
 };
 
 #endif // UPLINK_TX_ENGINE_HPP

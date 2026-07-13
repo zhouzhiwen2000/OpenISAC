@@ -55,7 +55,7 @@ uplink:
   symbol_count: 10  # TDD uplink window length in OFDM symbols
   guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
   wire_format_tx: sc16  # Uplink TX wire format; sc16/sc8
-  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
+  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine LDPC encode, modulation, TX send]
 
 # ===== Sync / Tracking =====
 sync_tracking:

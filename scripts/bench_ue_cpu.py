@@ -81,9 +81,10 @@ def build_demod_role_map(demod_cfg: dict, pid: int) -> dict[tuple[int, str], str
                 role_map[(pid, str(demod_cores[idx]))] = role
     uplink_cores = [int(core) for core in demod_cfg.get("uplink_cpu_cores", [])]
     uplink_roles = [
-        "debs:uplink_udp_ingest_proc",
+        "debs:uplink_ldpc_encode_proc",
         "debs:uplink_mod_proc",
         "debs:uplink_tx_proc",
+        "debs:uplink_udp_recv_proc",
     ]
     for idx, role in enumerate(uplink_roles):
         if idx < len(uplink_cores) and uplink_cores[idx] >= 0:
