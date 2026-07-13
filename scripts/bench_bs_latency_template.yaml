@@ -1,61 +1,80 @@
 # ===== OFDM Frame =====
-fft_size: 1024  # FFT size (subcarrier count)
-cp_length: 128  # Cyclic prefix length (samples)
-sync_pos: 1  # Sync symbol index in one frame
-num_symbols: 100  # Number of OFDM symbols per frame
-cuda_mod_pipeline_slots: 3  # Number of CUDA modulation pipeline slots
-zc_root: 29  # Zadoff-Chu root for sync/preamble
-pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]  # Comb-pilot subcarrier indices
-midframe_pilot_symbols: []      # Mid-frame BPSK pilot symbols; e.g. [25, 50, 75]
-midframe_pilot_seed: 1296453708  # Deterministic BPSK pilot seed; must match TX/RX
+ofdm_frame:
+  fft_size: 1024  # FFT size (subcarrier count)
+  cp_length: 128  # Cyclic prefix length (samples)
+  sync_pos: 1  # Sync symbol index in one frame
+  num_symbols: 100  # Number of OFDM symbols per frame
+  sensing_symbol_num: 100  # Number of symbols used in sensing processing
+  zc_root: 29  # Zadoff-Chu root for sync/preamble
+  pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]  # Comb-pilot subcarrier indices
+  midframe_pilot_symbols: []  # Mid-frame BPSK pilot symbol indices; comb-pilot RE keep comb-pilot sequence
+  midframe_pilot_seed: 1296453708  # Deterministic mid-frame BPSK pilot seed; must match TX/RX
+
+# ===== CUDA =====
+cuda:
+  cuda_mod_pipeline_slots: 3  # Number of CUDA modulation pipeline slots
+
+# ===== Sensing =====
+sensing:
+  sensing_rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
+  rx_device_args: ""  # Default sensing RX args (empty = use device_args)
+  rx_clock_source: ""  # Sensing RX clock source override (optional)
+  rx_time_source: ""  # Sensing RX time source override (optional)
+  sensing_rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
+  sensing_rx_channels: []
+  range_fft_size: 1024  # Range FFT size
+  doppler_fft_size: 100  # Doppler FFT size
+  paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
 
 # ===== RF / Sampling =====
-sample_rate: 200000000  # Baseband sample rate (Hz)
-bandwidth: 200000000  # Analog bandwidth (Hz), usually same as sample_rate
-center_freq: 2800000000  # RF center frequency (Hz)
-tx_gain: 60  # TX gain (dB)
-tx_channel: 0  # TX channel index on USRP
+rf_sampling:
+  sample_rate: 200000000  # Baseband sample rate (Hz)
+  bandwidth: 200000000  # Analog bandwidth (Hz), usually same as sample_rate
+  center_freq: 2800000000  # RF center frequency (Hz)
 
 # ===== USRP Device Args =====
-device_args: "addr=192.168.30.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # Shared fallback args
-tx_device_args: ""  # TX-specific args (empty = use device_args)
-rx_device_args: ""  # Default sensing RX args (empty = use device_args)
+usrp_device:
+  device_args: "addr=192.168.30.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # Shared fallback args
 
 # ===== Clock / Time Sources =====
-clock_source: external  # Global clock source: internal/external/gpsdo
-time_source: internal  # Global time source: empty -> follow clock_source
-tx_clock_source: ""  # TX clock source override (optional)
-tx_time_source: ""  # TX time source override (optional)
-rx_clock_source: ""  # Sensing RX clock source override (optional)
-rx_time_source: ""  # Sensing RX time source override (optional)
+clock_time:
+  clock_source: external  # Global clock source; internal/external/gpsdo
+  time_source: internal  # Global time source; empty follows clock_source
 
-# ===== Wire Format =====
-wire_format_tx: sc16  # TX wire format: sc16/sc8
-wire_format_rx: sc16  # RX wire format: sc16/sc8
+# ===== Downlink =====
+downlink:
+  tx_gain: 60  # TX gain (dB)
+  tx_channel: 0  # TX channel index on USRP
+  tx_device_args: ""  # TX-specific args (empty = use device_args)
+  tx_clock_source: ""  # TX clock source override (optional)
+  tx_time_source: ""  # TX time source override (optional)
+  wire_format_tx: sc16  # TX wire format; sc16/sc8
+  tx_circular_buffer_size: 32  # BS frame circular buffer capacity
+  data_packet_buffer_size: 32  # Encoded packet buffer capacity
+  downlink_cpu_cores: [5, 7, 8]  # BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]
+
+# ===== Uplink =====
+uplink:
+  symbol_start: 90  # TDD first uplink symbol in the downlink frame
+  symbol_count: 10  # TDD uplink window length in OFDM symbols
+  guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
+  uplink_rx_channel: 0  # Uplink RX channel index on USRP
+  uplink_rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
+  uplink_rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
+  uplink_rx_clock_source: ""  # Uplink RX clock source override (optional)
+  uplink_rx_time_source: ""  # Uplink RX time source override (optional)
+  uplink_cpu_cores: []  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
 
 # ===== Network Output =====
-udp_input_ip: 0.0.0.0  # Bind IP for incoming payload UDP packets
-udp_input_port: 50000  # Bind port for incoming payload UDP packets
-mono_sensing_ip: "0.0.0.0"  # Monostatic sensing ZMQ listen IP
-mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
-control_port: 9999  # ZMQ port for runtime control commands
-
-# ===== Sensing RX Channels =====
-sensing_rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
-sensing_rx_channels:
-range_fft_size: 1024
-doppler_fft_size: 100
-sensing_symbol_num: 100
-sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
+network_output:
+  udp_input_ip: 0.0.0.0  # Bind IP for incoming payload UDP packets
+  udp_input_port: 50000  # Bind port for incoming payload UDP packets
+  mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
+  mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
+  control_port: 9999  # ZMQ port for runtime control commands
+  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== Runtime / Debug =====
-tx_circular_buffer_size: 32  # BS frame circular buffer capacity
-data_packet_buffer_size: 32  # Encoded packet buffer capacity
-paired_frame_queue_size: 64  # Keep above tx_circular_buffer_size for RX startup/alignment headroom
-profiling_modules: modulation,latency  # Enable latency reports in _tx_proc
-downlink_cpu_cores:
-  - 5   # TX thread
-  - 7   # Modulation thread
-  - 8   # Data-ingest thread
-uplink_cpu_cores: []      # BS uplink CPU cores: RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output
-main_cpu_core: 6          # Main thread CPU core (-1 = no explicit binding)
+runtime:
+  main_cpu_core: 6  # Main-thread CPU core (-1 disables explicit binding)
+  profiling_modules: "modulation,latency"  # Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"

@@ -1073,7 +1073,7 @@ private:
             _tx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
             _tx_usrp->set_rx_gain(_cfg.rx_gain, ul_rx_ch);
             _tx_usrp->set_rx_bandwidth(_cfg.bandwidth, ul_rx_ch);
-            uhd::stream_args_t ul_rx_args("fc32", _cfg.wire_format_rx);
+            uhd::stream_args_t ul_rx_args("fc32", _cfg.uplink_rx_wire_format);
             ul_rx_args.channels = {ul_rx_ch};
             _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
             _uplink_rx->set_rx_stream(_tx_usrp->get_rx_stream(ul_rx_args));

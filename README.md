@@ -314,6 +314,7 @@ The system uses YAML files for runtime configuration.
 *   **First run**:
     Template YAML files live in `config/`. Copy `config/BS_X310.yaml` / `config/BS_B210.yaml` or
     `config/UE_X310.yaml` / `config/UE_B210.yaml` to `BS.yaml` / `UE.yaml`, then edit them in place.
+    For the B210 TDD duplex preset, copy `config/BS_B210_Duplex.yaml` and `config/UE_B210_Duplex.yaml`.
  
 ### Frontend (Python)
 
@@ -405,6 +406,11 @@ sudo ../scripts/isolate_cpus.bash run ./BS
 cp ../config/BS_B210.yaml BS.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./BS
+
+# For B210 duplex:
+cp ../config/BS_B210_Duplex.yaml BS.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./BS
 ```
 *If you are using a separate frontend computer, point the monostatic viewer at the BS backend IP with `--host` or the viewer's Backend IP field.*
 
@@ -419,6 +425,11 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 
 # For B210:
 cp ../config/UE_B210.yaml UE.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./UE
+
+# For B210 duplex:
+cp ../config/UE_B210_Duplex.yaml UE.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./UE
 ```
@@ -511,7 +522,7 @@ Notes:
 ### BS
 
 `BS` is configured through `BS.yaml`.
-Use `config/BS_X310.yaml` or `config/BS_B210.yaml` as a starting template.
+Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml` as a starting template.
 
 `BS.yaml` parameter reference:
 
@@ -547,13 +558,13 @@ Use `config/BS_X310.yaml` or `config/BS_B210.yaml` as a starting template.
 | `rx_clock_source` | `string` | `""` | Default sensing RX clock source override. |
 | `rx_time_source` | `string` | `""` | Default sensing RX time source override. |
 | `wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
-| `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
+| `uplink_rx_wire_format` | `string` | `sc16` | BS uplink RX wire format, typically `sc16` or `sc8`. |
+| `sensing_rx_wire_format` | `string` | `sc16` | BS sensing RX default wire format, typically `sc16` or `sc8`. |
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | Bind IP for incoming payload UDP packets. |
 | `udp_input_port` | `int` | `50000` | Bind port for incoming payload UDP packets. |
 | `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
-| `uplink_idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
-| `uplink` | `object` | omitted | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols. In FDD, `center_freq` defines the UE->BS carrier. `udp_output_ip` / `udp_output_port` select where BS sends decoded uplink payloads. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
-| `bs_dl_ul_timing_diff` | `int` / samples | `0` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
+| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols. In FDD, `center_freq` defines the UE->BS carrier. `udp_output_ip` / `udp_output_port` select where BS sends decoded uplink payloads. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
+| `bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the monostatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `mono_sensing_port` | `int` | `8888` | ZeroMQ PUB bind port for the monostatic sensing stream. |
 | `uplink_channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink channel-estimation debug stream. |
@@ -598,7 +609,7 @@ When `sensing_output_mode=compact_mask`, sensing sends one compact message per O
 | `device_args` | `string` | `""` | Per-channel USRP args. |
 | `clock_source` | `string` | `""` | Per-channel clock source override. |
 | `time_source` | `string` | `""` | Per-channel time source override. |
-| `wire_format_rx` | `string` | `""` | Per-channel RX wire format override. |
+| `wire_format` | `string` | `""` | Per-channel sensing RX wire format override. |
 | `rx_gain` | `float` | `30` | RX gain for this channel. |
 | `alignment` | `int` | `63` | Per-channel alignment offset (samples). |
 | `rx_antenna` | `string` | `""` | RX antenna name, e.g. `TX/RX`, `RX1`. |
@@ -615,7 +626,7 @@ Notes:
 ### UE
 
 `UE` is configured through `UE.yaml`.
-Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
+Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml` as a starting template.
 
 `UE.yaml` parameter reference:
 
@@ -643,10 +654,11 @@ Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
 | `sensing_output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
+| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing processing pipeline. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
 | `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink carrier and sends only in the configured uplink symbol window; `fdd` transmits continuously on `uplink.center_freq`. |
 | `uplink_idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
-| `uplink` | `object` | omitted | UE uplink settings. `udp_input_ip` / `udp_input_port` bind the UE-side UDP source for uplink payloads. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
-| `ue_timing_advance` | `int` / samples | `0` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
+| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1` | UE uplink settings. `udp_input_ip` / `udp_input_port` bind the UE-side UDP source for uplink payloads. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
+| `ue_timing_advance` | `int` / samples | `63` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
 | `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
 | `frame_queue_size` | `int` | `8` | Capacity of the UE RX frame queue. Values below `1` are clamped to `1`. |
 | `sync_queue_size` | `int` | `8` | Capacity of the UE sync-search batch queue. Values below `1` are clamped to `1`. |
@@ -657,7 +669,7 @@ Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 | `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame. The receiver uses the full known symbol as an additional channel-estimation anchor, keeps comb-pilot RE available for phase tracking, and excludes the symbol from payload LLR extraction. |
 | `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match the transmitter. |
 | `equalizer_mode` | `string` | `mmse` | Communication equalizer inverse. `zf` uses a floored channel-power denominator; `mmse` adds `noise_var` to that denominator to reduce noise enhancement on deep fades. |
-| `channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking for communication equalization on both CPU and CUDA demodulators. `off` keeps the sync-only channel estimate, while `pilot_phase` fits common and linear residual phase from comb pilots on each data symbol. |
+| `channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking for communication equalization on both CPU and CUDA demodulators. `disabled` keeps the sync-only channel estimate, while `pilot_phase` fits common and linear residual phase from comb pilots on each data symbol. |
 | `equalizer_mag_floor` | `float` | `1e-6` | Lower bound for channel magnitude squared during inversion, used by both `zf` and `mmse`. |
 | `channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual power/weight accepted by per-symbol tracking before falling back to the sync-only correction. |
 | `data_resource_blocks` | `object[]` | omitted | Receiver-side communication resource map. It answers: "which RE should be interpreted as payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set `[]` to extract no payload LLR at all. Use the same rectangles and `kind` values as the transmitter. Blocks with `kind: payload` produce payload LLR; blocks with `kind: sensing_pilot` are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root. |
@@ -665,7 +677,7 @@ Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 | `device_args` | `string` | `""` | USRP device args. |
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
 | `wire_format_tx` | `string` | `sc16` | TX wire format for the optional UE uplink path, typically `sc16` or `sc8`. |
-| `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
+| `downlink_rx_wire_format` | `string` | `sc16` | UE downlink RX wire format, typically `sc16` or `sc8`. |
 | `software_sync` | `bool` | `true` | Enable software synchronization tracking. |
 | `predictive_delay` | `bool` | `true` | Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP. |
 | `hardware_sync` | `bool` | `false` | Enable hardware synchronization. |
@@ -687,9 +699,9 @@ Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 | `akf_r_max` | `float` | `1e3` | Upper bound of observation-noise variance `R`. |
 | `ppm_adjust_factor` | `float` | `0.05` | Frequency offset compensation factor. |
 | `desired_peak_pos` | `int` | `20` | Target delay-peak position used by alignment logic. |
-| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and output. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
-| `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the bistatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
-| `bi_sensing_port` | `int` | `8889` | ZeroMQ PUB bind port for the bistatic sensing stream. |
+| `bi_sensing_output_enabled` | `bool` | `true` | Enable the bistatic sensing ZeroMQ PUB output. The processing pipeline can remain enabled while this output is disabled. |
+| `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ bind IP for the bistatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
+| `bi_sensing_port` | `int` | `8889` | ZeroMQ PUB bind port for the bistatic sensing data stream. |
 | `channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
 | `channel_port` | `int` | `12348` | ZeroMQ PUB bind port for channel-estimation output. |
 | `pdf_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for PDP/PDF output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
@@ -709,7 +721,7 @@ Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 | `measurement_payload_bytes` | `int` | `1024` | Expected bytes per measurement payload. Values below the internal header size are clamped up. |
 | `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to rebuild deterministic PRBS measurement payloads. |
 | `measurement_packets_per_point` | `int` | `1` | Expected measurement payload count for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `sync`, `agc`, `align`, and `snr`; `all` enables every module. `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, and `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates from the active UE receive path. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `sync`, `agc`, `align`, `snr`, and `uplink`; `all` enables every module. `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates, and `uplink` gates `[UL-TX]` timing/waveform diagnostics. |
 | `downlink_cpu_cores` | `int[]` | `[]` | UE downlink CPU cores: indices `0..3` bind `rx_proc`, `process_proc`, `sensing_process_proc`, and `bit_processing_proc`. |
 | `uplink_cpu_cores` | `int[]` | `[]` | UE uplink CPU cores: indices `0`, `1`, and `2` bind `UplinkTxEngine::_udp_ingest_proc`, `_mod_proc`, and `_tx_proc`. |
 | `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |

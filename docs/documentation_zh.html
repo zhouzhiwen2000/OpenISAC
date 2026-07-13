@@ -169,7 +169,8 @@ sudo ../scripts/isolate_cpus.bash run ./BS
 <ul>
 <li><strong>配置文件名</strong>: <code>BS</code> 读取 <code>BS.yaml</code>，<code>UE</code> 读取 <code>UE.yaml</code>。</li>
 <li><strong>首次运行</strong>: 模板 YAML 统一放在 <code>config/</code> 目录。请将 <code>config/BS_X310.yaml</code> / <code>config/BS_B210.yaml</code> 或
-<code>config/UE_X310.yaml</code> / <code>config/UE_B210.yaml</code> 复制为 <code>BS.yaml</code> / <code>UE.yaml</code>，再按需修改。</li>
+<code>config/UE_X310.yaml</code> / <code>config/UE_B210.yaml</code> 复制为 <code>BS.yaml</code> / <code>UE.yaml</code>，再按需修改。
+B210 TDD 双工预设可直接复制 <code>config/BS_B210_Duplex.yaml</code> 和 <code>config/UE_B210_Duplex.yaml</code>。</li>
 </ul>
 <h3 id="前端-python-2">前端 (Python)</h3>
 <p>建议使用 <strong>Python 3.13</strong> 的 <code>conda</code> 或 <code>venv</code> 环境。</p>
@@ -238,6 +239,11 @@ sudo ../scripts/isolate_cpus.bash run ./BS
 cp ../config/BS_B210.yaml BS.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./BS
+
+# 对于 B210 双工:
+cp ../config/BS_B210_Duplex.yaml BS.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./BS
 </code></pre>
 <p><em>如果您使用单独的计算机作为前端，请在单站感知前端中用 <code>--host</code> 或 Backend IP 输入框指向 BS 后端 IP。</em></p>
 <h3 id="2-启动-ue-用户端">2. 启动 UE (用户端)</h3>
@@ -250,6 +256,11 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 
 # 对于 B210:
 cp ../config/UE_B210.yaml UE.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./UE
+
+# 对于 B210 双工:
+cp ../config/UE_B210_Duplex.yaml UE.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./UE
 </code></pre>
@@ -319,7 +330,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <h2 id="参数说明">参数说明</h2>
 <h3 id="bs">BS</h3>
 <p><code>BS</code> (BS 节点) 使用 <code>BS.yaml</code> 配置。
-可使用 <code>config/BS_X310.yaml</code> 或 <code>config/BS_B210.yaml</code> 作为模板。</p>
+可使用 <code>config/BS_X310.yaml</code>、<code>config/BS_B210.yaml</code> 或 <code>config/BS_B210_Duplex.yaml</code> 作为模板。</p>
 <p><code>BS.yaml</code> 参数说明：</p>
 <table>
 <thead>
@@ -512,10 +523,16 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>wire_format_rx</code></td>
+<td style="text-align:left"><code>uplink_rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+<td style="text-align:left">BS 上行 RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">BS 感知 RX 默认链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_input_ip</code></td>
@@ -536,21 +553,15 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">双工方式。<code>tdd</code> 将 UE 上行符号按时间复用到 BS 帧内；<code>fdd</code> 保持 BS 下行连续发送，同时 UE 上行使用 <code>uplink.center_freq</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>uplink_idle_waveform</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>random_qpsk</code></td>
-<td style="text-align:left">UE 无上行 UDP 载荷时的 idle 波形。<code>random_qpsk</code> 发送 zero-length mini-header 后接确定性随机 QPSK 填充；<code>zero</code> 发送 zero-length mini-header，剩余 payload RE 保持为 0。</td>
-</tr>
-<tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
-<td style="text-align:left">缺省</td>
+<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code></td>
 <td style="text-align:left">上行/双工设置。TDD 下，<code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 以 OFDM 符号为单位定义 DL/UL 边界；FDD 下，<code>center_freq</code> 定义 UE-&gt;BS 上行载波。<code>udp_output_ip</code> / <code>udp_output_port</code> 决定 BS 解码上行业务后输出到哪里。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
 <td style="text-align:left"><code>int</code> / 采样点</td>
-<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left"><code>63</code></td>
 <td style="text-align:left">BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 <code>DUTI</code> 调整。</td>
 </tr>
 <tr>
@@ -744,10 +755,10 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">该通道专用时间源覆盖。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>wire_format_rx</code></td>
+<td style="text-align:left"><code>wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">该通道专用 RX 数据格式覆盖。</td>
+<td style="text-align:left">该感知通道专用 RX 数据格式覆盖。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_gain</code></td>
@@ -796,7 +807,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 </ul>
 <h3 id="ue">UE</h3>
 <p><code>UE</code> (UE 节点) 使用 <code>UE.yaml</code> 配置。
-可使用 <code>config/UE_X310.yaml</code> 或 <code>config/UE_B210.yaml</code> 作为模板。</p>
+可使用 <code>config/UE_X310.yaml</code>、<code>config/UE_B210.yaml</code> 或 <code>config/UE_B210_Duplex.yaml</code> 作为模板。</p>
 <p><code>UE.yaml</code> 参数说明：</p>
 <table>
 <thead>
@@ -941,6 +952,12 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">双站感知输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>enable_bi_sensing</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">启用双站感知处理链；设为 <code>false</code> 时 <code>UE</code> 与 <code>CUDAUE</code> 均不会启动双站感知通道。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>duplex_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
@@ -955,13 +972,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
-<td style="text-align:left">缺省</td>
+<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code></td>
 <td style="text-align:left">UE 上行设置。<code>udp_input_ip</code> / <code>udp_input_port</code> 是 UE 侧上行业务 UDP 输入。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ue_timing_advance</code></td>
 <td style="text-align:left"><code>int</code> / 采样点</td>
-<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left"><code>63</code></td>
 <td style="text-align:left">UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 <code>TADV</code> 值移动后续上行帧。</td>
 </tr>
 <tr>
@@ -1028,7 +1045,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>channel_tracking_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>pilot_phase</code></td>
-<td style="text-align:left">CPU 和 CUDA UE 都支持的每符号梳状导频跟踪模式。<code>off</code> 使用同步符号得到的固定信道，<code>pilot_phase</code> 对每个数据信号符号用梳状导频残差拟合公共相位和线性相位。</td>
+<td style="text-align:left">CPU 和 CUDA UE 都支持的每符号梳状导频跟踪模式。<code>disabled</code> 使用同步符号得到的固定信道，<code>pilot_phase</code> 对每个数据信号符号用梳状导频残差拟合公共相位和线性相位。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>equalizer_mag_floor</code></td>
@@ -1073,10 +1090,10 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">可选 UE 上行 TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>wire_format_rx</code></td>
+<td style="text-align:left"><code>downlink_rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+<td style="text-align:left">UE 下行 RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>software_sync</code></td>
@@ -1205,16 +1222,16 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">时延峰目标位置（用于对齐策略）。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_bi_sensing</code></td>
+<td style="text-align:left"><code>bi_sensing_output_enabled</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用双站感知处理链和输出；设为 <code>false</code> 时 <code>UE</code> 与 <code>CUDAUE</code> 均不会启动双站感知通道。</td>
+<td style="text-align:left">启用双站感知 ZeroMQ PUB 输出。处理链可以保持开启，同时关闭该输出。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">双站感知数据流和控制通道的 ZMQ 监听 IP。使用 <code>0.0.0.0</code> 可接受远端前端连接；使用 <code>127.0.0.1</code> 则仅允许本机连接。</td>
+<td style="text-align:left">双站感知数据流和控制通道的 ZMQ 绑定 IP。使用 <code>0.0.0.0</code> 可接受远端前端连接；使用 <code>127.0.0.1</code> 则仅允许本机连接。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bi_sensing_port</code></td>
@@ -1340,7 +1357,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>sync</code>、<code>agc</code>、<code>align</code>、<code>snr</code>；<code>all</code> 表示全部。<code>sync</code> 控制逐 alias 同步峰值比较日志，<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前 UE 接收路径的 <code>_snr_db / _noise_var / _llr_scale</code>。</td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>sync</code>、<code>agc</code>、<code>align</code>、<code>snr</code>、<code>uplink</code>；<code>all</code> 表示全部。<code>sync</code> 控制逐 alias 同步峰值比较日志，<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前 UE 接收路径的 <code>_snr_db / _noise_var / _llr_scale</code>，<code>uplink</code> 控制 <code>[UL-TX]</code> timing/waveform 诊断日志。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>

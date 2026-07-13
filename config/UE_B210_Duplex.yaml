@@ -1,3 +1,7 @@
+# ===== Radio backend =====
+radio:
+  radio_backend: uhd  # Radio I/O backend; uhd = real USRP, sim = channel simulator
+
 # ===== OFDM Frame =====
 ofdm_frame:
   fft_size: 1024  # FFT size (subcarrier count)
@@ -11,7 +15,6 @@ ofdm_frame:
   frame_queue_size: 128  # Capacity of the demodulated RX frame queue
   zc_root: 29  # Zadoff-Chu root for sync/preamble
   pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]  # Comb-pilot subcarrier indices
-  midframe_pilot_symbols: []  # Mid-frame BPSK pilot symbol indices; comb-pilot RE keep comb-pilot sequence
   midframe_pilot_seed: 1296453708  # Deterministic mid-frame BPSK pilot seed; must match TX/RX
 
 # ===== CUDA =====
@@ -20,7 +23,7 @@ cuda:
   cuda_ldpc_decoder_backend: gpu  # CUDA demod LDPC decoder backend
   cuda_ldpc_worker_buffers: 3  # Number of CUDA LDPC async worker batch buffers
   cuda_ldpc_cross_frame_flush_frames: 2  # Max frames accumulated before CUDA LDPC batch decode
-  cuda_ldpc_cross_frame_flush_us: 1000  # Max CUDA LDPC cross-frame batch wait time in microseconds
+  cuda_ldpc_cross_frame_flush_us: 1000.0  # Max CUDA LDPC cross-frame batch wait time in microseconds
 
 # ===== Sensing =====
 sensing:
@@ -59,13 +62,15 @@ downlink:
 
 # ===== Uplink =====
 uplink:
-  symbol_start: 90  # TDD first uplink symbol in the downlink frame
-  symbol_count: 10  # TDD uplink window length in OFDM symbols
-  guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
+  enable_uplink: true  # Enable UE-to-BS uplink / duplex path
+  duplex_mode: tdd  # Uplink carrier/window scheme (tdd = time-multiplexed uplink, fdd = separate uplink carrier)
   uplink_idle_waveform: random_qpsk  # UE uplink idle waveform when no UDP payload is queued
-  wire_format_tx: sc16  # Uplink TX wire format; sc16/sc8
+  symbol_start: 90  # TDD first uplink symbol in the downlink frame
+  symbol_count: 10  # TDD uplink window length in OFDM symbols; 0 disables TDD uplink
+  guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
+  wire_format_tx: sc8  # Uplink TX wire format; sc16/sc8
   ue_timing_advance: 63  # UE Timing Advance (samples) — also adjustable at runtime via TADV
-  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
+  uplink_cpu_cores: [-1, 5, 6]  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
 
 # ===== Sync / Tracking =====
 sync_tracking:
@@ -93,13 +98,17 @@ sync_tracking:
   akf_tikhonov_lambda: 0.001  # Tikhonov regularization coefficient for LS
   akf_update_smooth: 0.2  # Exponential smoothing for Q/R update
   akf_q_wf_min: 1e-10  # Lower bound of white-frequency-noise coefficient
-  akf_q_wf_max: 1.0e2  # Upper bound of white-frequency-noise coefficient
+  akf_q_wf_max: 100.0  # Upper bound of white-frequency-noise coefficient
   akf_q_rw_min: 1e-12  # Lower bound of random-walk-frequency-noise coefficient
-  akf_q_rw_max: 1.0e1  # Upper bound of random-walk-frequency-noise coefficient
+  akf_q_rw_max: 10.0  # Upper bound of random-walk-frequency-noise coefficient
   akf_r_min: 1e-08  # Lower bound of observation noise variance R
-  akf_r_max: 1.0e3  # Upper bound of observation noise variance R
+  akf_r_max: 1000.0  # Upper bound of observation noise variance R
   desired_peak_pos: 20  # Target delay-peak index for alignment
   sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
+
+# ===== Measurement mode =====
+measurement:
+  measurement_enable: false  # Enable internal PRBS measurement traffic
 
 # ===== Network Output =====
 network_output:
@@ -113,13 +122,11 @@ network_output:
   pdf_port: 12349  # Delay-spectrum output port
   constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
   constellation_port: 12346  # Constellation output port
-  udp_output_ip: ""  # Payload output IP (empty = use default_out_ip)
   udp_output_port: 50001  # Payload output port
 
 # ===== Runtime / Debug =====
 runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
-  vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
-  main_cpu_core: 5  # Main-thread CPU core (-1 disables explicit binding)
+  main_cpu_core: 7  # Main-thread CPU core (-1 disables explicit binding)
   profiling_modules: ""  # Comma-separated modules to profile, or "all"

@@ -1107,6 +1107,191 @@
       return modelForTab(currentTab);
     }
 
+    function radioBackendValue(model = currentModel()) {
+      const field = findField(model, 'radio_backend');
+      return String(field?.value_text ?? field?.value ?? '').trim().toLowerCase();
+    }
+
+    const SIM_HARDWARE_SECTION_TITLES = new Set([
+      'USRP Device Args',
+      'Clock / Time Sources',
+      'Wire Format',
+      'USRP Device / Link',
+    ]);
+
+    const SIM_HARDWARE_FIELD_KEYS = new Set([
+      'device_args',
+      'clock_source',
+      'time_source',
+      'wire_format_tx',
+      'uplink_rx_wire_format',
+      'sensing_rx_wire_format',
+      'downlink_rx_wire_format',
+      'tx_gain',
+      'tx_channel',
+      'tx_device_args',
+      'tx_clock_source',
+      'tx_time_source',
+      'rx_gain',
+      'rx_device_args',
+      'rx_clock_source',
+      'rx_time_source',
+      'rx_channel',
+      'uplink_rx_channel',
+      'uplink_rx_device_args',
+      'uplink_rx_clock_source',
+      'uplink_rx_time_source',
+      'rx_agc_enable',
+      'rx_agc_low_threshold_db',
+      'rx_agc_high_threshold_db',
+      'rx_agc_max_step_db',
+      'rx_agc_update_frames',
+      'hardware_sync',
+      'hardware_sync_tty',
+      'ocxo_pi_kp_fast',
+      'ocxo_pi_ki_fast',
+      'ocxo_pi_kp_slow',
+      'ocxo_pi_ki_slow',
+      'ocxo_pi_switch_abs_error_ppm',
+      'ocxo_pi_switch_hold_s',
+      'ocxo_pi_max_step_fast_ppm',
+      'ocxo_pi_max_step_slow_ppm',
+      'akf_enable',
+      'akf_bootstrap_frames',
+      'akf_innovation_window',
+      'akf_max_lag',
+      'akf_adapt_interval',
+      'akf_gate_sigma',
+      'akf_tikhonov_lambda',
+      'akf_update_smooth',
+      'akf_q_wf_min',
+      'akf_q_wf_max',
+      'akf_q_rw_min',
+      'akf_q_rw_max',
+      'akf_r_min',
+      'akf_r_max',
+    ]);
+
+    const SIM_HARDWARE_MAPPING_ITEM_KEYS = new Set([
+      'device_args',
+      'clock_source',
+      'time_source',
+      'wire_format',
+      'rx_gain',
+      'rx_antenna',
+    ]);
+
+    function shouldHideFieldInSim(section, field, showSimulation) {
+      if (!showSimulation) return false;
+      if (field.type === 'simulation_mapping') return false;
+      if (SIM_HARDWARE_SECTION_TITLES.has(section.title)) return true;
+      return SIM_HARDWARE_FIELD_KEYS.has(field.key);
+    }
+
+    function visibleMappingItemFields(field, showSimulation) {
+      const itemFields = Array.isArray(field.item_fields) ? field.item_fields : [];
+      if (!showSimulation) return itemFields;
+      if (field.key !== 'sensing_rx_channels') return itemFields;
+      return itemFields.filter((sub) => !SIM_HARDWARE_MAPPING_ITEM_KEYS.has(sub.key));
+    }
+
+    const DEPENDENT_FIELD_RULES = {
+      cfo_training_period_samples: (model) => fieldBoolValue(model, 'enable_cfo_training_sequence', false),
+      duplex_mode: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_idle_waveform: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      equalizer_mode: (model) => !fieldIsInSection(model, 'equalizer_mode', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      channel_tracking_mode: (model) => !fieldIsInSection(model, 'channel_tracking_mode', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      equalizer_mag_floor: (model) => !fieldIsInSection(model, 'equalizer_mag_floor', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      channel_tracking_min_pilot_snr: (model) => !fieldIsInSection(model, 'channel_tracking_min_pilot_snr', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      rx_gain: (model) => !fieldIsInSection(model, 'rx_gain', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      tx_gain: (model) => !fieldIsInSection(model, 'tx_gain', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      tx_channel: (model) => !fieldIsInSection(model, 'tx_channel', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      wire_format_tx: (model) => !fieldIsInSection(model, 'wire_format_tx', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
+      uplink_rx_channel: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_rx_wire_format: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_rx_device_args: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_rx_clock_source: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_rx_time_source: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      bs_dl_ul_timing_diff: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      ue_timing_advance: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_cpu_cores: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_channel_ip: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_channel_port: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_pdf_ip: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_pdf_port: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_constellation_ip: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      uplink_constellation_port: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      measurement_mode: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      measurement_run_id: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      measurement_output_dir: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      measurement_payload_bytes: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      measurement_prbs_seed: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      measurement_packets_per_point: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      measurement_max_packets_per_frame: (model) => fieldBoolValue(model, 'measurement_enable', false),
+      rx_agc_low_threshold_db: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
+      rx_agc_high_threshold_db: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
+      rx_agc_max_step_db: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
+      rx_agc_update_frames: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
+      hardware_sync_tty: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_kp_fast: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_ki_fast: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_kp_slow: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_ki_slow: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_switch_abs_error_ppm: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_switch_hold_s: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_max_step_fast_ppm: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      ocxo_pi_max_step_slow_ppm: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      akf_enable: (model) => fieldBoolValue(model, 'hardware_sync', false),
+      akf_bootstrap_frames: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_innovation_window: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_max_lag: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_adapt_interval: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_gate_sigma: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_tikhonov_lambda: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_update_smooth: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_q_wf_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_q_wf_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_q_rw_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_q_rw_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_r_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      akf_r_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
+      bi_sensing_output_enabled: (model) => fieldBoolValue(model, 'enable_bi_sensing', false),
+      bi_sensing_ip: (model) => fieldBoolValue(model, 'enable_bi_sensing', false),
+      bi_sensing_port: (model) => fieldBoolValue(model, 'enable_bi_sensing', false) && fieldBoolValue(model, 'bi_sensing_output_enabled', true),
+      sensing_view_range_bins: (model) => fieldBoolValue(model, 'enable_backend_sensing_processing', false),
+      sensing_view_doppler_bins: (model) => fieldBoolValue(model, 'enable_backend_sensing_processing', false),
+      sensing_rx_channels: (model) => fieldIntValue(model, 'sensing_rx_channel_count', 0) > 0,
+    };
+
+    function shouldHideFieldByDependency(model, field) {
+      const rule = DEPENDENT_FIELD_RULES[field.key];
+      return Boolean(rule && !rule(model));
+    }
+
+    function structuredBoolValue(field, key, fallback = false) {
+      const sub = (field.scalar_fields || []).find((item) => item.key === key);
+      if (!sub) return fallback;
+      if (typeof sub.value === 'boolean') return sub.value;
+      const raw = sub.value_text ?? sub.value ?? '';
+      if (typeof raw === 'string') {
+        const normalized = raw.trim().toLowerCase();
+        if (normalized === 'true') return true;
+        if (normalized === 'false') return false;
+      }
+      return Boolean(raw);
+    }
+
+    function shouldHideStructuredScalar(field, sub) {
+      if (field.key === 'simulation' && sub.key === 'enable_uplink') {
+        return !fieldBoolValue(currentModel(), 'enable_uplink', false);
+      }
+      if (field.key === 'simulation' && sub.key === 'target_snr_db') {
+        return !structuredBoolValue(field, 'snr_control_enable', false);
+      }
+      return false;
+    }
+
     function currentRuntimePrefs(tab = currentTab) {
       if (!cache[tab]) cache[tab] = {};
       if (!cache[tab].runtimePrefs) {
@@ -1176,6 +1361,15 @@
       return null;
     }
 
+    function fieldIsInSection(model, key, title) {
+      if (!model?.sections) return false;
+      for (const section of model.sections) {
+        if (section.title !== title) continue;
+        if (section.fields.some((field) => field.key === key)) return true;
+      }
+      return false;
+    }
+
     function parseFlowListInts(field) {
       if (!field) return [];
       const raw = field.value_text ?? field.value ?? '';
@@ -1201,6 +1395,13 @@
         if (normalized === 'false') return false;
       }
       return Boolean(raw);
+    }
+
+    function fieldIntValue(model, key, fallback = 0) {
+      const field = findField(model, key);
+      if (!field) return fallback;
+      const raw = field.value_text ?? field.value ?? '';
+      return parseIntOrNull(raw) ?? fallback;
     }
 
     function mappingScalarText(field, key) {
@@ -3003,6 +3204,128 @@
       return fragment;
     }
 
+    function renderSimulationMappingRows(field) {
+      const fragment = document.createDocumentFragment();
+      for (const sub of (field.scalar_fields || [])) {
+        if (shouldHideStructuredScalar(field, sub)) continue;
+        const row = document.createElement('div');
+        row.className = 'kv-row';
+        row.innerHTML = `
+          <div class="key-col">
+            <code>simulation.${sub.key}</code>
+            <div class="hint">${fieldHintText(sub)}</div>
+          </div>
+          <div class="value-col"></div>
+        `;
+        renderScalarControl(row.querySelector('.value-col'), sub, (changedField) => {
+          if (changedField.key === 'snr_control_enable') {
+            renderSections();
+          }
+        });
+        fragment.appendChild(row);
+      }
+
+      for (const listField of (field.list_fields || [])) {
+        listField.items = Array.isArray(listField.items) ? listField.items : [];
+        const row = document.createElement('div');
+        row.className = 'kv-row';
+        row.innerHTML = `
+          <div class="key-col">
+            <code>simulation.${listField.key}</code>
+            <div class="hint">${listField.display_comment || listField.comment || ''}</div>
+          </div>
+          <div class="value-col"></div>
+        `;
+        const valueCol = row.querySelector('.value-col');
+        const head = document.createElement('div');
+        head.className = 'simulation-list-head';
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn';
+        addBtn.textContent = 'Add';
+        addBtn.addEventListener('click', () => {
+          listField.items.push({ ...(listField.default_item || {}) });
+          listField.is_set = true;
+          renderSections();
+        });
+        head.appendChild(addBtn);
+        valueCol.appendChild(head);
+
+        const itemsHost = document.createElement('div');
+        itemsHost.className = 'planner-block-list';
+        listField.items.forEach((item, index) => {
+          const block = document.createElement('div');
+          block.className = 'planner-block';
+          const blockHead = document.createElement('div');
+          blockHead.className = 'planner-block-head';
+          const strong = document.createElement('strong');
+          strong.textContent = `${listField.key}[${index}]`;
+          const removeBtn = document.createElement('button');
+          removeBtn.className = 'btn danger';
+          removeBtn.textContent = 'Delete';
+          removeBtn.addEventListener('click', () => {
+            listField.items.splice(index, 1);
+            listField.is_set = true;
+            renderSections();
+          });
+          blockHead.appendChild(strong);
+          blockHead.appendChild(removeBtn);
+          block.appendChild(blockHead);
+          const grid = document.createElement('div');
+          grid.className = 'planner-block-grid';
+          for (const sub of (listField.item_fields || [])) {
+            const cell = document.createElement('div');
+            cell.innerHTML = `<label>${sub.key}</label>`;
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = item[sub.key] === null || item[sub.key] === undefined ? '' : String(item[sub.key]);
+            input.addEventListener('input', () => {
+              item[sub.key] = input.value;
+              listField.is_set = true;
+            });
+            cell.appendChild(input);
+            if (sub.display_comment || sub.comment) {
+              const hint = document.createElement('div');
+              hint.className = 'hint';
+              hint.textContent = sub.display_comment || sub.comment;
+              cell.appendChild(hint);
+            }
+            grid.appendChild(cell);
+          }
+          block.appendChild(grid);
+          itemsHost.appendChild(block);
+        });
+        if (!listField.items.length) {
+          const empty = document.createElement('div');
+          empty.className = 'planner-empty';
+          empty.textContent = 'No entries';
+          itemsHost.appendChild(empty);
+        }
+        valueCol.appendChild(itemsHost);
+        fragment.appendChild(row);
+      }
+
+      if (field.extra_text) {
+        const row = document.createElement('div');
+        row.className = 'kv-row';
+        row.innerHTML = `
+          <div class="key-col">
+            <code>simulation.extra</code>
+            <div class="hint">Additional simulation keys not represented above.</div>
+          </div>
+          <div class="value-col"></div>
+        `;
+        const textarea = document.createElement('textarea');
+        textarea.value = field.extra_text || '';
+        textarea.rows = Math.max(3, Math.min(10, textarea.value.split('\n').length + 1));
+        textarea.addEventListener('input', () => {
+          field.extra_text = textarea.value;
+        });
+        row.querySelector('.value-col').appendChild(textarea);
+        fragment.appendChild(row);
+      }
+      return fragment;
+    }
+
 	    function renderSections() {
 	      const model = currentModel();
 	      if (!model) return;
@@ -3014,11 +3337,31 @@
           duplex_mode: 1,
           uplink_idle_waveform: 2,
           uplink: 3,
+          equalizer_mode: 4,
+          channel_tracking_mode: 5,
+          equalizer_mag_floor: 6,
+          channel_tracking_min_pilot_snr: 7,
+          rx_gain: 8,
+          uplink_rx_channel: 9,
+          uplink_rx_wire_format: 10,
+          uplink_rx_device_args: 11,
+          uplink_rx_clock_source: 12,
+          uplink_rx_time_source: 13,
+          bs_dl_ul_timing_diff: 14,
+          ue_timing_advance: 15,
+          uplink_cpu_cores: 16,
           data_resource_blocks: 0,
           sensing_mask_blocks: 1,
         };
 
+      const showSimulation = radioBackendValue(model) === 'sim';
 	      for (const section of model.sections) {
+        const visibleFields = section.fields.filter((field) => {
+          if (field.type === 'simulation_mapping') return showSimulation;
+          if (shouldHideFieldInSim(section, field, showSimulation)) return false;
+          return !shouldHideFieldByDependency(model, field);
+        });
+        if (!visibleFields.length) continue;
 	        const card = document.createElement('div');
 	        card.className = 'section-card';
 	        const title = document.createElement('h3');
@@ -3028,7 +3371,7 @@
         const kv = document.createElement('div');
         kv.className = 'kv';
 
-          const orderedFields = [...section.fields].sort((lhs, rhs) => {
+          const orderedFields = [...visibleFields].sort((lhs, rhs) => {
             const lhsOrder = fieldSortOrder[lhs.key] ?? 100;
             const rhsOrder = fieldSortOrder[rhs.key] ?? 100;
             if (lhsOrder !== rhsOrder) return lhsOrder - rhsOrder;
@@ -3063,7 +3406,7 @@
               channel.appendChild(heading);
               const inner = document.createElement('div');
               inner.className = 'kv';
-              field.item_fields.forEach((sub) => {
+              visibleMappingItemFields(field, showSimulation).forEach((sub) => {
                 const row = document.createElement('div');
                 row.className = 'kv-row';
                 const value = item[sub.key] ?? '';
@@ -3127,7 +3470,7 @@
           }
 
           if (field.type === 'simulation_mapping') {
-            kv.appendChild(renderStructuredMapping(field));
+            kv.appendChild(renderSimulationMappingRows(field));
             continue;
           }
 
@@ -3234,7 +3577,17 @@
             input.addEventListener('change', () => {
               field.value = input.checked;
               field.value_text = input.checked ? 'true' : 'false';
-              if (['enable_sec_sync_symbol', 'enable_cfo_training_sequence'].includes(field.key)) {
+              if ([
+                'enable_uplink',
+                'enable_sec_sync_symbol',
+                'enable_cfo_training_sequence',
+                'measurement_enable',
+                'rx_agc_enable',
+                'hardware_sync',
+                'akf_enable',
+                'enable_bi_sensing',
+                'enable_backend_sensing_processing',
+              ].includes(field.key)) {
                 renderSections();
                 return;
               }
@@ -3272,7 +3625,12 @@
 	                updateRuntimeOptionControls();
 	                return;
 	              }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
+              if (field.key === 'radio_backend') {
+                field.value = select.value;
+                renderSections();
+                return;
+              }
+              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_uplink', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'enable_bi_sensing', 'enable_backend_sensing_processing', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
                 field.value = select.value;
                 renderSections();
               }
@@ -3293,7 +3651,12 @@
 	                updateRuntimeOptionControls();
 	                return;
 	              }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
+              if (field.key === 'radio_backend') {
+                field.value = input.value;
+                renderSections();
+                return;
+              }
+              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_uplink', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'enable_bi_sensing', 'enable_backend_sensing_processing', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
                 field.value = input.value;
                 renderSections();
               }

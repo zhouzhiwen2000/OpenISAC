@@ -696,9 +696,11 @@ private:
         if (_uplink_tx) {
             _uplink_tx->rx_alignment_shift().store(next, std::memory_order_relaxed);
         }
-        LOG_RT_WARN_HZ(2) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
-                          << " samples -> TX timing delta=" << tx_alignment_delta_samples
-                          << " samples, cumulative RX-alignment target=" << next;
+        if (cfg_.should_profile("uplink")) {
+            LOG_RT_WARN_HZ(2) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
+                              << " samples -> TX timing delta=" << tx_alignment_delta_samples
+                              << " samples, cumulative RX-alignment target=" << next;
+        }
     }
 
     void _schedule_receive_alignment(int32_t alignment_samples) {
@@ -711,7 +713,7 @@ private:
         if (!_uplink_tx) {
             return;
         }
-        if (_uplink_tx->set_waveform_enabled(enabled)) {
+        if (_uplink_tx->set_waveform_enabled(enabled) && cfg_.should_profile("uplink")) {
             LOG_RT_INFO() << "[UL-TX] "
                           << (enabled ? "enabled" : "muted")
                           << " uplink waveform transmission";
@@ -1354,7 +1356,7 @@ private:
         LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
                      << "] dB, initial gain: " << initial_rx_gain_db << " dB";
 
-        uhd::stream_args_t args("fc32", cfg_.wire_format_rx);
+        uhd::stream_args_t args("fc32", cfg_.downlink_rx_wire_format);
         args.args["block_id"] = "radio";
         args.channels = {cfg_.rx_channel};
         rx_stream_ = usrp_->get_rx_stream(args);
@@ -1374,10 +1376,12 @@ private:
             _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
             _uplink_tx->set_tx_stream(usrp_->get_tx_stream(tx_args));
             _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
-            LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.tx_channel
-                         << " @ " << format_freq_hz(ul_freq) << " Hz, "
-                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
-                         << "zc_root=" << _uplink_tx->uplink_config().zc_root;
+            if (cfg_.should_profile("uplink")) {
+                LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.tx_channel
+                             << " @ " << format_freq_hz(ul_freq) << " Hz, "
+                             << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
+                             << "zc_root=" << _uplink_tx->uplink_config().zc_root;
+            }
         }
     }
 
@@ -1410,9 +1414,11 @@ private:
                 _sim_radio->make_tx_streamer("ul.tx", cfg_.samples_per_frame()));
             _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
             // sim: continuous send paced by shm backpressure (no timed scheduling).
-            LOG_G_INFO() << "[UL-TX] uplink transmit enabled (sim ul.tx), "
-                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
-                         << "zc_root=" << _uplink_tx->uplink_config().zc_root;
+            if (cfg_.should_profile("uplink")) {
+                LOG_G_INFO() << "[UL-TX] uplink transmit enabled (sim ul.tx), "
+                             << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
+                             << "zc_root=" << _uplink_tx->uplink_config().zc_root;
+            }
         }
     }
 
@@ -1680,6 +1686,7 @@ private:
 
         SensingRxChannelConfig bistatic_cfg;
         bistatic_cfg.enable_system_delay_estimation = false;
+        bistatic_cfg.enable_sensing_output = cfg_.bi_sensing_output_enabled;
         _bistatic_sensing_channel = std::make_unique<SensingChannel>(
             cfg_,
             bistatic_cfg,
@@ -1760,13 +1767,15 @@ private:
         tx_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
         tx_tune_req.dsp_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
         current_ul_tx_tune_ = usrp_->set_tx_freq(tx_tune_req, cfg_.tx_channel);
-        LOG_RT_INFO() << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
-                      << format_freq_hz(ul_base_freq)
-                      << " Hz, target correction=" << format_freq_hz(tx_target_correction_hz)
-                      << " Hz, requested TX DSP=" << format_freq_hz(tx_dsp_correction_hz)
-                      << " Hz, actual RF=" << format_freq_hz(current_ul_tx_tune_.actual_rf_freq)
-                      << " Hz, DSP=" << format_freq_hz(current_ul_tx_tune_.actual_dsp_freq)
-                      << " Hz";
+        if (cfg_.should_profile("uplink")) {
+            LOG_RT_INFO() << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
+                          << format_freq_hz(ul_base_freq)
+                          << " Hz, target correction=" << format_freq_hz(tx_target_correction_hz)
+                          << " Hz, requested TX DSP=" << format_freq_hz(tx_dsp_correction_hz)
+                          << " Hz, actual RF=" << format_freq_hz(current_ul_tx_tune_.actual_rf_freq)
+                          << " Hz, DSP=" << format_freq_hz(current_ul_tx_tune_.actual_dsp_freq)
+                          << " Hz";
+        }
     }
     void prepare_fftw() {
         fft_input_.resize(cfg_.fft_size);

@@ -247,8 +247,10 @@ private:
                           << _link_cfg.ul_udp_input_port;
             return;
         }
-        LOG_G_INFO() << "[UL-TX] uplink payload UDP input on " << _link_cfg.ul_udp_input_ip << ":"
-                     << _link_cfg.ul_udp_input_port;
+        if (_link_cfg.should_profile("uplink")) {
+            LOG_G_INFO() << "[UL-TX] uplink payload UDP input on " << _link_cfg.ul_udp_input_ip << ":"
+                         << _link_cfg.ul_udp_input_port;
+        }
 
         std::vector<uint8_t> buf(65536);
         while (_running.load(std::memory_order_relaxed)) {
@@ -271,8 +273,10 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(len);
         const size_t packet_qpsk = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
         if (packet_qpsk > _layout.payload_re_count) {
-            LOG_RT_WARN_HZ(2) << "[UL-TX] dropping payload: " << packet_qpsk
-                              << " qpsk syms > capacity " << _layout.payload_re_count;
+            if (_link_cfg.should_profile("uplink")) {
+                LOG_RT_WARN_HZ(2) << "[UL-TX] dropping payload: " << packet_qpsk
+                                  << " qpsk syms > capacity " << _layout.payload_re_count;
+            }
             return;
         }
 
@@ -407,7 +411,9 @@ private:
                 try {
                     _tx_stream->send(&_eob_sample, 0, eob_md, 0.1);
                 } catch (const std::exception& e) {
-                    LOG_RT_WARN() << "[UL-TX] failed to terminate burst before restart: " << e.what();
+                    if (_link_cfg.should_profile("uplink")) {
+                        LOG_RT_WARN() << "[UL-TX] failed to terminate burst before restart: " << e.what();
+                    }
                 }
                 {
                     std::lock_guard<std::mutex> lock(_timing_mutex);
@@ -416,9 +422,11 @@ private:
                 applied_shift_samples = 0;
                 first = true;
                 _period_queue.clear();
-                LOG_RT_WARN() << "[UL-TX] timed TX restart scheduled at "
-                              << uhd::time_spec_t::from_ticks(next_ticks, _tick_rate).get_real_secs()
-                              << " s";
+                if (_link_cfg.should_profile("uplink")) {
+                    LOG_RT_WARN() << "[UL-TX] timed TX restart scheduled at "
+                                  << uhd::time_spec_t::from_ticks(next_ticks, _tick_rate).get_real_secs()
+                                  << " s";
+                }
             }
 
             AlignedVector* frame = _period_queue.consumer_slot();
@@ -455,9 +463,11 @@ private:
                 applied_shift_samples);
             if (!result.complete && _running.load(std::memory_order_relaxed)) {
                 _tx_error_count.fetch_add(1, std::memory_order_relaxed);
-                LOG_RT_WARN() << "[UL-TX] short send/underflow: "
-                              << (result.expected_samples - result.sent_samples)
-                              << " samples not sent";
+                if (_link_cfg.should_profile("uplink")) {
+                    LOG_RT_WARN() << "[UL-TX] short send/underflow: "
+                                  << (result.expected_samples - result.sent_samples)
+                                  << " samples not sent";
+                }
             }
             if (result.sent_samples > 0) {
                 first = false;
@@ -568,10 +578,12 @@ private:
             const size_t insert_samples = static_cast<size_t>(-delta);
             result.expected_samples += insert_samples;
             if (insert_samples > 0) {
-                LOG_RT_WARN_HZ(2) << "[UL-TX] delaying stream by lengthening this period by "
-                                  << insert_samples << " samples (target_shift="
-                                  << target_shift_samples << ", applied_shift="
-                                  << target_shift_samples << ")";
+                if (_link_cfg.should_profile("uplink")) {
+                    LOG_RT_WARN_HZ(2) << "[UL-TX] delaying stream by lengthening this period by "
+                                      << insert_samples << " samples (target_shift="
+                                      << target_shift_samples << ", applied_shift="
+                                      << target_shift_samples << ")";
+                }
             }
             const size_t sent = _send_period_samples(frame, 0, frame.size(), frame_md);
             result.sent_samples += sent;
@@ -594,11 +606,13 @@ private:
                 frame.size());
             result.expected_samples -= skip_samples;
             if (skip_samples > 0) {
-                LOG_RT_WARN_HZ(2) << "[UL-TX] advancing stream by shortening this period by "
-                                  << skip_samples << " samples (target_shift="
-                                  << target_shift_samples << ", applied_shift="
-                                  << (applied_shift_samples + static_cast<int64_t>(skip_samples))
-                                  << ")";
+                if (_link_cfg.should_profile("uplink")) {
+                    LOG_RT_WARN_HZ(2) << "[UL-TX] advancing stream by shortening this period by "
+                                      << skip_samples << " samples (target_shift="
+                                      << target_shift_samples << ", applied_shift="
+                                      << (applied_shift_samples + static_cast<int64_t>(skip_samples))
+                                      << ")";
+                }
             }
             if (skip_samples >= frame.size()) {
                 applied_shift_samples += static_cast<int64_t>(skip_samples);

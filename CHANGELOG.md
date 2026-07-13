@@ -8,6 +8,66 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-22 - B210 Duplex 默认配置模板
+
+### Summary
+
+本次更新把当前验证中的 B210 BS/UE TDD duplex 运行配置固化为可复用模板。
+
+### Changes
+
+- 新增 `config/BS_B210_Duplex.yaml` 和 `config/UE_B210_Duplex.yaml`，内容来自当前 `build/BS.yaml` 与 `build/UE.yaml`，包含 B210 UHD 参数、TDD uplink 窗口、idle random QPSK、uplink debug 输出端口和 CPU 绑定默认值。
+  影响：B210 双工实验可直接复制 Duplex 模板到 `build/BS.yaml` / `build/UE.yaml`，不必从普通 B210 下行模板手动补上上行参数。
+
+- `bs_dl_ul_timing_diff` 和 `ue_timing_advance` 默认值统一为 `63` samples，并同步到 Web 配置编辑器 schema、B210 模板和 README。
+  影响：BS 上行 RX 窗口和 UE 上行 TX timing advance 的启动默认值一致，仍可运行时通过 `DUTI` / `TADV` 微调。
+
+## 2026-06-22 - Uplink TDD 默认窗口调整
+
+### Summary
+
+本次更新将 TDD uplink 默认窗口改为帧尾 10 个 OFDM 符号，并默认保留 1 个 guard symbol。
+
+### Changes
+
+- `uplink.symbol_start` 默认改为 `90`，`uplink.symbol_count` 默认改为 `10`，`uplink.guard_symbols` 默认改为 `1`，并同步到 C++ 默认配置、Web 配置编辑器 schema、配置模板、benchmark 模板和 README。
+  影响：新建或补全配置时，默认 TDD 上行窗口为 `[90, 100)`，其中符号 `90` 为 guard，实际上行数据符号为 `[91, 100)`。
+
+## 2026-06-21 - 配置模板与 Web 编辑器分组整理
+
+### Summary
+
+本次更新整理 YAML 配置模板和 `config_web_editor` 的分组显示，使 CUDA、上行、下行和仿真参数在模板与 Web 界面中保持一致。
+
+### Changes
+
+- Web 配置编辑器 schema 将 CUDA 相关参数集中到 `CUDA` 分组，将原 `Duplex` 分组更名为 `Uplink`，并把均衡/信道跟踪、`uplink_rx_*` 上行 RX 模板参数和 uplink CPU 参数归入 `Uplink`。
+  影响：上行相关参数不再散落在 OFDM/RF/Device 分组里，查找和保存后的 YAML 顺序更稳定。
+
+- BS 模板中保留 `rx_device_args`、`rx_clock_source`、`rx_time_source` 作为 sensing RX 默认配置，并移入 `Sensing`；新增 `uplink_rx_channel`、`uplink_rx_device_args`、`uplink_rx_clock_source`、`uplink_rx_time_source` 作为上行 RX 模板字段。
+  影响：sensing RX 默认设备配置和 Uplink RX 模板配置不再共用同一组字段名。
+
+- 拆分并移除旧的顶层 RX wire-format 配置：BS 使用 `uplink_rx_wire_format` 与 `sensing_rx_wire_format`，UE 使用 `downlink_rx_wire_format`，sensing 每通道覆盖字段改为 `wire_format`。
+  影响：上行、感知和 UE 下行 RX wire format 不再共用一个含义模糊的顶层字段。
+
+- `config_web_editor` 的 `uplink` 嵌套字段按 BS/UE 角色拆分：BS 只显示和保存 decoded uplink payload 输出目的地，UE 只显示和保存 uplink payload UDP 输入绑定。
+  影响：UE 配置不会再出现 BS 专用的 `uplink` 输出字段，BS 配置也不会再出现 UE 专用的 `uplink` 输入字段。
+
+- `tx_*`、TX wire format、BS 下行 pipeline 和 downlink CPU 配置归入 `Downlink` 分组。
+  影响：下行发送路径参数与上行接收/调试参数分离。
+
+- `simulation` 在 Web 编辑器中仅当 `radio_backend=sim` 时显示，并改为 `simulation.xxx` 扁平行显示。
+  影响：UHD 配置下不会显示仿真专用参数，仿真配置编辑时也减少嵌套层级。
+
+- `radio_backend=sim` 时，Web 编辑器隐藏 USRP device/clock/wire format、TX/RX gain/channel、硬件 AGC、硬件同步和 sensing RX 每通道硬件字段。
+  影响：仿真配置界面只保留仿真和仍会影响仿真运行的参数；隐藏字段仍保留在 YAML 数据中，切回 UHD 后不会丢失。
+
+- Web 编辑器新增可选字段依赖显示：例如 `cfo_training_period_samples` 仅在 `enable_cfo_training_sequence=true` 时显示；Uplink 细项仅在 `enable_uplink=true` 时显示；measurement/AGC/hardware-sync/AKF/bistatic-sensing 等细项也会跟随对应 enable 开关显示。
+  影响：常用配置界面更简洁，关闭功能时不会继续展示只在该功能开启后才生效的细项。
+
+- `scripts/config_web_editor.py --standardize-configs` 新增模板标准化入口，并已用该入口重写 `config/*.yaml`。
+  影响：后续可重复用同一套 schema 顺序批量整理配置模板。
+
 ## 2026-06-21 - BS 上行调试输出
 
 ### Summary

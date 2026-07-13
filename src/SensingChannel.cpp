@@ -1667,8 +1667,8 @@ void SensingChannel::initialize_rx_hardware_and_sync(
     };
 
     auto resolve_rx_wire_format = [&cfg](const SensingRxChannelConfig& ch_cfg) -> std::string {
-        if (!ch_cfg.wire_format_rx.empty()) return ch_cfg.wire_format_rx;
-        return cfg.wire_format_rx;
+        if (!ch_cfg.wire_format.empty()) return ch_cfg.wire_format;
+        return cfg.sensing_rx_wire_format;
     };
 
     auto get_or_create_rx_usrp = [&](const std::string& rx_args, const std::string& rx_clock_source, const std::string& rx_time_source) -> uhd::usrp::multi_usrp::sptr {

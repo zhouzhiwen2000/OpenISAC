@@ -314,6 +314,7 @@ sudo ./scripts/isolate_cpus.bash reset
 *   **配置文件名**: `BS` 读取 `BS.yaml`，`UE` 读取 `UE.yaml`。
 *   **首次运行**: 模板 YAML 统一放在 `config/` 目录。请将 `config/BS_X310.yaml` / `config/BS_B210.yaml` 或
     `config/UE_X310.yaml` / `config/UE_B210.yaml` 复制为 `BS.yaml` / `UE.yaml`，再按需修改。
+    B210 TDD 双工预设可直接复制 `config/BS_B210_Duplex.yaml` 和 `config/UE_B210_Duplex.yaml`。
  
 ### 前端 (Python)
 
@@ -405,6 +406,11 @@ sudo ../scripts/isolate_cpus.bash run ./BS
 cp ../config/BS_B210.yaml BS.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./BS
+
+# 对于 B210 双工:
+cp ../config/BS_B210_Duplex.yaml BS.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./BS
 ```
 *如果您使用单独的计算机作为前端，请在单站感知前端中用 `--host` 或 Backend IP 输入框指向 BS 后端 IP。*
 
@@ -419,6 +425,11 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 
 # 对于 B210:
 cp ../config/UE_B210.yaml UE.yaml
+sudo ../scripts/isolate_cpus.bash
+sudo ../scripts/isolate_cpus.bash run ./UE
+
+# 对于 B210 双工:
+cp ../config/UE_B210_Duplex.yaml UE.yaml
 sudo ../scripts/isolate_cpus.bash
 sudo ../scripts/isolate_cpus.bash run ./UE
 ```
@@ -511,7 +522,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 ### BS
 
 `BS` (BS 节点) 使用 `BS.yaml` 配置。
-可使用 `config/BS_X310.yaml` 或 `config/BS_B210.yaml` 作为模板。
+可使用 `config/BS_X310.yaml`、`config/BS_B210.yaml` 或 `config/BS_B210_Duplex.yaml` 作为模板。
 
 `BS.yaml` 参数说明：
 
@@ -547,13 +558,13 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `rx_clock_source` | `string` | `""` | 感知 RX 默认时钟源覆盖项。 |
 | `rx_time_source` | `string` | `""` | 感知 RX 默认时间源覆盖项。 |
 | `wire_format_tx` | `string` | `sc16` | TX 链路数据格式，常用 `sc16` 或 `sc8`。 |
-| `wire_format_rx` | `string` | `sc16` | RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `uplink_rx_wire_format` | `string` | `sc16` | BS 上行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `sensing_rx_wire_format` | `string` | `sc16` | BS 感知 RX 默认链路数据格式，常用 `sc16` 或 `sc8`。 |
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS 接收下行业务 UDP 的绑定地址。 |
 | `udp_input_port` | `int` | `50000` | BS 接收下行业务 UDP 的端口。 |
 | `duplex_mode` | `string` | `tdd` | 双工方式。`tdd` 将 UE 上行符号按时间复用到 BS 帧内；`fdd` 保持 BS 下行连续发送，同时 UE 上行使用 `uplink.center_freq`。 |
-| `uplink_idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
-| `uplink` | `object` | 缺省 | 上行/双工设置。TDD 下，`symbol_start`、`symbol_count`、`guard_symbols` 以 OFDM 符号为单位定义 DL/UL 边界；FDD 下，`center_freq` 定义 UE->BS 上行载波。`udp_output_ip` / `udp_output_port` 决定 BS 解码上行业务后输出到哪里。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。 |
-| `bs_dl_ul_timing_diff` | `int` / 采样点 | `0` | BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 `DUTI` 调整。 |
+| `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1` | 上行/双工设置。TDD 下，`symbol_start`、`symbol_count`、`guard_symbols` 以 OFDM 符号为单位定义 DL/UL 边界；FDD 下，`center_freq` 定义 UE->BS 上行载波。`udp_output_ip` / `udp_output_port` 决定 BS 解码上行业务后输出到哪里。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。 |
+| `bs_dl_ul_timing_diff` | `int` / 采样点 | `63` | BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 `DUTI` 调整。 |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 单站感知数据流和控制通道的 ZMQ 监听 IP。使用 `0.0.0.0` 可接受远端前端连接；使用 `127.0.0.1` 则仅允许本机连接。 |
 | `mono_sensing_port` | `int` | `8888` | 单站感知数据流的 ZeroMQ PUB 绑定端口。 |
 | `uplink_channel_ip` | `string` / IPv4 | `0.0.0.0` | BS 上行信道估计调试流的 ZeroMQ PUB 监听 IP。 |
@@ -598,7 +609,7 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `device_args` | `string` | `""` | 该通道专用 USRP 参数。 |
 | `clock_source` | `string` | `""` | 该通道专用时钟源覆盖。 |
 | `time_source` | `string` | `""` | 该通道专用时间源覆盖。 |
-| `wire_format_rx` | `string` | `""` | 该通道专用 RX 数据格式覆盖。 |
+| `wire_format` | `string` | `""` | 该感知通道专用 RX 数据格式覆盖。 |
 | `rx_gain` | `float` | `30` | 该通道 RX 增益。 |
 | `alignment` | `int` | `63` | 该通道对齐偏移（采样点）。 |
 | `rx_antenna` | `string` | `""` | 该通道天线口，如 `TX/RX`、`RX1`。 |
@@ -615,7 +626,7 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 ### UE
 
 `UE` (UE 节点) 使用 `UE.yaml` 配置。
-可使用 `config/UE_X310.yaml` 或 `config/UE_B210.yaml` 作为模板。
+可使用 `config/UE_X310.yaml`、`config/UE_B210.yaml` 或 `config/UE_B210_Duplex.yaml` 作为模板。
 
 `UE.yaml` 参数说明：
 
@@ -643,10 +654,11 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `num_symbols` | `int` | `100` | 每帧 OFDM 符号数。 |
 | `sensing_symbol_num` | `int` | `100` | 参与感知处理的符号数。 |
 | `sensing_output_mode` | `string` | `dense` | 双站感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
+| `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链；设为 `false` 时 `UE` 与 `CUDAUE` 均不会启动双站感知通道。 |
 | `duplex_mode` | `string` | `tdd` | 必须与 `BS.yaml` 保持一致。`tdd` 共享下行载波并只在配置的上行符号窗口发送；`fdd` 在 `uplink.center_freq` 上连续发送。 |
 | `uplink_idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
-| `uplink` | `object` | 缺省 | UE 上行设置。`udp_input_ip` / `udp_input_port` 是 UE 侧上行业务 UDP 输入。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。 |
-| `ue_timing_advance` | `int` / 采样点 | `0` | UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 `TADV` 值移动后续上行帧。 |
+| `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1` | UE 上行设置。`udp_input_ip` / `udp_input_port` 是 UE 侧上行业务 UDP 输入。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。 |
+| `ue_timing_advance` | `int` / 采样点 | `63` | UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 `TADV` 值移动后续上行帧。 |
 | `cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
 | `frame_queue_size` | `int` | `8` | UE RX 帧队列容量。小于 `1` 时会钳制到 `1`。 |
 | `sync_queue_size` | `int` | `8` | 同步搜索批队列容量。小于 `1` 时会钳制到 `1`。 |
@@ -657,7 +669,7 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `midframe_pilot_symbols` | `int[]` | `[]` | 可选的帧内 BPSK 导频符号索引。接收机会把完整已知符号作为额外信道估计 anchor，同时保留梳状导频 RE 用于相位跟踪，并从 payload LLR 提取中排除。 |
 | `midframe_pilot_seed` | `int` | `1296453708` | 确定性帧内 BPSK 导频种子，必须与发射端一致。 |
 | `equalizer_mode` | `string` | `mmse` | 通信均衡器反演模式。`zf` 使用带下限的信道功率分母；`mmse` 会在该分母上加入 `noise_var`，可降低深衰落处的噪声增强。 |
-| `channel_tracking_mode` | `string` | `pilot_phase` | CPU 和 CUDA UE 都支持的每符号梳状导频跟踪模式。`off` 使用同步符号得到的固定信道，`pilot_phase` 对每个数据信号符号用梳状导频残差拟合公共相位和线性相位。 |
+| `channel_tracking_mode` | `string` | `pilot_phase` | CPU 和 CUDA UE 都支持的每符号梳状导频跟踪模式。`disabled` 使用同步符号得到的固定信道，`pilot_phase` 对每个数据信号符号用梳状导频残差拟合公共相位和线性相位。 |
 | `equalizer_mag_floor` | `float` | `1e-6` | 信道幅度平方反演下限，`zf` 和 `mmse` 都会使用。 |
 | `channel_tracking_min_pilot_snr` | `float` | `1e-4` | 每符号跟踪接受梳状导频残差的最小功率/权重，低于该值时回退到同步符号信道。 |
 | `data_resource_blocks` | `object[]` | 缺省 | 接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都参与 payload 提取。设为 `[]` 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 `kind`。其中 `kind: payload` 的块会产生 payload LLR；`kind: sensing_pilot` 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。 |
@@ -665,7 +677,7 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `device_args` | `string` | `""` | USRP 参数。 |
 | `clock_source` | `string` | `internal/external/gpsdo` | 时钟源。 |
 | `wire_format_tx` | `string` | `sc16` | 可选 UE 上行 TX 链路数据格式，常用 `sc16` 或 `sc8`。 |
-| `wire_format_rx` | `string` | `sc16` | RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `downlink_rx_wire_format` | `string` | `sc16` | UE 下行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
 | `software_sync` | `bool` | `true` | 启用软件同步跟踪。 |
 | `predictive_delay` | `bool` | `true` | 启用基于 CFO 的预测性时延补偿，用于初始对齐和跟踪阶段的时延修正。仅当采样时钟和载波频率来自同一个参考源，且信号链路在 USRP 外没有二级变频时才应启用。 |
 | `hardware_sync` | `bool` | `false` | 启用硬件同步。 |
@@ -687,8 +699,8 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `akf_r_max` | `float` | `1e3` | 观测噪声方差 `R` 上界。 |
 | `ppm_adjust_factor` | `float` | `0.05` | 频偏补偿调节系数。 |
 | `desired_peak_pos` | `int` | `20` | 时延峰目标位置（用于对齐策略）。 |
-| `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链和输出；设为 `false` 时 `UE` 与 `CUDAUE` 均不会启动双站感知通道。 |
-| `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 双站感知数据流和控制通道的 ZMQ 监听 IP。使用 `0.0.0.0` 可接受远端前端连接；使用 `127.0.0.1` 则仅允许本机连接。 |
+| `bi_sensing_output_enabled` | `bool` | `true` | 启用双站感知 ZeroMQ PUB 输出。处理链可以保持开启，同时关闭该输出。 |
+| `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 双站感知数据流和控制通道的 ZMQ 绑定 IP。使用 `0.0.0.0` 可接受远端前端连接；使用 `127.0.0.1` 则仅允许本机连接。 |
 | `bi_sensing_port` | `int` | `8889` | 双站感知数据流的 ZeroMQ PUB 绑定端口。 |
 | `channel_ip` | `string` / IPv4 | `0.0.0.0` | 信道估计输出的 ZeroMQ PUB 监听 IP。留空会解析为 `0.0.0.0`，不会使用 `default_out_ip`。 |
 | `channel_port` | `int` | `12348` | 信道估计输出的 ZeroMQ PUB 绑定端口。 |
@@ -709,7 +721,7 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `measurement_payload_bytes` | `int` | `1024` | 每个测量载荷期望的字节数。若小于内部测量头长度，会自动钳制到最小合法值。 |
 | `measurement_prbs_seed` | `int` | `0x5A` | 用于重建确定性 PRBS 测量载荷的基础种子。 |
 | `measurement_packets_per_point` | `int` | `1` | 每个在线 `MRST` epoch 期望统计的测量载荷数。小于 `1` 时会钳制到 `1`。 |
-| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `demodulation`、`sync`、`agc`、`align`、`snr`；`all` 表示全部。`sync` 控制逐 alias 同步峰值比较日志，`agc` 控制 AGC 日志，`align` 控制运行时 `ALGN:` 日志，`snr` 会周期性打印当前 UE 接收路径的 `_snr_db / _noise_var / _llr_scale`。 |
+| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `demodulation`、`sync`、`agc`、`align`、`snr`、`uplink`；`all` 表示全部。`sync` 控制逐 alias 同步峰值比较日志，`agc` 控制 AGC 日志，`align` 控制运行时 `ALGN:` 日志，`snr` 会周期性打印当前 UE 接收路径的 `_snr_db / _noise_var / _llr_scale`，`uplink` 控制 `[UL-TX]` timing/waveform 诊断日志。 |
 | `downlink_cpu_cores` | `int[]` | `[]` | UE 下行 CPU 核列表：索引 `0..3` 分别绑定 `rx_proc`、`process_proc`、`sensing_process_proc` 和 `bit_processing_proc`。 |
 | `uplink_cpu_cores` | `int[]` | `[]` | UE 上行 CPU 核列表：索引 `0`、`1`、`2` 分别绑定 `UplinkTxEngine::_udp_ingest_proc`、`_mod_proc` 和 `_tx_proc`。 |
 | `main_cpu_core` | `int` | `-1` | 主线程 CPU 核。 |

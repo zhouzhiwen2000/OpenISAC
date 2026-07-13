@@ -101,7 +101,7 @@ using SymbolVector = std::vector<AlignedVector>;
 
 inline constexpr const char* kEqualizerModeZf = "zf";
 inline constexpr const char* kEqualizerModeMmse = "mmse";
-inline constexpr const char* kChannelTrackingModeOff = "off";
+inline constexpr const char* kChannelTrackingModeOff = "disabled";
 inline constexpr const char* kChannelTrackingModePilotPhase = "pilot_phase";
 
 /**
@@ -172,7 +172,7 @@ struct SensingRxChannelConfig {
     std::string device_args = "";       // Optional per-channel USRP args
     std::string clock_source = "";      // Optional per-channel USRP clock/REF source override
     std::string time_source = "";       // Optional per-channel USRP time/PPS source override
-    std::string wire_format_rx = "";    // Optional per-channel RX wire format override
+    std::string wire_format = "";       // Optional per-channel RX wire format override
     double rx_gain = 0.0;               // RX gain for this channel
     int32_t alignment = 63;             // Per-channel alignment offset (samples)
     std::string rx_antenna = "";        // RX antenna for this channel (e.g., TX/RX, RX1)
@@ -303,6 +303,22 @@ inline std::string normalize_uplink_idle_waveform_string(std::string waveform) {
         "'. Expected 'zero' or 'random_qpsk'.");
 }
 
+inline std::string normalize_channel_tracking_mode_string(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode.empty()) {
+        return kChannelTrackingModePilotPhase;
+    }
+    if (mode == "off" || mode == "false" || mode == "0" || mode == "no") {
+        return kChannelTrackingModeOff;
+    }
+    if (mode == kChannelTrackingModeOff || mode == kChannelTrackingModePilotPhase) {
+        return mode;
+    }
+    return kChannelTrackingModePilotPhase;
+}
+
 /**
  * @brief Duplexing configuration shared by the BS and UE.
  *
@@ -314,9 +330,9 @@ inline std::string normalize_uplink_idle_waveform_string(std::string waveform) {
  */
 struct DuplexConfig {
     DuplexMode mode = DuplexMode::TDD;
-    size_t ul_symbol_start = 0;     // TDD: first uplink OFDM symbol within a frame
-    size_t ul_symbol_count = 0;     // TDD: number of uplink symbols (0 => uplink disabled)
-    size_t ul_guard_symbols = 0;    // TDD: guard symbols at the DL->UL boundary (within the UL range)
+    size_t ul_symbol_start = 90;    // TDD: first uplink OFDM symbol within a frame
+    size_t ul_symbol_count = 10;    // TDD: number of uplink symbols (0 => uplink disabled)
+    size_t ul_guard_symbols = 1;    // TDD: guard symbols at the DL->UL boundary (within the UL range)
     double ul_center_freq = 0.0;    // FDD: uplink carrier frequency in Hz
 };
 
@@ -907,7 +923,7 @@ struct Config {
     std::vector<size_t> midframe_pilot_symbols; // Absolute mid-frame pilot symbols; comb pilot RE are preserved
     uint32_t midframe_pilot_seed = 0x4D46504Cu; // Deterministic BPSK pilot seed ("MFPL")
     std::string equalizer_mode = kEqualizerModeMmse; // zf or mmse
-    std::string channel_tracking_mode = kChannelTrackingModePilotPhase; // off or pilot_phase
+    std::string channel_tracking_mode = kChannelTrackingModePilotPhase; // disabled or pilot_phase
     double equalizer_mag_floor = 1e-6; // Lower bound for |H|^2 in channel inversion
     double channel_tracking_min_pilot_snr = 1e-4; // Minimum pilot residual weight before falling back
     bool data_resource_blocks_configured = false;
@@ -929,8 +945,8 @@ struct Config {
     // the DL/UL timing difference; the UE knob is the Timing Advance. Each side
     // adjusts its own value independently at runtime; stored here as the startup
     // default, mirrored into atomics by the engines.
-    int32_t bs_dl_ul_timing_diff = 0;  // BS: uplink-RX window offset relative to the TX frame anchor (samples)
-    int32_t ue_timing_advance = 0;     // UE: uplink-TX window advance relative to the RX frame anchor (samples)
+    int32_t bs_dl_ul_timing_diff = 63; // BS: uplink-RX window offset relative to the TX frame anchor (samples)
+    int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
     std::string uplink_idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     // UE uplink payload UDP input (mirrors udp_input_* on the BS downlink).
     std::string ul_udp_input_ip = "0.0.0.0";
@@ -943,6 +959,7 @@ struct Config {
     std::string mono_sensing_ip = "0.0.0.0";
     int mono_sensing_port = 8888;
     bool enable_bi_sensing = true;
+    bool bi_sensing_output_enabled = true;
     std::string bi_sensing_ip = "0.0.0.0";
     int bi_sensing_port = 8889;
     int control_port = 9999;
@@ -973,7 +990,9 @@ struct Config {
     std::string rx_clock_source = "";     // Default RX clock source override
     std::string rx_time_source = "";      // Default RX time source override
     std::string wire_format_tx = "sc16";
-    std::string wire_format_rx = "sc16";
+    std::string uplink_rx_wire_format = "sc16";   // BS uplink RX wire format
+    std::string sensing_rx_wire_format = "sc16";  // BS sensing RX default wire format
+    std::string downlink_rx_wire_format = "sc16"; // UE downlink RX wire format
     uint32_t sensing_rx_channel_count = 1; // Number of sensing RX channels
     std::vector<SensingRxChannelConfig> sensing_rx_channels; // Per-channel sensing RX config
     size_t sensing_symbol_stride = 20;     // Default sensing STRD applied at startup
@@ -983,7 +1002,7 @@ struct Config {
     std::vector<int> downlink_cpu_cores; // BS: TX/mod/data-ingest; UE: RX/process/sensing/bit-processing
     std::vector<int> uplink_cpu_cores;   // Dedicated uplink thread cores; empty = no explicit uplink binding
     int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, uplink, or "all"
     bool measurement_enable = false;
     std::string measurement_mode = "";
     std::string measurement_run_id = "";
@@ -2252,6 +2271,113 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::EndMap;
 }
 
+inline void expose_section_config_keys(
+    YAML::Node& config,
+    const char* section_key,
+    std::initializer_list<const char*> keys) {
+    YAML::Node section = config[section_key];
+    if (!section || !section.IsMap()) {
+        return;
+    }
+    for (const char* key : keys) {
+        if (!config[key] && section[key]) {
+            config[key] = section[key];
+        }
+    }
+}
+
+inline void expose_editor_sectioned_config(YAML::Node& config) {
+    expose_section_config_keys(config, "radio", {
+        "radio_backend",
+    });
+    expose_section_config_keys(config, "ofdm_frame", {
+        "fft_size", "cp_length", "sync_pos", "enable_sec_sync_symbol",
+        "enable_cfo_training_sequence", "cfo_training_period_samples",
+        "num_symbols", "sensing_symbol_num", "frame_queue_size", "zc_root",
+        "pilot_positions", "midframe_pilot_symbols", "midframe_pilot_seed",
+    });
+    expose_section_config_keys(config, "cuda", {
+        "cuda_mod_pipeline_slots", "cuda_demod_pipeline_slots",
+        "cuda_ldpc_decoder_backend", "cuda_ldpc_worker_buffers",
+        "cuda_ldpc_cross_frame_flush_frames", "cuda_ldpc_cross_frame_flush_us",
+    });
+    expose_section_config_keys(config, "sensing", {
+        "enable_bi_sensing", "sensing_on_wire_format", "range_fft_size",
+        "doppler_fft_size", "sensing_output_mode",
+        "enable_backend_sensing_processing", "sensing_view_range_bins",
+        "sensing_view_doppler_bins", "rx_device_args", "rx_clock_source",
+        "rx_time_source", "sensing_rx_wire_format", "sensing_rx_channel_count",
+        "sensing_rx_channels", "paired_frame_queue_size",
+    });
+    expose_section_config_keys(config, "rf_sampling", {
+        "sample_rate", "bandwidth", "center_freq", "rx_gain", "rx_agc_enable",
+        "rx_agc_low_threshold_db", "rx_agc_high_threshold_db",
+        "rx_agc_max_step_db", "rx_agc_update_frames",
+    });
+    expose_section_config_keys(config, "usrp_device", {
+        "device_args", "clock_source",
+    });
+    expose_section_config_keys(config, "clock_time", {
+        "clock_source", "time_source",
+    });
+    expose_section_config_keys(config, "downlink", {
+        "tx_gain", "tx_channel", "tx_device_args", "tx_clock_source",
+        "tx_time_source", "wire_format_tx", "rx_channel",
+        "downlink_rx_wire_format", "equalizer_mode", "channel_tracking_mode",
+        "equalizer_mag_floor", "channel_tracking_min_pilot_snr",
+        "downlink_cpu_cores",
+    });
+    expose_section_config_keys(config, "downlink_pipeline", {
+        "tx_circular_buffer_size", "data_packet_buffer_size",
+        "downlink_cpu_cores",
+    });
+    expose_section_config_keys(config, "uplink", {
+        "enable_uplink", "duplex_mode", "uplink_idle_waveform",
+        "bs_dl_ul_timing_diff", "ue_timing_advance", "equalizer_mode",
+        "channel_tracking_mode", "equalizer_mag_floor",
+        "channel_tracking_min_pilot_snr", "rx_gain", "uplink_rx_channel",
+        "uplink_rx_device_args", "uplink_rx_wire_format",
+        "uplink_rx_clock_source", "uplink_rx_time_source", "tx_gain",
+        "tx_channel", "wire_format_tx", "uplink_cpu_cores",
+    });
+    expose_section_config_keys(config, "sync_tracking", {
+        "sync_queue_size", "sync_cfo_alias_search_range_hz", "reset_hold_s",
+        "software_sync", "predictive_delay", "hardware_sync",
+        "hardware_sync_tty", "ocxo_pi_kp_fast", "ocxo_pi_ki_fast",
+        "ocxo_pi_kp_slow", "ocxo_pi_ki_slow",
+        "ocxo_pi_switch_abs_error_ppm", "ocxo_pi_switch_hold_s",
+        "ocxo_pi_max_step_fast_ppm", "ocxo_pi_max_step_slow_ppm",
+        "akf_enable", "akf_bootstrap_frames", "akf_innovation_window",
+        "akf_max_lag", "akf_adapt_interval", "akf_gate_sigma",
+        "akf_tikhonov_lambda", "akf_update_smooth", "akf_q_wf_min",
+        "akf_q_wf_max", "akf_q_rw_min", "akf_q_rw_max", "akf_r_min",
+        "akf_r_max", "desired_peak_pos", "sensing_symbol_stride",
+    });
+    expose_section_config_keys(config, "measurement", {
+        "measurement_enable", "measurement_mode", "measurement_run_id",
+        "measurement_output_dir", "measurement_payload_bytes",
+        "measurement_prbs_seed", "measurement_packets_per_point",
+        "measurement_max_packets_per_frame",
+    });
+    expose_section_config_keys(config, "network_output", {
+        "udp_input_ip", "udp_input_port", "mono_sensing_ip",
+        "mono_sensing_port", "mono_sensing_output_enabled",
+        "uplink_channel_ip", "uplink_channel_port", "uplink_pdf_ip",
+        "uplink_pdf_port", "uplink_constellation_ip",
+        "uplink_constellation_port", "bi_sensing_output_enabled",
+        "bi_sensing_ip", "bi_sensing_port", "control_port", "channel_ip",
+        "channel_port", "pdf_ip", "pdf_port", "constellation_ip",
+        "constellation_port", "udp_output_ip", "udp_output_port",
+    });
+    expose_section_config_keys(config, "runtime", {
+        "default_out_ip", "vofa_debug_ip", "vofa_debug_port",
+        "main_cpu_core", "profiling_modules",
+    });
+    expose_section_config_keys(config, "resource_preview", {
+        "data_resource_blocks", "sensing_mask_blocks",
+    });
+}
+
 /**
  * @brief Parse the radio_backend + simulation block from a YAML node.
  *
@@ -2323,7 +2449,6 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
 //     center_freq: <double>      # FDD: uplink carrier (Hz)
 //   bs_dl_ul_timing_diff: <int>  # BS startup default (samples)
 //   ue_timing_advance: <int>     # UE startup default (samples)
-//   uplink_idle_waveform: zero | random_qpsk
 inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
     if (config["enable_uplink"]) {
         cfg.enable_uplink = config["enable_uplink"].as<bool>();
@@ -2803,7 +2928,8 @@ inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepat
     out << YAML::Key << "rx_time_source" << YAML::Value << cfg.rx_time_source;
     out << YAML::Key << "control_port" << YAML::Value << cfg.control_port;
     out << YAML::Key << "wire_format_tx" << YAML::Value << cfg.wire_format_tx;
-    out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
+    out << YAML::Key << "uplink_rx_wire_format" << YAML::Value << cfg.uplink_rx_wire_format;
+    out << YAML::Key << "sensing_rx_wire_format" << YAML::Value << cfg.sensing_rx_wire_format;
     out << YAML::Key << "udp_input_ip" << YAML::Value << cfg.udp_input_ip;
     out << YAML::Key << "udp_input_port" << YAML::Value << cfg.udp_input_port;
     out << YAML::Key << "mono_sensing_output_enabled" << YAML::Value << cfg.mono_sensing_output_enabled;
@@ -2824,7 +2950,7 @@ inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepat
         out << YAML::Key << "device_args" << YAML::Value << ch.device_args;
         out << YAML::Key << "clock_source" << YAML::Value << ch.clock_source;
         out << YAML::Key << "time_source" << YAML::Value << ch.time_source;
-        out << YAML::Key << "wire_format_rx" << YAML::Value << ch.wire_format_rx;
+        out << YAML::Key << "wire_format" << YAML::Value << ch.wire_format;
         out << YAML::Key << "rx_gain" << YAML::Value << ch.rx_gain;
         out << YAML::Key << "alignment" << YAML::Value << ch.alignment;
         out << YAML::Key << "rx_antenna" << YAML::Value << ch.rx_antenna;
@@ -2837,7 +2963,6 @@ inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepat
     out << YAML::EndSeq;
     emit_simulation_config(out, cfg);
     out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
-    out << YAML::Key << "uplink_idle_waveform" << YAML::Value << cfg.uplink_idle_waveform;
     out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
     out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
     out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
@@ -2877,6 +3002,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
     }
     try {
         YAML::Node config = YAML::LoadFile(filepath);
+        expose_editor_sectioned_config(config);
         const bool has_range_fft_size = static_cast<bool>(config["range_fft_size"]);
         if (!config_detail::reject_legacy_key(config, "mod_udp_ip", "udp_input_ip")) return false;
         if (!config_detail::reject_legacy_key(config, "mod_udp_port", "udp_input_port")) return false;
@@ -2940,7 +3066,12 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         if (config["rx_time_source"]) cfg.rx_time_source = config["rx_time_source"].as<std::string>();
         if (config["control_port"]) cfg.control_port = config["control_port"].as<int>();
         if (config["wire_format_tx"]) cfg.wire_format_tx = config["wire_format_tx"].as<std::string>();
-        if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
+        if (config["uplink_rx_wire_format"]) {
+            cfg.uplink_rx_wire_format = config["uplink_rx_wire_format"].as<std::string>();
+        }
+        if (config["sensing_rx_wire_format"]) {
+            cfg.sensing_rx_wire_format = config["sensing_rx_wire_format"].as<std::string>();
+        }
         if (config["udp_input_ip"]) cfg.udp_input_ip = config["udp_input_ip"].as<std::string>();
         if (config["udp_input_port"]) cfg.udp_input_port = config["udp_input_port"].as<int>();
         if (config["mono_sensing_output_enabled"]) {
@@ -2976,7 +3107,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
                 if (node["device_args"]) ch.device_args = node["device_args"].as<std::string>();
                 if (node["clock_source"]) ch.clock_source = node["clock_source"].as<std::string>();
                 if (node["time_source"]) ch.time_source = node["time_source"].as<std::string>();
-                if (node["wire_format_rx"]) ch.wire_format_rx = node["wire_format_rx"].as<std::string>();
+                if (node["wire_format"]) ch.wire_format = node["wire_format"].as<std::string>();
                 if (node["rx_gain"]) ch.rx_gain = node["rx_gain"].as<double>();
                 if (node["alignment"]) ch.alignment = node["alignment"].as<int32_t>();
                 if (node["rx_antenna"]) ch.rx_antenna = node["rx_antenna"].as<std::string>();
@@ -3092,7 +3223,7 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
         ch.alignment = SensingRxChannelConfig{}.alignment;
         ch.clock_source = "";
         ch.time_source = "";
-        ch.wire_format_rx = "";
+        ch.wire_format = "";
         ch.enable_system_delay_estimation = false;
         ch.enable_sensing_output = cfg.mono_sensing_output_enabled;
         return ch;
@@ -3172,6 +3303,7 @@ inline Config make_default_ue_config() {
     cfg.zc_root = 29;
     cfg.device_args = "";
     cfg.enable_bi_sensing = true;
+    cfg.bi_sensing_output_enabled = true;
     cfg.bi_sensing_ip = "";
     cfg.bi_sensing_port = 8889;
     cfg.control_port = 10000;
@@ -3263,8 +3395,9 @@ inline bool save_ue_config_to_yaml(const Config& cfg, const std::string& filepat
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
     out << YAML::Key << "wire_format_tx" << YAML::Value << cfg.wire_format_tx;
-    out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
+    out << YAML::Key << "downlink_rx_wire_format" << YAML::Value << cfg.downlink_rx_wire_format;
     out << YAML::Key << "enable_bi_sensing" << YAML::Value << cfg.enable_bi_sensing;
+    out << YAML::Key << "bi_sensing_output_enabled" << YAML::Value << cfg.bi_sensing_output_enabled;
     out << YAML::Key << "bi_sensing_ip" << YAML::Value << cfg.bi_sensing_ip;
     out << YAML::Key << "bi_sensing_port" << YAML::Value << cfg.bi_sensing_port;
     out << YAML::Key << "control_port" << YAML::Value << cfg.control_port;
@@ -3353,6 +3486,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
     }
     try {
         YAML::Node config = YAML::LoadFile(filepath);
+        expose_editor_sectioned_config(config);
         if (!config_detail::reject_legacy_key(config, "sensing_ip", "bi_sensing_ip")) return false;
         if (!config_detail::reject_legacy_key(config, "sensing_port", "bi_sensing_port")) return false;
 
@@ -3425,8 +3559,13 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
         if (config["wire_format_tx"]) cfg.wire_format_tx = config["wire_format_tx"].as<std::string>();
-        if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
+        if (config["downlink_rx_wire_format"]) {
+            cfg.downlink_rx_wire_format = config["downlink_rx_wire_format"].as<std::string>();
+        }
         if (config["enable_bi_sensing"]) cfg.enable_bi_sensing = config["enable_bi_sensing"].as<bool>();
+        if (config["bi_sensing_output_enabled"]) {
+            cfg.bi_sensing_output_enabled = config["bi_sensing_output_enabled"].as<bool>();
+        }
         if (config["bi_sensing_ip"]) cfg.bi_sensing_ip = config["bi_sensing_ip"].as<std::string>();
         if (config["bi_sensing_port"]) cfg.bi_sensing_port = config["bi_sensing_port"].as<int>();
         if (config["control_port"]) cfg.control_port = config["control_port"].as<int>();
@@ -3500,7 +3639,8 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         }
         if (config["equalizer_mode"]) cfg.equalizer_mode = config["equalizer_mode"].as<std::string>();
         if (config["channel_tracking_mode"]) {
-            cfg.channel_tracking_mode = config["channel_tracking_mode"].as<std::string>();
+            cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(
+                config["channel_tracking_mode"].as<std::string>());
         }
         if (config["equalizer_mag_floor"]) {
             cfg.equalizer_mag_floor = config["equalizer_mag_floor"].as<double>();
@@ -3576,12 +3716,7 @@ inline void finalize_ue_network_defaults(Config& cfg) {
                      << "'. Falling back to '" << kEqualizerModeMmse << "'.";
         cfg.equalizer_mode = kEqualizerModeMmse;
     }
-    if (cfg.channel_tracking_mode != kChannelTrackingModeOff &&
-        cfg.channel_tracking_mode != kChannelTrackingModePilotPhase) {
-        LOG_G_WARN() << "Unsupported channel_tracking_mode='" << cfg.channel_tracking_mode
-                     << "'. Falling back to '" << kChannelTrackingModePilotPhase << "'.";
-        cfg.channel_tracking_mode = kChannelTrackingModePilotPhase;
-    }
+    cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(cfg.channel_tracking_mode);
     if (cfg.equalizer_mag_floor <= 0.0 || !std::isfinite(cfg.equalizer_mag_floor)) {
         LOG_G_WARN() << "equalizer_mag_floor is invalid. Falling back to 1e-6.";
         cfg.equalizer_mag_floor = 1e-6;
@@ -5506,7 +5641,7 @@ public:
           _channel_id(channel_id),
           _aggregated_sender(std::move(aggregated_sender))
     {
-        if (_aggregated_sender == nullptr) {
+        if (_enabled && _aggregated_sender == nullptr) {
             _direct_sender = std::make_unique<SensingDataSender>(ip, port, enabled, wire_data_format);
         }
     }
