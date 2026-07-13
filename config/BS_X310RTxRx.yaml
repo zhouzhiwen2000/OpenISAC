@@ -51,13 +51,13 @@ sensing:
   doppler_fft_size: 100  # Doppler FFT size
   sensing_output_mode: dense  # dense or compact_mask
   enable_backend_sensing_processing: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
   paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
 
 # ===== RF / Sampling =====
 rf_sampling:
   sample_rate: 50000000  # Baseband sample rate (Hz)
   bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
-  center_freq: 3100000000  # RF center frequency (Hz)
 
 # ===== USRP Device Args =====
 usrp_device:
@@ -70,32 +70,34 @@ clock_time:
 
 # ===== Downlink =====
 downlink:
+  center_freq: 3100000000  # RF center frequency (Hz)
   tx_gain: 90  # TX gain (dB)
   tx_channel: 0  # TX channel index on USRP
   tx_device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # TX-specific args (empty = use device_args)
   tx_clock_source: ""  # TX clock source override (optional)
   tx_time_source: ""  # TX time source override (optional)
   wire_format_tx: sc16  # TX wire format; sc16/sc8
-  tx_circular_buffer_size: 32  # BS frame circular buffer capacity
-  data_packet_buffer_size: 32  # Encoded packet buffer capacity
-  downlink_cpu_cores: [1, 2, 3]  # BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]
 
 # ===== Uplink =====
+
+# ===== Downlink Pipeline =====
+downlink_pipeline:
+  tx_circular_buffer_size: 32  # BS frame circular buffer capacity
+  data_packet_buffer_size: 32  # Encoded packet buffer capacity
 uplink:
-  symbol_start: 90  # TDD first uplink symbol in the downlink frame
-  symbol_count: 10  # TDD uplink window length in OFDM symbols
-  guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
+  symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
+  symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
+  guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
   uplink_rx_channel: 0  # Uplink RX channel index on USRP
   uplink_rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
   uplink_rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
   uplink_rx_clock_source: ""  # Uplink RX clock source override (optional)
   uplink_rx_time_source: ""  # Uplink RX time source override (optional)
-  uplink_cpu_cores: []  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
 
-# ===== Network Output =====
+# ===== Network =====
 network_output:
-  udp_input_ip: 0.0.0.0  # Bind IP for incoming payload UDP packets
-  udp_input_port: 50000  # Bind port for incoming payload UDP packets
+  udp_input_ip: 0.0.0.0  # BS downlink payload UDP bind IP
+  udp_input_port: 50000  # BS downlink payload UDP bind port
   mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
   mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
   uplink_channel_ip: 0.0.0.0  # Uplink channel-estimate ZMQ listen IP
@@ -105,9 +107,13 @@ network_output:
   uplink_constellation_ip: 0.0.0.0  # Uplink constellation ZMQ listen IP
   uplink_constellation_port: 12356  # Uplink constellation output port
   control_port: 9999  # ZMQ port for runtime control commands
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
+
+# ===== CPU Cores =====
+cpu_cores:
+  downlink_cpu_cores: [1, 2, 3]  # BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]
+  uplink_cpu_cores: []  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
+  main_cpu_core: 8  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====
 runtime:
-  main_cpu_core: 8  # Main-thread CPU core (-1 disables explicit binding)
   profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"

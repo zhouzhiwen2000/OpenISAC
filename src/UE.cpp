@@ -235,6 +235,8 @@ public:
           _channel_estimator(cfg.fft_size),
           _delay_processor(cfg.fft_size),
           _sync_processor(cfg.sync_samples(), cfg.fft_size, cfg.cp_length, zc_freq_),
+          _uplink_self_zc_freq(generate_zc_freq(cfg.fft_size, make_uplink_config(cfg).zc_root)),
+          _uplink_self_debug_estimator(cfg.fft_size, cfg.cp_length),
           _control_handler(cfg.bi_sensing_ip, cfg.control_port),
           channel_sender_(2, [this](const auto& data) {
               channel_pub_->send_container(data);
@@ -244,6 +246,12 @@ public:
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           constellation_sender_(10, [this](const auto& data) {
               constellation_pub_->send_container(data);
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          uplink_self_channel_sender_(2, [this](const auto& data) {
+              uplink_self_channel_pub_->send_container(data);
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          uplink_self_pdf_sender_(2, [this](const auto& data) {
+              uplink_self_pdf_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           // Initialize object pools for memory reuse
           _rx_frame_pool(32, [&cfg]() {
@@ -355,6 +363,10 @@ public:
         channel_sender_.start();
         pdf_sender_.start();
         constellation_sender_.start();
+        if (uplink_self_channel_debug_enabled(cfg_) && _uplink_tx) {
+            uplink_self_channel_sender_.start();
+            uplink_self_pdf_sender_.start();
+        }
         
         // Start data processing thread
         _bit_processing_running.store(true);
@@ -387,6 +399,8 @@ public:
         channel_sender_.stop();
         pdf_sender_.stop();
         constellation_sender_.stop();
+        uplink_self_channel_sender_.stop();
+        uplink_self_pdf_sender_.stop();
         _control_handler.stop();
     }
 
@@ -430,6 +444,12 @@ private:
     std::atomic<uint64_t> _rx_overflow_count{0};
     std::atomic<uint64_t> _tx_async_error_count{0};
     std::atomic<uint64_t> _handled_ul_tx_error_count{0};
+    std::mutex _uplink_tx_gain_mutex;
+    bool _uplink_tx_gain_range_initialized = false;
+    double _uplink_tx_gain_min_db = 0.0;
+    double _uplink_tx_gain_max_db = 0.0;
+    double _uplink_tx_gain_restore_db = 0.0;
+    std::atomic<bool> _uplink_tx_gain_muted{false};
 
     // Current radio time: real USRP clock, or the simulator's shared sample clock.
     uhd::time_spec_t radio_time_now() const {
@@ -611,6 +631,11 @@ private:
     ChannelEstimator _channel_estimator;
     DelayProcessor _delay_processor;
     SyncProcessor _sync_processor;
+    AlignedVector _uplink_self_zc_freq;
+    SelfZcChannelDebugEstimator _uplink_self_debug_estimator;
+    AlignedVector _uplink_self_h_est;
+    AlignedVector _uplink_self_delay_spectrum;
+    uint64_t _uplink_self_debug_frame_counter = 0;
     
     std::unique_ptr<FIRFilter> freq_offset_filter_;
     uhd::tune_result_t current_rx_tune_;
@@ -625,6 +650,8 @@ private:
     std::unique_ptr<ZmqByteSender> channel_pub_;
     std::unique_ptr<ZmqByteSender> pdf_pub_;
     std::unique_ptr<ZmqByteSender> constellation_pub_;
+    std::unique_ptr<ZmqByteSender> uplink_self_channel_pub_;
+    std::unique_ptr<ZmqByteSender> uplink_self_pdf_pub_;
     std::unique_ptr<VofaPlusDebugSender> vofa_debug_sender_;
     // Control handler
     ControlCommandHandler _control_handler;
@@ -632,6 +659,8 @@ private:
     DataSender<std::complex<float>, AlignedAlloc> channel_sender_;
     DataSender<std::complex<float>, AlignedAlloc> pdf_sender_;
     DataSender<std::complex<float>, AlignedAlloc> constellation_sender_;
+    DataSender<std::complex<float>, AlignedAlloc> uplink_self_channel_sender_;
+    DataSender<std::complex<float>, AlignedAlloc> uplink_self_pdf_sender_;
     uint32_t _reset_count = 0;
     uint32_t _constellation_frame_counter = 0;
     
@@ -664,11 +693,9 @@ private:
         }
     }
 
-    // UE RX alignment is a pending stream-read delta for handle_alignment().
-    // Publish the matching UL-TX target when the alignment is scheduled so the
-    // TX stream can move its continuous boundary before the RX shift takes effect.
-    // UL-TX target_shift uses positive values as a timing advance, so the RX
-    // delta maps to the opposite TX sign.
+    // Keep the UL-TX frame anchor tied to the currently aligned UE RX/downlink
+    // frame anchor. UplinkTxEngine applies this target by shortening or
+    // lengthening the continuous TX stream.
     void _apply_uplink_tx_rx_alignment_delta(int32_t rx_alignment_delta_samples) {
         if (rx_alignment_delta_samples == 0) {
             return;
@@ -706,6 +733,7 @@ private:
     void _schedule_receive_alignment(int32_t alignment_samples) {
         discard_samples_.store(static_cast<int>(alignment_samples), std::memory_order_relaxed);
         _apply_uplink_tx_rx_alignment_delta(alignment_samples);
+        _restore_uplink_tx_gain_after_sync();
         state_ = RxState::ALIGNMENT;
     }
 
@@ -713,10 +741,39 @@ private:
         if (!_uplink_tx) {
             return;
         }
+        if (enabled) {
+            _restore_uplink_tx_gain_after_sync();
+        }
         if (_uplink_tx->set_waveform_enabled(enabled) && cfg_.should_profile("uplink")) {
             LOG_RT_INFO() << "[UL-TX] "
                           << (enabled ? "enabled" : "muted")
                           << " uplink waveform transmission";
+        }
+    }
+
+    void _mute_uplink_tx_gain_for_sync_search() {
+        if (!_uplink_tx || _sim_radio || !usrp_ || !_uplink_tx_gain_range_initialized) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(_uplink_tx_gain_mutex);
+        try {
+            usrp_->set_tx_gain(_uplink_tx_gain_min_db, cfg_.tx_channel);
+            _uplink_tx_gain_muted.store(true, std::memory_order_release);
+        } catch (const std::exception& e) {
+            LOG_RT_WARN() << "[UL-TX] failed to mute TX gain during sync search: " << e.what();
+        }
+    }
+
+    void _restore_uplink_tx_gain_after_sync() {
+        if (!_uplink_tx || _sim_radio || !usrp_ || !_uplink_tx_gain_range_initialized) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(_uplink_tx_gain_mutex);
+        try {
+            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.tx_channel);
+            _uplink_tx_gain_muted.store(false, std::memory_order_release);
+        } catch (const std::exception& e) {
+            LOG_RT_WARN() << "[UL-TX] failed to restore TX gain after sync: " << e.what();
         }
     }
     std::unique_ptr<HardwareSyncController> _hw_sync;
@@ -1369,7 +1426,23 @@ private:
                 ? cfg_.duplex.ul_center_freq : cfg_.center_freq;
             usrp_->set_tx_rate(cfg_.sample_rate);
             current_ul_tx_tune_ = usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.tx_channel);
-            usrp_->set_tx_gain(cfg_.tx_gain, cfg_.tx_channel);
+            const auto tx_gain_range = usrp_->get_tx_gain_range(cfg_.tx_channel);
+            _uplink_tx_gain_min_db = tx_gain_range.start();
+            _uplink_tx_gain_max_db = tx_gain_range.stop();
+            _uplink_tx_gain_restore_db = std::clamp(
+                cfg_.tx_gain,
+                _uplink_tx_gain_min_db,
+                _uplink_tx_gain_max_db);
+            _uplink_tx_gain_range_initialized = true;
+            if (_uplink_tx_gain_restore_db != cfg_.tx_gain) {
+                LOG_G_WARN() << "Configured tx_gain=" << cfg_.tx_gain
+                             << " dB is outside hardware range ["
+                             << _uplink_tx_gain_min_db << ", "
+                             << _uplink_tx_gain_max_db
+                             << "] dB. Clamping to "
+                             << _uplink_tx_gain_restore_db << " dB.";
+            }
+            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.tx_channel);
             usrp_->set_tx_bandwidth(cfg_.bandwidth, cfg_.tx_channel);
             uhd::stream_args_t tx_args("fc32", cfg_.wire_format_tx);
             tx_args.channels = {cfg_.tx_channel};
@@ -1809,6 +1882,18 @@ private:
         channel_pub_ = std::make_unique<ZmqByteSender>(cfg_.channel_ip, cfg_.channel_port);
         pdf_pub_ = std::make_unique<ZmqByteSender>(cfg_.pdf_ip, cfg_.pdf_port);
         constellation_pub_ = std::make_unique<ZmqByteSender>(cfg_.constellation_ip, cfg_.constellation_port);
+        if (uplink_self_channel_debug_enabled(cfg_)) {
+            uplink_self_channel_pub_ = std::make_unique<ZmqByteSender>(
+                cfg_.uplink_self_channel_ip,
+                static_cast<uint16_t>(cfg_.uplink_self_channel_port));
+            uplink_self_pdf_pub_ = std::make_unique<ZmqByteSender>(
+                cfg_.uplink_self_pdf_ip,
+                static_cast<uint16_t>(cfg_.uplink_self_pdf_port));
+            LOG_G_INFO() << "[UL-TX] self-channel debug streams: channel="
+                         << cfg_.uplink_self_channel_ip << ':' << cfg_.uplink_self_channel_port
+                         << ", pdf=" << cfg_.uplink_self_pdf_ip << ':'
+                         << cfg_.uplink_self_pdf_port;
+        }
         vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.vofa_debug_ip, cfg_.vofa_debug_port, 64);
     }
 
@@ -1838,7 +1923,6 @@ private:
         _sync_in_progress = false;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
-        _reset_uplink_tx_rx_alignment_shift();
         _set_uplink_waveform_enabled(false);
         _llr_snr_linear_filtered = 1.0;
         _llr_snr_filter_initialized = false;
@@ -2098,7 +2182,6 @@ private:
     void process_sync_data(const AlignedVector& sync_data, int64_t sync_time_ns) {
         const size_t symbol_len = cfg_.fft_size + cfg_.cp_length;
         const bool allow_freq_adjust = _control_time_gates.allow_freq_adjust(sync_time_ns);
-        const bool allow_alignment = _control_time_gates.allow_alignment(sync_time_ns);
         bool issued_freq_adjust = false;
         bool issued_alignment = false;
 
@@ -2219,6 +2302,7 @@ private:
         }
 
         if (sync_found) {
+            _restore_uplink_tx_gain_after_sync();
             _sync_search_gain_sweep.note_sync_found();
             LOG_RT_INFO() << "Sync found at pos: " << max_pos
                           << " with peak/avg: " << peak_ratio_db(max_corr, avg_corr)
@@ -2323,18 +2407,18 @@ private:
                     issued_freq_adjust = true;
                 }
 
-                // Record time offset
-                if (allow_alignment) {
-                    sync_offset_ =
-                        (max_pos - cfg_.sync_pos * symbol_len - cfg_.desired_peak_pos +
-                         predictive_delay_samples);
-                    if (sync_offset_ > 0) {
-                        sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
-                    }
-                    _clear_frame_queue();
-                    _schedule_receive_alignment(static_cast<int32_t>(sync_offset_));
-                    issued_alignment = true;
+                // Record time offset. A fresh sync-search acquisition must always
+                // schedule alignment; otherwise RX/TX windows can remain at the
+                // old/reset position even though sync detection succeeded.
+                sync_offset_ =
+                    (max_pos - cfg_.sync_pos * symbol_len - cfg_.desired_peak_pos +
+                     predictive_delay_samples);
+                if (sync_offset_ > 0) {
+                    sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
                 }
+                _clear_frame_queue();
+                _schedule_receive_alignment(static_cast<int32_t>(sync_offset_));
+                issued_alignment = true;
             } else {
                 LOG_RT_WARN() << "No valid symbols for CFO estimation";
             }
@@ -2440,6 +2524,43 @@ private:
                     frame_count = 0;
                 }
             }
+        }
+    }
+
+    void _publish_uplink_self_channel_debug(const RxFrame& frame) {
+        if (!uplink_self_channel_debug_enabled(cfg_) || !_uplink_tx) {
+            return;
+        }
+
+        const Config ul_cfg = _uplink_tx->uplink_config();
+        if (ul_cfg.num_symbols == 0) {
+            return;
+        }
+        const size_t sym_len = cfg_.fft_size + cfg_.cp_length;
+        const size_t local_tx_zc_start =
+            _duplex_layout.ul_sample_offset(cfg_) + ul_cfg.sync_pos * sym_len;
+
+        if (!_uplink_self_debug_estimator.estimate(
+                frame.frame_data,
+                local_tx_zc_start,
+                0,
+                _uplink_self_zc_freq,
+                _uplink_self_h_est)) {
+            return;
+        }
+
+        uplink_self_channel_sender_.add_data(
+            AlignedVector(_uplink_self_h_est.begin(), _uplink_self_h_est.end()));
+
+        _delay_processor.compute_delay_spectrum(_uplink_self_h_est, _uplink_self_delay_spectrum);
+        uplink_self_pdf_sender_.add_data(
+            AlignedVector(_uplink_self_delay_spectrum.begin(), _uplink_self_delay_spectrum.end()));
+
+        if ((_uplink_self_debug_frame_counter++ % 4096) == 0) {
+            LOG_G_INFO() << "[UL-TX] self-channel debug: local UE UL ZC offset="
+                         << local_tx_zc_start
+                         << ", rx_frame_start_offset=0"
+                         << ", frame_period=" << frame.frame_data.size();
         }
     }
 
@@ -3024,6 +3145,7 @@ private:
                     LOG_RT_INFO() << "OCXO PI state reset to fast stage after sync reset.";
                 }
                 _enter_sync_search_state();
+                _mute_uplink_tx_gain_for_sync_search();
                 _control_time_gates.mark_reset_now(radio_time_now());
                 return;
             }
@@ -3105,6 +3227,7 @@ private:
             auto constellation_copy = symbols[last_idx];
             constellation_sender_.add_data(std::move(constellation_copy));
         }
+        _publish_uplink_self_channel_debug(frame);
         prof_step_end = ProfileClock::now();
         prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         

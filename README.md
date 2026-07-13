@@ -558,12 +558,15 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `rx_clock_source` | `string` | `""` | Default sensing RX clock source override. |
 | `rx_time_source` | `string` | `""` | Default sensing RX time source override. |
 | `wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
+| `uplink_rx_channel` | `int` | `0` | BS uplink RX channel index on the shared TX/RX USRP. Legacy `rx_channel` remains a fallback when this key is omitted. |
 | `uplink_rx_wire_format` | `string` | `sc16` | BS uplink RX wire format, typically `sc16` or `sc8`. |
 | `sensing_rx_wire_format` | `string` | `sc16` | BS sensing RX default wire format, typically `sc16` or `sc8`. |
-| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | Bind IP for incoming payload UDP packets. |
-| `udp_input_port` | `int` | `50000` | Bind port for incoming payload UDP packets. |
-| `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
-| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols. In FDD, `center_freq` defines the UE->BS carrier. `udp_output_ip` / `udp_output_port` select where BS sends decoded uplink payloads. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
+| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS downlink payload UDP bind IP. This is the input stream transmitted on the BS->UE downlink. |
+| `udp_input_port` | `int` | `50000` | BS downlink payload UDP bind port. |
+| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS decoded uplink payload UDP destination IP. This is the output stream recovered from UE->BS uplink. |
+| `udp_output_port` | `int` | `50003` | BS decoded uplink payload UDP destination port. |
+| `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
+| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols, and `center_freq` is ignored. In FDD, `center_freq` defines the UE->BS carrier, while `symbol_start`, `symbol_count`, and `guard_symbols` are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
 | `bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the monostatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `mono_sensing_port` | `int` | `8888` | ZeroMQ PUB bind port for the monostatic sensing stream. |
@@ -655,9 +658,9 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
 | `sensing_output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
 | `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing processing pipeline. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
-| `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink carrier and sends only in the configured uplink symbol window; `fdd` transmits continuously on `uplink.center_freq`. |
+| `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink center frequency and sends only in the configured uplink symbol window; `fdd` transmits continuously over the full frame on `uplink.center_freq`. |
 | `uplink_idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
-| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1` | UE uplink settings. `udp_input_ip` / `udp_input_port` bind the UE-side UDP source for uplink payloads. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
+| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | UE uplink settings. TDD uses `symbol_start`, `symbol_count`, and `guard_symbols` and ignores `center_freq`; FDD uses `center_freq` and ignores the TDD symbol-window fields, transmitting over the full frame. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
 | `ue_timing_advance` | `int` / samples | `63` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
 | `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
 | `frame_queue_size` | `int` | `8` | Capacity of the UE RX frame queue. Values below `1` are clamped to `1`. |
@@ -710,8 +713,10 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `constellation_port` | `int` | `12346` | ZeroMQ PUB bind port for constellation output. |
 | `vofa_debug_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for VOFA+ debug output. |
 | `vofa_debug_port` | `int` | `12347` | Destination port for VOFA+ debug output. |
-| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for decoded payload output. |
-| `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
+| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | UE uplink payload UDP bind IP. This is the input stream transmitted on the UE->BS uplink. |
+| `udp_input_port` | `int` | `50002` | UE uplink payload UDP bind port. |
+| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | UE decoded downlink payload UDP destination IP. This is the output stream recovered from the BS->UE downlink. |
+| `udp_output_port` | `int` | `50001` | UE decoded downlink payload UDP destination port. |
 | `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value. |
 | `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
 | `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. CUDA binaries ignore this mode. |

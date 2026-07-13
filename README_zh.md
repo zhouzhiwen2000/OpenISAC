@@ -558,12 +558,15 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `rx_clock_source` | `string` | `""` | 感知 RX 默认时钟源覆盖项。 |
 | `rx_time_source` | `string` | `""` | 感知 RX 默认时间源覆盖项。 |
 | `wire_format_tx` | `string` | `sc16` | TX 链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `uplink_rx_channel` | `int` | `0` | BS 上行 RX 使用的 USRP 通道索引。兼容旧配置：省略该字段时会回退到 `rx_channel`。 |
 | `uplink_rx_wire_format` | `string` | `sc16` | BS 上行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
 | `sensing_rx_wire_format` | `string` | `sc16` | BS 感知 RX 默认链路数据格式，常用 `sc16` 或 `sc8`。 |
-| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS 接收下行业务 UDP 的绑定地址。 |
-| `udp_input_port` | `int` | `50000` | BS 接收下行业务 UDP 的端口。 |
-| `duplex_mode` | `string` | `tdd` | 双工方式。`tdd` 将 UE 上行符号按时间复用到 BS 帧内；`fdd` 保持 BS 下行连续发送，同时 UE 上行使用 `uplink.center_freq`。 |
-| `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1` | 上行/双工设置。TDD 下，`symbol_start`、`symbol_count`、`guard_symbols` 以 OFDM 符号为单位定义 DL/UL 边界；FDD 下，`center_freq` 定义 UE->BS 上行载波。`udp_output_ip` / `udp_output_port` 决定 BS 解码上行业务后输出到哪里。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。 |
+| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS 下行业务 UDP 输入绑定地址，即 BS->UE 下行要发送的业务流。 |
+| `udp_input_port` | `int` | `50000` | BS 下行业务 UDP 输入绑定端口。 |
+| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS 解码后的上行业务 UDP 输出目标 IP，即从 UE->BS 上行恢复出的业务流。 |
+| `udp_output_port` | `int` | `50003` | BS 解码后的上行业务 UDP 输出目标端口。 |
+| `duplex_mode` | `string` | `tdd` | 双工方式。`tdd` 将 UE 上行符号按时间复用到 BS 帧内，并使用下行中心频率；`fdd` 保持 BS 下行连续发送，同时 UE 上行使用 `uplink.center_freq`。 |
+| `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1`、`center_freq=2500000000` | 上行/双工设置。TDD 下，`symbol_start`、`symbol_count`、`guard_symbols` 以 OFDM 符号为单位定义 DL/UL 边界，`center_freq` 会被忽略；FDD 下，`center_freq` 定义 UE->BS 上行载波，而 `symbol_start`、`symbol_count`、`guard_symbols` 会被忽略，上行按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。 |
 | `bs_dl_ul_timing_diff` | `int` / 采样点 | `63` | BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 `DUTI` 调整。 |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 单站感知数据流和控制通道的 ZMQ 监听 IP。使用 `0.0.0.0` 可接受远端前端连接；使用 `127.0.0.1` 则仅允许本机连接。 |
 | `mono_sensing_port` | `int` | `8888` | 单站感知数据流的 ZeroMQ PUB 绑定端口。 |
@@ -655,9 +658,9 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `sensing_symbol_num` | `int` | `100` | 参与感知处理的符号数。 |
 | `sensing_output_mode` | `string` | `dense` | 双站感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
 | `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链；设为 `false` 时 `UE` 与 `CUDAUE` 均不会启动双站感知通道。 |
-| `duplex_mode` | `string` | `tdd` | 必须与 `BS.yaml` 保持一致。`tdd` 共享下行载波并只在配置的上行符号窗口发送；`fdd` 在 `uplink.center_freq` 上连续发送。 |
+| `duplex_mode` | `string` | `tdd` | 必须与 `BS.yaml` 保持一致。`tdd` 共享下行中心频率并只在配置的上行符号窗口发送；`fdd` 在 `uplink.center_freq` 上按整帧连续发送。 |
 | `uplink_idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
-| `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1` | UE 上行设置。`udp_input_ip` / `udp_input_port` 是 UE 侧上行业务 UDP 输入。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。 |
+| `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1`、`center_freq=2500000000` | UE 上行设置。TDD 使用 `symbol_start`、`symbol_count`、`guard_symbols` 并忽略 `center_freq`；FDD 使用 `center_freq` 并忽略 TDD 符号窗口字段，按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。 |
 | `ue_timing_advance` | `int` / 采样点 | `63` | UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 `TADV` 值移动后续上行帧。 |
 | `cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
 | `frame_queue_size` | `int` | `8` | UE RX 帧队列容量。小于 `1` 时会钳制到 `1`。 |
@@ -710,8 +713,10 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `constellation_port` | `int` | `12346` | 星座图输出的 ZeroMQ PUB 绑定端口。 |
 | `vofa_debug_ip` | `string` / IPv4 | `127.0.0.1` | VOFA+ 调试输出 IP。 |
 | `vofa_debug_port` | `int` | `12347` | VOFA+ 调试输出端口。 |
-| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | 解码后业务数据输出 IP。 |
-| `udp_output_port` | `int` | `50001` | 解码后业务数据输出端口。 |
+| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | UE 上行业务 UDP 输入绑定地址，即 UE->BS 上行要发送的业务流。 |
+| `udp_input_port` | `int` | `50002` | UE 上行业务 UDP 输入绑定端口。 |
+| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | UE 解码后的下行业务 UDP 输出目标 IP，即从 BS->UE 下行恢复出的业务流。 |
+| `udp_output_port` | `int` | `50001` | UE 解码后的下行业务 UDP 输出目标端口。 |
 | `default_out_ip` | `string` / IPv4 | `127.0.0.1` | UDP 业务数据和 VOFA+ 调试输出的默认目标 IP；对应 IP 字段留空时使用该值。ZeroMQ PUB 监听 IP 不继承该值。 |
 | `control_port` | `int` | `10001` | 双向控制通道的 ZeroMQ ROUTER 绑定端口。 |
 | `measurement_enable` | `bool` | `false` | 启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 `udp_output_*`，而是直接用于 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。 |

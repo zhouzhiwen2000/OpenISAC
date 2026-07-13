@@ -173,6 +173,12 @@ public:
         }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
         _uplink_constellation_sender(10, [this](const auto& data) {
             _uplink_constellation_pub->send_container(data);
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        _uplink_self_channel_sender(2, [this](const auto& data) {
+            _uplink_self_channel_pub->send_container(data);
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        _uplink_self_pdf_sender(2, [this](const auto& data) {
+            _uplink_self_pdf_pub->send_container(data);
         }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly)
     {
         _measurement_tx_gain_x10.store(
@@ -304,6 +310,10 @@ public:
             _uplink_channel_sender.start();
             _uplink_pdf_sender.start();
             _uplink_constellation_sender.start();
+            if (uplink_self_channel_debug_enabled(_cfg)) {
+                _uplink_self_channel_sender.start();
+                _uplink_self_pdf_sender.start();
+            }
             _uplink_rx->start(_start_time);
         }
     }
@@ -321,6 +331,8 @@ public:
             _uplink_channel_sender.stop();
             _uplink_pdf_sender.stop();
             _uplink_constellation_sender.stop();
+            _uplink_self_channel_sender.stop();
+            _uplink_self_pdf_sender.stop();
         }
 
         for (auto& ch : _sensing_channels) {
@@ -443,9 +455,13 @@ private:
     std::unique_ptr<ZmqByteSender> _uplink_channel_pub;
     std::unique_ptr<ZmqByteSender> _uplink_pdf_pub;
     std::unique_ptr<ZmqByteSender> _uplink_constellation_pub;
+    std::unique_ptr<ZmqByteSender> _uplink_self_channel_pub;
+    std::unique_ptr<ZmqByteSender> _uplink_self_pdf_pub;
     DataSender<std::complex<float>, AlignedAlloc> _uplink_channel_sender;
     DataSender<std::complex<float>, AlignedAlloc> _uplink_pdf_sender;
     DataSender<std::complex<float>, AlignedAlloc> _uplink_constellation_sender;
+    DataSender<std::complex<float>, AlignedAlloc> _uplink_self_channel_sender;
+    DataSender<std::complex<float>, AlignedAlloc> _uplink_self_pdf_sender;
     LatencyAccumulator _latency_accumulator;
     std::vector<std::unique_ptr<SensingChannel>> _sensing_channels;
     std::shared_ptr<AggregatedSensingDataSender> _aggregated_sensing_sender;
@@ -562,28 +578,56 @@ private:
             _cfg.uplink_pdf_ip, static_cast<uint16_t>(_cfg.uplink_pdf_port));
         _uplink_constellation_pub = std::make_unique<ZmqByteSender>(
             _cfg.uplink_constellation_ip, static_cast<uint16_t>(_cfg.uplink_constellation_port));
+        if (uplink_self_channel_debug_enabled(_cfg)) {
+            _uplink_self_channel_pub = std::make_unique<ZmqByteSender>(
+                _cfg.uplink_self_channel_ip, static_cast<uint16_t>(_cfg.uplink_self_channel_port));
+            _uplink_self_pdf_pub = std::make_unique<ZmqByteSender>(
+                _cfg.uplink_self_pdf_ip, static_cast<uint16_t>(_cfg.uplink_self_pdf_port));
+        }
         LOG_G_INFO() << "[UL-RX] debug ZMQ streams: channel="
                      << _cfg.uplink_channel_ip << ':' << _cfg.uplink_channel_port
                      << ", pdf=" << _cfg.uplink_pdf_ip << ':' << _cfg.uplink_pdf_port
                      << ", constellation=" << _cfg.uplink_constellation_ip << ':'
                      << _cfg.uplink_constellation_port;
+        if (uplink_self_channel_debug_enabled(_cfg)) {
+            LOG_G_INFO() << "[UL-RX] self-channel debug streams: channel="
+                         << _cfg.uplink_self_channel_ip << ':' << _cfg.uplink_self_channel_port
+                         << ", pdf=" << _cfg.uplink_self_pdf_ip << ':'
+                         << _cfg.uplink_self_pdf_port;
+        }
     }
 
     void _attach_uplink_debug_sinks() {
         if (!_uplink_rx) return;
-        if (!_uplink_channel_pub || !_uplink_pdf_pub || !_uplink_constellation_pub) {
+        const bool self_debug_enabled = uplink_self_channel_debug_enabled(_cfg);
+        if (!_uplink_channel_pub || !_uplink_pdf_pub || !_uplink_constellation_pub ||
+            (self_debug_enabled &&
+             (!_uplink_self_channel_pub || !_uplink_self_pdf_pub))) {
             _init_uplink_debug_publishers();
         }
-        _uplink_rx->set_debug_sinks(
-            [this](AlignedVector&& data) {
-                _uplink_channel_sender.add_data(std::move(data));
-            },
-            [this](AlignedVector&& data) {
-                _uplink_pdf_sender.add_data(std::move(data));
-            },
-            [this](AlignedVector&& data) {
-                _uplink_constellation_sender.add_data(std::move(data));
-            });
+        auto channel_sink = [this](AlignedVector&& data) {
+            _uplink_channel_sender.add_data(std::move(data));
+        };
+        auto pdf_sink = [this](AlignedVector&& data) {
+            _uplink_pdf_sender.add_data(std::move(data));
+        };
+        auto constellation_sink = [this](AlignedVector&& data) {
+            _uplink_constellation_sender.add_data(std::move(data));
+        };
+        if (self_debug_enabled) {
+            _uplink_rx->set_debug_sinks(
+                channel_sink,
+                pdf_sink,
+                constellation_sink,
+                [this](AlignedVector&& data) {
+                    _uplink_self_channel_sender.add_data(std::move(data));
+                },
+                [this](AlignedVector&& data) {
+                    _uplink_self_pdf_sender.add_data(std::move(data));
+                });
+            return;
+        }
+        _uplink_rx->set_debug_sinks(channel_sink, pdf_sink, constellation_sink);
     }
 
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
@@ -1068,7 +1112,14 @@ private:
             const double ul_freq = (_cfg.duplex.mode == DuplexMode::FDD &&
                                     _cfg.duplex.ul_center_freq > 0.0)
                 ? _cfg.duplex.ul_center_freq : _cfg.center_freq;
-            const size_t ul_rx_ch = _cfg.rx_channel;
+            const size_t ul_rx_ch = _cfg.uplink_rx_channel;
+            const size_t usrp_rx_channels = _tx_usrp->get_rx_num_channels();
+            if (ul_rx_ch >= usrp_rx_channels) {
+                throw std::runtime_error(
+                    "Configured uplink_rx_channel out of range: " +
+                    std::to_string(ul_rx_ch) +
+                    " (USRP supports " + std::to_string(usrp_rx_channels) + " RX channels)");
+            }
             _tx_usrp->set_rx_rate(_cfg.sample_rate);
             _tx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
             _tx_usrp->set_rx_gain(_cfg.rx_gain, ul_rx_ch);

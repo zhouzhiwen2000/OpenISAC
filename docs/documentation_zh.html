@@ -523,6 +523,12 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>uplink_rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS 上行 RX 使用的 USRP 通道索引。兼容旧配置：省略该字段时会回退到 <code>rx_channel</code>。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>uplink_rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
@@ -538,25 +544,37 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>udp_input_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">BS 接收下行业务 UDP 的绑定地址。</td>
+<td style="text-align:left">BS 下行业务 UDP 输入绑定地址，即 BS-&gt;UE 下行要发送的业务流。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_input_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>50000</code></td>
-<td style="text-align:left">BS 接收下行业务 UDP 的端口。</td>
+<td style="text-align:left">BS 下行业务 UDP 输入绑定端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">BS 解码后的上行业务 UDP 输出目标 IP，即从 UE-&gt;BS 上行恢复出的业务流。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50003</code></td>
+<td style="text-align:left">BS 解码后的上行业务 UDP 输出目标端口。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>duplex_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">双工方式。<code>tdd</code> 将 UE 上行符号按时间复用到 BS 帧内；<code>fdd</code> 保持 BS 下行连续发送，同时 UE 上行使用 <code>uplink.center_freq</code>。</td>
+<td style="text-align:left">双工方式。<code>tdd</code> 将 UE 上行符号按时间复用到 BS 帧内，并使用下行中心频率；<code>fdd</code> 保持 BS 下行连续发送，同时 UE 上行使用 <code>uplink.center_freq</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code></td>
-<td style="text-align:left">上行/双工设置。TDD 下，<code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 以 OFDM 符号为单位定义 DL/UL 边界；FDD 下，<code>center_freq</code> 定义 UE-&gt;BS 上行载波。<code>udp_output_ip</code> / <code>udp_output_port</code> 决定 BS 解码上行业务后输出到哪里。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。</td>
+<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code>、<code>center_freq=2500000000</code></td>
+<td style="text-align:left">上行/双工设置。TDD 下，<code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 以 OFDM 符号为单位定义 DL/UL 边界，<code>center_freq</code> 会被忽略；FDD 下，<code>center_freq</code> 定义 UE-&gt;BS 上行载波，而 <code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 会被忽略，上行按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
@@ -961,7 +979,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>duplex_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">必须与 <code>BS.yaml</code> 保持一致。<code>tdd</code> 共享下行载波并只在配置的上行符号窗口发送；<code>fdd</code> 在 <code>uplink.center_freq</code> 上连续发送。</td>
+<td style="text-align:left">必须与 <code>BS.yaml</code> 保持一致。<code>tdd</code> 共享下行中心频率并只在配置的上行符号窗口发送；<code>fdd</code> 在 <code>uplink.center_freq</code> 上按整帧连续发送。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink_idle_waveform</code></td>
@@ -972,8 +990,8 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code></td>
-<td style="text-align:left">UE 上行设置。<code>udp_input_ip</code> / <code>udp_input_port</code> 是 UE 侧上行业务 UDP 输入。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。</td>
+<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code>、<code>center_freq=2500000000</code></td>
+<td style="text-align:left">UE 上行设置。TDD 使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 并忽略 <code>center_freq</code>；FDD 使用 <code>center_freq</code> 并忽略 TDD 符号窗口字段，按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ue_timing_advance</code></td>
@@ -1288,16 +1306,28 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">VOFA+ 调试输出端口。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE 上行业务 UDP 输入绑定地址，即 UE-&gt;BS 上行要发送的业务流。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50002</code></td>
+<td style="text-align:left">UE 上行业务 UDP 输入绑定端口。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>udp_output_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">解码后业务数据输出 IP。</td>
+<td style="text-align:left">UE 解码后的下行业务 UDP 输出目标 IP，即从 BS-&gt;UE 下行恢复出的业务流。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_output_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>50001</code></td>
-<td style="text-align:left">解码后业务数据输出端口。</td>
+<td style="text-align:left">UE 解码后的下行业务 UDP 输出目标端口。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>default_out_ip</code></td>

@@ -32,12 +32,12 @@ sensing:
   doppler_fft_size: 100  # Doppler FFT size
   sensing_output_mode: dense  # dense or compact_mask
   enable_backend_sensing_processing: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== RF / Sampling =====
 rf_sampling:
   sample_rate: 50000000  # Baseband sample rate (Hz)
   bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
-  center_freq: 2400000000  # RF center frequency (Hz)
   rx_agc_enable: true  # Enable hardware RX AGC driven by delay-spectrum peak
   rx_agc_low_threshold_db: 14.0  # Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
   rx_agc_high_threshold_db: 16.0  # Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
@@ -52,25 +52,27 @@ usrp_device:
 
 # ===== Downlink =====
 downlink:
+  center_freq: 2400000000  # RF center frequency (Hz)
   downlink_rx_wire_format: sc16  # Downlink RX wire format; sc16/sc8
   rx_channel: 0  # RX channel index on USRP
   equalizer_mode: mmse  # Communication equalizer inverse mode
   channel_tracking_mode: pilot_phase  # Per-symbol comb-pilot tracking mode
   equalizer_mag_floor: 1e-06  # Lower bound for |H|^2 during channel inversion
   channel_tracking_min_pilot_snr: 0.0001  # Minimum comb-pilot residual power accepted by per-symbol tracking
-  downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
 
 # ===== Uplink =====
 uplink:
   enable_uplink: true  # Enable UE-to-BS uplink / duplex path
-  duplex_mode: tdd  # Uplink carrier/window scheme (tdd = time-multiplexed uplink, fdd = separate uplink carrier)
+  duplex_mode: tdd  # Uplink carrier/window scheme (tdd = shared downlink carrier with a symbol window, fdd = separate carrier with continuous full-frame uplink)
   uplink_idle_waveform: random_qpsk  # UE uplink idle waveform when no UDP payload is queued
-  symbol_start: 90  # TDD first uplink symbol in the downlink frame
-  symbol_count: 10  # TDD uplink window length in OFDM symbols; 0 disables TDD uplink
-  guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
+  symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
+  symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
+  guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
+  debug_self_channel: true  # Estimate UE self-TX leakage channel from the RX window using current TADV
+  tx_gain: 90  # Uplink TX gain (dB)
+  tx_channel: 0  # Uplink TX channel index on USRP
   wire_format_tx: sc8  # Uplink TX wire format; sc16/sc8
-  ue_timing_advance: 63  # UE Timing Advance (samples) — also adjustable at runtime via TADV
-  uplink_cpu_cores: [-1, 5, 6]  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
+  ue_timing_advance: 104  # UE Timing Advance (samples) — also adjustable at runtime via TADV
 
 # ===== Sync / Tracking =====
 sync_tracking:
@@ -104,14 +106,17 @@ sync_tracking:
   akf_r_min: 1e-08  # Lower bound of observation noise variance R
   akf_r_max: 1000.0  # Upper bound of observation noise variance R
   desired_peak_pos: 20  # Target delay-peak index for alignment
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== Measurement mode =====
 measurement:
   measurement_enable: false  # Enable internal PRBS measurement traffic
 
-# ===== Network Output =====
+# ===== Network =====
 network_output:
+  self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
+  self_channel_port: 12350  # UE self-channel output port
+  self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP
+  self_pdf_port: 12351  # UE self delay-spectrum output port
   bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
@@ -122,11 +127,15 @@ network_output:
   pdf_port: 12349  # Delay-spectrum output port
   constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
   constellation_port: 12346  # Constellation output port
-  udp_output_port: 50001  # Payload output port
+  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
+
+# ===== CPU Cores =====
+cpu_cores:
+  downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
+  uplink_cpu_cores: [-1, 5, 6]  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
+  main_cpu_core: 7  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====
 runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
   vofa_debug_port: 12347  # VOFA+ debug output port
-  main_cpu_core: 7  # Main-thread CPU core (-1 disables explicit binding)
-  profiling_modules: ""  # Comma-separated modules to profile, or "all"

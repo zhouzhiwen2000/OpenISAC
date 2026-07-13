@@ -17,8 +17,8 @@ common:
       type: scalar
       key: duplex_mode
       kind: string
-      comment: Uplink carrier/window scheme (tdd = time-multiplexed uplink, fdd =
-        separate uplink carrier)
+      comment: Uplink carrier/window scheme (tdd = shared downlink carrier with a symbol window, fdd =
+        separate carrier with continuous full-frame uplink)
       default: tdd
       optional: true
       options:
@@ -33,63 +33,6 @@ common:
       comment: Enable UE-to-BS uplink / duplex path
       default: false
       optional: true
-  uplink:
-    title: Uplink
-    field:
-      type: uplink_mapping
-      key: uplink
-      comment: UE-to-BS uplink / duplex settings
-      default:
-        symbol_start: 90
-        symbol_count: 10
-        guard_symbols: 1
-        center_freq: 0
-        udp_input_ip: 0.0.0.0
-        udp_input_port: 50002
-        udp_output_ip: 127.0.0.1
-        udp_output_port: 50003
-      optional: true
-      scalar_fields:
-      - key: symbol_start
-        comment: TDD first uplink symbol in the downlink frame
-        kind: int
-        default: 90
-        optional: true
-      - key: symbol_count
-        comment: TDD uplink window length in OFDM symbols; 0 disables TDD uplink
-        kind: int
-        default: 10
-        optional: true
-      - key: guard_symbols
-        comment: Leading TDD guard symbols inside the uplink window
-        kind: int
-        default: 1
-        optional: true
-      - key: center_freq
-        comment: FDD uplink carrier. Displayed in GHz, stored in Hz.
-        kind: float
-        default: 0
-        optional: true
-      - key: udp_input_ip
-        comment: UE-side uplink payload UDP bind IP
-        kind: string
-        default: 0.0.0.0
-        optional: true
-      - key: udp_input_port
-        comment: UE-side uplink payload UDP bind port
-        kind: int
-        default: 50002
-        optional: true
-      - key: udp_output_ip
-        comment: BS-side decoded uplink payload UDP destination IP
-        kind: string
-        default: 127.0.0.1
-        optional: true
-      - key: udp_output_port
-        comment: BS-side decoded uplink payload UDP destination port
-        kind: int
-        default: 50003
-        optional: true
   simulation:
     title: Channel simulator
     field:
@@ -386,41 +329,71 @@ bs:
         symbol_start: 90
         symbol_count: 10
         guard_symbols: 1
-        center_freq: 0
-        udp_output_ip: 127.0.0.1
-        udp_output_port: 50003
+        center_freq: 2500000000
+        debug_self_channel: false
       optional: true
       scalar_fields:
       - key: symbol_start
-        comment: TDD first uplink symbol in the downlink frame
+        comment: TDD only; first uplink symbol in the downlink frame
         kind: int
         default: 90
         optional: true
       - key: symbol_count
-        comment: TDD uplink window length in OFDM symbols; 0 disables TDD uplink
+        comment: TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
         kind: int
         default: 10
         optional: true
       - key: guard_symbols
-        comment: Leading TDD guard symbols inside the uplink window
+        comment: TDD only; leading guard symbols inside the uplink window
         kind: int
         default: 1
         optional: true
       - key: center_freq
-        comment: FDD uplink carrier. Displayed in GHz, stored in Hz.
+        comment: FDD only; uplink carrier. TDD uses the downlink center frequency. Displayed in GHz, stored in Hz.
         kind: float
-        default: 0
+        default: 2500000000
         optional: true
-      - key: udp_output_ip
-        comment: BS-side decoded uplink payload UDP destination IP
-        kind: string
-        default: 127.0.0.1
+      - key: debug_self_channel
+        comment: Estimate BS self-TX leakage channel from the uplink RX window using current DUTI
+        kind: bool
+        default: false
         optional: true
-      - key: udp_output_port
-        comment: BS-side decoded uplink payload UDP destination port
-        kind: int
-        default: 50003
-        optional: true
+  self_channel_ip:
+    title: Network
+    field:
+      type: scalar
+      key: self_channel_ip
+      kind: string
+      comment: BS self-channel ZMQ listen IP
+      default: 0.0.0.0
+      optional: true
+  self_channel_port:
+    title: Network
+    field:
+      type: scalar
+      key: self_channel_port
+      kind: int
+      comment: BS self-channel output port
+      default: 12360
+      optional: true
+  self_pdf_ip:
+    title: Network
+    field:
+      type: scalar
+      key: self_pdf_ip
+      kind: string
+      comment: BS self delay-spectrum ZMQ listen IP
+      default: 0.0.0.0
+      optional: true
+  self_pdf_port:
+    title: Network
+    field:
+      type: scalar
+      key: self_pdf_port
+      kind: int
+      comment: BS self delay-spectrum output port
+      default: 12361
+      optional: true
   bs_dl_ul_timing_diff:
     title: Uplink
     field:
@@ -683,7 +656,7 @@ bs:
       default: 50000000
       optional: true
   center_freq:
-    title: RF / Sampling
+    title: Downlink
     field:
       type: scalar
       key: center_freq
@@ -911,25 +884,43 @@ bs:
       - sc16
       - sc8
   udp_input_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: udp_input_ip
       kind: string
-      comment: Bind IP for incoming payload UDP packets
+      comment: BS downlink payload UDP bind IP
       default: 0.0.0.0
       optional: true
   udp_input_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: udp_input_port
       kind: int
-      comment: Bind port for incoming payload UDP packets
+      comment: BS downlink payload UDP bind port
       default: 50000
       optional: true
+  udp_output_ip:
+    title: Network
+    field:
+      type: scalar
+      key: udp_output_ip
+      kind: string
+      comment: BS decoded uplink payload UDP destination IP
+      default: 127.0.0.1
+      optional: true
+  udp_output_port:
+    title: Network
+    field:
+      type: scalar
+      key: udp_output_port
+      kind: int
+      comment: BS decoded uplink payload UDP destination port
+      default: 50003
+      optional: true
   mono_sensing_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: mono_sensing_ip
@@ -938,7 +929,7 @@ bs:
       default: 0.0.0.0
       optional: true
   mono_sensing_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: mono_sensing_port
@@ -947,7 +938,7 @@ bs:
       default: 8888
       optional: true
   mono_sensing_output_enabled:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: mono_sensing_output_enabled
@@ -956,7 +947,7 @@ bs:
       default: true
       optional: true
   uplink_channel_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: uplink_channel_ip
@@ -965,7 +956,7 @@ bs:
       default: 0.0.0.0
       optional: true
   uplink_channel_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: uplink_channel_port
@@ -974,7 +965,7 @@ bs:
       default: 12358
       optional: true
   uplink_pdf_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: uplink_pdf_ip
@@ -983,7 +974,7 @@ bs:
       default: 0.0.0.0
       optional: true
   uplink_pdf_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: uplink_pdf_port
@@ -992,7 +983,7 @@ bs:
       default: 12359
       optional: true
   uplink_constellation_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: uplink_constellation_ip
@@ -1001,7 +992,7 @@ bs:
       default: 0.0.0.0
       optional: true
   uplink_constellation_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: uplink_constellation_port
@@ -1010,7 +1001,7 @@ bs:
       default: 12356
       optional: true
   control_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: control_port
@@ -1019,7 +1010,7 @@ bs:
       default: 9999
       optional: true
   sensing_symbol_stride:
-    title: Network Output
+    title: Sensing
     field:
       type: scalar
       key: sensing_symbol_stride
@@ -1137,7 +1128,7 @@ bs:
       default: 64
       optional: true
   downlink_cpu_cores:
-    title: Downlink Pipeline
+    title: CPU Cores
     field:
       type: flow_list
       key: downlink_cpu_cores
@@ -1150,7 +1141,7 @@ bs:
       - 3
       optional: true
   uplink_cpu_cores:
-    title: Uplink
+    title: CPU Cores
     field:
       type: flow_list
       key: uplink_cpu_cores
@@ -1160,7 +1151,7 @@ bs:
       default: []
       optional: true
   main_cpu_core:
-    title: Runtime / Debug
+    title: CPU Cores
     field:
       type: scalar
       key: main_cpu_core
@@ -1201,41 +1192,71 @@ ue:
         symbol_start: 90
         symbol_count: 10
         guard_symbols: 1
-        center_freq: 0
-        udp_input_ip: 0.0.0.0
-        udp_input_port: 50002
+        center_freq: 2500000000
+        debug_self_channel: false
       optional: true
       scalar_fields:
       - key: symbol_start
-        comment: TDD first uplink symbol in the downlink frame
+        comment: TDD only; first uplink symbol in the downlink frame
         kind: int
         default: 90
         optional: true
       - key: symbol_count
-        comment: TDD uplink window length in OFDM symbols; 0 disables TDD uplink
+        comment: TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
         kind: int
         default: 10
         optional: true
       - key: guard_symbols
-        comment: Leading TDD guard symbols inside the uplink window
+        comment: TDD only; leading guard symbols inside the uplink window
         kind: int
         default: 1
         optional: true
       - key: center_freq
-        comment: FDD uplink carrier. Displayed in GHz, stored in Hz.
+        comment: FDD only; uplink carrier. TDD uses the downlink center frequency. Displayed in GHz, stored in Hz.
         kind: float
-        default: 0
+        default: 2500000000
         optional: true
-      - key: udp_input_ip
-        comment: UE-side uplink payload UDP bind IP
-        kind: string
-        default: 0.0.0.0
+      - key: debug_self_channel
+        comment: Estimate UE self-TX leakage channel from the RX window using current TADV
+        kind: bool
+        default: false
         optional: true
-      - key: udp_input_port
-        comment: UE-side uplink payload UDP bind port
-        kind: int
-        default: 50002
-        optional: true
+  self_channel_ip:
+    title: Network
+    field:
+      type: scalar
+      key: self_channel_ip
+      kind: string
+      comment: UE self-channel ZMQ listen IP
+      default: 0.0.0.0
+      optional: true
+  self_channel_port:
+    title: Network
+    field:
+      type: scalar
+      key: self_channel_port
+      kind: int
+      comment: UE self-channel output port
+      default: 12350
+      optional: true
+  self_pdf_ip:
+    title: Network
+    field:
+      type: scalar
+      key: self_pdf_ip
+      kind: string
+      comment: UE self delay-spectrum ZMQ listen IP
+      default: 0.0.0.0
+      optional: true
+  self_pdf_port:
+    title: Network
+    field:
+      type: scalar
+      key: self_pdf_port
+      kind: int
+      comment: UE self delay-spectrum output port
+      default: 12351
+      optional: true
   ue_timing_advance:
     title: Uplink
     field:
@@ -1573,7 +1594,7 @@ ue:
       default: 50000000
       optional: true
   center_freq:
-    title: RF / Sampling
+    title: Downlink
     field:
       type: scalar
       key: center_freq
@@ -1954,7 +1975,7 @@ ue:
       default: 20
       optional: true
   sensing_symbol_stride:
-    title: Sync / Tracking
+    title: Sensing
     field:
       type: scalar
       key: sensing_symbol_stride
@@ -1972,7 +1993,7 @@ ue:
       default: true
       optional: true
   bi_sensing_output_enabled:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: bi_sensing_output_enabled
@@ -1981,7 +2002,7 @@ ue:
       default: true
       optional: true
   bi_sensing_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: bi_sensing_ip
@@ -1990,7 +2011,7 @@ ue:
       default: 0.0.0.0
       optional: true
   bi_sensing_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: bi_sensing_port
@@ -1999,7 +2020,7 @@ ue:
       default: 8889
       optional: true
   control_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: control_port
@@ -2008,7 +2029,7 @@ ue:
       default: 10001
       optional: true
   channel_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: channel_ip
@@ -2017,7 +2038,7 @@ ue:
       default: 0.0.0.0
       optional: true
   channel_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: channel_port
@@ -2026,7 +2047,7 @@ ue:
       default: 12348
       optional: true
   pdf_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: pdf_ip
@@ -2035,7 +2056,7 @@ ue:
       default: 0.0.0.0
       optional: true
   pdf_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: pdf_port
@@ -2044,7 +2065,7 @@ ue:
       default: 12349
       optional: true
   constellation_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: constellation_ip
@@ -2053,7 +2074,7 @@ ue:
       default: 0.0.0.0
       optional: true
   constellation_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: constellation_port
@@ -2061,22 +2082,40 @@ ue:
       comment: Constellation output port
       default: 12346
       optional: true
+  udp_input_ip:
+    title: Network
+    field:
+      type: scalar
+      key: udp_input_ip
+      kind: string
+      comment: UE uplink payload UDP bind IP
+      default: 0.0.0.0
+      optional: true
+  udp_input_port:
+    title: Network
+    field:
+      type: scalar
+      key: udp_input_port
+      kind: int
+      comment: UE uplink payload UDP bind port
+      default: 50002
+      optional: true
   udp_output_ip:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: udp_output_ip
       kind: string
-      comment: Payload output IP (empty = use default_out_ip)
+      comment: UE decoded downlink payload UDP destination IP (empty = use default_out_ip)
       default: ''
       optional: true
   udp_output_port:
-    title: Network Output
+    title: Network
     field:
       type: scalar
       key: udp_output_port
       kind: int
-      comment: Payload output port
+      comment: UE decoded downlink payload UDP destination port
       default: 50001
       optional: true
   default_out_ip:
@@ -2107,7 +2146,7 @@ ue:
       default: 12347
       optional: true
   downlink_cpu_cores:
-    title: Downlink
+    title: CPU Cores
     field:
       type: flow_list
       key: downlink_cpu_cores
@@ -2121,7 +2160,7 @@ ue:
       - 4
       optional: true
   uplink_cpu_cores:
-    title: Uplink
+    title: CPU Cores
     field:
       type: flow_list
       key: uplink_cpu_cores
@@ -2130,7 +2169,7 @@ ue:
       default: []
       optional: true
   main_cpu_core:
-    title: Runtime / Debug
+    title: CPU Cores
     field:
       type: scalar
       key: main_cpu_core

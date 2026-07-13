@@ -314,10 +314,18 @@ private:
 
     // ---- Build one uplink frame's IQ into period_buffer at the UL window ----
     void _build_period_buffer(AlignedVector& period_buffer) {
-        std::fill(period_buffer.begin(), period_buffer.end(), std::complex<float>(0.0f, 0.0f));
+        // The period buffers come from the pool zero-initialized and the only
+        // region ever written is the UL window [_window_offset, +_window_samples),
+        // which the symbol loop below overwrites in full every frame (the ctor
+        // asserts _window_samples == uplink samples_per_frame() == num_symbols *
+        // sym_len, and the loop writes exactly that many contiguous samples). So
+        // the rest of the DL-period buffer stays zero permanently — no per-frame
+        // fill over the (large) full period is needed. If a future layout leaves
+        // gaps inside the UL window, re-add a window-scoped zeroing here.
 
         // Pull payload packets up to one frame's payload capacity.
-        AlignedIntVector data_pool;
+        AlignedIntVector& data_pool = _data_pool;
+        data_pool.clear();
         data_pool.reserve(_layout.payload_re_count);
         while (data_pool.size() < _layout.payload_re_count) {
             AlignedIntVector* slot = _packet_buffer.consumer_slot();
@@ -357,12 +365,17 @@ private:
                 ++data_symbol_idx;
             }
             fftwf_execute(_ifft_plan);
-            std::complex<float>* dst = period_buffer.data() + _window_offset + sym * sym_len;
+            std::complex<float>* __restrict__ dst =
+                period_buffer.data() + _window_offset + sym * sym_len;
+            const auto* __restrict__ src = _fft_out.data();
+            // Cyclic prefix (tail of the IFFT body) then the symbol body, scaled.
+            #pragma omp simd
             for (size_t j = 0; j < _cfg.cp_length; ++j) {
-                dst[j] = _fft_out[_cfg.fft_size - _cfg.cp_length + j] * scale;
+                dst[j] = src[_cfg.fft_size - _cfg.cp_length + j] * scale;
             }
+            #pragma omp simd
             for (size_t j = 0; j < _cfg.fft_size; ++j) {
-                dst[_cfg.cp_length + j] = _fft_out[j] * scale;
+                dst[_cfg.cp_length + j] = src[j] * scale;
             }
         }
     }
@@ -650,6 +663,7 @@ private:
     AlignedVector _fft_out;
     fftwf_plan _ifft_plan = nullptr;
     AlignedVector _mod_pool;
+    AlignedIntVector _data_pool;   // reused per-frame payload symbol scratch
 
     const size_t _period_samples;
     const size_t _window_offset;

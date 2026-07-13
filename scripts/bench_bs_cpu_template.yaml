@@ -65,10 +65,10 @@ uplink:
   uplink_rx_time_source: ""  # Uplink RX time source override (optional)
   uplink_cpu_cores: []  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
 
-# ===== Network Output =====
+# ===== Network =====
 network_output:
-  udp_input_ip: 0.0.0.0  # Bind IP for incoming payload UDP packets
-  udp_input_port: 50000  # Bind port for incoming payload UDP packets
+  udp_input_ip: 0.0.0.0  # BS downlink payload UDP bind IP
+  udp_input_port: 50000  # BS downlink payload UDP bind port
   mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
   mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
   control_port: 9999  # ZMQ port for runtime control commands

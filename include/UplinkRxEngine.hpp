@@ -25,6 +25,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <fftw3.h>
@@ -58,6 +59,8 @@ public:
           _duplex(build_duplex_frame_layout(link_cfg)),
           _layout(build_data_resource_grid_layout(_cfg)),
           _zc_freq(generate_zc_freq(_cfg.fft_size, _cfg.zc_root)),
+          _link_zc_freq(generate_zc_freq(link_cfg.fft_size, link_cfg.zc_root)),
+          _self_debug_estimator(link_cfg.fft_size, link_cfg.cp_length),
           _fft_in(_cfg.fft_size),
           _fft_out(_cfg.fft_size),
           _ce_in(_cfg.fft_size),
@@ -72,6 +75,7 @@ public:
         }
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
         _build_payload_indices();
+        _build_tracking_tables();
         _fft_plan = fftwf_plan_dft_1d(
             static_cast<int>(_cfg.fft_size),
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
@@ -147,11 +151,15 @@ public:
     void set_debug_sinks(
         DebugVectorCallback channel_sink,
         DebugVectorCallback delay_sink,
-        DebugVectorCallback constellation_sink)
+        DebugVectorCallback constellation_sink,
+        DebugVectorCallback self_channel_sink = DebugVectorCallback{},
+        DebugVectorCallback self_delay_sink = DebugVectorCallback{})
     {
         _channel_debug_sink = std::move(channel_sink);
         _delay_debug_sink = std::move(delay_sink);
         _constellation_debug_sink = std::move(constellation_sink);
+        _self_channel_debug_sink = std::move(self_channel_sink);
+        _self_delay_debug_sink = std::move(self_delay_sink);
     }
 
     void start(const uhd::time_spec_t& start_time = uhd::time_spec_t(0.0)) {
@@ -184,6 +192,47 @@ public:
             }
             ++data_symbol_idx;
         }
+    }
+
+    // Build the constant frequency-index table the per-frame equalizer needs:
+    // FFT-buffer position -> signed physical frequency index (standard fft-shift
+    // layout), required by equalize_symbol's per-subcarrier derotation. The
+    // data-slot -> actual-symbol mapping reuses _layout.data_symbol_to_actual_symbol
+    // (the same authoritative source that sizes _data_symbols).
+    void _build_tracking_tables() {
+        _track_enabled = (_cfg.channel_tracking_mode != kChannelTrackingModeOff) &&
+                         !_cfg.pilot_positions.empty();
+        _use_mmse = (_cfg.equalizer_mode == kEqualizerModeMmse);
+
+        _actual_subcarrier_indices.resize(_cfg.fft_size);
+        const int half = static_cast<int>(_cfg.fft_size / 2);
+        for (size_t i = 0; i < _cfg.fft_size; ++i) {
+            _actual_subcarrier_indices[i] = (static_cast<int>(i) >= half)
+                ? static_cast<int>(i) - static_cast<int>(_cfg.fft_size)
+                : static_cast<int>(i);
+        }
+    }
+
+    // Received-domain noise variance for MMSE equalization. The sync channel
+    // impulse response concentrates signal energy within the CP; energy beyond it
+    // is noise (estimate_snr_from_impulse_response). Scaling the resulting
+    // signal-normalized noise variance by the mean channel power |H|^2 puts it in
+    // the same units as compute_mmse_inverse's |H|^2 + noise_var denominator.
+    float _estimate_mmse_noise_var() {
+        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.fft_size * sizeof(std::complex<float>));
+        fftwf_execute(_ce_ifft_plan);
+        const float snr = ChannelEstimator::estimate_snr_from_impulse_response(
+            _ce_out, _cfg.cp_length);
+        const double norm_nv = noise_variance_from_snr_linear(std::max(snr, 1e-6f));
+
+        const auto* __restrict__ h = _h_est.data();
+        double avg_power = 0.0;
+        #pragma omp simd simdlen(16) reduction(+:avg_power)
+        for (size_t k = 0; k < _cfg.fft_size; ++k) {
+            avg_power += h[k].real() * h[k].real() + h[k].imag() * h[k].imag();
+        }
+        avg_power /= static_cast<double>(_cfg.fft_size);
+        return static_cast<float>(norm_nv * avg_power);
     }
 
     static int64_t _host_now_ns() {
@@ -440,20 +489,65 @@ public:
         // 1) Channel estimate from the sync symbol (symbol 0 of the UL frame).
         _fft_symbol(win + /*sym0*/ 0 * sym_len + _cfg.cp_length, _sync_freq_buf);
         ChannelEstimator::estimate_from_sync_ls(_sync_freq_buf, _zc_freq, _h_est);
-        ChannelEstimator::compute_zf_inverse(_h_est, _h_inv,
-                                             static_cast<float>(_cfg.equalizer_mag_floor));
 
-        // 2) FFT + equalize each data symbol.
+        // 2) FFT every data symbol (scaled, pre-equalization). The frequency-domain
+        //    symbols are produced before equalization so the pilot-phase tracker can
+        //    measure the residual phase ramp from adjacent-symbol pilot products.
         size_t data_idx = 0;
         for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
             if (is_zc_sync_symbol(_cfg, sym)) continue;
-            AlignedVector& dst = _data_symbols[data_idx];
-            _fft_symbol(win + sym * sym_len + _cfg.cp_length, dst);
-            for (size_t k = 0; k < _cfg.fft_size; ++k) dst[k] *= _h_inv[k];
+            _fft_symbol(win + sym * sym_len + _cfg.cp_length, _data_symbols[data_idx]);
             ++data_idx;
         }
 
-        // 3) Noise variance from equalized pilots -> LLR scale.
+        // 3) Channel tracking. TX and RX run on independent LO/sample clocks, so a
+        //    residual CFO and sample-clock offset (SFO) accumulate across the data
+        //    symbols relative to the single sync-symbol channel estimate. Estimate
+        //    the per-symbol phase ramp from comb pilots: alpha = constant (CFO),
+        //    beta = frequency slope (SFO). Honors channel_tracking_mode.
+        float alpha = 0.0f, beta = 0.0f;
+        if (_track_enabled) {
+            const bool est_valid = FrequencyOffsetEstimator::compute_pilot_phase_diff(
+                _data_symbols, _cfg.pilot_positions, _cfg.fft_size, _cfg.sync_pos,
+                _pilot_indices_buf, _avg_phase_diff_buf, _weights_buf,
+                &_layout.data_symbol_to_actual_symbol, nullptr);
+            if (est_valid) {
+                unwrap(_avg_phase_diff_buf);
+                std::tie(beta, alpha) = weightedlinearRegression(
+                    _pilot_indices_buf, _avg_phase_diff_buf, _weights_buf);
+                if (!std::isfinite(alpha) || !std::isfinite(beta)) {
+                    alpha = 0.0f;
+                    beta = 0.0f;
+                }
+            }
+        }
+
+        // 4) Equalizer inverse. Honors equalizer_mode (ZF vs MMSE); MMSE uses a
+        //    received-domain noise variance from the sync impulse response.
+        if (_use_mmse) {
+            ChannelEstimator::compute_mmse_inverse(
+                _h_est, _h_inv, _estimate_mmse_noise_var(),
+                static_cast<float>(_cfg.equalizer_mag_floor));
+        } else {
+            ChannelEstimator::compute_zf_inverse(
+                _h_est, _h_inv, static_cast<float>(_cfg.equalizer_mag_floor));
+        }
+
+        // 5) Equalize + derotate each data symbol in place. Reuses the SIMD
+        //    equalize_symbol; the derotation removes the accumulated alpha*n (CFO)
+        //    and beta*n*idx (SFO) for the n-th symbol after the sync anchor. When
+        //    tracking is off, alpha=beta=0 and this is plain ZF/MMSE equalization.
+        for (size_t i = 0; i < _data_symbols.size(); ++i) {
+            const int rel = _layout.data_symbol_to_actual_symbol[i] -
+                            static_cast<int>(_cfg.sync_pos);
+            ChannelEstimator::equalize_symbol(
+                _data_symbols[i], _h_inv,
+                alpha * static_cast<float>(rel),
+                beta * static_cast<float>(rel),
+                _actual_subcarrier_indices);
+        }
+
+        // 6) Noise variance from equalized pilots -> LLR scale.
         const double noise_var = QPSK_LLR::estimate_noise_variance(
             _data_symbols, _cfg.pilot_positions, _zc_freq);
 
@@ -478,7 +572,7 @@ public:
         const float scale_llr = std::min(
             static_cast<float>((4.0 / std::max(noise_var, 1e-6)) * M_SQRT1_2), 500.0f);
 
-        // 4) Build the matched payload-RE LLR stream (symbol-major, flat order).
+        // 7) Build the matched payload-RE LLR stream (symbol-major, flat order).
         if (_layout.payload_re_count > 0) {
             UplinkLlrFrame* llr_frame = nullptr;
             SPSCBackoff llr_backoff;
@@ -509,9 +603,10 @@ public:
             _llr_queue.producer_commit();
         }
 
+        _update_self_channel_debug(frame);
         _publish_debug_streams();
 
-        // 5) AGC from the channel impulse-response delay peak.
+        // 8) AGC from the channel impulse-response delay peak.
         _run_agc(frame);
     }
 
@@ -520,7 +615,10 @@ public:
         fftwf_execute(_fft_plan);
         freq_out.resize(_cfg.fft_size);
         const float s = 1.0f / std::sqrt(static_cast<float>(_cfg.fft_size));
-        for (size_t k = 0; k < _cfg.fft_size; ++k) freq_out[k] = _fft_out[k] * s;
+        const auto* __restrict__ src = _fft_out.data();
+        auto* __restrict__ dst = freq_out.data();
+        #pragma omp simd simdlen(16)
+        for (size_t k = 0; k < _cfg.fft_size; ++k) dst[k] = src[k] * s;
     }
 
     // Parse LdpcPacketFraming packets out of the frame LLR stream and decode.
@@ -548,12 +646,15 @@ public:
             if (payload_off + required > frame_llr.size()) break;
             if (payload_blocks == 0) { symbol_offset = next_off; continue; }
 
-            LDPCCodec::AlignedFloatVector payload_llr(required);
+            // Reuse scratch buffers across packets (decode thread, but still on
+            // the hot per-frame path) — std::copy fully overwrites payload_llr.
+            LDPCCodec::AlignedFloatVector& payload_llr = _payload_llr_scratch;
+            payload_llr.resize(required);
             std::copy(frame_llr.begin() + payload_off,
                       frame_llr.begin() + payload_off + required, payload_llr.begin());
             _bit_interleaver->deinterleave_inplace(payload_llr, _deint_scratch);
             _descrambler.soft_descramble(payload_llr);
-            LDPCCodec::AlignedByteVector decoded;
+            LDPCCodec::AlignedByteVector& decoded = _decoded_scratch;
             try {
                 _ldpc.decode_frame(payload_llr, decoded);
             } catch (const std::exception& e) {
@@ -580,8 +681,12 @@ public:
         fftwf_execute(_ce_ifft_plan);
         float peak = 0.0f;
         double sum = 0.0;
+        const auto* __restrict__ ce = _ce_out.data();
+        #pragma omp simd simdlen(16) reduction(max:peak) reduction(+:sum)
         for (size_t i = 0; i < _cfg.fft_size; ++i) {
-            const float m = std::abs(_ce_out[i]);
+            const float re = ce[i].real();
+            const float im = ce[i].imag();
+            const float m = std::sqrt(re * re + im * im);
             peak = std::max(peak, m);
             sum += m;
         }
@@ -592,9 +697,38 @@ public:
             [this](double g) { if (_apply_gain) _apply_gain(g); });
     }
 
+    void _update_self_channel_debug(const AlignedVector& frame) {
+        if (!uplink_self_channel_debug_enabled(_link_cfg) ||
+            (!_self_channel_debug_sink && !_self_delay_debug_sink)) {
+            return;
+        }
+        const size_t link_sym_len = _link_cfg.fft_size + _link_cfg.cp_length;
+        const size_t local_tx_zc_start = _link_cfg.sync_pos * link_sym_len;
+        if (!_self_debug_estimator.estimate(
+                frame,
+                local_tx_zc_start,
+                0,
+                _link_zc_freq,
+                _self_h_est)) {
+            _self_h_est.clear();
+            _self_delay_spectrum.clear();
+            return;
+        }
+        if ((_self_debug_frame_counter++ % 4096) == 0) {
+            LOG_G_INFO() << "[UL-RX] self-channel debug: local BS ZC offset="
+                         << local_tx_zc_start
+                         << ", rx_frame_start_offset=0"
+                         << ", frame_period=" << frame.size();
+        }
+    }
+
     void _publish_debug_streams() {
         if (_channel_debug_sink) {
             _channel_debug_sink(AlignedVector(_h_est.begin(), _h_est.end()));
+        }
+
+        if (_self_channel_debug_sink && !_self_h_est.empty()) {
+            _self_channel_debug_sink(AlignedVector(_self_h_est.begin(), _self_h_est.end()));
         }
 
         const bool need_delay = static_cast<bool>(_delay_debug_sink);
@@ -613,6 +747,22 @@ public:
             _delay_debug_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
         }
 
+        const bool need_self_delay = static_cast<bool>(_self_delay_debug_sink) && !_self_h_est.empty();
+        if (need_self_delay) {
+            const size_t half = _link_cfg.fft_size / 2;
+            for (size_t i = 0; i < half; ++i) {
+                _ce_in[i] = _self_h_est[i + half];
+                _ce_in[i + half] = _self_h_est[i];
+            }
+            fftwf_execute(_ce_ifft_plan);
+            _self_delay_spectrum.resize(_link_cfg.fft_size);
+            const float scale = 1.0f / std::sqrt(static_cast<float>(_link_cfg.fft_size));
+            for (size_t i = 0; i < _link_cfg.fft_size; ++i) {
+                _self_delay_spectrum[i] = _ce_out[i] * scale;
+            }
+            _self_delay_debug_sink(AlignedVector(_self_delay_spectrum.begin(), _self_delay_spectrum.end()));
+        }
+
         constexpr uint32_t kConstellationStride = 8;
         if (_constellation_debug_sink && !_data_symbols.empty() &&
             ((_constellation_frame_counter++ % kConstellationStride) == 0)) {
@@ -626,16 +776,29 @@ public:
     const DuplexFrameLayout _duplex;
     const DataResourceGridLayout _layout;
     AlignedVector _zc_freq;
+    AlignedVector _link_zc_freq;
+    SelfZcChannelDebugEstimator _self_debug_estimator;
 
     AlignedVector _fft_in, _fft_out;
     fftwf_plan _fft_plan = nullptr;
     AlignedVector _ce_in, _ce_out;       // channel-estimate IFFT for AGC/debug delay peak
     AlignedVector _delay_spectrum;
+    AlignedVector _self_delay_spectrum;
     fftwf_plan _ce_ifft_plan = nullptr;
 
     AlignedVector _sync_freq_buf, _h_est, _h_inv;
+    AlignedVector _self_h_est;
     std::vector<AlignedVector> _data_symbols;
     std::vector<int> _payload_subcarrier_indices_flat;
+
+    // Channel-tracking / equalizer-mode state (honors channel_tracking_mode and
+    // equalizer_mode on the derived uplink config).
+    bool _track_enabled = false;
+    bool _use_mmse = false;
+    std::vector<int> _actual_subcarrier_indices;   // fft pos -> signed freq index
+    std::vector<int> _pilot_indices_buf;           // compute_pilot_phase_diff scratch
+    std::vector<float> _avg_phase_diff_buf;        // compute_pilot_phase_diff scratch
+    std::vector<float> _weights_buf;               // compute_pilot_phase_diff scratch
 
     const size_t _period_samples;
     const size_t _window_offset;
@@ -647,6 +810,8 @@ public:
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
     LDPCCodec::AlignedFloatVector _deint_scratch;
+    LDPCCodec::AlignedFloatVector _payload_llr_scratch;   // reused per-packet LDPC input
+    LDPCCodec::AlignedByteVector _decoded_scratch;        // reused per-packet LDPC output
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_out;
 
@@ -656,6 +821,8 @@ public:
     DebugVectorCallback _channel_debug_sink;
     DebugVectorCallback _delay_debug_sink;
     DebugVectorCallback _constellation_debug_sink;
+    DebugVectorCallback _self_channel_debug_sink;
+    DebugVectorCallback _self_delay_debug_sink;
 
     uhd::rx_streamer::sptr _rx_stream;
     std::atomic<int32_t> _dl_ul_timing_diff{0};
@@ -667,6 +834,7 @@ public:
     std::function<uint64_t()> _bs_frame_fn;
     std::atomic<uint64_t> _decoded_count{0};
     uint64_t _frame_count = 0;
+    uint64_t _self_debug_frame_counter = 0;
     uint32_t _constellation_frame_counter = 0;
     std::atomic<bool> _running{false};
     std::thread _rx_thread;

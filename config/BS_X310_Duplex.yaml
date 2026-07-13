@@ -1,3 +1,7 @@
+# ===== Radio backend =====
+radio:
+  radio_backend: uhd  # Radio I/O backend; uhd = real USRP, sim = channel simulator
+
 # ===== OFDM Frame =====
 ofdm_frame:
   fft_size: 1024  # FFT size (subcarrier count)
@@ -15,7 +19,7 @@ ofdm_frame:
 
 # ===== CUDA =====
 cuda:
-  cuda_mod_pipeline_slots: 2  # Number of CUDA modulation pipeline slots
+  cuda_mod_pipeline_slots: 3  # Number of CUDA modulation pipeline slots
 
 # ===== Sensing =====
 sensing:
@@ -23,30 +27,7 @@ sensing:
   rx_device_args: ""  # Default sensing RX args (empty = use device_args)
   rx_clock_source: ""  # Sensing RX clock source override (optional)
   rx_time_source: ""  # Sensing RX time source override (optional)
-  sensing_rx_channel_count: 2  # Number of sensing RX channels (0 disables sensing RX)
-  sensing_rx_channels:
-    - usrp_channel: 0  # USRP RX channel index for this sensing path
-      device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # Per-channel USRP args override (optional)
-      clock_source: external  # Per-channel clock source override (optional)
-      time_source: internal  # Per-channel time source override (optional)
-      wire_format: ""  # Per-channel wire format override (optional)
-      rx_gain: 30  # Per-channel RX gain (dB)
-      alignment: 103  # Per-channel timing alignment offset (samples)
-      rx_antenna: RX2  # RX antenna port (e.g. RX1/RX2/TX/RX)
-      enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
-      rx_cpu_core: 4  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
-      processing_cpu_core: 5  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
-    - usrp_channel: 1  # USRP RX channel index for this sensing path
-      device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # Per-channel USRP args override (optional)
-      clock_source: external  # Per-channel clock source override (optional)
-      time_source: internal  # Per-channel time source override (optional)
-      wire_format: ""  # Per-channel wire format override (optional)
-      rx_gain: 30  # Per-channel RX gain (dB)
-      alignment: 103  # Per-channel timing alignment offset (samples)
-      rx_antenna: RX2  # RX antenna port (e.g. RX1/RX2/TX/RX)
-      enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
-      rx_cpu_core: 6  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
-      processing_cpu_core: 7  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
+  sensing_rx_channel_count: 0  # Number of sensing RX channels (0 disables sensing RX)
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
   sensing_output_mode: dense  # dense or compact_mask
@@ -61,19 +42,19 @@ rf_sampling:
 
 # ===== USRP Device Args =====
 usrp_device:
-  device_args: ""  # Shared fallback args
+  device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # Shared fallback args
 
 # ===== Clock / Time Sources =====
 clock_time:
   clock_source: external  # Global clock source; internal/external/gpsdo
-  time_source: external  # Global time source; empty follows clock_source
+  time_source: internal  # Global time source; empty follows clock_source
 
 # ===== Downlink =====
 downlink:
-  center_freq: 3100000000  # RF center frequency (Hz)
-  tx_gain: 90  # TX gain (dB)
+  center_freq: 2400000000  # RF center frequency (Hz)
+  tx_gain: 30  # TX gain (dB)
   tx_channel: 0  # TX channel index on USRP
-  tx_device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # TX-specific args (empty = use device_args)
+  tx_device_args: ""  # TX-specific args (empty = use device_args)
   tx_clock_source: ""  # TX clock source override (optional)
   tx_time_source: ""  # TX time source override (optional)
   wire_format_tx: sc16  # TX wire format; sc16/sc8
@@ -85,21 +66,39 @@ downlink_pipeline:
   tx_circular_buffer_size: 32  # BS frame circular buffer capacity
   data_packet_buffer_size: 32  # Encoded packet buffer capacity
 uplink:
+  enable_uplink: true  # Enable UE-to-BS uplink / duplex path
+  duplex_mode: tdd  # Uplink carrier/window scheme (tdd = shared downlink carrier with a symbol window, fdd = separate carrier with continuous full-frame uplink)
   symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
   symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
   guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
+  debug_self_channel: true  # Estimate BS self-TX leakage channel from the uplink RX window using current DUTI
+  equalizer_mode: mmse  # Communication equalizer inverse mode
+  channel_tracking_mode: disabled  # Per-symbol comb-pilot tracking mode
+  rx_gain: 10  # Uplink RX gain (dB)
   uplink_rx_channel: 0  # Uplink RX channel index on USRP
   uplink_rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
   uplink_rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
   uplink_rx_clock_source: ""  # Uplink RX clock source override (optional)
   uplink_rx_time_source: ""  # Uplink RX time source override (optional)
+  bs_dl_ul_timing_diff: 0  # BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
+
+# ===== Measurement mode =====
+measurement:
+  measurement_enable: false  # Enable internal PRBS measurement traffic
 
 # ===== Network =====
 network_output:
+  self_channel_ip: 0.0.0.0  # BS self-channel ZMQ listen IP
+  self_channel_port: 12360  # BS self-channel output port
+  self_pdf_ip: 0.0.0.0  # BS self delay-spectrum ZMQ listen IP
+  self_pdf_port: 12361  # BS self delay-spectrum output port
   udp_input_ip: 0.0.0.0  # BS downlink payload UDP bind IP
   udp_input_port: 50000  # BS downlink payload UDP bind port
+  udp_output_ip: 127.0.0.1  # BS decoded uplink payload UDP destination IP
+  udp_output_port: 50003  # BS decoded uplink payload UDP destination port
   mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
   mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
+  mono_sensing_output_enabled: false  # Enable monostatic sensing ZMQ output
   uplink_channel_ip: 0.0.0.0  # Uplink channel-estimate ZMQ listen IP
   uplink_channel_port: 12358  # Uplink channel-estimate output port
   uplink_pdf_ip: 0.0.0.0  # Uplink delay-spectrum ZMQ listen IP
@@ -111,8 +110,8 @@ network_output:
 # ===== CPU Cores =====
 cpu_cores:
   downlink_cpu_cores: [1, 2, 3]  # BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]
-  uplink_cpu_cores: []  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
-  main_cpu_core: 8  # Main-thread CPU core (-1 disables explicit binding)
+  uplink_cpu_cores: [-1, 9, 10]  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
+  main_cpu_core: 11  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====
 runtime:

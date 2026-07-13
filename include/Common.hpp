@@ -249,9 +249,9 @@ struct SimConfig {
  * TDD: uplink shares the downlink carrier and is time-multiplexed into a
  *      contiguous range of OFDM symbols within each frame, separated from the
  *      downlink by an optional guard interval (both measured in OFDM symbols).
- * FDD: uplink occupies a separate carrier (`ul_center_freq`) and is transmitted
- *      continuously, simultaneously with the downlink. Uplink OFDM-symbol
- *      boundaries remain time-aligned to the downlink frame grid.
+ * FDD: uplink occupies a separate carrier (`ul_center_freq`) and transmits a
+ *      continuous full-frame uplink. TDD ignores `ul_center_freq` and uses the
+ *      downlink carrier.
  */
 enum class DuplexMode : uint8_t {
     TDD = 0,
@@ -333,7 +333,7 @@ struct DuplexConfig {
     size_t ul_symbol_start = 90;    // TDD: first uplink OFDM symbol within a frame
     size_t ul_symbol_count = 10;    // TDD: number of uplink symbols (0 => uplink disabled)
     size_t ul_guard_symbols = 1;    // TDD: guard symbols at the DL->UL boundary (within the UL range)
-    double ul_center_freq = 0.0;    // FDD: uplink carrier frequency in Hz
+    double ul_center_freq = 2.5e9;  // FDD: uplink carrier frequency in Hz; TDD ignored
 };
 
 /**
@@ -398,6 +398,8 @@ inline constexpr const char* kSensingOutputModeDense = "dense";
 inline constexpr const char* kSensingOutputModeCompactMask = "compact_mask";
 inline constexpr const char* kSensingOnWireFormatCf32 = "cf32";
 inline constexpr const char* kSensingOnWireFormatCf16 = "cf16";
+inline constexpr const char* kCudaLdpcDecoderBackendGpu = "gpu";
+inline constexpr const char* kCudaLdpcDecoderBackendCpu = "cpu";
 
 enum class SensingOnWireFormat : uint32_t {
     ComplexFloat32 = 0,
@@ -868,6 +870,10 @@ struct Config {
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
     size_t cuda_mod_pipeline_slots = 2;   // Number of CUDA mod pipeline slots
     size_t cuda_demod_pipeline_slots = 3; // Number of CUDA demod pipeline slots
+    std::string cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu; // CUDA demod LDPC backend: gpu/cpu
+    size_t cuda_ldpc_worker_buffers = 3;  // Number of CUDA LDPC async worker batch buffers
+    size_t cuda_ldpc_cross_frame_flush_frames = 2; // Max frames to accumulate before CUDA LDPC batch decode
+    double cuda_ldpc_cross_frame_flush_us = 1000.0; // Max CUDA LDPC cross-frame batch wait time
     size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
     size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
     size_t sync_pos = 1;               // Synchronization symbol position
@@ -948,6 +954,7 @@ struct Config {
     int32_t bs_dl_ul_timing_diff = 63; // BS: uplink-RX window offset relative to the TX frame anchor (samples)
     int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
     std::string uplink_idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
+    bool uplink_debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
     // UE uplink payload UDP input (mirrors udp_input_* on the BS downlink).
     std::string ul_udp_input_ip = "0.0.0.0";
     int ul_udp_input_port = 50002;
@@ -969,6 +976,10 @@ struct Config {
     int uplink_pdf_port = 12359;
     std::string uplink_constellation_ip = "0.0.0.0";
     int uplink_constellation_port = 12356;
+    std::string uplink_self_channel_ip = "0.0.0.0";
+    int uplink_self_channel_port = 12360;
+    std::string uplink_self_pdf_ip = "0.0.0.0";
+    int uplink_self_pdf_port = 12361;
     std::string channel_ip = "0.0.0.0";
     int channel_port = 12348;
     std::string pdf_ip = "0.0.0.0";
@@ -990,6 +1001,7 @@ struct Config {
     std::string rx_clock_source = "";     // Default RX clock source override
     std::string rx_time_source = "";      // Default RX time source override
     std::string wire_format_tx = "sc16";
+    size_t uplink_rx_channel = 0;          // BS uplink RX channel index
     std::string uplink_rx_wire_format = "sc16";   // BS uplink RX wire format
     std::string sensing_rx_wire_format = "sc16";  // BS sensing RX default wire format
     std::string downlink_rx_wire_format = "sc16"; // UE downlink RX wire format
@@ -1051,6 +1063,10 @@ struct Config {
         return 2 * samples_per_frame(); 
     }
 };
+
+inline bool uplink_self_channel_debug_enabled(const Config& cfg) {
+    return cfg.uplink_debug_self_channel && cfg.duplex.mode != DuplexMode::FDD;
+}
 
 inline bool sec_sync_symbol_enabled(const Config& cfg) {
     return cfg.enable_sec_sync_symbol;
@@ -1470,6 +1486,29 @@ inline SensingOnWireFormat parse_sensing_on_wire_format_string(const std::string
         return SensingOnWireFormat::ComplexFloat16;
     }
     return SensingOnWireFormat::ComplexFloat32;
+}
+
+inline std::string normalize_cuda_ldpc_decoder_backend_string(std::string backend) {
+    std::transform(backend.begin(), backend.end(), backend.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (backend.empty()) {
+        return kCudaLdpcDecoderBackendGpu;
+    }
+    if (backend == kCudaLdpcDecoderBackendGpu || backend == kCudaLdpcDecoderBackendCpu) {
+        return backend;
+    }
+    throw std::runtime_error(
+        "Invalid cuda_ldpc_decoder_backend='" + backend +
+        "'. Supported values: gpu, cpu.");
+}
+
+inline bool cuda_ldpc_decoder_backend_is_cpu(const Config& cfg) {
+    return cfg.cuda_ldpc_decoder_backend == kCudaLdpcDecoderBackendCpu;
+}
+
+inline bool cuda_ldpc_decoder_backend_is_gpu(const Config& cfg) {
+    return cfg.cuda_ldpc_decoder_backend == kCudaLdpcDecoderBackendGpu;
 }
 
 inline size_t sensing_on_wire_complex_bytes(SensingOnWireFormat format) {
@@ -2271,113 +2310,6 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::EndMap;
 }
 
-inline void expose_section_config_keys(
-    YAML::Node& config,
-    const char* section_key,
-    std::initializer_list<const char*> keys) {
-    YAML::Node section = config[section_key];
-    if (!section || !section.IsMap()) {
-        return;
-    }
-    for (const char* key : keys) {
-        if (!config[key] && section[key]) {
-            config[key] = section[key];
-        }
-    }
-}
-
-inline void expose_editor_sectioned_config(YAML::Node& config) {
-    expose_section_config_keys(config, "radio", {
-        "radio_backend",
-    });
-    expose_section_config_keys(config, "ofdm_frame", {
-        "fft_size", "cp_length", "sync_pos", "enable_sec_sync_symbol",
-        "enable_cfo_training_sequence", "cfo_training_period_samples",
-        "num_symbols", "sensing_symbol_num", "frame_queue_size", "zc_root",
-        "pilot_positions", "midframe_pilot_symbols", "midframe_pilot_seed",
-    });
-    expose_section_config_keys(config, "cuda", {
-        "cuda_mod_pipeline_slots", "cuda_demod_pipeline_slots",
-        "cuda_ldpc_decoder_backend", "cuda_ldpc_worker_buffers",
-        "cuda_ldpc_cross_frame_flush_frames", "cuda_ldpc_cross_frame_flush_us",
-    });
-    expose_section_config_keys(config, "sensing", {
-        "enable_bi_sensing", "sensing_on_wire_format", "range_fft_size",
-        "doppler_fft_size", "sensing_output_mode",
-        "enable_backend_sensing_processing", "sensing_view_range_bins",
-        "sensing_view_doppler_bins", "rx_device_args", "rx_clock_source",
-        "rx_time_source", "sensing_rx_wire_format", "sensing_rx_channel_count",
-        "sensing_rx_channels", "paired_frame_queue_size",
-    });
-    expose_section_config_keys(config, "rf_sampling", {
-        "sample_rate", "bandwidth", "center_freq", "rx_gain", "rx_agc_enable",
-        "rx_agc_low_threshold_db", "rx_agc_high_threshold_db",
-        "rx_agc_max_step_db", "rx_agc_update_frames",
-    });
-    expose_section_config_keys(config, "usrp_device", {
-        "device_args", "clock_source",
-    });
-    expose_section_config_keys(config, "clock_time", {
-        "clock_source", "time_source",
-    });
-    expose_section_config_keys(config, "downlink", {
-        "tx_gain", "tx_channel", "tx_device_args", "tx_clock_source",
-        "tx_time_source", "wire_format_tx", "rx_channel",
-        "downlink_rx_wire_format", "equalizer_mode", "channel_tracking_mode",
-        "equalizer_mag_floor", "channel_tracking_min_pilot_snr",
-        "downlink_cpu_cores",
-    });
-    expose_section_config_keys(config, "downlink_pipeline", {
-        "tx_circular_buffer_size", "data_packet_buffer_size",
-        "downlink_cpu_cores",
-    });
-    expose_section_config_keys(config, "uplink", {
-        "enable_uplink", "duplex_mode", "uplink_idle_waveform",
-        "bs_dl_ul_timing_diff", "ue_timing_advance", "equalizer_mode",
-        "channel_tracking_mode", "equalizer_mag_floor",
-        "channel_tracking_min_pilot_snr", "rx_gain", "uplink_rx_channel",
-        "uplink_rx_device_args", "uplink_rx_wire_format",
-        "uplink_rx_clock_source", "uplink_rx_time_source", "tx_gain",
-        "tx_channel", "wire_format_tx", "uplink_cpu_cores",
-    });
-    expose_section_config_keys(config, "sync_tracking", {
-        "sync_queue_size", "sync_cfo_alias_search_range_hz", "reset_hold_s",
-        "software_sync", "predictive_delay", "hardware_sync",
-        "hardware_sync_tty", "ocxo_pi_kp_fast", "ocxo_pi_ki_fast",
-        "ocxo_pi_kp_slow", "ocxo_pi_ki_slow",
-        "ocxo_pi_switch_abs_error_ppm", "ocxo_pi_switch_hold_s",
-        "ocxo_pi_max_step_fast_ppm", "ocxo_pi_max_step_slow_ppm",
-        "akf_enable", "akf_bootstrap_frames", "akf_innovation_window",
-        "akf_max_lag", "akf_adapt_interval", "akf_gate_sigma",
-        "akf_tikhonov_lambda", "akf_update_smooth", "akf_q_wf_min",
-        "akf_q_wf_max", "akf_q_rw_min", "akf_q_rw_max", "akf_r_min",
-        "akf_r_max", "desired_peak_pos", "sensing_symbol_stride",
-    });
-    expose_section_config_keys(config, "measurement", {
-        "measurement_enable", "measurement_mode", "measurement_run_id",
-        "measurement_output_dir", "measurement_payload_bytes",
-        "measurement_prbs_seed", "measurement_packets_per_point",
-        "measurement_max_packets_per_frame",
-    });
-    expose_section_config_keys(config, "network_output", {
-        "udp_input_ip", "udp_input_port", "mono_sensing_ip",
-        "mono_sensing_port", "mono_sensing_output_enabled",
-        "uplink_channel_ip", "uplink_channel_port", "uplink_pdf_ip",
-        "uplink_pdf_port", "uplink_constellation_ip",
-        "uplink_constellation_port", "bi_sensing_output_enabled",
-        "bi_sensing_ip", "bi_sensing_port", "control_port", "channel_ip",
-        "channel_port", "pdf_ip", "pdf_port", "constellation_ip",
-        "constellation_port", "udp_output_ip", "udp_output_port",
-    });
-    expose_section_config_keys(config, "runtime", {
-        "default_out_ip", "vofa_debug_ip", "vofa_debug_port",
-        "main_cpu_core", "profiling_modules",
-    });
-    expose_section_config_keys(config, "resource_preview", {
-        "data_resource_blocks", "sensing_mask_blocks",
-    });
-}
-
 /**
  * @brief Parse the radio_backend + simulation block from a YAML node.
  *
@@ -2385,7 +2317,9 @@ inline void expose_editor_sectioned_config(YAML::Node& config) {
  * struct defaults so existing (hardware) configs are unaffected.
  */
 inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
-    if (config["radio_backend"]) cfg.radio_backend = config["radio_backend"].as<std::string>();
+    if (config["radio"] && config["radio"].IsMap() && config["radio"]["radio_backend"]) {
+        cfg.radio_backend = config["radio"]["radio_backend"].as<std::string>();
+    }
     if (config["simulation"] && config["simulation"].IsMap()) {
         const YAML::Node& sim_node = config["simulation"];
         SimConfig& sim = cfg.simulation;
@@ -2446,40 +2380,86 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
 //     symbol_start: <size_t>     # TDD: first uplink OFDM symbol
 //     symbol_count: <size_t>     # TDD: uplink symbol count (0 => uplink off)
 //     guard_symbols: <size_t>    # TDD: guard symbols at the DL->UL boundary
-//     center_freq: <double>      # FDD: uplink carrier (Hz)
+//     center_freq: <double>      # FDD only: uplink carrier (Hz)
 //   bs_dl_ul_timing_diff: <int>  # BS startup default (samples)
 //   ue_timing_advance: <int>     # UE startup default (samples)
 inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
-    if (config["enable_uplink"]) {
-        cfg.enable_uplink = config["enable_uplink"].as<bool>();
+    const YAML::Node ul = config["uplink"] && config["uplink"].IsMap()
+        ? config["uplink"]
+        : YAML::Node();
+    if (ul["enable_uplink"]) {
+        cfg.enable_uplink = ul["enable_uplink"].as<bool>();
     }
-    if (config["duplex_mode"]) {
-        const std::string raw = config["duplex_mode"].as<std::string>();
+    if (ul["duplex_mode"]) {
+        const std::string raw = ul["duplex_mode"].as<std::string>();
         DuplexMode mode = cfg.duplex.mode;
         if (parse_duplex_mode_string(raw, mode)) {
             cfg.duplex.mode = mode;
         }
     }
-    if (config["uplink"] && config["uplink"].IsMap()) {
-        const YAML::Node& ul = config["uplink"];
+    if (ul) {
         if (ul["symbol_start"]) cfg.duplex.ul_symbol_start = ul["symbol_start"].as<size_t>();
         if (ul["symbol_count"]) cfg.duplex.ul_symbol_count = ul["symbol_count"].as<size_t>();
         if (ul["guard_symbols"]) cfg.duplex.ul_guard_symbols = ul["guard_symbols"].as<size_t>();
-        if (ul["center_freq"]) cfg.duplex.ul_center_freq = ul["center_freq"].as<double>();
-        if (ul["udp_input_ip"]) cfg.ul_udp_input_ip = ul["udp_input_ip"].as<std::string>();
-        if (ul["udp_input_port"]) cfg.ul_udp_input_port = ul["udp_input_port"].as<int>();
-        if (ul["udp_output_ip"]) cfg.ul_udp_output_ip = ul["udp_output_ip"].as<std::string>();
-        if (ul["udp_output_port"]) cfg.ul_udp_output_port = ul["udp_output_port"].as<int>();
+        if (cfg.duplex.mode == DuplexMode::FDD && ul["center_freq"]) {
+            cfg.duplex.ul_center_freq = ul["center_freq"].as<double>();
+        }
+        if (ul["debug_self_channel"]) cfg.uplink_debug_self_channel = ul["debug_self_channel"].as<bool>();
+        if (ul["uplink_debug_self_channel"]) {
+            cfg.uplink_debug_self_channel = ul["uplink_debug_self_channel"].as<bool>();
+        }
+        if (ul["self_channel_ip"]) cfg.uplink_self_channel_ip = ul["self_channel_ip"].as<std::string>();
+        if (ul["self_channel_port"]) cfg.uplink_self_channel_port = ul["self_channel_port"].as<int>();
+        if (ul["self_pdf_ip"]) cfg.uplink_self_pdf_ip = ul["self_pdf_ip"].as<std::string>();
+        if (ul["self_pdf_port"]) cfg.uplink_self_pdf_port = ul["self_pdf_port"].as<int>();
+        if (ul["uplink_self_channel_ip"]) {
+            cfg.uplink_self_channel_ip = ul["uplink_self_channel_ip"].as<std::string>();
+        }
+        if (ul["uplink_self_channel_port"]) {
+            cfg.uplink_self_channel_port = ul["uplink_self_channel_port"].as<int>();
+        }
+        if (ul["uplink_self_pdf_ip"]) cfg.uplink_self_pdf_ip = ul["uplink_self_pdf_ip"].as<std::string>();
+        if (ul["uplink_self_pdf_port"]) cfg.uplink_self_pdf_port = ul["uplink_self_pdf_port"].as<int>();
     }
-    if (config["bs_dl_ul_timing_diff"]) {
-        cfg.bs_dl_ul_timing_diff = config["bs_dl_ul_timing_diff"].as<int32_t>();
+    if (cfg.duplex.mode != DuplexMode::FDD) {
+        cfg.duplex.ul_center_freq = 0.0;
     }
-    if (config["ue_timing_advance"]) {
-        cfg.ue_timing_advance = config["ue_timing_advance"].as<int32_t>();
+    if (ul["bs_dl_ul_timing_diff"]) {
+        cfg.bs_dl_ul_timing_diff = ul["bs_dl_ul_timing_diff"].as<int32_t>();
     }
-    if (config["uplink_idle_waveform"]) {
+    if (ul["ue_timing_advance"]) {
+        cfg.ue_timing_advance = ul["ue_timing_advance"].as<int32_t>();
+    }
+    if (ul["uplink_idle_waveform"]) {
         cfg.uplink_idle_waveform = normalize_uplink_idle_waveform_string(
-            config["uplink_idle_waveform"].as<std::string>());
+            ul["uplink_idle_waveform"].as<std::string>());
+    }
+    const YAML::Node net = config["network_output"] && config["network_output"].IsMap()
+        ? config["network_output"]
+        : YAML::Node();
+    if (net["uplink_self_channel_ip"]) {
+        cfg.uplink_self_channel_ip = net["uplink_self_channel_ip"].as<std::string>();
+    }
+    if (net["uplink_self_channel_port"]) {
+        cfg.uplink_self_channel_port = net["uplink_self_channel_port"].as<int>();
+    }
+    if (net["uplink_self_pdf_ip"]) {
+        cfg.uplink_self_pdf_ip = net["uplink_self_pdf_ip"].as<std::string>();
+    }
+    if (net["uplink_self_pdf_port"]) {
+        cfg.uplink_self_pdf_port = net["uplink_self_pdf_port"].as<int>();
+    }
+    if (net["self_channel_ip"]) {
+        cfg.uplink_self_channel_ip = net["self_channel_ip"].as<std::string>();
+    }
+    if (net["self_channel_port"]) {
+        cfg.uplink_self_channel_port = net["self_channel_port"].as<int>();
+    }
+    if (net["self_pdf_ip"]) {
+        cfg.uplink_self_pdf_ip = net["self_pdf_ip"].as<std::string>();
+    }
+    if (net["self_pdf_port"]) {
+        cfg.uplink_self_pdf_port = net["self_pdf_port"].as<int>();
     }
 }
 
@@ -2697,6 +2677,35 @@ inline void prefault_thread_stack(size_t bytes = 512 * 1024) {
 }
 
 namespace config_detail {
+inline YAML::Node section_node(const YAML::Node& config, const char* key) {
+    const YAML::Node section = config[key];
+    return (section && section.IsMap()) ? section : YAML::Node();
+}
+
+inline bool reject_top_level_config_values(const YAML::Node& config, const char* context_name) {
+    if (!config || !config.IsMap()) {
+        LOG_G_ERROR() << context_name << " root must be a YAML mapping of section maps.";
+        return false;
+    }
+    for (auto it = config.begin(); it != config.end(); ++it) {
+        const std::string key = it->first.as<std::string>();
+        const YAML::Node value = it->second;
+        if (!value.IsMap()) {
+            LOG_G_ERROR() << context_name << " top-level key '" << key
+                          << "' is no longer supported. Move settings under their section.";
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename T>
+inline void load_value(const YAML::Node& section, const char* key, T& value) {
+    if (section && section[key]) {
+        value = section[key].as<T>();
+    }
+}
+
 inline bool reject_legacy_key(const YAML::Node& config, const char* old_key, const char* new_key) {
     if (config[old_key]) {
         LOG_G_ERROR() << "Legacy YAML key '" << old_key
@@ -2866,6 +2875,10 @@ inline Config make_default_bs_config() {
     cfg.uplink_pdf_port = 12359;
     cfg.uplink_constellation_ip = "0.0.0.0";
     cfg.uplink_constellation_port = 12356;
+    cfg.uplink_self_channel_ip = "0.0.0.0";
+    cfg.uplink_self_channel_port = 12360;
+    cfg.uplink_self_pdf_ip = "0.0.0.0";
+    cfg.uplink_self_pdf_port = 12361;
     cfg.sensing_rx_channel_count = 1;
     cfg.sensing_symbol_stride = 20;
     cfg.tx_circular_buffer_size = 8;
@@ -2886,222 +2899,77 @@ inline Config make_default_bs_config() {
     return cfg;
 }
 
-inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepath) {
-    YAML::Emitter out;
-    out << YAML::BeginMap;
-    out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
-    out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
-    out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
-    out << YAML::Key << "sensing_view_range_bins" << YAML::Value << cfg.sensing_view_range_bins;
-    out << YAML::Key << "sensing_view_doppler_bins" << YAML::Value << cfg.sensing_view_doppler_bins;
-    out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
-    out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
-    out << YAML::Key << "enable_sec_sync_symbol" << YAML::Value << cfg.enable_sec_sync_symbol;
-    out << YAML::Key << "enable_cfo_training_sequence" << YAML::Value
-        << cfg.enable_cfo_training_sequence;
-    out << YAML::Key << "cfo_training_period_samples" << YAML::Value
-        << cfg.cfo_training_period_samples;
-    out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
-    out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
-    out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
-    out << YAML::Key << "tx_gain" << YAML::Value << cfg.tx_gain;
-    out << YAML::Key << "tx_channel" << YAML::Value << cfg.tx_channel;
-    out << YAML::Key << "rx_gain" << YAML::Value << cfg.rx_gain;
-    out << YAML::Key << "rx_channel" << YAML::Value << cfg.rx_channel;
-    out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
-    out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
-    out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
-    out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
-    out << YAML::Key << "sensing_on_wire_format" << YAML::Value
-        << sensing_on_wire_format_to_string(cfg.sensing_on_wire_format);
-    out << YAML::Key << "enable_backend_sensing_processing" << YAML::Value
-        << cfg.enable_backend_sensing_processing;
-    out << YAML::Key << "cuda_mod_pipeline_slots" << YAML::Value << cfg.cuda_mod_pipeline_slots;
-    out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
-    out << YAML::Key << "tx_device_args" << YAML::Value << cfg.tx_device_args;
-    out << YAML::Key << "rx_device_args" << YAML::Value << cfg.rx_device_args;
-    out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
-    out << YAML::Key << "time_source" << YAML::Value << cfg.timesource;
-    out << YAML::Key << "tx_clock_source" << YAML::Value << cfg.tx_clock_source;
-    out << YAML::Key << "tx_time_source" << YAML::Value << cfg.tx_time_source;
-    out << YAML::Key << "rx_clock_source" << YAML::Value << cfg.rx_clock_source;
-    out << YAML::Key << "rx_time_source" << YAML::Value << cfg.rx_time_source;
-    out << YAML::Key << "control_port" << YAML::Value << cfg.control_port;
-    out << YAML::Key << "wire_format_tx" << YAML::Value << cfg.wire_format_tx;
-    out << YAML::Key << "uplink_rx_wire_format" << YAML::Value << cfg.uplink_rx_wire_format;
-    out << YAML::Key << "sensing_rx_wire_format" << YAML::Value << cfg.sensing_rx_wire_format;
-    out << YAML::Key << "udp_input_ip" << YAML::Value << cfg.udp_input_ip;
-    out << YAML::Key << "udp_input_port" << YAML::Value << cfg.udp_input_port;
-    out << YAML::Key << "mono_sensing_output_enabled" << YAML::Value << cfg.mono_sensing_output_enabled;
-    out << YAML::Key << "mono_sensing_ip" << YAML::Value << cfg.mono_sensing_ip;
-    out << YAML::Key << "mono_sensing_port" << YAML::Value << cfg.mono_sensing_port;
-    out << YAML::Key << "uplink_channel_ip" << YAML::Value << cfg.uplink_channel_ip;
-    out << YAML::Key << "uplink_channel_port" << YAML::Value << cfg.uplink_channel_port;
-    out << YAML::Key << "uplink_pdf_ip" << YAML::Value << cfg.uplink_pdf_ip;
-    out << YAML::Key << "uplink_pdf_port" << YAML::Value << cfg.uplink_pdf_port;
-    out << YAML::Key << "uplink_constellation_ip" << YAML::Value << cfg.uplink_constellation_ip;
-    out << YAML::Key << "uplink_constellation_port" << YAML::Value << cfg.uplink_constellation_port;
-    out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
-    out << YAML::Key << "sensing_rx_channel_count" << YAML::Value << cfg.sensing_rx_channel_count;
-    out << YAML::Key << "sensing_rx_channels" << YAML::Value << YAML::BeginSeq;
-    for (const auto& ch : cfg.sensing_rx_channels) {
-        out << YAML::BeginMap;
-        out << YAML::Key << "usrp_channel" << YAML::Value << ch.usrp_channel;
-        out << YAML::Key << "device_args" << YAML::Value << ch.device_args;
-        out << YAML::Key << "clock_source" << YAML::Value << ch.clock_source;
-        out << YAML::Key << "time_source" << YAML::Value << ch.time_source;
-        out << YAML::Key << "wire_format" << YAML::Value << ch.wire_format;
-        out << YAML::Key << "rx_gain" << YAML::Value << ch.rx_gain;
-        out << YAML::Key << "alignment" << YAML::Value << ch.alignment;
-        out << YAML::Key << "rx_antenna" << YAML::Value << ch.rx_antenna;
-        out << YAML::Key << "enable_system_delay_estimation" << YAML::Value << ch.enable_system_delay_estimation;
-        out << YAML::Key << "enable_sensing_output" << YAML::Value << ch.enable_sensing_output;
-        out << YAML::Key << "rx_cpu_core" << YAML::Value << ch.rx_cpu_core;
-        out << YAML::Key << "processing_cpu_core" << YAML::Value << ch.processing_cpu_core;
-        out << YAML::EndMap;
-    }
-    out << YAML::EndSeq;
-    emit_simulation_config(out, cfg);
-    out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
-    out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
-    out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
-    out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
-    out << YAML::Key << "measurement_output_dir" << YAML::Value << cfg.measurement_output_dir;
-    out << YAML::Key << "measurement_payload_bytes" << YAML::Value << cfg.measurement_payload_bytes;
-    out << YAML::Key << "measurement_prbs_seed" << YAML::Value << cfg.measurement_prbs_seed;
-    out << YAML::Key << "measurement_packets_per_point" << YAML::Value << cfg.measurement_packets_per_point;
-    out << YAML::Key << "measurement_max_packets_per_frame" << YAML::Value << cfg.measurement_max_packets_per_frame;
-    out << YAML::Key << "tx_circular_buffer_size" << YAML::Value << cfg.tx_circular_buffer_size;
-    out << YAML::Key << "data_packet_buffer_size" << YAML::Value << cfg.data_packet_buffer_size;
-    out << YAML::Key << "paired_frame_queue_size" << YAML::Value << cfg.paired_frame_queue_size;
-    out << YAML::Key << "downlink_cpu_cores" << YAML::Value << YAML::Flow << cfg.downlink_cpu_cores;
-    out << YAML::Key << "uplink_cpu_cores" << YAML::Value << YAML::Flow << cfg.uplink_cpu_cores;
-    out << YAML::Key << "main_cpu_core" << YAML::Value << cfg.main_cpu_core;
-    out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
-    out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
-    out << YAML::Key << "midframe_pilot_symbols" << YAML::Value << YAML::Flow
-        << cfg.midframe_pilot_symbols;
-    out << YAML::Key << "midframe_pilot_seed" << YAML::Value << cfg.midframe_pilot_seed;
-    config_detail::emit_data_resource_blocks_yaml(out, cfg);
-    config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
-    out << YAML::EndMap;
-
-    std::ofstream fout(filepath);
-    if (!fout) {
-        LOG_G_ERROR() << "Error: Cannot write to config file: " << filepath;
-        return false;
-    }
-    fout << out.c_str();
-    fout.close();
-    return true;
-}
-
 inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
     }
     try {
         YAML::Node config = YAML::LoadFile(filepath);
-        expose_editor_sectioned_config(config);
-        const bool has_range_fft_size = static_cast<bool>(config["range_fft_size"]);
-        if (!config_detail::reject_legacy_key(config, "mod_udp_ip", "udp_input_ip")) return false;
-        if (!config_detail::reject_legacy_key(config, "mod_udp_port", "udp_input_port")) return false;
-        if (!config_detail::reject_legacy_key(config, "sensing_ip", "mono_sensing_ip")) return false;
-        if (!config_detail::reject_legacy_key(config, "sensing_port", "mono_sensing_port")) return false;
+        if (!config_detail::reject_top_level_config_values(config, "BS config")) {
+            return false;
+        }
+        const YAML::Node ofdm = config_detail::section_node(config, "ofdm_frame");
+        const YAML::Node cuda = config_detail::section_node(config, "cuda");
+        const YAML::Node sensing = config_detail::section_node(config, "sensing");
+        const YAML::Node rf = config_detail::section_node(config, "rf_sampling");
+        const YAML::Node usrp = config_detail::section_node(config, "usrp_device");
+        const YAML::Node clock = config_detail::section_node(config, "clock_time");
+        const YAML::Node downlink = config_detail::section_node(config, "downlink");
+        const YAML::Node downlink_pipeline = config_detail::section_node(config, "downlink_pipeline");
+        const YAML::Node uplink = config_detail::section_node(config, "uplink");
+        const YAML::Node measurement = config_detail::section_node(config, "measurement");
+        const YAML::Node network = config_detail::section_node(config, "network_output");
+        const YAML::Node cpu = config_detail::section_node(config, "cpu_cores");
+        const YAML::Node runtime = config_detail::section_node(config, "runtime");
+        const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
 
-        if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
-        if (has_range_fft_size) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
-        if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
-        if (config["sensing_view_range_bins"]) {
-            cfg.sensing_view_range_bins = config["sensing_view_range_bins"].as<size_t>();
+        config_detail::load_value(ofdm, "fft_size", cfg.fft_size);
+        config_detail::load_value(ofdm, "cp_length", cfg.cp_length);
+        config_detail::load_value(ofdm, "sync_pos", cfg.sync_pos);
+        config_detail::load_value(ofdm, "enable_sec_sync_symbol", cfg.enable_sec_sync_symbol);
+        config_detail::load_value(
+            ofdm, "enable_cfo_training_sequence", cfg.enable_cfo_training_sequence);
+        config_detail::load_value(
+            ofdm, "cfo_training_period_samples", cfg.cfo_training_period_samples);
+        config_detail::load_value(ofdm, "zc_root", cfg.zc_root);
+        config_detail::load_value(ofdm, "num_symbols", cfg.num_symbols);
+        config_detail::load_value(ofdm, "sensing_symbol_num", cfg.sensing_symbol_num);
+        if (ofdm["pilot_positions"]) {
+            cfg.pilot_positions = ofdm["pilot_positions"].as<std::vector<size_t>>();
         }
-        if (config["sensing_view_doppler_bins"]) {
-            cfg.sensing_view_doppler_bins = config["sensing_view_doppler_bins"].as<size_t>();
+        if (ofdm["midframe_pilot_symbols"]) {
+            cfg.midframe_pilot_symbols =
+                ofdm["midframe_pilot_symbols"].as<std::vector<size_t>>();
         }
-        if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
-        if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
-        if (config["enable_sec_sync_symbol"]) {
-            cfg.enable_sec_sync_symbol = config["enable_sec_sync_symbol"].as<bool>();
-        }
-        if (config["enable_cfo_training_sequence"]) {
-            cfg.enable_cfo_training_sequence =
-                config["enable_cfo_training_sequence"].as<bool>();
-        }
-        if (config["cfo_training_period_samples"]) {
-            cfg.cfo_training_period_samples =
-                config["cfo_training_period_samples"].as<size_t>();
-        }
-        if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
-        if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
-        if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
-        if (config["tx_gain"]) cfg.tx_gain = config["tx_gain"].as<double>();
-        if (config["tx_channel"]) cfg.tx_channel = config["tx_channel"].as<uint32_t>();
-        if (config["rx_gain"]) cfg.rx_gain = config["rx_gain"].as<double>();
-        if (config["rx_channel"]) cfg.rx_channel = config["rx_channel"].as<size_t>();
-        if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
-        if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
-        if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
-        if (config["sensing_output_mode"]) {
-            cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
-        }
-        if (config["sensing_on_wire_format"]) {
+        config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.midframe_pilot_seed);
+
+        config_detail::load_value(cuda, "cuda_mod_pipeline_slots", cfg.cuda_mod_pipeline_slots);
+
+        config_detail::load_value(sensing, "range_fft_size", cfg.range_fft_size);
+        config_detail::load_value(sensing, "doppler_fft_size", cfg.doppler_fft_size);
+        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing_view_range_bins);
+        config_detail::load_value(
+            sensing, "sensing_view_doppler_bins", cfg.sensing_view_doppler_bins);
+        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing_output_mode);
+        if (sensing["sensing_on_wire_format"]) {
             cfg.sensing_on_wire_format = parse_sensing_on_wire_format_string(
-                config["sensing_on_wire_format"].as<std::string>());
+                sensing["sensing_on_wire_format"].as<std::string>());
         }
-        if (config["enable_backend_sensing_processing"]) {
-            cfg.enable_backend_sensing_processing =
-                config["enable_backend_sensing_processing"].as<bool>();
-        }
-        if (config["cuda_mod_pipeline_slots"]) {
-            cfg.cuda_mod_pipeline_slots = config["cuda_mod_pipeline_slots"].as<size_t>();
-        }
-        if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
-        if (config["tx_device_args"]) cfg.tx_device_args = config["tx_device_args"].as<std::string>();
-        if (config["rx_device_args"]) cfg.rx_device_args = config["rx_device_args"].as<std::string>();
-        if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
-        if (config["time_source"]) cfg.timesource = config["time_source"].as<std::string>();
-        if (config["tx_clock_source"]) cfg.tx_clock_source = config["tx_clock_source"].as<std::string>();
-        if (config["tx_time_source"]) cfg.tx_time_source = config["tx_time_source"].as<std::string>();
-        if (config["rx_clock_source"]) cfg.rx_clock_source = config["rx_clock_source"].as<std::string>();
-        if (config["rx_time_source"]) cfg.rx_time_source = config["rx_time_source"].as<std::string>();
-        if (config["control_port"]) cfg.control_port = config["control_port"].as<int>();
-        if (config["wire_format_tx"]) cfg.wire_format_tx = config["wire_format_tx"].as<std::string>();
-        if (config["uplink_rx_wire_format"]) {
-            cfg.uplink_rx_wire_format = config["uplink_rx_wire_format"].as<std::string>();
-        }
-        if (config["sensing_rx_wire_format"]) {
-            cfg.sensing_rx_wire_format = config["sensing_rx_wire_format"].as<std::string>();
-        }
-        if (config["udp_input_ip"]) cfg.udp_input_ip = config["udp_input_ip"].as<std::string>();
-        if (config["udp_input_port"]) cfg.udp_input_port = config["udp_input_port"].as<int>();
-        if (config["mono_sensing_output_enabled"]) {
-            cfg.mono_sensing_output_enabled = config["mono_sensing_output_enabled"].as<bool>();
-        }
-        if (config["mono_sensing_ip"]) cfg.mono_sensing_ip = config["mono_sensing_ip"].as<std::string>();
-        if (config["mono_sensing_port"]) cfg.mono_sensing_port = config["mono_sensing_port"].as<int>();
-        if (config["uplink_channel_ip"]) cfg.uplink_channel_ip = config["uplink_channel_ip"].as<std::string>();
-        if (config["uplink_channel_port"]) cfg.uplink_channel_port = config["uplink_channel_port"].as<int>();
-        if (config["uplink_pdf_ip"]) cfg.uplink_pdf_ip = config["uplink_pdf_ip"].as<std::string>();
-        if (config["uplink_pdf_port"]) cfg.uplink_pdf_port = config["uplink_pdf_port"].as<int>();
-        if (config["uplink_constellation_ip"]) {
-            cfg.uplink_constellation_ip = config["uplink_constellation_ip"].as<std::string>();
-        }
-        if (config["uplink_constellation_port"]) {
-            cfg.uplink_constellation_port = config["uplink_constellation_port"].as<int>();
-        }
-        if (config["sensing_symbol_stride"]) {
-            cfg.sensing_symbol_stride = config["sensing_symbol_stride"].as<size_t>();
-        }
-        if (config["tx_circular_buffer_size"]) cfg.tx_circular_buffer_size = config["tx_circular_buffer_size"].as<size_t>();
-        if (config["data_packet_buffer_size"]) cfg.data_packet_buffer_size = config["data_packet_buffer_size"].as<size_t>();
-        if (config["paired_frame_queue_size"]) cfg.paired_frame_queue_size = config["paired_frame_queue_size"].as<size_t>();
-        const bool has_sensing_count_key = static_cast<bool>(config["sensing_rx_channel_count"]);
+        config_detail::load_value(
+            sensing, "enable_backend_sensing_processing", cfg.enable_backend_sensing_processing);
+        config_detail::load_value(sensing, "rx_device_args", cfg.rx_device_args);
+        config_detail::load_value(sensing, "rx_clock_source", cfg.rx_clock_source);
+        config_detail::load_value(sensing, "rx_time_source", cfg.rx_time_source);
+        config_detail::load_value(sensing, "sensing_rx_wire_format", cfg.sensing_rx_wire_format);
+        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing_symbol_stride);
+        config_detail::load_value(sensing, "paired_frame_queue_size", cfg.paired_frame_queue_size);
+        const bool has_sensing_count_key = static_cast<bool>(sensing["sensing_rx_channel_count"]);
         if (has_sensing_count_key) {
-            cfg.sensing_rx_channel_count = config["sensing_rx_channel_count"].as<uint32_t>();
+            cfg.sensing_rx_channel_count = sensing["sensing_rx_channel_count"].as<uint32_t>();
         }
-        if (config["sensing_rx_channels"] && config["sensing_rx_channels"].IsSequence()) {
+        if (sensing["sensing_rx_channels"] && sensing["sensing_rx_channels"].IsSequence()) {
             cfg.sensing_rx_channels.clear();
-            for (const auto& node : config["sensing_rx_channels"]) {
+            for (const auto& node : sensing["sensing_rx_channels"]) {
                 SensingRxChannelConfig ch;
                 if (node["usrp_channel"]) ch.usrp_channel = node["usrp_channel"].as<uint32_t>();
                 if (node["device_args"]) ch.device_args = node["device_args"].as<std::string>();
@@ -3112,7 +2980,8 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
                 if (node["alignment"]) ch.alignment = node["alignment"].as<int32_t>();
                 if (node["rx_antenna"]) ch.rx_antenna = node["rx_antenna"].as<std::string>();
                 if (node["enable_system_delay_estimation"]) {
-                    ch.enable_system_delay_estimation = node["enable_system_delay_estimation"].as<bool>();
+                    ch.enable_system_delay_estimation =
+                        node["enable_system_delay_estimation"].as<bool>();
                 }
                 if (node["enable_sensing_output"]) {
                     ch.enable_sensing_output = node["enable_sensing_output"].as<bool>();
@@ -3123,42 +2992,89 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
                 cfg.sensing_rx_channels.push_back(ch);
             }
             if (!has_sensing_count_key) {
-                cfg.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing_rx_channels.size());
+                cfg.sensing_rx_channel_count =
+                    static_cast<uint32_t>(cfg.sensing_rx_channels.size());
             }
         }
+
+        config_detail::load_value(rf, "sample_rate", cfg.sample_rate);
+        config_detail::load_value(rf, "bandwidth", cfg.bandwidth);
+
+        config_detail::load_value(usrp, "device_args", cfg.device_args);
+        config_detail::load_value(clock, "clock_source", cfg.clocksource);
+        config_detail::load_value(clock, "time_source", cfg.timesource);
+
+        config_detail::load_value(downlink, "center_freq", cfg.center_freq);
+        config_detail::load_value(downlink, "tx_gain", cfg.tx_gain);
+        config_detail::load_value(downlink, "tx_channel", cfg.tx_channel);
+        config_detail::load_value(downlink, "tx_device_args", cfg.tx_device_args);
+        config_detail::load_value(downlink, "tx_clock_source", cfg.tx_clock_source);
+        config_detail::load_value(downlink, "tx_time_source", cfg.tx_time_source);
+        config_detail::load_value(downlink, "wire_format_tx", cfg.wire_format_tx);
+        config_detail::load_value(
+            downlink_pipeline, "tx_circular_buffer_size", cfg.tx_circular_buffer_size);
+        config_detail::load_value(
+            downlink_pipeline, "data_packet_buffer_size", cfg.data_packet_buffer_size);
+
+        config_detail::load_value(uplink, "rx_gain", cfg.rx_gain);
+        cfg.uplink_rx_channel = cfg.rx_channel;
+        config_detail::load_value(uplink, "uplink_rx_channel", cfg.uplink_rx_channel);
+        config_detail::load_value(uplink, "uplink_rx_wire_format", cfg.uplink_rx_wire_format);
+        config_detail::load_value(uplink, "equalizer_mode", cfg.equalizer_mode);
+        if (uplink["channel_tracking_mode"]) {
+            cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(
+                uplink["channel_tracking_mode"].as<std::string>());
+        }
+        config_detail::load_value(uplink, "equalizer_mag_floor", cfg.equalizer_mag_floor);
+        config_detail::load_value(
+            uplink, "channel_tracking_min_pilot_snr", cfg.channel_tracking_min_pilot_snr);
+
         load_simulation_config(config, cfg);
         load_duplex_config(config, cfg);
-        if (config["measurement_enable"]) cfg.measurement_enable = config["measurement_enable"].as<bool>();
-        if (config["measurement_mode"]) cfg.measurement_mode = config["measurement_mode"].as<std::string>();
-        if (config["measurement_run_id"]) cfg.measurement_run_id = config["measurement_run_id"].as<std::string>();
-        if (config["measurement_output_dir"]) cfg.measurement_output_dir = config["measurement_output_dir"].as<std::string>();
-        if (config["measurement_payload_bytes"]) cfg.measurement_payload_bytes = config["measurement_payload_bytes"].as<size_t>();
-        if (config["measurement_prbs_seed"]) cfg.measurement_prbs_seed = config["measurement_prbs_seed"].as<uint32_t>();
-        if (config["measurement_packets_per_point"]) cfg.measurement_packets_per_point = config["measurement_packets_per_point"].as<uint32_t>();
-        if (config["measurement_max_packets_per_frame"]) {
-            cfg.measurement_max_packets_per_frame = config["measurement_max_packets_per_frame"].as<size_t>();
-        }
-        if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
-        if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
-        if (config["midframe_pilot_symbols"]) {
-            cfg.midframe_pilot_symbols = config["midframe_pilot_symbols"].as<std::vector<size_t>>();
-        }
-        if (config["midframe_pilot_seed"]) {
-            cfg.midframe_pilot_seed = config["midframe_pilot_seed"].as<uint32_t>();
-        }
-        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "BS config")) {
+
+        config_detail::load_value(measurement, "measurement_enable", cfg.measurement_enable);
+        config_detail::load_value(measurement, "measurement_mode", cfg.measurement_mode);
+        config_detail::load_value(measurement, "measurement_run_id", cfg.measurement_run_id);
+        config_detail::load_value(measurement, "measurement_output_dir", cfg.measurement_output_dir);
+        config_detail::load_value(
+            measurement, "measurement_payload_bytes", cfg.measurement_payload_bytes);
+        config_detail::load_value(measurement, "measurement_prbs_seed", cfg.measurement_prbs_seed);
+        config_detail::load_value(
+            measurement, "measurement_packets_per_point", cfg.measurement_packets_per_point);
+        config_detail::load_value(
+            measurement, "measurement_max_packets_per_frame", cfg.measurement_max_packets_per_frame);
+
+        config_detail::load_value(network, "udp_input_ip", cfg.udp_input_ip);
+        config_detail::load_value(network, "udp_input_port", cfg.udp_input_port);
+        config_detail::load_value(network, "udp_output_ip", cfg.ul_udp_output_ip);
+        config_detail::load_value(network, "udp_output_port", cfg.ul_udp_output_port);
+        config_detail::load_value(
+            network, "mono_sensing_output_enabled", cfg.mono_sensing_output_enabled);
+        config_detail::load_value(network, "mono_sensing_ip", cfg.mono_sensing_ip);
+        config_detail::load_value(network, "mono_sensing_port", cfg.mono_sensing_port);
+        config_detail::load_value(network, "uplink_channel_ip", cfg.uplink_channel_ip);
+        config_detail::load_value(network, "uplink_channel_port", cfg.uplink_channel_port);
+        config_detail::load_value(network, "uplink_pdf_ip", cfg.uplink_pdf_ip);
+        config_detail::load_value(network, "uplink_pdf_port", cfg.uplink_pdf_port);
+        config_detail::load_value(
+            network, "uplink_constellation_ip", cfg.uplink_constellation_ip);
+        config_detail::load_value(
+            network, "uplink_constellation_port", cfg.uplink_constellation_port);
+        config_detail::load_value(network, "control_port", cfg.control_port);
+
+        config_detail::load_value(cpu, "downlink_cpu_cores", cfg.downlink_cpu_cores);
+        config_detail::load_value(cpu, "uplink_cpu_cores", cfg.uplink_cpu_cores);
+        config_detail::load_value(cpu, "main_cpu_core", cfg.main_cpu_core);
+        config_detail::load_value(runtime, "profiling_modules", cfg.profiling_modules);
+
+        if (!config_detail::load_data_resource_blocks_from_yaml(
+                cfg, resource_preview, "BS config")) {
             return false;
         }
-        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "BS config")) {
+        if (!config_detail::load_sensing_mask_blocks_from_yaml(
+                cfg, resource_preview, "BS config")) {
             return false;
         }
-        if (config["downlink_cpu_cores"]) {
-            cfg.downlink_cpu_cores = config["downlink_cpu_cores"].as<std::vector<int>>();
-        }
-        if (config["uplink_cpu_cores"]) {
-            cfg.uplink_cpu_cores = config["uplink_cpu_cores"].as<std::vector<int>>();
-        }
-        if (config["main_cpu_core"]) cfg.main_cpu_core = config["main_cpu_core"].as<int>();
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -3262,6 +3178,12 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
     if (cfg.uplink_constellation_ip.empty()) {
         cfg.uplink_constellation_ip = "0.0.0.0";
     }
+    if (cfg.uplink_self_channel_ip.empty()) {
+        cfg.uplink_self_channel_ip = "0.0.0.0";
+    }
+    if (cfg.uplink_self_pdf_ip.empty()) {
+        cfg.uplink_self_pdf_ip = "0.0.0.0";
+    }
     if (cfg.mono_sensing_port <= 0) {
         LOG_G_WARN() << "mono_sensing_port=" << cfg.mono_sensing_port
                      << " is invalid. Falling back to 8888.";
@@ -3287,6 +3209,10 @@ inline Config make_default_ue_config() {
     cfg.num_symbols = 100;
     cfg.sensing_symbol_num = 100;
     cfg.cuda_demod_pipeline_slots = 3;
+    cfg.cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu;
+    cfg.cuda_ldpc_worker_buffers = 3;
+    cfg.cuda_ldpc_cross_frame_flush_frames = 2;
+    cfg.cuda_ldpc_cross_frame_flush_us = 1000.0;
     cfg.frame_queue_size = 8;
     cfg.sync_queue_size = 8;
     cfg.sync_pos = 1;
@@ -3311,6 +3237,10 @@ inline Config make_default_ue_config() {
     cfg.channel_port = 12348;
     cfg.pdf_ip = "0.0.0.0";
     cfg.pdf_port = 12349;
+    cfg.uplink_self_channel_ip = "0.0.0.0";
+    cfg.uplink_self_channel_port = 12350;
+    cfg.uplink_self_pdf_ip = "0.0.0.0";
+    cfg.uplink_self_pdf_port = 12351;
     cfg.constellation_ip = "0.0.0.0";
     cfg.constellation_port = 12346;
     cfg.vofa_debug_ip = "";
@@ -3353,315 +3283,194 @@ inline Config make_default_ue_config() {
     return cfg;
 }
 
-inline bool save_ue_config_to_yaml(const Config& cfg, const std::string& filepath) {
-    YAML::Emitter out;
-    out << YAML::BeginMap;
-    out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
-    out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
-    out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
-    out << YAML::Key << "enable_sec_sync_symbol" << YAML::Value << cfg.enable_sec_sync_symbol;
-    out << YAML::Key << "enable_cfo_training_sequence" << YAML::Value
-        << cfg.enable_cfo_training_sequence;
-    out << YAML::Key << "cfo_training_period_samples" << YAML::Value
-        << cfg.cfo_training_period_samples;
-    out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
-    out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
-    out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
-    out << YAML::Key << "tx_gain" << YAML::Value << cfg.tx_gain;
-    out << YAML::Key << "tx_channel" << YAML::Value << cfg.tx_channel;
-    out << YAML::Key << "rx_gain" << YAML::Value << cfg.rx_gain;
-    out << YAML::Key << "rx_agc_enable" << YAML::Value << cfg.rx_agc_enable;
-    out << YAML::Key << "rx_agc_low_threshold_db" << YAML::Value << cfg.rx_agc_low_threshold_db;
-    out << YAML::Key << "rx_agc_high_threshold_db" << YAML::Value << cfg.rx_agc_high_threshold_db;
-    out << YAML::Key << "rx_agc_max_step_db" << YAML::Value << cfg.rx_agc_max_step_db;
-    out << YAML::Key << "rx_agc_update_frames" << YAML::Value << cfg.rx_agc_update_frames;
-    out << YAML::Key << "rx_channel" << YAML::Value << cfg.rx_channel;
-    out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
-    out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
-    out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
-    out << YAML::Key << "sensing_output_mode" << YAML::Value << cfg.sensing_output_mode;
-    out << YAML::Key << "sensing_on_wire_format" << YAML::Value
-        << sensing_on_wire_format_to_string(cfg.sensing_on_wire_format);
-    out << YAML::Key << "cuda_demod_pipeline_slots" << YAML::Value << cfg.cuda_demod_pipeline_slots;
-    out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
-    out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
-    out << YAML::Key << "sync_cfo_alias_search_range_hz" << YAML::Value
-        << cfg.sync_cfo_alias_search_range_hz;
-    out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
-    out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
-    out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
-    out << YAML::Key << "sensing_view_range_bins" << YAML::Value << cfg.sensing_view_range_bins;
-    out << YAML::Key << "sensing_view_doppler_bins" << YAML::Value << cfg.sensing_view_doppler_bins;
-    out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
-    out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
-    out << YAML::Key << "wire_format_tx" << YAML::Value << cfg.wire_format_tx;
-    out << YAML::Key << "downlink_rx_wire_format" << YAML::Value << cfg.downlink_rx_wire_format;
-    out << YAML::Key << "enable_bi_sensing" << YAML::Value << cfg.enable_bi_sensing;
-    out << YAML::Key << "bi_sensing_output_enabled" << YAML::Value << cfg.bi_sensing_output_enabled;
-    out << YAML::Key << "bi_sensing_ip" << YAML::Value << cfg.bi_sensing_ip;
-    out << YAML::Key << "bi_sensing_port" << YAML::Value << cfg.bi_sensing_port;
-    out << YAML::Key << "control_port" << YAML::Value << cfg.control_port;
-    out << YAML::Key << "channel_ip" << YAML::Value << cfg.channel_ip;
-    out << YAML::Key << "channel_port" << YAML::Value << cfg.channel_port;
-    out << YAML::Key << "pdf_ip" << YAML::Value << cfg.pdf_ip;
-    out << YAML::Key << "pdf_port" << YAML::Value << cfg.pdf_port;
-    out << YAML::Key << "constellation_ip" << YAML::Value << cfg.constellation_ip;
-    out << YAML::Key << "constellation_port" << YAML::Value << cfg.constellation_port;
-    out << YAML::Key << "vofa_debug_ip" << YAML::Value << cfg.vofa_debug_ip;
-    out << YAML::Key << "vofa_debug_port" << YAML::Value << cfg.vofa_debug_port;
-    out << YAML::Key << "udp_output_ip" << YAML::Value << cfg.udp_output_ip;
-    out << YAML::Key << "udp_output_port" << YAML::Value << cfg.udp_output_port;
-    out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
-    out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
-    out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
-    out << YAML::Key << "measurement_output_dir" << YAML::Value << cfg.measurement_output_dir;
-    out << YAML::Key << "measurement_payload_bytes" << YAML::Value << cfg.measurement_payload_bytes;
-    out << YAML::Key << "measurement_prbs_seed" << YAML::Value << cfg.measurement_prbs_seed;
-    out << YAML::Key << "measurement_packets_per_point" << YAML::Value << cfg.measurement_packets_per_point;
-    out << YAML::Key << "measurement_max_packets_per_frame" << YAML::Value << cfg.measurement_max_packets_per_frame;
-    out << YAML::Key << "software_sync" << YAML::Value << cfg.software_sync;
-    out << YAML::Key << "predictive_delay" << YAML::Value << cfg.predictive_delay;
-    out << YAML::Key << "hardware_sync" << YAML::Value << cfg.hardware_sync;
-    out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
-    out << YAML::Key << "downlink_cpu_cores" << YAML::Value << YAML::Flow << cfg.downlink_cpu_cores;
-    out << YAML::Key << "uplink_cpu_cores" << YAML::Value << YAML::Flow << cfg.uplink_cpu_cores;
-    out << YAML::Key << "main_cpu_core" << YAML::Value << cfg.main_cpu_core;
-    out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
-    out << YAML::Key << "default_out_ip" << YAML::Value << cfg.default_out_ip;
-    emit_simulation_config(out, cfg);
-    out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
-    out << YAML::Key << "uplink_idle_waveform" << YAML::Value << cfg.uplink_idle_waveform;
-    out << YAML::Key << "ocxo_pi_kp_fast" << YAML::Value << cfg.ocxo_pi_kp_fast;
-    out << YAML::Key << "ocxo_pi_ki_fast" << YAML::Value << cfg.ocxo_pi_ki_fast;
-    out << YAML::Key << "ocxo_pi_kp_slow" << YAML::Value << cfg.ocxo_pi_kp_slow;
-    out << YAML::Key << "ocxo_pi_ki_slow" << YAML::Value << cfg.ocxo_pi_ki_slow;
-    out << YAML::Key << "ocxo_pi_switch_abs_error_ppm" << YAML::Value << cfg.ocxo_pi_switch_abs_error_ppm;
-    out << YAML::Key << "ocxo_pi_switch_hold_s" << YAML::Value << cfg.ocxo_pi_switch_hold_s;
-    out << YAML::Key << "ocxo_pi_max_step_fast_ppm" << YAML::Value << cfg.ocxo_pi_max_step_fast_ppm;
-    out << YAML::Key << "ocxo_pi_max_step_slow_ppm" << YAML::Value << cfg.ocxo_pi_max_step_slow_ppm;
-    out << YAML::Key << "akf_enable" << YAML::Value << cfg.akf_enable;
-    out << YAML::Key << "akf_bootstrap_frames" << YAML::Value << cfg.akf_bootstrap_frames;
-    out << YAML::Key << "akf_innovation_window" << YAML::Value << cfg.akf_innovation_window;
-    out << YAML::Key << "akf_max_lag" << YAML::Value << cfg.akf_max_lag;
-    out << YAML::Key << "akf_adapt_interval" << YAML::Value << cfg.akf_adapt_interval;
-    out << YAML::Key << "akf_gate_sigma" << YAML::Value << cfg.akf_gate_sigma;
-    out << YAML::Key << "akf_tikhonov_lambda" << YAML::Value << cfg.akf_tikhonov_lambda;
-    out << YAML::Key << "akf_update_smooth" << YAML::Value << cfg.akf_update_smooth;
-    out << YAML::Key << "akf_q_wf_min" << YAML::Value << cfg.akf_q_wf_min;
-    out << YAML::Key << "akf_q_wf_max" << YAML::Value << cfg.akf_q_wf_max;
-    out << YAML::Key << "akf_q_rw_min" << YAML::Value << cfg.akf_q_rw_min;
-    out << YAML::Key << "akf_q_rw_max" << YAML::Value << cfg.akf_q_rw_max;
-    out << YAML::Key << "akf_r_min" << YAML::Value << cfg.akf_r_min;
-    out << YAML::Key << "akf_r_max" << YAML::Value << cfg.akf_r_max;
-    out << YAML::Key << "desired_peak_pos" << YAML::Value << cfg.desired_peak_pos;
-    out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
-    out << YAML::Key << "enable_backend_sensing_processing" << YAML::Value
-        << cfg.enable_backend_sensing_processing;
-    out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
-    out << YAML::Key << "midframe_pilot_symbols" << YAML::Value << YAML::Flow
-        << cfg.midframe_pilot_symbols;
-    out << YAML::Key << "midframe_pilot_seed" << YAML::Value << cfg.midframe_pilot_seed;
-    out << YAML::Key << "equalizer_mode" << YAML::Value << cfg.equalizer_mode;
-    out << YAML::Key << "channel_tracking_mode" << YAML::Value << cfg.channel_tracking_mode;
-    out << YAML::Key << "equalizer_mag_floor" << YAML::Value << cfg.equalizer_mag_floor;
-    out << YAML::Key << "channel_tracking_min_pilot_snr" << YAML::Value
-        << cfg.channel_tracking_min_pilot_snr;
-    config_detail::emit_data_resource_blocks_yaml(out, cfg);
-    config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
-    out << YAML::EndMap;
-
-    std::ofstream fout(filepath);
-    if (!fout) {
-        LOG_G_ERROR() << "Error: Cannot write to config file: " << filepath;
-        return false;
-    }
-    fout << out.c_str();
-    fout.close();
-    return true;
-}
-
 inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
     }
     try {
         YAML::Node config = YAML::LoadFile(filepath);
-        expose_editor_sectioned_config(config);
-        if (!config_detail::reject_legacy_key(config, "sensing_ip", "bi_sensing_ip")) return false;
-        if (!config_detail::reject_legacy_key(config, "sensing_port", "bi_sensing_port")) return false;
+        if (!config_detail::reject_top_level_config_values(config, "UE config")) {
+            return false;
+        }
+        const YAML::Node ofdm = config_detail::section_node(config, "ofdm_frame");
+        const YAML::Node cuda = config_detail::section_node(config, "cuda");
+        const YAML::Node sensing = config_detail::section_node(config, "sensing");
+        const YAML::Node rf = config_detail::section_node(config, "rf_sampling");
+        const YAML::Node usrp = config_detail::section_node(config, "usrp_device");
+        const YAML::Node downlink = config_detail::section_node(config, "downlink");
+        const YAML::Node uplink = config_detail::section_node(config, "uplink");
+        const YAML::Node sync = config_detail::section_node(config, "sync_tracking");
+        const YAML::Node measurement = config_detail::section_node(config, "measurement");
+        const YAML::Node network = config_detail::section_node(config, "network_output");
+        const YAML::Node cpu = config_detail::section_node(config, "cpu_cores");
+        const YAML::Node runtime = config_detail::section_node(config, "runtime");
+        const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
 
-        if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
-        if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
-        if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
-        if (config["enable_sec_sync_symbol"]) {
-            cfg.enable_sec_sync_symbol = config["enable_sec_sync_symbol"].as<bool>();
+        config_detail::load_value(ofdm, "fft_size", cfg.fft_size);
+        config_detail::load_value(ofdm, "cp_length", cfg.cp_length);
+        config_detail::load_value(ofdm, "sync_pos", cfg.sync_pos);
+        config_detail::load_value(ofdm, "enable_sec_sync_symbol", cfg.enable_sec_sync_symbol);
+        config_detail::load_value(
+            ofdm, "enable_cfo_training_sequence", cfg.enable_cfo_training_sequence);
+        config_detail::load_value(
+            ofdm, "cfo_training_period_samples", cfg.cfo_training_period_samples);
+        config_detail::load_value(ofdm, "num_symbols", cfg.num_symbols);
+        config_detail::load_value(ofdm, "sensing_symbol_num", cfg.sensing_symbol_num);
+        config_detail::load_value(ofdm, "frame_queue_size", cfg.frame_queue_size);
+        config_detail::load_value(ofdm, "zc_root", cfg.zc_root);
+        if (ofdm["pilot_positions"]) {
+            cfg.pilot_positions = ofdm["pilot_positions"].as<std::vector<size_t>>();
         }
-        if (config["enable_cfo_training_sequence"]) {
-            cfg.enable_cfo_training_sequence =
-                config["enable_cfo_training_sequence"].as<bool>();
+        if (ofdm["midframe_pilot_symbols"]) {
+            cfg.midframe_pilot_symbols =
+                ofdm["midframe_pilot_symbols"].as<std::vector<size_t>>();
         }
-        if (config["cfo_training_period_samples"]) {
-            cfg.cfo_training_period_samples =
-                config["cfo_training_period_samples"].as<size_t>();
+        config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.midframe_pilot_seed);
+
+        config_detail::load_value(cuda, "cuda_demod_pipeline_slots", cfg.cuda_demod_pipeline_slots);
+        if (cuda["cuda_ldpc_decoder_backend"]) {
+            cfg.cuda_ldpc_decoder_backend = normalize_cuda_ldpc_decoder_backend_string(
+                cuda["cuda_ldpc_decoder_backend"].as<std::string>());
         }
-        if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
-        if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
-        if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
-        if (config["tx_gain"]) cfg.tx_gain = config["tx_gain"].as<double>();
-        if (config["tx_channel"]) cfg.tx_channel = config["tx_channel"].as<uint32_t>();
-        if (config["rx_gain"]) cfg.rx_gain = config["rx_gain"].as<double>();
-        if (config["rx_agc_enable"]) cfg.rx_agc_enable = config["rx_agc_enable"].as<bool>();
-        if (config["rx_agc_low_threshold_db"]) {
-            cfg.rx_agc_low_threshold_db = config["rx_agc_low_threshold_db"].as<double>();
-        }
-        if (config["rx_agc_high_threshold_db"]) {
-            cfg.rx_agc_high_threshold_db = config["rx_agc_high_threshold_db"].as<double>();
-        }
-        if (config["rx_agc_max_step_db"]) {
-            cfg.rx_agc_max_step_db = config["rx_agc_max_step_db"].as<double>();
-        }
-        if (config["rx_agc_update_frames"]) {
-            cfg.rx_agc_update_frames = config["rx_agc_update_frames"].as<size_t>();
-        }
-        if (config["rx_channel"]) cfg.rx_channel = config["rx_channel"].as<size_t>();
-        if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
-        if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
-        if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
-        if (config["sensing_output_mode"]) {
-            cfg.sensing_output_mode = config["sensing_output_mode"].as<std::string>();
-        }
-        if (config["sensing_on_wire_format"]) {
+        config_detail::load_value(cuda, "cuda_ldpc_worker_buffers", cfg.cuda_ldpc_worker_buffers);
+        config_detail::load_value(
+            cuda, "cuda_ldpc_cross_frame_flush_frames", cfg.cuda_ldpc_cross_frame_flush_frames);
+        config_detail::load_value(
+            cuda, "cuda_ldpc_cross_frame_flush_us", cfg.cuda_ldpc_cross_frame_flush_us);
+
+        config_detail::load_value(sensing, "enable_bi_sensing", cfg.enable_bi_sensing);
+        config_detail::load_value(sensing, "range_fft_size", cfg.range_fft_size);
+        config_detail::load_value(sensing, "doppler_fft_size", cfg.doppler_fft_size);
+        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing_output_mode);
+        if (sensing["sensing_on_wire_format"]) {
             cfg.sensing_on_wire_format = parse_sensing_on_wire_format_string(
-                config["sensing_on_wire_format"].as<std::string>());
+                sensing["sensing_on_wire_format"].as<std::string>());
         }
-        if (config["enable_backend_sensing_processing"]) {
-            cfg.enable_backend_sensing_processing =
-                config["enable_backend_sensing_processing"].as<bool>();
+        config_detail::load_value(
+            sensing, "enable_backend_sensing_processing", cfg.enable_backend_sensing_processing);
+        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing_view_range_bins);
+        config_detail::load_value(
+            sensing, "sensing_view_doppler_bins", cfg.sensing_view_doppler_bins);
+        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing_symbol_stride);
+
+        config_detail::load_value(rf, "sample_rate", cfg.sample_rate);
+        config_detail::load_value(rf, "bandwidth", cfg.bandwidth);
+        config_detail::load_value(rf, "rx_gain", cfg.rx_gain);
+        config_detail::load_value(rf, "rx_agc_enable", cfg.rx_agc_enable);
+        config_detail::load_value(rf, "rx_agc_low_threshold_db", cfg.rx_agc_low_threshold_db);
+        config_detail::load_value(rf, "rx_agc_high_threshold_db", cfg.rx_agc_high_threshold_db);
+        config_detail::load_value(rf, "rx_agc_max_step_db", cfg.rx_agc_max_step_db);
+        config_detail::load_value(rf, "rx_agc_update_frames", cfg.rx_agc_update_frames);
+
+        config_detail::load_value(usrp, "device_args", cfg.device_args);
+        config_detail::load_value(usrp, "clock_source", cfg.clocksource);
+
+        config_detail::load_value(downlink, "center_freq", cfg.center_freq);
+        config_detail::load_value(downlink, "downlink_rx_wire_format", cfg.downlink_rx_wire_format);
+        config_detail::load_value(downlink, "rx_channel", cfg.rx_channel);
+        config_detail::load_value(downlink, "equalizer_mode", cfg.equalizer_mode);
+        if (downlink["channel_tracking_mode"]) {
+            cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(
+                downlink["channel_tracking_mode"].as<std::string>());
         }
-        if (config["cuda_demod_pipeline_slots"]) {
-            cfg.cuda_demod_pipeline_slots = config["cuda_demod_pipeline_slots"].as<size_t>();
-        }
-        if (config["frame_queue_size"]) cfg.frame_queue_size = config["frame_queue_size"].as<size_t>();
-        if (config["sync_queue_size"]) cfg.sync_queue_size = config["sync_queue_size"].as<size_t>();
-        if (config["sync_cfo_alias_search_range_hz"]) {
-            cfg.sync_cfo_alias_search_range_hz =
-                config["sync_cfo_alias_search_range_hz"].as<double>();
-        }
-        if (config["reset_hold_s"]) cfg.reset_hold_s = config["reset_hold_s"].as<double>();
-        if (config["range_fft_size"]) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
-        if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
-        if (config["sensing_view_range_bins"]) {
-            cfg.sensing_view_range_bins = config["sensing_view_range_bins"].as<size_t>();
-        }
-        if (config["sensing_view_doppler_bins"]) {
-            cfg.sensing_view_doppler_bins = config["sensing_view_doppler_bins"].as<size_t>();
-        }
-        if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
-        if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
-        if (config["wire_format_tx"]) cfg.wire_format_tx = config["wire_format_tx"].as<std::string>();
-        if (config["downlink_rx_wire_format"]) {
-            cfg.downlink_rx_wire_format = config["downlink_rx_wire_format"].as<std::string>();
-        }
-        if (config["enable_bi_sensing"]) cfg.enable_bi_sensing = config["enable_bi_sensing"].as<bool>();
-        if (config["bi_sensing_output_enabled"]) {
-            cfg.bi_sensing_output_enabled = config["bi_sensing_output_enabled"].as<bool>();
-        }
-        if (config["bi_sensing_ip"]) cfg.bi_sensing_ip = config["bi_sensing_ip"].as<std::string>();
-        if (config["bi_sensing_port"]) cfg.bi_sensing_port = config["bi_sensing_port"].as<int>();
-        if (config["control_port"]) cfg.control_port = config["control_port"].as<int>();
-        if (config["channel_ip"]) cfg.channel_ip = config["channel_ip"].as<std::string>();
-        if (config["channel_port"]) cfg.channel_port = config["channel_port"].as<int>();
-        if (config["pdf_ip"]) cfg.pdf_ip = config["pdf_ip"].as<std::string>();
-        if (config["pdf_port"]) cfg.pdf_port = config["pdf_port"].as<int>();
-        if (config["constellation_ip"]) cfg.constellation_ip = config["constellation_ip"].as<std::string>();
-        if (config["constellation_port"]) cfg.constellation_port = config["constellation_port"].as<int>();
-        if (config["vofa_debug_ip"]) cfg.vofa_debug_ip = config["vofa_debug_ip"].as<std::string>();
-        if (config["vofa_debug_port"]) cfg.vofa_debug_port = config["vofa_debug_port"].as<int>();
-        if (config["udp_output_ip"]) cfg.udp_output_ip = config["udp_output_ip"].as<std::string>();
-        if (config["udp_output_port"]) cfg.udp_output_port = config["udp_output_port"].as<int>();
-        if (config["measurement_enable"]) cfg.measurement_enable = config["measurement_enable"].as<bool>();
-        if (config["measurement_mode"]) cfg.measurement_mode = config["measurement_mode"].as<std::string>();
-        if (config["measurement_run_id"]) cfg.measurement_run_id = config["measurement_run_id"].as<std::string>();
-        if (config["measurement_output_dir"]) cfg.measurement_output_dir = config["measurement_output_dir"].as<std::string>();
-        if (config["measurement_payload_bytes"]) cfg.measurement_payload_bytes = config["measurement_payload_bytes"].as<size_t>();
-        if (config["measurement_prbs_seed"]) cfg.measurement_prbs_seed = config["measurement_prbs_seed"].as<uint32_t>();
-        if (config["measurement_packets_per_point"]) cfg.measurement_packets_per_point = config["measurement_packets_per_point"].as<uint32_t>();
-        if (config["measurement_max_packets_per_frame"]) {
-            cfg.measurement_max_packets_per_frame = config["measurement_max_packets_per_frame"].as<size_t>();
-        }
-        if (config["software_sync"]) cfg.software_sync = config["software_sync"].as<bool>();
-        if (config["predictive_delay"]) cfg.predictive_delay = config["predictive_delay"].as<bool>();
-        if (config["hardware_sync"]) cfg.hardware_sync = config["hardware_sync"].as<bool>();
-        if (config["hardware_sync_tty"]) cfg.hardware_sync_tty = config["hardware_sync_tty"].as<std::string>();
-        if (config["profiling_modules"]) cfg.profiling_modules = config["profiling_modules"].as<std::string>();
-        if (config["default_out_ip"]) {
-            cfg.default_out_ip = config["default_out_ip"].as<std::string>();
-        }
-        load_simulation_config(config, cfg);
-        load_duplex_config(config, cfg);
-        if (config["ocxo_pi_kp_fast"]) cfg.ocxo_pi_kp_fast = config["ocxo_pi_kp_fast"].as<double>();
-        if (config["ocxo_pi_ki_fast"]) cfg.ocxo_pi_ki_fast = config["ocxo_pi_ki_fast"].as<double>();
-        if (config["ocxo_pi_kp_slow"]) cfg.ocxo_pi_kp_slow = config["ocxo_pi_kp_slow"].as<double>();
-        if (config["ocxo_pi_ki_slow"]) cfg.ocxo_pi_ki_slow = config["ocxo_pi_ki_slow"].as<double>();
-        if (config["ocxo_pi_switch_abs_error_ppm"]) cfg.ocxo_pi_switch_abs_error_ppm = config["ocxo_pi_switch_abs_error_ppm"].as<double>();
-        if (config["ocxo_pi_switch_hold_s"]) cfg.ocxo_pi_switch_hold_s = config["ocxo_pi_switch_hold_s"].as<double>();
-        if (config["ocxo_pi_max_step_fast_ppm"]) cfg.ocxo_pi_max_step_fast_ppm = config["ocxo_pi_max_step_fast_ppm"].as<double>();
-        if (config["ocxo_pi_max_step_slow_ppm"]) cfg.ocxo_pi_max_step_slow_ppm = config["ocxo_pi_max_step_slow_ppm"].as<double>();
-        if (config["ocxo_pi_max_step_ppm"]) {
-            const auto max_step = config["ocxo_pi_max_step_ppm"].as<double>();
+        config_detail::load_value(downlink, "equalizer_mag_floor", cfg.equalizer_mag_floor);
+        config_detail::load_value(
+            downlink, "channel_tracking_min_pilot_snr", cfg.channel_tracking_min_pilot_snr);
+
+        config_detail::load_value(uplink, "tx_gain", cfg.tx_gain);
+        config_detail::load_value(uplink, "tx_channel", cfg.tx_channel);
+        config_detail::load_value(uplink, "wire_format_tx", cfg.wire_format_tx);
+
+        config_detail::load_value(sync, "sync_queue_size", cfg.sync_queue_size);
+        config_detail::load_value(
+            sync, "sync_cfo_alias_search_range_hz", cfg.sync_cfo_alias_search_range_hz);
+        config_detail::load_value(sync, "reset_hold_s", cfg.reset_hold_s);
+        config_detail::load_value(sync, "software_sync", cfg.software_sync);
+        config_detail::load_value(sync, "predictive_delay", cfg.predictive_delay);
+        config_detail::load_value(sync, "hardware_sync", cfg.hardware_sync);
+        config_detail::load_value(sync, "hardware_sync_tty", cfg.hardware_sync_tty);
+        config_detail::load_value(sync, "ocxo_pi_kp_fast", cfg.ocxo_pi_kp_fast);
+        config_detail::load_value(sync, "ocxo_pi_ki_fast", cfg.ocxo_pi_ki_fast);
+        config_detail::load_value(sync, "ocxo_pi_kp_slow", cfg.ocxo_pi_kp_slow);
+        config_detail::load_value(sync, "ocxo_pi_ki_slow", cfg.ocxo_pi_ki_slow);
+        config_detail::load_value(
+            sync, "ocxo_pi_switch_abs_error_ppm", cfg.ocxo_pi_switch_abs_error_ppm);
+        config_detail::load_value(
+            sync, "ocxo_pi_switch_hold_s", cfg.ocxo_pi_switch_hold_s);
+        config_detail::load_value(sync, "ocxo_pi_max_step_fast_ppm", cfg.ocxo_pi_max_step_fast_ppm);
+        config_detail::load_value(sync, "ocxo_pi_max_step_slow_ppm", cfg.ocxo_pi_max_step_slow_ppm);
+        if (sync["ocxo_pi_max_step_ppm"]) {
+            const auto max_step = sync["ocxo_pi_max_step_ppm"].as<double>();
             cfg.ocxo_pi_max_step_fast_ppm = max_step;
             cfg.ocxo_pi_max_step_slow_ppm = max_step;
         }
-        if (config["akf_enable"]) cfg.akf_enable = config["akf_enable"].as<bool>();
-        if (config["akf_bootstrap_frames"]) cfg.akf_bootstrap_frames = config["akf_bootstrap_frames"].as<size_t>();
-        if (config["akf_innovation_window"]) cfg.akf_innovation_window = config["akf_innovation_window"].as<size_t>();
-        if (config["akf_max_lag"]) cfg.akf_max_lag = config["akf_max_lag"].as<size_t>();
-        if (config["akf_adapt_interval"]) cfg.akf_adapt_interval = config["akf_adapt_interval"].as<size_t>();
-        if (config["akf_gate_sigma"]) cfg.akf_gate_sigma = config["akf_gate_sigma"].as<double>();
-        if (config["akf_tikhonov_lambda"]) cfg.akf_tikhonov_lambda = config["akf_tikhonov_lambda"].as<double>();
-        if (config["akf_update_smooth"]) cfg.akf_update_smooth = config["akf_update_smooth"].as<double>();
-        if (config["akf_q_wf_min"]) cfg.akf_q_wf_min = config["akf_q_wf_min"].as<double>();
-        if (config["akf_q_wf_max"]) cfg.akf_q_wf_max = config["akf_q_wf_max"].as<double>();
-        if (config["akf_q_rw_min"]) cfg.akf_q_rw_min = config["akf_q_rw_min"].as<double>();
-        if (config["akf_q_rw_max"]) cfg.akf_q_rw_max = config["akf_q_rw_max"].as<double>();
-        if (config["akf_r_min"]) cfg.akf_r_min = config["akf_r_min"].as<double>();
-        if (config["akf_r_max"]) cfg.akf_r_max = config["akf_r_max"].as<double>();
-        if (config["desired_peak_pos"]) cfg.desired_peak_pos = config["desired_peak_pos"].as<int>();
-        if (config["sensing_symbol_stride"]) {
-            cfg.sensing_symbol_stride = config["sensing_symbol_stride"].as<size_t>();
-        }
-        if (config["pilot_positions"]) cfg.pilot_positions = config["pilot_positions"].as<std::vector<size_t>>();
-        if (config["midframe_pilot_symbols"]) {
-            cfg.midframe_pilot_symbols = config["midframe_pilot_symbols"].as<std::vector<size_t>>();
-        }
-        if (config["midframe_pilot_seed"]) {
-            cfg.midframe_pilot_seed = config["midframe_pilot_seed"].as<uint32_t>();
-        }
-        if (config["equalizer_mode"]) cfg.equalizer_mode = config["equalizer_mode"].as<std::string>();
-        if (config["channel_tracking_mode"]) {
-            cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(
-                config["channel_tracking_mode"].as<std::string>());
-        }
-        if (config["equalizer_mag_floor"]) {
-            cfg.equalizer_mag_floor = config["equalizer_mag_floor"].as<double>();
-        }
-        if (config["channel_tracking_min_pilot_snr"]) {
-            cfg.channel_tracking_min_pilot_snr =
-                config["channel_tracking_min_pilot_snr"].as<double>();
-        }
-        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "UE config")) {
+        config_detail::load_value(sync, "akf_enable", cfg.akf_enable);
+        config_detail::load_value(sync, "akf_bootstrap_frames", cfg.akf_bootstrap_frames);
+        config_detail::load_value(sync, "akf_innovation_window", cfg.akf_innovation_window);
+        config_detail::load_value(sync, "akf_max_lag", cfg.akf_max_lag);
+        config_detail::load_value(sync, "akf_adapt_interval", cfg.akf_adapt_interval);
+        config_detail::load_value(sync, "akf_gate_sigma", cfg.akf_gate_sigma);
+        config_detail::load_value(sync, "akf_tikhonov_lambda", cfg.akf_tikhonov_lambda);
+        config_detail::load_value(sync, "akf_update_smooth", cfg.akf_update_smooth);
+        config_detail::load_value(sync, "akf_q_wf_min", cfg.akf_q_wf_min);
+        config_detail::load_value(sync, "akf_q_wf_max", cfg.akf_q_wf_max);
+        config_detail::load_value(sync, "akf_q_rw_min", cfg.akf_q_rw_min);
+        config_detail::load_value(sync, "akf_q_rw_max", cfg.akf_q_rw_max);
+        config_detail::load_value(sync, "akf_r_min", cfg.akf_r_min);
+        config_detail::load_value(sync, "akf_r_max", cfg.akf_r_max);
+        config_detail::load_value(sync, "desired_peak_pos", cfg.desired_peak_pos);
+
+        config_detail::load_value(measurement, "measurement_enable", cfg.measurement_enable);
+        config_detail::load_value(measurement, "measurement_mode", cfg.measurement_mode);
+        config_detail::load_value(measurement, "measurement_run_id", cfg.measurement_run_id);
+        config_detail::load_value(measurement, "measurement_output_dir", cfg.measurement_output_dir);
+        config_detail::load_value(
+            measurement, "measurement_payload_bytes", cfg.measurement_payload_bytes);
+        config_detail::load_value(measurement, "measurement_prbs_seed", cfg.measurement_prbs_seed);
+        config_detail::load_value(
+            measurement, "measurement_packets_per_point", cfg.measurement_packets_per_point);
+        config_detail::load_value(
+            measurement, "measurement_max_packets_per_frame", cfg.measurement_max_packets_per_frame);
+
+        config_detail::load_value(network, "bi_sensing_output_enabled", cfg.bi_sensing_output_enabled);
+        config_detail::load_value(network, "bi_sensing_ip", cfg.bi_sensing_ip);
+        config_detail::load_value(network, "bi_sensing_port", cfg.bi_sensing_port);
+        config_detail::load_value(network, "control_port", cfg.control_port);
+        config_detail::load_value(network, "channel_ip", cfg.channel_ip);
+        config_detail::load_value(network, "channel_port", cfg.channel_port);
+        config_detail::load_value(network, "pdf_ip", cfg.pdf_ip);
+        config_detail::load_value(network, "pdf_port", cfg.pdf_port);
+        config_detail::load_value(network, "constellation_ip", cfg.constellation_ip);
+        config_detail::load_value(network, "constellation_port", cfg.constellation_port);
+        config_detail::load_value(network, "udp_input_ip", cfg.ul_udp_input_ip);
+        config_detail::load_value(network, "udp_input_port", cfg.ul_udp_input_port);
+        config_detail::load_value(network, "udp_output_ip", cfg.udp_output_ip);
+        config_detail::load_value(network, "udp_output_port", cfg.udp_output_port);
+        config_detail::load_value(network, "self_channel_ip", cfg.uplink_self_channel_ip);
+        config_detail::load_value(network, "self_channel_port", cfg.uplink_self_channel_port);
+        config_detail::load_value(network, "self_pdf_ip", cfg.uplink_self_pdf_ip);
+        config_detail::load_value(network, "self_pdf_port", cfg.uplink_self_pdf_port);
+
+        config_detail::load_value(runtime, "default_out_ip", cfg.default_out_ip);
+        config_detail::load_value(runtime, "vofa_debug_ip", cfg.vofa_debug_ip);
+        config_detail::load_value(runtime, "vofa_debug_port", cfg.vofa_debug_port);
+        config_detail::load_value(runtime, "profiling_modules", cfg.profiling_modules);
+
+        load_simulation_config(config, cfg);
+        load_duplex_config(config, cfg);
+
+        config_detail::load_value(cpu, "downlink_cpu_cores", cfg.downlink_cpu_cores);
+        config_detail::load_value(cpu, "uplink_cpu_cores", cfg.uplink_cpu_cores);
+        config_detail::load_value(cpu, "main_cpu_core", cfg.main_cpu_core);
+
+        if (!config_detail::load_data_resource_blocks_from_yaml(
+                cfg, resource_preview, "UE config")) {
             return false;
         }
-        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "UE config")) {
+        if (!config_detail::load_sensing_mask_blocks_from_yaml(
+                cfg, resource_preview, "UE config")) {
             return false;
         }
-        if (config["downlink_cpu_cores"]) {
-            cfg.downlink_cpu_cores = config["downlink_cpu_cores"].as<std::vector<int>>();
-        }
-        if (config["uplink_cpu_cores"]) {
-            cfg.uplink_cpu_cores = config["uplink_cpu_cores"].as<std::vector<int>>();
-        }
-        if (config["main_cpu_core"]) cfg.main_cpu_core = config["main_cpu_core"].as<int>();
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -3675,6 +3484,20 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     if (cfg.cuda_demod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda_demod_pipeline_slots = 1;
+    }
+    cfg.cuda_ldpc_decoder_backend =
+        normalize_cuda_ldpc_decoder_backend_string(cfg.cuda_ldpc_decoder_backend);
+    if (cfg.cuda_ldpc_worker_buffers < 2) {
+        LOG_G_WARN() << "cuda_ldpc_worker_buffers<2 is invalid. Clamping to 2.";
+        cfg.cuda_ldpc_worker_buffers = 2;
+    }
+    if (cfg.cuda_ldpc_cross_frame_flush_frames == 0) {
+        LOG_G_WARN() << "cuda_ldpc_cross_frame_flush_frames=0 is invalid. Clamping to 1.";
+        cfg.cuda_ldpc_cross_frame_flush_frames = 1;
+    }
+    if (cfg.cuda_ldpc_cross_frame_flush_us < 0.0) {
+        LOG_G_WARN() << "cuda_ldpc_cross_frame_flush_us<0 is invalid. Clamping to 0 us.";
+        cfg.cuda_ldpc_cross_frame_flush_us = 0.0;
     }
     if (cfg.frame_queue_size == 0) {
         LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
@@ -3758,6 +3581,8 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     if (cfg.channel_ip.empty()) cfg.channel_ip = "0.0.0.0";
     if (cfg.pdf_ip.empty()) cfg.pdf_ip = "0.0.0.0";
     if (cfg.constellation_ip.empty()) cfg.constellation_ip = "0.0.0.0";
+    if (cfg.uplink_self_channel_ip.empty()) cfg.uplink_self_channel_ip = "0.0.0.0";
+    if (cfg.uplink_self_pdf_ip.empty()) cfg.uplink_self_pdf_ip = "0.0.0.0";
     if (cfg.vofa_debug_ip.empty()) cfg.vofa_debug_ip = cfg.default_out_ip;
     if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_out_ip;
 }

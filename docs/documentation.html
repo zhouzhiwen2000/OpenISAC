@@ -523,6 +523,12 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left">TX wire format, typically <code>sc16</code> or <code>sc8</code>.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>uplink_rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS uplink RX channel index on the shared TX/RX USRP. Legacy <code>rx_channel</code> remains a fallback when this key is omitted.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>uplink_rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
@@ -538,25 +544,37 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left"><code>udp_input_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">Bind IP for incoming payload UDP packets.</td>
+<td style="text-align:left">BS downlink payload UDP bind IP. This is the input stream transmitted on the BS-&gt;UE downlink.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_input_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>50000</code></td>
-<td style="text-align:left">Bind port for incoming payload UDP packets.</td>
+<td style="text-align:left">BS downlink payload UDP bind port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">BS decoded uplink payload UDP destination IP. This is the output stream recovered from UE-&gt;BS uplink.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50003</code></td>
+<td style="text-align:left">BS decoded uplink payload UDP destination port.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>duplex_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">Duplexing scheme. <code>tdd</code> time-multiplexes UE uplink symbols into the BS frame; <code>fdd</code> keeps BS downlink active while UE uplink uses <code>uplink.center_freq</code>.</td>
+<td style="text-align:left">Duplexing scheme. <code>tdd</code> time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; <code>fdd</code> keeps BS downlink active while UE uplink uses <code>uplink.center_freq</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>, <code>symbol_count=10</code>, <code>guard_symbols=1</code></td>
-<td style="text-align:left">Uplink/duplex settings. In TDD, <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> define the DL/UL boundary in OFDM symbols. In FDD, <code>center_freq</code> defines the UE-&gt;BS carrier. <code>udp_output_ip</code> / <code>udp_output_port</code> select where BS sends decoded uplink payloads. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX.</td>
+<td style="text-align:left"><code>symbol_start=90</code>, <code>symbol_count=10</code>, <code>guard_symbols=1</code>, <code>center_freq=2500000000</code></td>
+<td style="text-align:left">Uplink/duplex settings. In TDD, <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> define the DL/UL boundary in OFDM symbols, and <code>center_freq</code> is ignored. In FDD, <code>center_freq</code> defines the UE-&gt;BS carrier, while <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
@@ -961,7 +979,7 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>duplex_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">Must match <code>BS.yaml</code>. <code>tdd</code> shares the downlink carrier and sends only in the configured uplink symbol window; <code>fdd</code> transmits continuously on <code>uplink.center_freq</code>.</td>
+<td style="text-align:left">Must match <code>BS.yaml</code>. <code>tdd</code> shares the downlink center frequency and sends only in the configured uplink symbol window; <code>fdd</code> transmits continuously over the full frame on <code>uplink.center_freq</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink_idle_waveform</code></td>
@@ -972,8 +990,8 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>, <code>symbol_count=10</code>, <code>guard_symbols=1</code></td>
-<td style="text-align:left">UE uplink settings. <code>udp_input_ip</code> / <code>udp_input_port</code> bind the UE-side UDP source for uplink payloads. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path.</td>
+<td style="text-align:left"><code>symbol_start=90</code>, <code>symbol_count=10</code>, <code>guard_symbols=1</code>, <code>center_freq=2500000000</code></td>
+<td style="text-align:left">UE uplink settings. TDD uses <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> and ignores <code>center_freq</code>; FDD uses <code>center_freq</code> and ignores the TDD symbol-window fields, transmitting over the full frame. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ue_timing_advance</code></td>
@@ -1288,16 +1306,28 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left">Destination port for VOFA+ debug output.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE uplink payload UDP bind IP. This is the input stream transmitted on the UE-&gt;BS uplink.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50002</code></td>
+<td style="text-align:left">UE uplink payload UDP bind port.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>udp_output_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for decoded payload output.</td>
+<td style="text-align:left">UE decoded downlink payload UDP destination IP. This is the output stream recovered from the BS-&gt;UE downlink.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>udp_output_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>50001</code></td>
-<td style="text-align:left">Destination port for decoded payload output.</td>
+<td style="text-align:left">UE decoded downlink payload UDP destination port.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>default_out_ip</code></td>

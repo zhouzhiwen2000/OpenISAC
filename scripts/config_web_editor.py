@@ -21,6 +21,8 @@ import yaml
 
 
 HTML_TEMPLATE_PATH = Path(__file__).with_suffix(".html")
+CSS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.css")
+JS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.js")
 SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
@@ -55,7 +57,8 @@ SECTION_ORDER_BY_TAB: dict[str, tuple[str, ...]] = {
         "Downlink Pipeline",
         "Uplink",
         "Measurement mode",
-        "Network Output",
+        "Network",
+        "CPU Cores",
         "Runtime / Debug",
         "Resource Preview",
         "Other",
@@ -72,7 +75,8 @@ SECTION_ORDER_BY_TAB: dict[str, tuple[str, ...]] = {
         "Uplink",
         "Sync / Tracking",
         "Measurement mode",
-        "Network Output",
+        "Network",
+        "CPU Cores",
         "Runtime / Debug",
         "Resource Preview",
         "Other",
@@ -94,7 +98,8 @@ SECTION_YAML_KEY_BY_TITLE: dict[str, str] = {
     "Uplink": "uplink",
     "Sync / Tracking": "sync_tracking",
     "Measurement mode": "measurement",
-    "Network Output": "network_output",
+    "Network": "network_output",
+    "CPU Cores": "cpu_cores",
     "Runtime / Debug": "runtime",
     "Resource Preview": "resource_preview",
 }
@@ -117,7 +122,6 @@ SIMULATION_KEYS = ("simulation",)
 RF_SAMPLING_KEYS = (
     "sample_rate",
     "bandwidth",
-    "center_freq",
     "rx_agc_enable",
     "rx_agc_low_threshold_db",
     "rx_agc_high_threshold_db",
@@ -140,6 +144,7 @@ UE_DEVICE_KEYS = (
 )
 
 BS_DOWNLINK_KEYS = (
+    "center_freq",
     "tx_gain",
     "tx_channel",
     "tx_device_args",
@@ -148,17 +153,29 @@ BS_DOWNLINK_KEYS = (
     "wire_format_tx",
     "tx_circular_buffer_size",
     "data_packet_buffer_size",
-    "downlink_cpu_cores",
 )
 
 UE_DOWNLINK_KEYS = (
+    "center_freq",
     "downlink_rx_wire_format",
     "rx_channel",
     "equalizer_mode",
     "channel_tracking_mode",
     "equalizer_mag_floor",
     "channel_tracking_min_pilot_snr",
+)
+
+CPU_CORES_KEYS = (
     "downlink_cpu_cores",
+    "uplink_cpu_cores",
+    "main_cpu_core",
+)
+
+UE_NETWORK_KEYS = (
+    "udp_input_ip",
+    "udp_input_port",
+    "udp_output_ip",
+    "udp_output_port",
 )
 
 SENSING_RX_KEYS = (
@@ -208,7 +225,6 @@ BS_UPLINK_KEYS = (
     "uplink_rx_time_source",
     "bs_dl_ul_timing_diff",
     "ue_timing_advance",
-    "uplink_cpu_cores",
 )
 
 UE_UPLINK_KEYS = (
@@ -220,7 +236,6 @@ UE_UPLINK_KEYS = (
     "tx_channel",
     "wire_format_tx",
     "ue_timing_advance",
-    "uplink_cpu_cores",
 )
 
 def load_layout_schema() -> dict[str, dict[str, dict[str, Any]]]:
@@ -286,6 +301,14 @@ def load_html_page() -> str:
     return HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
+def load_css_asset() -> str:
+    return CSS_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
+def load_js_asset() -> str:
+    return JS_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+
 @dataclass(frozen=True)
 class TabConfig:
     name: str
@@ -346,6 +369,14 @@ def format_display_value(key: str, value: Any) -> str:
     return f"{scaled:.6f}".rstrip("0").rstrip(".")
 
 
+def display_value_range(key: str) -> tuple[float, float] | None:
+    if key == "center_freq":
+        return (0.0, 100.0)
+    if key in {"sample_rate", "bandwidth"}:
+        return (0.0, 10000.0)
+    return None
+
+
 def parse_display_value(key: str, text: str, kind: str) -> Any:
     meta = display_unit_meta(key)
     if meta is None:
@@ -357,7 +388,14 @@ def parse_display_value(key: str, text: str, kind: str) -> Any:
     raw = text.strip()
     if not raw:
         return 0.0 if kind == "float" else 0
-    value_hz = float(raw) * scale
+    value = float(raw)
+    display_range = display_value_range(key)
+    if display_range is not None and not (display_range[0] <= value <= display_range[1]):
+        raise RuntimeError(
+            f"{key} is shown in {_unit}; entered value {raw} is outside the valid range "
+            f"[{display_range[0]}, {display_range[1]}]."
+        )
+    value_hz = value * scale
     if kind == "int":
         return int(round(value_hz))
     return value_hz
@@ -768,7 +806,22 @@ def build_uplink_mapping_payload(value: Any, field: dict[str, Any], has_value: b
     return build_structured_mapping_payload(value, field, has_value, "uplink_mapping")
 
 
-def normalize_uplink_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
+def normalized_duplex_mode_value(value: Any) -> str:
+    return "fdd" if str(value or "").strip().lower() == "fdd" else "tdd"
+
+
+def filter_uplink_mapping_for_duplex_mode(value: dict[str, Any], duplex_mode: str) -> dict[str, Any]:
+    filtered = copy.deepcopy(value)
+    mode = normalized_duplex_mode_value(duplex_mode)
+    if mode == "fdd":
+        for key in ("symbol_start", "symbol_count", "guard_symbols", "debug_self_channel"):
+            filtered.pop(key, None)
+    else:
+        filtered.pop("center_freq", None)
+    return filtered
+
+
+def normalize_uplink_mapping_payload(raw: Any, field: dict[str, Any], duplex_mode: str = "tdd") -> dict[str, Any]:
     if isinstance(raw, str):
         source = parse_mapping_text(raw)
         if not isinstance(source, dict):
@@ -778,7 +831,10 @@ def normalize_uplink_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[st
             for item in field.get("scalar_fields", [])
             if item.get("key")
         }
-        return {key: copy.deepcopy(value) for key, value in source.items() if key in allowed_keys}
+        return filter_uplink_mapping_for_duplex_mode(
+            {key: copy.deepcopy(value) for key, value in source.items() if key in allowed_keys},
+            duplex_mode,
+        )
     if not isinstance(raw, dict):
         raise RuntimeError("Invalid uplink payload.")
 
@@ -805,7 +861,7 @@ def normalize_uplink_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[st
             result[key] = raw_text == "true" if isinstance(raw_value, str) else bool(raw_value)
         else:
             result[key] = parse_display_value(key, str(raw_value), kind)
-    return result
+    return filter_uplink_mapping_for_duplex_mode(result, duplex_mode)
 
 
 def coerce_scalar(text: str, kind: str) -> Any:
@@ -1002,11 +1058,7 @@ def sort_layout_sections(tab_name: str, layout: list[dict[str, Any]]) -> list[di
 
 
 def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str, Any]]) -> dict[str, Any]:
-    data: dict[str, Any] = {
-        key: copy.deepcopy(value)
-        for key, value in raw_data.items()
-        if key not in SECTION_YAML_KEYS or not isinstance(value, dict)
-    }
+    data: dict[str, Any] = {}
 
     for section in layout:
         section_key = SECTION_YAML_KEY_BY_TITLE.get(section["title"])
@@ -1018,8 +1070,6 @@ def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str,
         for field in section["fields"]:
             key = str(field.get("key", ""))
             if not key:
-                continue
-            if key in raw_data and key not in SECTION_YAML_KEYS:
                 continue
             if key == section_key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}:
                 if field.get("type") == "uplink_mapping":
@@ -1035,6 +1085,15 @@ def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str,
             if key in section_value:
                 data[key] = copy.deepcopy(section_value[key])
     return data
+
+
+def reject_top_level_config_values(raw_data: dict[str, Any], source: Path) -> None:
+    for key, value in raw_data.items():
+        if not isinstance(value, dict):
+            raise RuntimeError(
+                f"{source}: top-level key '{key}' is no longer supported; "
+                "move settings under their section."
+            )
 
 
 def normalize_loaded_config_values(data: dict[str, Any]) -> None:
@@ -1363,6 +1422,7 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     data = yaml.safe_load(text) if text.strip() else {}
     if not isinstance(data, dict):
         data = {}
+    reject_top_level_config_values(data, source)
     optional_catalog = build_optional_field_catalog(
         tab_name=tab_name,
         sample_candidates=fallback_paths,
@@ -1397,6 +1457,9 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     else:
         layout = regroup_layout_fields(layout, optional_catalog, "Sensing", UE_SENSING_KEYS)
     layout = regroup_layout_fields(layout, optional_catalog, "Measurement mode", MEASUREMENT_KEYS)
+    if tab_name == "ue":
+        layout = regroup_layout_fields(layout, optional_catalog, "Network", UE_NETWORK_KEYS)
+    layout = regroup_layout_fields(layout, optional_catalog, "CPU Cores", CPU_CORES_KEYS)
     layout = enrich_mapping_list_layouts(layout)
     layout = sort_layout_sections(tab_name, layout)
     data = flatten_sectioned_yaml_data(data, layout)
@@ -1628,6 +1691,7 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                 value = data.get(key, {})
                 if field["type"] == "uplink_mapping":
                     value = schema_mapping_value(field, value, include_extra=False)
+                    value = filter_uplink_mapping_for_duplex_mode(value, data.get("duplex_mode", "tdd"))
                     if field.get("optional") and not value:
                         continue
                 elif field["type"] == "simulation_mapping":
@@ -1742,7 +1806,11 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
         elif mapping_field.get("type") == "simulation_mapping":
             result[key] = normalize_simulation_mapping_payload(raw_mapping_text, mapping_field)
         elif mapping_field.get("type") == "uplink_mapping":
-            normalized = normalize_uplink_mapping_payload(raw_mapping_text, mapping_field)
+            normalized = normalize_uplink_mapping_payload(
+                raw_mapping_text,
+                mapping_field,
+                normalized_duplex_mode_value(result.get("duplex_mode", current_data.get("duplex_mode", "tdd"))),
+            )
             if optional and not normalized:
                 result.pop(key, None)
             else:
@@ -2131,6 +2199,12 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             if parsed.path == "/":
                 self._serve_index()
                 return
+            if parsed.path == "/config_web_editor.css":
+                self._serve_asset(load_css_asset(), "text/css; charset=utf-8")
+                return
+            if parsed.path == "/config_web_editor.js":
+                self._serve_asset(load_js_asset(), "text/javascript; charset=utf-8")
+                return
             if parsed.path == "/api/config":
                 name = self._require_name(parsed)
                 self._send_json(self.server.app.load_config(name))
@@ -2193,6 +2267,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
         body = page.encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_asset(self, text: str, content_type: str) -> None:
+        body = text.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

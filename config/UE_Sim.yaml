@@ -29,12 +29,12 @@ sensing:
   doppler_fft_size: 100  # Doppler FFT size
   sensing_output_mode: dense  # dense or compact_mask
   enable_backend_sensing_processing: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== RF / Sampling =====
 rf_sampling:
   sample_rate: 50000000  # Baseband sample rate (Hz)
   bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
-  center_freq: 2400000000  # RF center frequency (Hz)
   rx_agc_enable: false  # Enable hardware RX AGC driven by delay-spectrum peak
   rx_gain: 10  # RX gain (dB)
 
@@ -45,22 +45,21 @@ usrp_device:
 
 # ===== Downlink =====
 downlink:
+  center_freq: 2400000000  # RF center frequency (Hz)
   downlink_rx_wire_format: sc16  # Downlink RX wire format; sc16/sc8
   rx_channel: 0  # RX channel index on USRP
   equalizer_mode: mmse  # Communication equalizer inverse mode
   channel_tracking_mode: pilot_phase  # Per-symbol comb-pilot tracking mode
   equalizer_mag_floor: 1e-06  # Lower bound for |H|^2 during channel inversion
   channel_tracking_min_pilot_snr: 0.0001  # Minimum comb-pilot residual power accepted by per-symbol tracking
-  downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
 
 # ===== Uplink =====
 uplink:
-  symbol_start: 90  # TDD first uplink symbol in the downlink frame
-  symbol_count: 10  # TDD uplink window length in OFDM symbols
-  guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
   uplink_idle_waveform: random_qpsk  # UE uplink idle waveform when no UDP payload is queued
+  symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
+  symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
+  guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
   wire_format_tx: sc16  # Uplink TX wire format; sc16/sc8
-  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
 
 # ===== Sync / Tracking =====
 sync_tracking:
@@ -71,7 +70,6 @@ sync_tracking:
   predictive_delay: true  # Enable CFO-based predictive delay compensation during alignment/tracking
   hardware_sync: false  # Enable hardware sync mode
   desired_peak_pos: 20  # Target delay-peak index for alignment
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== Measurement mode =====
 measurement:
@@ -79,7 +77,7 @@ measurement:
   measurement_mode: internal_prbs  # Measurement payload generator / checker mode
   measurement_payload_bytes: 1024  # Bytes per generated measurement payload
 
-# ===== Network Output =====
+# ===== Network =====
 network_output:
   bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
@@ -91,13 +89,18 @@ network_output:
   pdf_port: 12349  # Delay-spectrum output port
   constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
   constellation_port: 12346  # Constellation output port
-  udp_output_ip: ""  # Payload output IP (empty = use default_out_ip)
-  udp_output_port: 50001  # Payload output port
+  udp_output_ip: ""  # UE decoded downlink payload UDP destination IP (empty = use default_out_ip)
+  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
+
+# ===== CPU Cores =====
+cpu_cores:
+  downlink_cpu_cores: [1, 2, 3, 4]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
+  uplink_cpu_cores: []  # UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]
+  main_cpu_core: 5  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====
 runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
-  main_cpu_core: 5  # Main-thread CPU core (-1 disables explicit binding)
   profiling_modules: ""  # Comma-separated modules to profile, or "all"

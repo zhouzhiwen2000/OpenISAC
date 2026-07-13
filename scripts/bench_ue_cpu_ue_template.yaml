@@ -88,7 +88,7 @@ sync_tracking:
   desired_peak_pos: 20  # Target delay-peak index for alignment
   sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
-# ===== Network Output =====
+# ===== Network =====
 network_output:
   bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
@@ -100,8 +100,8 @@ network_output:
   pdf_port: 12349  # Delay-spectrum output port
   constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
   constellation_port: 12346  # Constellation output port
-  udp_output_ip: ""  # Payload output IP (empty = use default_out_ip)
-  udp_output_port: 50001  # Payload output port
+  udp_output_ip: ""  # UE decoded downlink payload UDP destination IP (empty = use default_out_ip)
+  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
 
 # ===== Runtime / Debug =====
 runtime:

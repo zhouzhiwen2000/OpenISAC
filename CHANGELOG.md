@@ -8,6 +8,59 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-23 - BS 上行 RX 通道配置生效
+
+### Summary
+
+本次更新修复 BS 侧 `uplink_rx_channel` 配置未接入运行时的问题。
+
+### Changes
+
+- 新增运行时 `uplink_rx_channel` 配置字段，并让 BS 上行 RX 的 tune、gain、bandwidth、stream 和 AGC 都使用该字段；旧配置省略该字段时仍回退到 `rx_channel`。
+  影响：BS 可独立设置上行 RX 通道，例如 `uplink_rx_channel: 1` 会真正使用 USRP RX channel 1。
+
+## 2026-06-23 - FDD Uplink 默认载波
+
+### Summary
+
+本次更新将 FDD 上行载波默认值设为 2.5 GHz。
+
+### Changes
+
+- `uplink.center_freq` 默认改为 `2500000000` Hz，并同步到 C++ 默认配置、Web 配置编辑器 schema 和 README。
+  影响：新建或补全 FDD 上行配置时，默认 UE->BS 上行载波为 2.5 GHz；TDD 仍忽略该字段并使用下行中心频率。
+
+## 2026-06-22 - UE 上行失锁重同步恢复
+
+### Summary
+
+本次更新修复 UE 上行开启后失锁再重同步时 UL-TX 窗口恢复不稳定的问题。
+
+### Changes
+
+- UE 普通失锁进入重搜时不再清空 UL-TX 的 RX-alignment shift，保留已对齐的上行发送 anchor；重同步成功后 fresh sync acquisition 会强制调度 RX alignment，并通过 UL-TX 多/少发样本继续跟随新的下行 frame anchor。
+  影响：BS 重启或大 CFO 失锁后，UE 的上行发送窗口能够随重新同步后的 RX/downlink frame anchor 恢复，而不是回到 TADV-only 位置。
+
+- UE 失锁重搜期间会将 UL TX gain 拉到硬件最小值，重新检测到同步、调度 alignment 或重新开启 uplink waveform 时恢复到配置的 TX gain。
+  影响：重搜期间降低本机 UL 残留对下行重同步的干扰，同时恢复同步后自动恢复上行发射功率。
+
+## 2026-06-22 - Uplink 自发自收信道调试
+
+### Summary
+
+本次更新为 BS/UE 上行调试增加本机发送 ZC 的 self-channel 估计，用于辅助 DUTI/TADV 调整。
+
+### Changes
+
+- 新增 `uplink.debug_self_channel` 配置开关。开启后，BS 会在上行 RX 接收窗内按理想 BS 本机下行 ZC 位置截取；UE 会按理想 UE 本机上行 ZC 位置截取，然后分别估计自发自收信道和 delay profile。
+  影响：调 DUTI/TADV 时可同时观察对端链路和本机理想时序泄漏参考。
+
+- self-channel delay profile 的校准准则：UE 侧调 `ue_timing_advance` / `TADV`，使 UE self_pdf 峰值落在 `desired_peak_pos`；BS 侧调 `bs_dl_ul_timing_diff` / `DUTI`，使 BS self_pdf 峰值落在 `desired_peak_pos`。
+  影响：DUTI 和 TADV 分别用本机自发自收的 ZC 泄漏峰作为参考，避免混用对端链路峰值。
+
+- 新增 self debug 输出端口：BS 默认 `self_channel_port=12360`、`self_pdf_port=12361`，UE 默认 `self_channel_port=12350`、`self_pdf_port=12351`。
+  影响：BS/UE 可在同一台仿真主机上同时开启 self-channel debug，端口不会与现有 uplink channel/pdf 或 UE downlink channel/pdf 冲突。
+
 ## 2026-06-22 - B210 Duplex 默认配置模板
 
 ### Summary

@@ -1396,6 +1396,83 @@ private:
     AlignedVector _H_est_internal;
 };
 
+/**
+ * @brief Extract a local-TX ZC symbol from an RX frame and estimate self-channel.
+ *
+ * The RX frame is treated as a circular frame-period window. `tx_symbol_start`
+ * is the local transmitter's ZC symbol start relative to its own frame anchor.
+ * `rx_frame_start_offset` is the RX window's first sample relative to that same
+ * local TX anchor. Pass zero to sample the ideal local-TX frame position.
+ */
+class SelfZcChannelDebugEstimator {
+public:
+    SelfZcChannelDebugEstimator(size_t fft_size, size_t cp_length)
+        : _fft_size(fft_size),
+          _cp_length(cp_length),
+          _fft_in(fft_size),
+          _fft_out(fft_size) {
+        _fft_plan = fftwf_plan_dft_1d(
+            static_cast<int>(_fft_size),
+            reinterpret_cast<fftwf_complex*>(_fft_in.data()),
+            reinterpret_cast<fftwf_complex*>(_fft_out.data()),
+            FFTW_FORWARD,
+            FFTW_MEASURE);
+    }
+
+    ~SelfZcChannelDebugEstimator() {
+        if (_fft_plan) {
+            fftwf_destroy_plan(_fft_plan);
+        }
+    }
+
+    SelfZcChannelDebugEstimator(const SelfZcChannelDebugEstimator&) = delete;
+    SelfZcChannelDebugEstimator& operator=(const SelfZcChannelDebugEstimator&) = delete;
+
+    bool estimate(
+        const AlignedVector& rx_frame,
+        size_t tx_symbol_start,
+        int64_t rx_frame_start_offset,
+        const AlignedVector& tx_zc,
+        AlignedVector& h_est)
+    {
+        if (_fft_size == 0 || tx_zc.size() < _fft_size || rx_frame.size() < _fft_size) {
+            return false;
+        }
+        const int64_t period = static_cast<int64_t>(rx_frame.size());
+        const int64_t useful_start = static_cast<int64_t>(tx_symbol_start + _cp_length) -
+                                     rx_frame_start_offset;
+        int64_t start = useful_start % period;
+        if (start < 0) {
+            start += period;
+        }
+
+        size_t src = static_cast<size_t>(start);
+        for (size_t i = 0; i < _fft_size; ++i) {
+            _fft_in[i] = rx_frame[src];
+            if (++src == rx_frame.size()) {
+                src = 0;
+            }
+        }
+
+        fftwf_execute(_fft_plan);
+        _rx_freq.resize(_fft_size);
+        const float scale = 1.0f / std::sqrt(static_cast<float>(_fft_size));
+        for (size_t k = 0; k < _fft_size; ++k) {
+            _rx_freq[k] = _fft_out[k] * scale;
+        }
+        ChannelEstimator::estimate_from_sync_ls(_rx_freq, tx_zc, h_est);
+        return true;
+    }
+
+private:
+    size_t _fft_size = 0;
+    size_t _cp_length = 0;
+    AlignedVector _fft_in;
+    AlignedVector _fft_out;
+    AlignedVector _rx_freq;
+    fftwf_plan _fft_plan = nullptr;
+};
+
 
 /**
  * @brief Synchronization Processor.
