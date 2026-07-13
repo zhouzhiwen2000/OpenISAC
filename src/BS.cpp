@@ -141,30 +141,30 @@ public:
       : _cfg(cfg),
         _gen(std::random_device{}()),
         _dist(0, 3),
-        _fft_in(cfg.fft_size),
-        _fft_out(cfg.fft_size),
+        _fft_in(cfg.ofdm.fft_size),
+        _fft_out(cfg.ofdm.fft_size),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
         _duplex_layout(build_duplex_frame_layout(cfg)),
         _data_resource_layout(build_data_resource_grid_layout(cfg)),
-        _control_handler(cfg.mono_sensing_ip, cfg.control_port),
+        _control_handler(cfg.network_output.mono_sensing_ip, cfg.network_output.control_port),
         _measurement_enabled(measurement_mode_enabled(cfg)),
         _frame_pool(32, [&cfg]() {
             return AlignedVector(cfg.samples_per_frame());
         }),
         _symbols_pool(32, [&cfg]() {
             SymbolVector sv;
-            sv.resize(cfg.num_symbols);
-            for (size_t i = 0; i < cfg.num_symbols; ++i) {
-                sv[i].resize(cfg.fft_size);
+            sv.resize(cfg.ofdm.num_symbols);
+            for (size_t i = 0; i < cfg.ofdm.num_symbols; ++i) {
+                sv[i].resize(cfg.ofdm.fft_size);
             }
             return sv;
         }),
         _data_packet_pool(64, []() {
             return AlignedIntVector();
         }),
-        _circular_buffer(cfg.tx_circular_buffer_size),
-        _data_packet_buffer(cfg.data_packet_buffer_size),
-        _data_packet_ingest_ts(cfg.data_packet_buffer_size),
+        _circular_buffer(cfg.downlink_pipeline.tx_circular_buffer_size),
+        _data_packet_buffer(cfg.downlink_pipeline.data_packet_buffer_size),
+        _data_packet_ingest_ts(cfg.downlink_pipeline.data_packet_buffer_size),
         _uplink_channel_sender(2, [this](const auto& data) {
             _uplink_channel_pub->send_container(data);
         }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
@@ -182,20 +182,20 @@ public:
         }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly)
     {
         _measurement_tx_gain_x10.store(
-            static_cast<int32_t>(std::llround(cfg.tx_gain * 10.0)),
+            static_cast<int32_t>(std::llround(cfg.downlink.tx_gain * 10.0)),
             std::memory_order_relaxed);
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
-        if (_measurement_enabled && !_cfg.measurement_output_dir.empty()) {
+        if (_measurement_enabled && !_cfg.measurement.measurement_output_dir.empty()) {
             _measurement_summary_path =
-                (_cfg.measurement_output_dir.empty()
+                (_cfg.measurement.measurement_output_dir.empty()
                     ? std::string()
-                    : (_cfg.measurement_output_dir + "/bs_measurement_summary.csv"));
+                    : (_cfg.measurement.measurement_output_dir + "/bs_measurement_summary.csv"));
         }
         const CompactSensingMaskAnalysis compact_mask_analysis = analyze_compact_sensing_mask(_cfg);
         _shared_sensing_cfg.sensing_symbol_stride =
             compact_mask_analysis.local_delay_doppler_supported
                 ? compact_mask_analysis.implicit_symbol_stride
-                : cfg.sensing_symbol_stride;
+                : cfg.sensing.sensing_symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
         _shared_sensing_cfg.generation = 1;
@@ -217,11 +217,11 @@ public:
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
                      << " non-sync/non-pilot RE per frame, "
                      << _data_resource_layout.sensing_pilot_re_count << " sensing-pilot RE"
-                     << (_cfg.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
+                     << (_cfg.resource_preview.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
         if (_data_resource_layout.sensing_pilot_re_count > 0) {
             LOG_G_INFO() << "Sensing-pilot sequence uses alternate ZC root "
                          << _sensing_pilot_zc_root
-                         << " (sync root=" << _cfg.zc_root << ").";
+                         << " (sync root=" << _cfg.ofdm.zc_root << ").";
         }
         if (!_measurement_enabled && _data_resource_layout.payload_re_count == 0) {
             LOG_G_WARN() << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
@@ -296,7 +296,7 @@ public:
             ch->start(_start_time);
         }
 
-        _bs_dl_ul_timing_diff.store(_cfg.bs_dl_ul_timing_diff, std::memory_order_relaxed);
+        _bs_dl_ul_timing_diff.store(_cfg.uplink.bs_dl_ul_timing_diff, std::memory_order_relaxed);
         log_duplex_summary(_cfg, "BS");
         if (_duplex_layout.mode == DuplexMode::TDD && _duplex_layout.uplink_enabled) {
             LOG_G_INFO() << "[BS] TDD downlink blanking symbols ["
@@ -503,9 +503,9 @@ private:
             return;
         }
         std::vector<uint32_t> aggregate_channel_ids;
-        aggregate_channel_ids.reserve(_cfg.sensing_rx_channels.size());
-        for (uint32_t i = 0; i < _cfg.sensing_rx_channels.size(); ++i) {
-            const auto& ch_cfg = _cfg.sensing_rx_channels[i];
+        aggregate_channel_ids.reserve(_cfg.sensing.sensing_rx_channels.size());
+        for (uint32_t i = 0; i < _cfg.sensing.sensing_rx_channels.size(); ++i) {
+            const auto& ch_cfg = _cfg.sensing.sensing_rx_channels[i];
             if (!ch_cfg.enable_sensing_output || ch_cfg.enable_system_delay_estimation) {
                 continue;
             }
@@ -513,33 +513,33 @@ private:
         }
         if (!aggregate_channel_ids.empty()) {
             _aggregated_sensing_sender = std::make_shared<AggregatedSensingDataSender>(
-                _cfg.mono_sensing_ip,
-                _cfg.mono_sensing_port,
+                _cfg.network_output.mono_sensing_ip,
+                _cfg.network_output.mono_sensing_port,
                 std::move(aggregate_channel_ids),
                 true,
                 8,
-                _cfg.sensing_on_wire_format);
+                _cfg.sensing.sensing_on_wire_format);
             LOG_G_INFO() << "[Sensing Aggregate] enabled for "
                          << _aggregated_sensing_sender->channel_count()
-                         << " channels -> " << _cfg.mono_sensing_ip
-                         << ':' << _cfg.mono_sensing_port;
+                         << " channels -> " << _cfg.network_output.mono_sensing_ip
+                         << ':' << _cfg.network_output.mono_sensing_port;
         }
 
         _sensing_channels.clear();
-        _sensing_channels.reserve(_cfg.sensing_rx_channels.size());
-        for (uint32_t i = 0; i < _cfg.sensing_rx_channels.size(); ++i) {
+        _sensing_channels.reserve(_cfg.sensing.sensing_rx_channels.size());
+        for (uint32_t i = 0; i < _cfg.sensing.sensing_rx_channels.size(); ++i) {
             auto channel = std::make_unique<SensingChannel>(
                 _cfg,
-                _cfg.sensing_rx_channels[i],
+                _cfg.sensing.sensing_rx_channels[i],
                 SensingChannel::SensingRole::Monostatic,
-                _cfg.mono_sensing_ip,
-                _cfg.mono_sensing_port,
+                _cfg.network_output.mono_sensing_ip,
+                _cfg.network_output.mono_sensing_port,
                 i,
                 _running,
                 _aggregated_sensing_sender,
                 _shared_batch_reset_symbol,
                 [this]() {
-                    const uint64_t frame_len = (_cfg.num_symbols == 0) ? 1u : static_cast<uint64_t>(_cfg.num_symbols);
+                    const uint64_t frame_len = (_cfg.ofdm.num_symbols == 0) ? 1u : static_cast<uint64_t>(_cfg.ofdm.num_symbols);
                     constexpr uint64_t kResetLeadFrames = 4;
                     const uint64_t reset_symbol =
                         _next_frame_start_symbol.load(std::memory_order_relaxed) +
@@ -557,7 +557,7 @@ private:
                         if (_control_handler.send_heartbeat_to_last_peer()) {
                             return;
                         }
-                        _control_handler.send_heartbeat(_cfg.mono_sensing_ip, _cfg.mono_sensing_port);
+                        _control_handler.send_heartbeat(_cfg.network_output.mono_sensing_ip, _cfg.network_output.mono_sensing_port);
                         return;
                     }
                     _control_handler.send_heartbeat(ip, port);
@@ -573,27 +573,27 @@ private:
 
     void _init_uplink_debug_publishers() {
         _uplink_channel_pub = std::make_unique<ZmqByteSender>(
-            _cfg.uplink_channel_ip, static_cast<uint16_t>(_cfg.uplink_channel_port));
+            _cfg.network_output.uplink_channel_ip, static_cast<uint16_t>(_cfg.network_output.uplink_channel_port));
         _uplink_pdf_pub = std::make_unique<ZmqByteSender>(
-            _cfg.uplink_pdf_ip, static_cast<uint16_t>(_cfg.uplink_pdf_port));
+            _cfg.network_output.uplink_pdf_ip, static_cast<uint16_t>(_cfg.network_output.uplink_pdf_port));
         _uplink_constellation_pub = std::make_unique<ZmqByteSender>(
-            _cfg.uplink_constellation_ip, static_cast<uint16_t>(_cfg.uplink_constellation_port));
+            _cfg.network_output.uplink_constellation_ip, static_cast<uint16_t>(_cfg.network_output.uplink_constellation_port));
         if (uplink_self_channel_debug_enabled(_cfg)) {
             _uplink_self_channel_pub = std::make_unique<ZmqByteSender>(
-                _cfg.uplink_self_channel_ip, static_cast<uint16_t>(_cfg.uplink_self_channel_port));
+                _cfg.network_output.uplink_self_channel_ip, static_cast<uint16_t>(_cfg.network_output.uplink_self_channel_port));
             _uplink_self_pdf_pub = std::make_unique<ZmqByteSender>(
-                _cfg.uplink_self_pdf_ip, static_cast<uint16_t>(_cfg.uplink_self_pdf_port));
+                _cfg.network_output.uplink_self_pdf_ip, static_cast<uint16_t>(_cfg.network_output.uplink_self_pdf_port));
         }
         LOG_G_INFO() << "[UL-RX] debug ZMQ streams: channel="
-                     << _cfg.uplink_channel_ip << ':' << _cfg.uplink_channel_port
-                     << ", pdf=" << _cfg.uplink_pdf_ip << ':' << _cfg.uplink_pdf_port
-                     << ", constellation=" << _cfg.uplink_constellation_ip << ':'
-                     << _cfg.uplink_constellation_port;
+                     << _cfg.network_output.uplink_channel_ip << ':' << _cfg.network_output.uplink_channel_port
+                     << ", pdf=" << _cfg.network_output.uplink_pdf_ip << ':' << _cfg.network_output.uplink_pdf_port
+                     << ", constellation=" << _cfg.network_output.uplink_constellation_ip << ':'
+                     << _cfg.network_output.uplink_constellation_port;
         if (uplink_self_channel_debug_enabled(_cfg)) {
             LOG_G_INFO() << "[UL-RX] self-channel debug streams: channel="
-                         << _cfg.uplink_self_channel_ip << ':' << _cfg.uplink_self_channel_port
-                         << ", pdf=" << _cfg.uplink_self_pdf_ip << ':'
-                         << _cfg.uplink_self_pdf_port;
+                         << _cfg.network_output.uplink_self_channel_ip << ':' << _cfg.network_output.uplink_self_channel_port
+                         << ", pdf=" << _cfg.network_output.uplink_self_pdf_ip << ':'
+                         << _cfg.network_output.uplink_self_pdf_port;
         }
     }
 
@@ -664,10 +664,10 @@ private:
                 _shared_sensing_cfg = updated;
                 _shared_sensing_cfg.generation++;
                 next_symbol = _next_frame_start_symbol.load(std::memory_order_relaxed);
-                if (_cfg.num_symbols == 0) {
+                if (_cfg.ofdm.num_symbols == 0) {
                     _shared_sensing_cfg.apply_symbol_index = next_symbol;
                 } else {
-                    const uint64_t frame_len = static_cast<uint64_t>(_cfg.num_symbols);
+                    const uint64_t frame_len = static_cast<uint64_t>(_cfg.ofdm.num_symbols);
                     const uint64_t boundary = ((next_symbol + frame_len - 1) / frame_len) * frame_len;
                     _shared_sensing_cfg.apply_symbol_index = boundary;
                 }
@@ -725,7 +725,7 @@ private:
             ? (_cfg.simulation.array_spacing_m > 0.0
                    ? _cfg.simulation.array_spacing_m
                    : (_cfg.simulation.array_spacing_lambda * 3e8 /
-                      (_cfg.center_freq > 0.0 ? _cfg.center_freq : 1.0)))
+                      (_cfg.downlink.center_freq > 0.0 ? _cfg.downlink.center_freq : 1.0)))
             : 0.0;
         const SensingViewerParamsPacket packet = make_sensing_viewer_params_packet(
             _cfg,
@@ -745,8 +745,8 @@ private:
     void _send_viewer_params() {
         const SensingViewerParamsPacket packet = _make_viewer_params_packet();
         _control_handler.send_sensing_viewer_params(
-            _cfg.mono_sensing_ip,
-            _cfg.mono_sensing_port,
+            _cfg.network_output.mono_sensing_ip,
+            _cfg.network_output.mono_sensing_port,
             packet);
     }
 
@@ -967,10 +967,10 @@ private:
                 return;
             }
             const double requested_gain = static_cast<double>(value) / 10.0;
-            const auto gain_range = _tx_usrp->get_tx_gain_range(_cfg.tx_channel);
+            const auto gain_range = _tx_usrp->get_tx_gain_range(_cfg.downlink.tx_channel);
             const double clamped_gain = std::clamp(requested_gain, gain_range.start(), gain_range.stop());
-            _cfg.tx_gain = clamped_gain;
-            _tx_usrp->set_tx_gain(clamped_gain, _cfg.tx_channel);
+            _cfg.downlink.tx_gain = clamped_gain;
+            _tx_usrp->set_tx_gain(clamped_gain, _cfg.downlink.tx_channel);
             _measurement_tx_gain_x10.store(
                 static_cast<int32_t>(std::llround(clamped_gain * 10.0)),
                 std::memory_order_relaxed);
@@ -1056,36 +1056,36 @@ private:
             _init_sim_radio();
             return;
         }
-        const std::string tx_device_args = _cfg.tx_device_args.empty() ? _cfg.device_args : _cfg.tx_device_args;
-        const std::string tx_clock_source = _cfg.tx_clock_source.empty() ? _cfg.clocksource : _cfg.tx_clock_source;
-        const std::string tx_time_source = _cfg.tx_time_source.empty() ?
-            (_cfg.timesource.empty() ? tx_clock_source : _cfg.timesource) :
-            _cfg.tx_time_source;
+        const std::string tx_device_args = _cfg.downlink.tx_device_args.empty() ? _cfg.usrp_device.device_args : _cfg.downlink.tx_device_args;
+        const std::string tx_clock_source = _cfg.downlink.tx_clock_source.empty() ? _cfg.clock_time.clock_source : _cfg.downlink.tx_clock_source;
+        const std::string tx_time_source = _cfg.downlink.tx_time_source.empty() ?
+            (_cfg.clock_time.time_source.empty() ? tx_clock_source : _cfg.clock_time.time_source) :
+            _cfg.downlink.tx_time_source;
 
         _tx_usrp = uhd::usrp::multi_usrp::make(tx_device_args);
         _tx_usrp->set_clock_source(tx_clock_source);
         _tx_usrp->set_time_source(tx_time_source);
-        _tx_usrp->set_tx_rate(_cfg.sample_rate);
+        _tx_usrp->set_tx_rate(_cfg.rf_sampling.sample_rate);
 
         const size_t usrp_tx_channels = _tx_usrp->get_tx_num_channels();
-        if (_cfg.tx_channel >= usrp_tx_channels) {
+        if (_cfg.downlink.tx_channel >= usrp_tx_channels) {
             throw std::runtime_error(
                 "Configured TX channel out of range: " +
-                std::to_string(_cfg.tx_channel) +
+                std::to_string(_cfg.downlink.tx_channel) +
                 " (USRP supports " + std::to_string(usrp_tx_channels) + " TX channels)");
         }
 
-        const uhd::tune_request_t tune_req(_cfg.center_freq);
-        const uhd::tune_result_t tx_tune = _tx_usrp->set_tx_freq(tune_req, _cfg.tx_channel);
+        const uhd::tune_request_t tune_req(_cfg.downlink.center_freq);
+        const uhd::tune_result_t tx_tune = _tx_usrp->set_tx_freq(tune_req, _cfg.downlink.tx_channel);
         LOG_G_INFO() << "Actual TX RF Freq: " << format_freq_hz(tx_tune.actual_rf_freq)
                      << " Hz, DSP: " << format_freq_hz(tx_tune.actual_dsp_freq)
                      << " Hz";
-        _tx_usrp->set_tx_gain(_cfg.tx_gain, _cfg.tx_channel);
-        _tx_usrp->set_tx_bandwidth(_cfg.bandwidth, _cfg.tx_channel);
+        _tx_usrp->set_tx_gain(_cfg.downlink.tx_gain, _cfg.downlink.tx_channel);
+        _tx_usrp->set_tx_bandwidth(_cfg.rf_sampling.bandwidth, _cfg.downlink.tx_channel);
 
-        uhd::stream_args_t tx_stream_args("fc32", _cfg.wire_format_tx);
+        uhd::stream_args_t tx_stream_args("fc32", _cfg.downlink.wire_format_tx);
         tx_stream_args.args["block_id"] = "radio";
-        tx_stream_args.channels = {_cfg.tx_channel};
+        tx_stream_args.channels = {_cfg.downlink.tx_channel};
         _tx_stream = _tx_usrp->get_tx_stream(tx_stream_args);
         _tx_chunk_samps = _tx_stream->get_max_num_samps();
         if (_tx_chunk_samps == 0) {
@@ -1109,10 +1109,10 @@ private:
         if (uplink_enabled(_cfg)) {
             // Full-duplex uplink RX on the BS device. TDD: same carrier as TX.
             // FDD: the uplink carrier (duplex.ul_center_freq).
-            const double ul_freq = (_cfg.duplex.mode == DuplexMode::FDD &&
-                                    _cfg.duplex.ul_center_freq > 0.0)
-                ? _cfg.duplex.ul_center_freq : _cfg.center_freq;
-            const size_t ul_rx_ch = _cfg.uplink_rx_channel;
+            const double ul_freq = (_cfg.uplink.duplex.mode == DuplexMode::FDD &&
+                                    _cfg.uplink.duplex.ul_center_freq > 0.0)
+                ? _cfg.uplink.duplex.ul_center_freq : _cfg.downlink.center_freq;
+            const size_t ul_rx_ch = _cfg.uplink.uplink_rx_channel;
             const size_t usrp_rx_channels = _tx_usrp->get_rx_num_channels();
             if (ul_rx_ch >= usrp_rx_channels) {
                 throw std::runtime_error(
@@ -1120,29 +1120,29 @@ private:
                     std::to_string(ul_rx_ch) +
                     " (USRP supports " + std::to_string(usrp_rx_channels) + " RX channels)");
             }
-            _tx_usrp->set_rx_rate(_cfg.sample_rate);
+            _tx_usrp->set_rx_rate(_cfg.rf_sampling.sample_rate);
             _tx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
-            _tx_usrp->set_rx_gain(_cfg.rx_gain, ul_rx_ch);
-            _tx_usrp->set_rx_bandwidth(_cfg.bandwidth, ul_rx_ch);
-            uhd::stream_args_t ul_rx_args("fc32", _cfg.uplink_rx_wire_format);
+            _tx_usrp->set_rx_gain(_cfg.uplink.rx_gain, ul_rx_ch);
+            _tx_usrp->set_rx_bandwidth(_cfg.rf_sampling.bandwidth, ul_rx_ch);
+            uhd::stream_args_t ul_rx_args("fc32", _cfg.uplink.uplink_rx_wire_format);
             ul_rx_args.channels = {ul_rx_ch};
             _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
             _uplink_rx->set_rx_stream(_tx_usrp->get_rx_stream(ul_rx_args));
-            _uplink_rx->dl_ul_timing_diff().store(_cfg.bs_dl_ul_timing_diff,
+            _uplink_rx->dl_ul_timing_diff().store(_cfg.uplink.bs_dl_ul_timing_diff,
                                                   std::memory_order_relaxed);
             _uplink_rx->set_bs_frame_provider([this]() {
                 const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
-                return _cfg.num_symbols ? (s / _cfg.num_symbols) : s;
+                return _cfg.ofdm.num_symbols ? (s / _cfg.ofdm.num_symbols) : s;
             });
             _attach_uplink_debug_sinks();
             const uhd::gain_range_t gr = _tx_usrp->get_rx_gain_range(ul_rx_ch);
             _uplink_rx->configure_agc(
-                _cfg.rx_gain, gr.start(), gr.stop(),
+                _cfg.uplink.rx_gain, gr.start(), gr.stop(),
                 [this, ul_rx_ch](double g) { _tx_usrp->set_rx_gain(g, ul_rx_ch); });
             LOG_G_INFO() << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
                          << " @ " << format_freq_hz(ul_freq) << " Hz, "
-                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame, "
-                         << "zc_root=" << _uplink_rx->uplink_config().zc_root;
+                         << _uplink_rx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_rx->uplink_config().ofdm.zc_root;
         }
     }
 
@@ -1167,16 +1167,16 @@ private:
             _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
             _uplink_rx->set_rx_stream(
                 _sim_radio->make_rx_streamer("rx.ul", _cfg.samples_per_frame()));
-            _uplink_rx->dl_ul_timing_diff().store(_cfg.bs_dl_ul_timing_diff,
+            _uplink_rx->dl_ul_timing_diff().store(_cfg.uplink.bs_dl_ul_timing_diff,
                                                   std::memory_order_relaxed);
             _uplink_rx->set_bs_frame_provider([this]() {
                 const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
-                return _cfg.num_symbols ? (s / _cfg.num_symbols) : s;
+                return _cfg.ofdm.num_symbols ? (s / _cfg.ofdm.num_symbols) : s;
             });
             _attach_uplink_debug_sinks();
             LOG_G_INFO() << "[UL-RX] uplink receive enabled (sim rx.ul), "
-                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame, "
-                         << "zc_root=" << _uplink_rx->uplink_config().zc_root;
+                         << _uplink_rx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_rx->uplink_config().ofdm.zc_root;
         }
     }
 
@@ -1282,7 +1282,7 @@ private:
 
     void _init_fftw() {
         _ifft_plan = fftwf_plan_dft_1d(
-            static_cast<int>(_cfg.fft_size),
+            static_cast<int>(_cfg.ofdm.fft_size),
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_fft_out.data()),
             FFTW_BACKWARD,
@@ -1292,14 +1292,14 @@ private:
 
     // Prepare ZC sequence using ZadoffChuGenerator
     void _prepare_zc_sequence() {
-        _zc_seq = generate_zc_freq(_cfg.fft_size, _cfg.zc_root);
+        _zc_seq = generate_zc_freq(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root);
         _sensing_pilot_zc_root =
-            select_known_sensing_pilot_zc_root(_cfg.fft_size, _cfg.zc_root);
-        _sensing_pilot_seq = generate_zc_freq(_cfg.fft_size, _sensing_pilot_zc_root);
+            select_known_sensing_pilot_zc_root(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root);
+        _sensing_pilot_seq = generate_zc_freq(_cfg.ofdm.fft_size, _sensing_pilot_zc_root);
         if (cfo_training_sequence_enabled(_cfg)) {
             _cfo_training_seq = generate_cfo_training_freq(
-                _cfg.fft_size,
-                _cfg.cfo_training_period_samples);
+                _cfg.ofdm.fft_size,
+                _cfg.ofdm.cfo_training_period_samples);
         } else {
             _cfo_training_seq.clear();
         }
@@ -1307,10 +1307,10 @@ private:
         _midframe_pilot_seqs.reserve(_data_resource_layout.midframe_pilot_symbols.size());
         for (const int sym : _data_resource_layout.midframe_pilot_symbols) {
             _midframe_pilot_seqs.push_back(generate_midframe_bpsk_pilot_freq(
-                _cfg.fft_size,
-                _cfg.midframe_pilot_seed,
+                _cfg.ofdm.fft_size,
+                _cfg.ofdm.midframe_pilot_seed,
                 static_cast<size_t>(sym),
-                _cfg.pilot_positions,
+                _cfg.ofdm.pilot_positions,
                 _zc_seq));
         }
     }
@@ -1324,26 +1324,26 @@ private:
     }
 
     void _build_symbol_templates() {
-        _symbol_templates.resize(_cfg.num_symbols);
-        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
-            _symbol_templates[sym].resize(_cfg.fft_size);
+        _symbol_templates.resize(_cfg.ofdm.num_symbols);
+        for (size_t sym = 0; sym < _cfg.ofdm.num_symbols; ++sym) {
+            _symbol_templates[sym].resize(_cfg.ofdm.fft_size);
         }
 
         _payload_subcarrier_indices_flat.clear();
         _payload_subcarrier_indices_flat.reserve(_data_resource_layout.payload_re_count);
 
         size_t pregen_offset = 0;
-        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < _cfg.ofdm.num_symbols; ++sym) {
             auto& template_symbol = _symbol_templates[sym];
             // Reserved sync symbols always keep the dedicated sync ZC sequence.
             if (is_zc_sync_symbol(_cfg, sym)) {
                 std::memcpy(template_symbol.data(), _zc_seq.data(),
-                            _cfg.fft_size * sizeof(std::complex<float>));
+                            _cfg.ofdm.fft_size * sizeof(std::complex<float>));
                 continue;
             }
             if (is_cfo_training_symbol(_cfg, sym)) {
                 std::memcpy(template_symbol.data(), _cfo_training_seq.data(),
-                            _cfg.fft_size * sizeof(std::complex<float>));
+                            _cfg.ofdm.fft_size * sizeof(std::complex<float>));
                 continue;
             }
             const int midframe_pilot_rank =
@@ -1354,7 +1354,7 @@ private:
                 const auto& pilot_seq =
                     _midframe_pilot_seqs[static_cast<size_t>(midframe_pilot_rank)];
                 std::memcpy(template_symbol.data(), pilot_seq.data(),
-                            _cfg.fft_size * sizeof(std::complex<float>));
+                            _cfg.ofdm.fft_size * sizeof(std::complex<float>));
                 continue;
             }
 
@@ -1380,9 +1380,9 @@ private:
             }
             // Pilots are written after sensing-pilot RE so pilots keep highest priority
             // within non-sync symbols.
-            for (size_t idx = 0; idx < _cfg.pilot_positions.size(); ++idx) {
-                const size_t k = _cfg.pilot_positions[idx];
-                if (k < _cfg.fft_size) {
+            for (size_t idx = 0; idx < _cfg.ofdm.pilot_positions.size(); ++idx) {
+                const size_t k = _cfg.ofdm.pilot_positions[idx];
+                if (k < _cfg.ofdm.fft_size) {
                     template_symbol[k] = _zc_seq[k];
                 }
             }
@@ -1396,9 +1396,9 @@ private:
     }
 
     void _precalc_positions() {
-        _symbol_positions.reserve(_cfg.num_symbols);
-        for (size_t i = 0; i < _cfg.num_symbols; ++i) {
-            _symbol_positions.push_back(i * (_cfg.fft_size + _cfg.cp_length));
+        _symbol_positions.reserve(_cfg.ofdm.num_symbols);
+        for (size_t i = 0; i < _cfg.ofdm.num_symbols; ++i) {
+            _symbol_positions.push_back(i * (_cfg.ofdm.fft_size + _cfg.ofdm.cp_length));
         }
     }
 
@@ -1418,12 +1418,12 @@ private:
             "prbs_seed",
         };
         const std::vector<std::string> row{
-            _cfg.measurement_run_id,
+            _cfg.measurement.measurement_run_id,
             std::to_string(epoch_id),
             std::to_string(tx_gain_db),
             std::to_string(packets_sent),
-            std::to_string(_cfg.measurement_payload_bytes),
-            std::to_string(_cfg.measurement_prbs_seed),
+            std::to_string(_cfg.measurement.measurement_payload_bytes),
+            std::to_string(_cfg.measurement.measurement_prbs_seed),
         };
         if (!append_csv_row(_measurement_summary_path, header, row)) {
             LOG_G_WARN() << "Failed to append measurement epoch row to "
@@ -1592,7 +1592,7 @@ private:
 
         if (_measurement_enabled) {
             std::vector<uint8_t> payload;
-            payload.reserve(_cfg.measurement_payload_bytes);
+            payload.reserve(_cfg.measurement.measurement_payload_bytes);
             uint32_t active_epoch_id = 0;
             uint32_t seq_in_epoch = 0;
             uint32_t packets_sent_in_epoch = 0;
@@ -1601,7 +1601,7 @@ private:
                 const uint32_t requested_epoch = _measurement_requested_epoch.exchange(
                     0, std::memory_order_acq_rel);
                 if (requested_epoch > 0) {
-                    if (active_epoch_id > 0 && packets_sent_in_epoch < _cfg.measurement_packets_per_point) {
+                    if (active_epoch_id > 0 && packets_sent_in_epoch < _cfg.measurement.measurement_packets_per_point) {
                         LOG_G_WARN() << "Interrupting measurement epoch " << active_epoch_id
                                      << " after " << packets_sent_in_epoch << " packets.";
                     }
@@ -1618,9 +1618,9 @@ private:
                 MeasurementPayloadMetadata meta;
                 meta.epoch_id = active_epoch_id;
                 meta.seq_in_epoch = seq_in_epoch;
-                meta.packets_per_point = _cfg.measurement_packets_per_point;
-                meta.payload_bytes = static_cast<uint32_t>(_cfg.measurement_payload_bytes);
-                meta.prbs_seed = _cfg.measurement_prbs_seed;
+                meta.packets_per_point = _cfg.measurement.measurement_packets_per_point;
+                meta.payload_bytes = static_cast<uint32_t>(_cfg.measurement.measurement_payload_bytes);
+                meta.prbs_seed = _cfg.measurement.measurement_prbs_seed;
                 meta.tx_gain_x10 = _measurement_tx_gain_x10.load(std::memory_order_relaxed);
                 if (!build_measurement_payload(payload, meta)) {
                     LOG_G_ERROR() << "Failed to build measurement payload.";
@@ -1641,7 +1641,7 @@ private:
                 if (active_epoch_id > 0) {
                     ++seq_in_epoch;
                     ++packets_sent_in_epoch;
-                    if (packets_sent_in_epoch >= _cfg.measurement_packets_per_point) {
+                    if (packets_sent_in_epoch >= _cfg.measurement.measurement_packets_per_point) {
                         const double tx_gain_db =
                             static_cast<double>(_measurement_tx_gain_x10.load(std::memory_order_relaxed)) / 10.0;
                         _append_measurement_epoch_row(active_epoch_id, tx_gain_db, packets_sent_in_epoch);
@@ -1669,11 +1669,11 @@ private:
         setsockopt(_udp_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
         memset(&_udp_addr, 0, sizeof(_udp_addr));
         _udp_addr.sin_family = AF_INET;
-        _udp_addr.sin_port = htons(static_cast<uint16_t>(_cfg.udp_input_port));
-        if (_cfg.udp_input_ip == "0.0.0.0") {
+        _udp_addr.sin_port = htons(static_cast<uint16_t>(_cfg.network_output.udp_input_port));
+        if (_cfg.network_output.udp_input_ip == "0.0.0.0") {
             _udp_addr.sin_addr.s_addr = INADDR_ANY;
-        } else if (inet_pton(AF_INET, _cfg.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
-            LOG_G_ERROR() << "Invalid BS UDP bind IP: " << _cfg.udp_input_ip;
+        } else if (inet_pton(AF_INET, _cfg.network_output.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
+            LOG_G_ERROR() << "Invalid BS UDP bind IP: " << _cfg.network_output.udp_input_ip;
             close(_udp_sock);
             _udp_sock = -1;
             return;
@@ -1761,11 +1761,11 @@ private:
         auto prof_step_end = prof_step_start;
         // =================================================
 
-        const float scale = 1.0f / std::sqrt(_cfg.fft_size)/4; // Output digital signal power is 1/16
+        const float scale = 1.0f / std::sqrt(_cfg.ofdm.fft_size)/4; // Output digital signal power is 1/16
         const size_t max_data_syms_per_frame = _data_resource_layout.payload_re_count;
         const size_t measurement_packet_limit_per_frame =
-            (_measurement_enabled && _cfg.measurement_max_packets_per_frame > 0)
-                ? _cfg.measurement_max_packets_per_frame
+            (_measurement_enabled && _cfg.measurement.measurement_max_packets_per_frame > 0)
+                ? _cfg.measurement.measurement_max_packets_per_frame
                 : std::numeric_limits<size_t>::max();
         AlignedVector modulated_data_pool;
         modulated_data_pool.reserve(max_data_syms_per_frame);
@@ -1843,11 +1843,11 @@ private:
 
             // Objects from pool are already correctly sized - no need to resize
 
-            for (size_t i = 0; i < _cfg.num_symbols; ++i) {
+            for (size_t i = 0; i < _cfg.ofdm.num_symbols; ++i) {
                 const size_t pos = _symbol_positions[i];
                 auto* buf_ptr = current_frame.data() + pos;
                 if (!_duplex_layout.is_downlink(i)) {
-                    std::fill_n(buf_ptr, _cfg.fft_size + _cfg.cp_length,
+                    std::fill_n(buf_ptr, _cfg.ofdm.fft_size + _cfg.ofdm.cp_length,
                                 std::complex<float>(0.0f, 0.0f));
                     std::fill(current_symbols_ref[i].begin(), current_symbols_ref[i].end(),
                               std::complex<float>(0.0f, 0.0f));
@@ -1856,7 +1856,7 @@ private:
 
                 prof_step_start = ProfileClock::now();
                 std::memcpy(_fft_in.data(), _symbol_templates[i].data(),
-                            _cfg.fft_size * sizeof(std::complex<float>));
+                            _cfg.ofdm.fft_size * sizeof(std::complex<float>));
                 if (!is_reserved_sync_symbol(_cfg, i)) {
                     const int data_symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
                     if (data_symbol_idx_int >= 0) {
@@ -1880,7 +1880,7 @@ private:
                 }
                 
                 // Save frequency domain data of current symbol (for sensing) - direct memcpy
-                std::memcpy(current_symbols_ref[i].data(), _fft_in.data(), _cfg.fft_size * sizeof(std::complex<float>));
+                std::memcpy(current_symbols_ref[i].data(), _fft_in.data(), _cfg.ofdm.fft_size * sizeof(std::complex<float>));
                 prof_step_end = ProfileClock::now();
                 symbol_gen_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
@@ -1893,14 +1893,14 @@ private:
                 // Add Cyclic Prefix (CP)
                 prof_step_start = ProfileClock::now();
                 #pragma omp simd
-                for (size_t j = 0; j < _cfg.cp_length; ++j) {
-                    buf_ptr[j] = _fft_out[_cfg.fft_size - _cfg.cp_length + j] * scale;
+                for (size_t j = 0; j < _cfg.ofdm.cp_length; ++j) {
+                    buf_ptr[j] = _fft_out[_cfg.ofdm.fft_size - _cfg.ofdm.cp_length + j] * scale;
                 }
                 
                 // Write symbol body
                 #pragma omp simd
-                for (size_t j = 0; j < _cfg.fft_size; ++j) {
-                    buf_ptr[_cfg.cp_length + j] = _fft_out[j] * scale;
+                for (size_t j = 0; j < _cfg.ofdm.fft_size; ++j) {
+                    buf_ptr[_cfg.ofdm.cp_length + j] = _fft_out[j] * scale;
                 }
                 prof_step_end = ProfileClock::now();
                 cp_write_time += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -1917,7 +1917,7 @@ private:
 
             if (frame_count >= REPORT_INTERVAL) {
                 double avg_time = total_processing_time / frame_count;
-                double frame_duration = _cfg.samples_per_frame() / _cfg.sample_rate * 1000.0; // Convert to ms
+                double frame_duration = _cfg.samples_per_frame() / _cfg.rf_sampling.sample_rate * 1000.0; // Convert to ms
                 double load = avg_time / frame_duration;
                 std::ostringstream oss;
                 oss << std::fixed << std::setprecision(2)
@@ -2010,10 +2010,10 @@ private:
         uhd::tx_metadata_t md;
         md.start_of_burst = true;
         md.end_of_burst = false;
-        const double tick_rate = _tx_usrp ? _tx_usrp->get_master_clock_rate() : _cfg.sample_rate;
-        double tx_sample_rate = _cfg.sample_rate;
+        const double tick_rate = _tx_usrp ? _tx_usrp->get_master_clock_rate() : _cfg.rf_sampling.sample_rate;
+        double tx_sample_rate = _cfg.rf_sampling.sample_rate;
         if (_tx_usrp) {
-            const double actual_tx_rate = _tx_usrp->get_tx_rate(_cfg.tx_channel);
+            const double actual_tx_rate = _tx_usrp->get_tx_rate(_cfg.downlink.tx_channel);
             if (actual_tx_rate > 0.0) {
                 tx_sample_rate = actual_tx_rate;
             }
@@ -2093,7 +2093,7 @@ private:
             next_frame_ticks += static_cast<long long>(frames_to_skip) * frame_ticks;
             _next_tx_frame_seq.fetch_add(frames_to_skip, std::memory_order_relaxed);
             _next_frame_start_symbol.fetch_add(
-                frames_to_skip * static_cast<uint64_t>(_cfg.num_symbols),
+                frames_to_skip * static_cast<uint64_t>(_cfg.ofdm.num_symbols),
                 std::memory_order_relaxed);
             handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
             next_frame_starts_burst = true;
@@ -2181,7 +2181,7 @@ private:
             }
             _next_tx_frame_seq.fetch_add(1, std::memory_order_relaxed);
             _next_frame_start_symbol.fetch_add(
-                static_cast<uint64_t>(_cfg.num_symbols),
+                static_cast<uint64_t>(_cfg.ofdm.num_symbols),
                 std::memory_order_relaxed);
             next_frame_ticks += frame_ticks;
             next_frame_starts_burst = false;

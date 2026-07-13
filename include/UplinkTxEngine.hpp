@@ -47,22 +47,22 @@ public:
           _cfg(make_uplink_config(link_cfg)),
           _duplex(build_duplex_frame_layout(link_cfg)),
           _layout(build_data_resource_grid_layout(_cfg)),
-          _fft_in(_cfg.fft_size),
-          _fft_out(_cfg.fft_size),
+          _fft_in(_cfg.ofdm.fft_size),
+          _fft_out(_cfg.ofdm.fft_size),
           _period_samples(link_cfg.samples_per_frame()),
           _window_offset(_duplex.ul_sample_offset(link_cfg)),
           _window_samples(_duplex.ul_sample_count(link_cfg)) {
-        if (_cfg.num_symbols < 2) {
+        if (_cfg.ofdm.num_symbols < 2) {
             throw std::runtime_error("UplinkTxEngine: uplink needs >= 2 OFDM symbols (1 sync + data).");
         }
         if (_window_samples != _cfg.samples_per_frame()) {
             throw std::runtime_error("UplinkTxEngine: uplink window samples != uplink frame samples.");
         }
-        _zc_seq = generate_zc_freq(_cfg.fft_size, _cfg.zc_root);
+        _zc_seq = generate_zc_freq(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root);
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
         _build_symbol_templates();
         _ifft_plan = fftwf_plan_dft_1d(
-            static_cast<int>(_cfg.fft_size),
+            static_cast<int>(_cfg.ofdm.fft_size),
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_fft_out.data()),
             FFTW_BACKWARD, FFTW_MEASURE);
@@ -94,7 +94,7 @@ public:
         std::lock_guard<std::mutex> lock(_timing_mutex);
         _start_time = start_time;
         _tick_rate = tick_rate;
-        _tx_sample_rate = tx_sample_rate > 0.0 ? tx_sample_rate : _link_cfg.sample_rate;
+        _tx_sample_rate = tx_sample_rate > 0.0 ? tx_sample_rate : _link_cfg.rf_sampling.sample_rate;
         _use_timed_tx = (tick_rate > 0.0);
         _restart_requested.store(false, std::memory_order_release);
     }
@@ -159,15 +159,15 @@ public:
 private:
     // ---- One-time setup: build per-symbol frequency templates + payload map ----
     void _build_symbol_templates() {
-        _symbol_templates.assign(_cfg.num_symbols, AlignedVector(_cfg.fft_size, {0.0f, 0.0f}));
+        _symbol_templates.assign(_cfg.ofdm.num_symbols, AlignedVector(_cfg.ofdm.fft_size, {0.0f, 0.0f}));
         _payload_subcarrier_indices_flat.clear();
         _payload_subcarrier_indices_flat.reserve(_layout.payload_re_count);
 
         size_t data_symbol_idx = 0;
-        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < _cfg.ofdm.num_symbols; ++sym) {
             AlignedVector& tmpl = _symbol_templates[sym];
             if (is_zc_sync_symbol(_cfg, sym)) {
-                std::memcpy(tmpl.data(), _zc_seq.data(), _cfg.fft_size * sizeof(std::complex<float>));
+                std::memcpy(tmpl.data(), _zc_seq.data(), _cfg.ofdm.fft_size * sizeof(std::complex<float>));
                 continue;
             }
             const size_t base = _layout.non_pilot_offsets[data_symbol_idx];
@@ -182,8 +182,8 @@ private:
                     tmpl[k] = _zc_seq[k];
                 }
             }
-            for (const size_t k : _cfg.pilot_positions) {
-                if (k < _cfg.fft_size) tmpl[k] = _zc_seq[k];
+            for (const size_t k : _cfg.ofdm.pilot_positions) {
+                if (k < _cfg.ofdm.fft_size) tmpl[k] = _zc_seq[k];
             }
             ++data_symbol_idx;
         }
@@ -213,7 +213,7 @@ private:
         data_pool.resize(LdpcPacketFraming::kControlSymbols);
         LdpcPacketFraming::write_control_qpsk(hdr, data_pool.data());
 
-        if (_link_cfg.uplink_idle_waveform != kUplinkIdleWaveformRandomQpsk) {
+        if (_link_cfg.uplink.uplink_idle_waveform != kUplinkIdleWaveformRandomQpsk) {
             return;
         }
         data_pool.reserve(_layout.payload_re_count);
@@ -235,21 +235,21 @@ private:
         ::setsockopt(_udp_sock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(_link_cfg.ul_udp_input_port));
-        if (_link_cfg.ul_udp_input_ip == "0.0.0.0") {
+        addr.sin_port = htons(static_cast<uint16_t>(_link_cfg.network_output.ul_udp_input_port));
+        if (_link_cfg.network_output.ul_udp_input_ip == "0.0.0.0") {
             addr.sin_addr.s_addr = INADDR_ANY;
-        } else if (inet_pton(AF_INET, _link_cfg.ul_udp_input_ip.c_str(), &addr.sin_addr) != 1) {
-            LOG_G_ERROR() << "[UL-TX] Invalid ul_udp_input_ip: " << _link_cfg.ul_udp_input_ip;
+        } else if (inet_pton(AF_INET, _link_cfg.network_output.ul_udp_input_ip.c_str(), &addr.sin_addr) != 1) {
+            LOG_G_ERROR() << "[UL-TX] Invalid ul_udp_input_ip: " << _link_cfg.network_output.ul_udp_input_ip;
             return;
         }
         if (::bind(_udp_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            LOG_G_ERROR() << "[UL-TX] UDP bind failed on " << _link_cfg.ul_udp_input_ip << ":"
-                          << _link_cfg.ul_udp_input_port;
+            LOG_G_ERROR() << "[UL-TX] UDP bind failed on " << _link_cfg.network_output.ul_udp_input_ip << ":"
+                          << _link_cfg.network_output.ul_udp_input_port;
             return;
         }
         if (_link_cfg.should_profile("uplink")) {
-            LOG_G_INFO() << "[UL-TX] uplink payload UDP input on " << _link_cfg.ul_udp_input_ip << ":"
-                         << _link_cfg.ul_udp_input_port;
+            LOG_G_INFO() << "[UL-TX] uplink payload UDP input on " << _link_cfg.network_output.ul_udp_input_ip << ":"
+                         << _link_cfg.network_output.ul_udp_input_port;
         }
 
         std::vector<uint8_t> buf(65536);
@@ -347,12 +347,12 @@ private:
         _mod_pool.resize(data_pool.size());
         for (size_t i = 0; i < data_pool.size(); ++i) _mod_pool[i] = _qpsk_from_int(data_pool[i]);
 
-        const float scale = 1.0f / std::sqrt(static_cast<float>(_cfg.fft_size)) / 4.0f;
-        const size_t sym_len = _cfg.fft_size + _cfg.cp_length;
+        const float scale = 1.0f / std::sqrt(static_cast<float>(_cfg.ofdm.fft_size)) / 4.0f;
+        const size_t sym_len = _cfg.ofdm.fft_size + _cfg.ofdm.cp_length;
         size_t data_symbol_idx = 0;
-        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < _cfg.ofdm.num_symbols; ++sym) {
             std::memcpy(_fft_in.data(), _symbol_templates[sym].data(),
-                        _cfg.fft_size * sizeof(std::complex<float>));
+                        _cfg.ofdm.fft_size * sizeof(std::complex<float>));
             if (!is_zc_sync_symbol(_cfg, sym)) {
                 const size_t begin = _layout.payload_offsets[data_symbol_idx];
                 const size_t end = _layout.payload_offsets[data_symbol_idx + 1];
@@ -370,12 +370,12 @@ private:
             const auto* __restrict__ src = _fft_out.data();
             // Cyclic prefix (tail of the IFFT body) then the symbol body, scaled.
             #pragma omp simd
-            for (size_t j = 0; j < _cfg.cp_length; ++j) {
-                dst[j] = src[_cfg.fft_size - _cfg.cp_length + j] * scale;
+            for (size_t j = 0; j < _cfg.ofdm.cp_length; ++j) {
+                dst[j] = src[_cfg.ofdm.fft_size - _cfg.ofdm.cp_length + j] * scale;
             }
             #pragma omp simd
-            for (size_t j = 0; j < _cfg.fft_size; ++j) {
-                dst[_cfg.cp_length + j] = src[j] * scale;
+            for (size_t j = 0; j < _cfg.ofdm.fft_size; ++j) {
+                dst[_cfg.ofdm.cp_length + j] = src[j] * scale;
             }
         }
     }

@@ -853,52 +853,58 @@ bool spsc_wait_pop(Queue& queue, T& out, StopPredicate&& should_stop) {
     }
 }
 
-/**
- * @brief System Configuration Structure.
- * 
- * Holds all configurable parameters for the OFDM system, including FFT size,
- * cyclic prefix length, frequency settings, gain, and network configurations.
- */
-struct Config {
+struct OfdmFrameConfig {
     size_t fft_size = 1024;
-    size_t range_fft_size = 1024;      // Range FFT size
-    size_t doppler_fft_size = 100;     // Doppler FFT size
-    size_t sensing_view_range_bins = 0;   // Backend RD view width (0 = full range_fft_size)
-    size_t sensing_view_doppler_bins = 0; // Backend RD view height (0 = full doppler_fft_size)
     size_t cp_length = 128;            // Cyclic prefix length
     size_t num_symbols = 100;          // Number of symbols per frame
     size_t sensing_symbol_num = 100;   // Number of sensing symbols
+    size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
+    size_t sync_pos = 1;               // Synchronization symbol position
+    bool enable_sec_sync_symbol = false; // Reserve sync_pos-1 for the duplicate second sync symbol
+    bool enable_cfo_training_sequence = false; // Reserve sync_pos+1 for a repeated CFO training symbol
+    size_t cfo_training_period_samples = 16; // Repetition period of the CFO training symbol in samples
+    int zc_root = 29;                  // Zadoff-Chu sequence root index
+    std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    std::vector<size_t> midframe_pilot_symbols; // Absolute mid-frame pilot symbols; comb pilot RE are preserved
+    uint32_t midframe_pilot_seed = 0x4D46504Cu; // Deterministic BPSK pilot seed ("MFPL")
+};
+
+struct CudaConfig {
     size_t cuda_mod_pipeline_slots = 2;   // Number of CUDA mod pipeline slots
     size_t cuda_demod_pipeline_slots = 3; // Number of CUDA demod pipeline slots
     std::string cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu; // CUDA demod LDPC backend: gpu/cpu
     size_t cuda_ldpc_worker_buffers = 3;  // Number of CUDA LDPC async worker batch buffers
     size_t cuda_ldpc_cross_frame_flush_frames = 2; // Max frames to accumulate before CUDA LDPC batch decode
     double cuda_ldpc_cross_frame_flush_us = 1000.0; // Max CUDA LDPC cross-frame batch wait time
-    size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
-    size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
-    size_t sync_pos = 1;               // Synchronization symbol position
-    bool enable_sec_sync_symbol = false; // Reserve sync_pos-1 for the duplicate second sync symbol
-    bool enable_cfo_training_sequence = false; // Reserve sync_pos+1 for a repeated CFO training symbol
-    size_t cfo_training_period_samples = 16; // Repetition period of the CFO training symbol in samples
-    double sync_cfo_alias_search_range_hz = 800000.0; // Max absolute CFO span covered by sync alias search
-    int delay_adjust_step = 2;         // Delay adjustment step
-    double reset_hold_s = 0.5;         // Time window of persistent invalid delay before forcing a hard reset
-    int desired_peak_pos = 20;         // Desired delay peak position to include non-causal components
-    bool predictive_delay = true;      // Enable CFO-based predictive delay compensation during alignment/tracking
+};
+
+struct RfSamplingConfig {
     double sample_rate = 50e6;         // Sample rate
     double bandwidth = 50e6;           // Bandwidth
-    double center_freq = 2.4e9;        // Center frequency
-
-    double tx_gain = 0.0;              // TX gain
-    double rx_gain = 0.0;              // RX gain (Channel 1)
+    double rx_gain = 0.0;              // UE downlink RX gain
     bool rx_agc_enable = false;        // Enable hardware RX AGC via USRP gain control
     double rx_agc_low_threshold_db = 11.0; // Increase gain when delay-spectrum peak is below this threshold
     double rx_agc_high_threshold_db = 13.0; // Decrease gain when delay-spectrum peak is above this threshold
     double rx_agc_max_step_db = 3.0;   // Maximum gain change per AGC update
     size_t rx_agc_update_frames = 4;   // Frame interval between AGC updates
-    uint32_t tx_channel = 0;           // TX channel index
-    size_t rx_channel = 0;             // RX channel index
-    int zc_root = 29;                  // Zadoff-Chu sequence root index
+};
+
+struct UsrpDeviceConfig {
+    std::string device_args = "";
+};
+
+struct ClockTimeConfig {
+    std::string clock_source = "internal"; // Clock source
+    std::string time_source = "";         // Time source; empty means follow clock_source
+};
+
+struct SyncTrackingConfig {
+    size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
+    double sync_cfo_alias_search_range_hz = 800000.0; // Max absolute CFO span covered by sync alias search
+    int delay_adjust_step = 2;         // Delay adjustment step
+    double reset_hold_s = 0.5;         // Time window of persistent invalid delay before forcing a hard reset
+    int desired_peak_pos = 20;         // Desired delay peak position to include non-causal components
+    bool predictive_delay = true;      // Enable CFO-based predictive delay compensation during alignment/tracking
     bool software_sync = true;         // Software synchronization flag
     bool hardware_sync = false;        // Hardware synchronization flag
     std::string hardware_sync_tty = "/dev/ttyUSB0"; // Hardware sync TTY device
@@ -925,47 +931,78 @@ struct Config {
     double akf_r_min = 1e-8;          // Lower bound of observation noise variance R
     double akf_r_max = 1e3;           // Upper bound of observation noise variance R
 
-    std::vector<size_t> pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
-    std::vector<size_t> midframe_pilot_symbols; // Absolute mid-frame pilot symbols; comb pilot RE are preserved
-    uint32_t midframe_pilot_seed = 0x4D46504Cu; // Deterministic BPSK pilot seed ("MFPL")
+};
+
+struct EqualizerConfig {
     std::string equalizer_mode = kEqualizerModeMmse; // zf or mmse
     std::string channel_tracking_mode = kChannelTrackingModePilotPhase; // disabled or pilot_phase
     double equalizer_mag_floor = 1e-6; // Lower bound for |H|^2 in channel inversion
     double channel_tracking_min_pilot_snr = 1e-4; // Minimum pilot residual weight before falling back
-    bool data_resource_blocks_configured = false;
-    std::vector<DataResourceBlock> data_resource_blocks;
+};
+
+struct DownlinkConfig {
+    double center_freq = 2.4e9;        // Downlink RF center frequency
+    double tx_gain = 0.0;              // BS downlink TX gain
+    uint32_t tx_channel = 0;           // BS downlink TX channel index
+    std::string tx_device_args = "";
+    std::string tx_clock_source = "";
+    std::string tx_time_source = "";
+    std::string wire_format_tx = "sc16";
+    size_t rx_channel = 0;             // UE downlink RX channel index
+    std::string downlink_rx_wire_format = "sc16"; // UE downlink RX wire format
+    EqualizerConfig equalizer;
+};
+
+struct DownlinkPipelineConfig {
+    size_t tx_circular_buffer_size = 8;    // Capacity of BS frame circular buffer
+    size_t data_packet_buffer_size = 32;   // Capacity of BS encoded packet buffer
+};
+
+struct UplinkConfig {
+    bool enable_uplink = false;         // UE->BS uplink master switch
+    DuplexConfig duplex;                // Duplexing (TDD/FDD) + uplink frame structure
+    int32_t bs_dl_ul_timing_diff = 63; // BS: uplink-RX window offset relative to the TX frame anchor (samples)
+    int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
+    std::string uplink_idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
+    bool debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
+    double rx_gain = 0.0;              // BS uplink RX gain
+    size_t uplink_rx_channel = 0;      // BS uplink RX channel index
+    std::string uplink_rx_wire_format = "sc16"; // BS uplink RX wire format
+    double tx_gain = 0.0;              // UE uplink TX gain
+    uint32_t tx_channel = 0;           // UE uplink TX channel index
+    std::string wire_format_tx = "sc16"; // UE uplink TX wire format
+    EqualizerConfig equalizer;         // BS uplink equalizer/tracking
+};
+
+struct SensingConfig {
+    size_t range_fft_size = 1024;      // Range FFT size
+    size_t doppler_fft_size = 100;     // Doppler FFT size
+    size_t sensing_view_range_bins = 0;   // Backend RD view width (0 = full range_fft_size)
+    size_t sensing_view_doppler_bins = 0; // Backend RD view height (0 = full doppler_fft_size)
     std::string sensing_output_mode = kSensingOutputModeDense;
     SensingOnWireFormat sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
     bool enable_backend_sensing_processing = false;
     std::vector<DataResourceBlock> sensing_mask_blocks;
-    size_t payload_re_count = 0;
-    size_t non_pilot_re_count = 0;
-    std::string device_args = "";
-    std::string tx_device_args = "";
     std::string rx_device_args = "";
+    std::string rx_clock_source = "";
+    std::string rx_time_source = "";
+    std::string sensing_rx_wire_format = "sc16";  // BS sensing RX default wire format
+    uint32_t sensing_rx_channel_count = 1; // Number of sensing RX channels
+    std::vector<SensingRxChannelConfig> sensing_rx_channels; // Per-channel sensing RX config
+    size_t sensing_symbol_stride = 20;     // Default sensing STRD applied at startup
+    size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
+    bool enable_bi_sensing = true;
+};
+
+struct RadioConfig {
     std::string radio_backend = "uhd";  // Radio I/O backend: "uhd" (real USRP) or "sim" (channel simulator)
-    SimConfig simulation;               // Channel simulator parameters (used when radio_backend == "sim")
-    bool enable_uplink = false;         // Top-level UE->BS uplink master switch
-    DuplexConfig duplex;                // Duplexing (TDD/FDD) + uplink frame structure
-    // Runtime-adjustable DL/UL boundary timing knobs (samples). The BS knob is
-    // the DL/UL timing difference; the UE knob is the Timing Advance. Each side
-    // adjusts its own value independently at runtime; stored here as the startup
-    // default, mirrored into atomics by the engines.
-    int32_t bs_dl_ul_timing_diff = 63; // BS: uplink-RX window offset relative to the TX frame anchor (samples)
-    int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
-    std::string uplink_idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
-    bool uplink_debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
-    // UE uplink payload UDP input (mirrors udp_input_* on the BS downlink).
-    std::string ul_udp_input_ip = "0.0.0.0";
-    int ul_udp_input_port = 50002;
-    // BS uplink decoded-payload UDP output (mirrors udp_output_* on the UE downlink).
-    std::string ul_udp_output_ip = "127.0.0.1";
-    int ul_udp_output_port = 50003;
+};
+
+struct NetworkOutputConfig {
     std::string default_out_ip = "127.0.0.1";
     bool mono_sensing_output_enabled = true;
     std::string mono_sensing_ip = "0.0.0.0";
     int mono_sensing_port = 8888;
-    bool enable_bi_sensing = true;
     bool bi_sensing_output_enabled = true;
     std::string bi_sensing_ip = "0.0.0.0";
     int bi_sensing_port = 8889;
@@ -988,33 +1025,27 @@ struct Config {
     int constellation_port = 12346;
     std::string vofa_debug_ip = "127.0.0.1";
     int vofa_debug_port = 12347;
-    // UDP output for decoded payloads
     std::string udp_output_ip = "127.0.0.1";
     int udp_output_port = 50001;
-    // BS UDP input (for incoming payloads to modulate)
     std::string udp_input_ip = "0.0.0.0"; // bind address
     int udp_input_port = 50000;
-    std::string clocksource = "internal"; // Clock source
-    std::string timesource = "";          // Time source; empty means follow clocksource
-    std::string tx_clock_source = "";     // TX clock source override
-    std::string tx_time_source = "";      // TX time source override
-    std::string rx_clock_source = "";     // Default RX clock source override
-    std::string rx_time_source = "";      // Default RX time source override
-    std::string wire_format_tx = "sc16";
-    size_t uplink_rx_channel = 0;          // BS uplink RX channel index
-    std::string uplink_rx_wire_format = "sc16";   // BS uplink RX wire format
-    std::string sensing_rx_wire_format = "sc16";  // BS sensing RX default wire format
-    std::string downlink_rx_wire_format = "sc16"; // UE downlink RX wire format
-    uint32_t sensing_rx_channel_count = 1; // Number of sensing RX channels
-    std::vector<SensingRxChannelConfig> sensing_rx_channels; // Per-channel sensing RX config
-    size_t sensing_symbol_stride = 20;     // Default sensing STRD applied at startup
-    size_t tx_circular_buffer_size = 8;    // Capacity of BS frame circular buffer
-    size_t data_packet_buffer_size = 32;   // Capacity of BS encoded packet buffer
-    size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
+    std::string ul_udp_input_ip = "0.0.0.0"; // UE uplink payload UDP input
+    int ul_udp_input_port = 50002;
+    std::string ul_udp_output_ip = "127.0.0.1"; // BS decoded uplink UDP output
+    int ul_udp_output_port = 50003;
+};
+
+struct CpuCoresConfig {
     std::vector<int> downlink_cpu_cores; // BS: TX/mod/data-ingest; UE: RX/process/sensing/bit-processing
     std::vector<int> uplink_cpu_cores;   // Dedicated uplink thread cores; empty = no explicit uplink binding
     int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
+};
+
+struct RuntimeConfig {
     std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, uplink, or "all"
+};
+
+struct MeasurementConfig {
     bool measurement_enable = false;
     std::string measurement_mode = "";
     std::string measurement_run_id = "";
@@ -1023,30 +1054,63 @@ struct Config {
     uint32_t measurement_prbs_seed = 0x5A;
     uint32_t measurement_packets_per_point = 1;
     size_t measurement_max_packets_per_frame = 1; // 0 = unlimited
-    
+};
+
+struct ResourcePreviewConfig {
+    bool data_resource_blocks_configured = false;
+    std::vector<DataResourceBlock> data_resource_blocks;
+    size_t payload_re_count = 0;
+    size_t non_pilot_re_count = 0;
+};
+
+/**
+ * @brief Typed runtime configuration.
+ *
+ * Mirrors the sectioned YAML layout. YAML is parsed once into this structure;
+ * hot paths use typed fields instead of querying YAML nodes.
+ */
+struct Config {
+    RadioConfig radio;
+    SimConfig simulation;               // Channel simulator parameters (used when radio.radio_backend == "sim")
+    OfdmFrameConfig ofdm;
+    CudaConfig cuda;
+    SensingConfig sensing;
+    RfSamplingConfig rf_sampling;
+    UsrpDeviceConfig usrp_device;
+    ClockTimeConfig clock_time;
+    DownlinkConfig downlink;
+    DownlinkPipelineConfig downlink_pipeline;
+    UplinkConfig uplink;
+    SyncTrackingConfig sync_tracking;
+    MeasurementConfig measurement;
+    NetworkOutputConfig network_output;
+    CpuCoresConfig cpu_cores;
+    RuntimeConfig runtime;
+    ResourcePreviewConfig resource_preview;
+
     // Check if a specific module should be profiled
     bool should_profile(const std::string& module) const {
-        if (profiling_modules.empty()) return false;
-        if (profiling_modules == "all") return true;
+        if (runtime.profiling_modules.empty()) return false;
+        if (runtime.profiling_modules == "all") return true;
         size_t pos = 0;
-        while (pos < profiling_modules.size()) {
-            while (pos < profiling_modules.size() &&
-                   (profiling_modules[pos] == ',' ||
-                    std::isspace(static_cast<unsigned char>(profiling_modules[pos])))) {
+        while (pos < runtime.profiling_modules.size()) {
+            while (pos < runtime.profiling_modules.size() &&
+                   (runtime.profiling_modules[pos] == ',' ||
+                    std::isspace(static_cast<unsigned char>(runtime.profiling_modules[pos])))) {
                 ++pos;
             }
             const size_t token_start = pos;
-            while (pos < profiling_modules.size() && profiling_modules[pos] != ',') {
+            while (pos < runtime.profiling_modules.size() && runtime.profiling_modules[pos] != ',') {
                 ++pos;
             }
             size_t token_end = pos;
             while (token_end > token_start &&
-                   std::isspace(static_cast<unsigned char>(profiling_modules[token_end - 1]))) {
+                   std::isspace(static_cast<unsigned char>(runtime.profiling_modules[token_end - 1]))) {
                 --token_end;
             }
             const size_t token_len = token_end - token_start;
             if (token_len == module.size() &&
-                profiling_modules.compare(token_start, token_len, module) == 0) {
+                runtime.profiling_modules.compare(token_start, token_len, module) == 0) {
                 return true;
             }
         }
@@ -1055,7 +1119,7 @@ struct Config {
 
     // Calculate total samples per frame
     size_t samples_per_frame() const { 
-        return num_symbols * (fft_size + cp_length); 
+        return ofdm.num_symbols * (ofdm.fft_size + ofdm.cp_length);
     }
     
     // Calculate synchronization samples
@@ -1065,29 +1129,29 @@ struct Config {
 };
 
 inline bool uplink_self_channel_debug_enabled(const Config& cfg) {
-    return cfg.uplink_debug_self_channel && cfg.duplex.mode != DuplexMode::FDD;
+    return cfg.uplink.debug_self_channel && cfg.uplink.duplex.mode != DuplexMode::FDD;
 }
 
 inline bool sec_sync_symbol_enabled(const Config& cfg) {
-    return cfg.enable_sec_sync_symbol;
+    return cfg.ofdm.enable_sec_sync_symbol;
 }
 
 inline bool cfo_training_sequence_enabled(const Config& cfg) {
-    return cfg.enable_cfo_training_sequence;
+    return cfg.ofdm.enable_cfo_training_sequence;
 }
 
 inline size_t cfo_training_symbol_index(const Config& cfg) {
-    return cfg.sync_pos + 1;
+    return cfg.ofdm.sync_pos + 1;
 }
 
 inline bool is_sec_sync_symbol(const Config& cfg, size_t symbol_idx) {
     return sec_sync_symbol_enabled(cfg) &&
-           cfg.sync_pos > 0 &&
-           symbol_idx + 1 == cfg.sync_pos;
+           cfg.ofdm.sync_pos > 0 &&
+           symbol_idx + 1 == cfg.ofdm.sync_pos;
 }
 
 inline bool is_main_sync_symbol(const Config& cfg, size_t symbol_idx) {
-    return symbol_idx == cfg.sync_pos;
+    return symbol_idx == cfg.ofdm.sync_pos;
 }
 
 inline bool is_zc_sync_symbol(const Config& cfg, size_t symbol_idx) {
@@ -1096,7 +1160,7 @@ inline bool is_zc_sync_symbol(const Config& cfg, size_t symbol_idx) {
 
 inline bool is_cfo_training_symbol(const Config& cfg, size_t symbol_idx) {
     return cfo_training_sequence_enabled(cfg) &&
-           cfg.sync_pos < std::numeric_limits<size_t>::max() &&
+           cfg.ofdm.sync_pos < std::numeric_limits<size_t>::max() &&
            symbol_idx == cfo_training_symbol_index(cfg);
 }
 
@@ -1163,58 +1227,58 @@ struct DuplexFrameLayout {
     // Start sample (within a frame) of the contiguous uplink data block (TDD).
     size_t ul_sample_offset(const Config& cfg) const {
         if (mode == DuplexMode::FDD) return 0;
-        return (ul_start + ul_guard) * (cfg.fft_size + cfg.cp_length);
+        return (ul_start + ul_guard) * (cfg.ofdm.fft_size + cfg.ofdm.cp_length);
     }
     // Number of samples in the uplink data block.
     size_t ul_sample_count(const Config& cfg) const {
         if (mode == DuplexMode::FDD) return cfg.samples_per_frame();
         const size_t ul_data_syms = (ul_count > ul_guard) ? (ul_count - ul_guard) : 0;
-        return ul_data_syms * (cfg.fft_size + cfg.cp_length);
+        return ul_data_syms * (cfg.ofdm.fft_size + cfg.ofdm.cp_length);
     }
 };
 
 inline DuplexFrameLayout build_duplex_frame_layout(const Config& cfg) {
     DuplexFrameLayout layout;
-    layout.mode = cfg.duplex.mode;
-    layout.num_symbols = cfg.num_symbols;
-    if (!cfg.enable_uplink) {
+    layout.mode = cfg.uplink.duplex.mode;
+    layout.num_symbols = cfg.ofdm.num_symbols;
+    if (!cfg.uplink.enable_uplink) {
         layout.uplink_enabled = false;
-        layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
-        layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+        layout.symbol_is_uplink.assign(cfg.ofdm.num_symbols, 0);
+        layout.symbol_is_guard.assign(cfg.ofdm.num_symbols, 0);
         return layout;
     }
 
-    if (cfg.duplex.mode == DuplexMode::FDD) {
+    if (cfg.uplink.duplex.mode == DuplexMode::FDD) {
         // FDD: continuous uplink on a separate carrier; no symbol gating/guard.
         layout.uplink_enabled = true;
         layout.ul_start = 0;
-        layout.ul_count = cfg.num_symbols;
+        layout.ul_count = cfg.ofdm.num_symbols;
         layout.ul_guard = 0;
         return layout;
     }
 
     // TDD: validate and clamp the configured uplink symbol range.
-    size_t ul_start = cfg.duplex.ul_symbol_start;
-    size_t ul_count = cfg.duplex.ul_symbol_count;
-    size_t ul_guard = cfg.duplex.ul_guard_symbols;
+    size_t ul_start = cfg.uplink.duplex.ul_symbol_start;
+    size_t ul_count = cfg.uplink.duplex.ul_symbol_count;
+    size_t ul_guard = cfg.uplink.duplex.ul_guard_symbols;
 
     if (ul_count == 0) {
         layout.uplink_enabled = false;   // uplink disabled
-        layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
-        layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+        layout.symbol_is_uplink.assign(cfg.ofdm.num_symbols, 0);
+        layout.symbol_is_guard.assign(cfg.ofdm.num_symbols, 0);
         return layout;
     }
 
-    if (ul_start >= cfg.num_symbols) {
+    if (ul_start >= cfg.ofdm.num_symbols) {
         layout.warning = "uplink symbol_start beyond frame; uplink disabled";
         layout.uplink_enabled = false;
-        layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
-        layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+        layout.symbol_is_uplink.assign(cfg.ofdm.num_symbols, 0);
+        layout.symbol_is_guard.assign(cfg.ofdm.num_symbols, 0);
         return layout;
     }
-    if (ul_start + ul_count > cfg.num_symbols) {
+    if (ul_start + ul_count > cfg.ofdm.num_symbols) {
         layout.warning = "uplink range exceeds frame; clamped to num_symbols";
-        ul_count = cfg.num_symbols - ul_start;
+        ul_count = cfg.ofdm.num_symbols - ul_start;
     }
     if (ul_guard > ul_count) {
         layout.warning = "uplink guard exceeds uplink range; clamped";
@@ -1226,8 +1290,8 @@ inline DuplexFrameLayout build_duplex_frame_layout(const Config& cfg) {
     layout.ul_guard = ul_guard;
     layout.uplink_enabled = (ul_count > ul_guard);
 
-    layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
-    layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+    layout.symbol_is_uplink.assign(cfg.ofdm.num_symbols, 0);
+    layout.symbol_is_guard.assign(cfg.ofdm.num_symbols, 0);
     for (size_t s = ul_start; s < ul_start + ul_count; ++s) {
         if (s < ul_start + ul_guard) {
             layout.symbol_is_guard[s] = 1;          // leading guard symbols
@@ -1307,37 +1371,37 @@ inline int select_distinct_zc_root(
 // blocks).
 //
 // TDD: num_symbols = ul_symbol_count - ul_guard_symbols (the data-bearing part of
-//      the uplink window). FDD: num_symbols = cfg.num_symbols (continuous uplink).
+//      the uplink window). FDD: num_symbols = cfg.ofdm.num_symbols (continuous uplink).
 inline Config make_uplink_config(const Config& cfg) {
     Config ul = cfg;
     const DuplexFrameLayout dl = build_duplex_frame_layout(cfg);
-    const size_t ul_syms = !cfg.enable_uplink
+    const size_t ul_syms = !cfg.uplink.enable_uplink
         ? 0
-        : ((cfg.duplex.mode == DuplexMode::FDD)
-            ? cfg.num_symbols
+        : ((cfg.uplink.duplex.mode == DuplexMode::FDD)
+            ? cfg.ofdm.num_symbols
             : ((dl.ul_count > dl.ul_guard) ? (dl.ul_count - dl.ul_guard) : 0));
-    ul.num_symbols = ul_syms;
-    ul.sync_pos = 0;
-    const int sensing_pilot_root = select_distinct_zc_root(cfg.fft_size, cfg.zc_root);
-    ul.zc_root = select_distinct_zc_root(
-        cfg.fft_size,
-        cfg.zc_root,
+    ul.ofdm.num_symbols = ul_syms;
+    ul.ofdm.sync_pos = 0;
+    const int sensing_pilot_root = select_distinct_zc_root(cfg.ofdm.fft_size, cfg.ofdm.zc_root);
+    ul.ofdm.zc_root = select_distinct_zc_root(
+        cfg.ofdm.fft_size,
+        cfg.ofdm.zc_root,
         std::vector<int>{sensing_pilot_root});
-    ul.enable_sec_sync_symbol = false;
-    ul.enable_cfo_training_sequence = false;
-    ul.midframe_pilot_symbols.clear();
-    ul.sensing_mask_blocks.clear();
-    ul.data_resource_blocks.clear();
-    ul.data_resource_blocks_configured = false;
+    ul.ofdm.enable_sec_sync_symbol = false;
+    ul.ofdm.enable_cfo_training_sequence = false;
+    ul.ofdm.midframe_pilot_symbols.clear();
+    ul.sensing.sensing_mask_blocks.clear();
+    ul.resource_preview.data_resource_blocks.clear();
+    ul.resource_preview.data_resource_blocks_configured = false;
     // The uplink does not run sensing; keep sensing_symbol_num consistent.
-    ul.sensing_symbol_num = ul_syms;
+    ul.ofdm.sensing_symbol_num = ul_syms;
     return ul;
 }
 
 // True when the uplink carries at least one data-bearing symbol (a ZC sync plus
 // at least one data symbol). Uses make_uplink_config()'s derived num_symbols.
 inline bool uplink_enabled(const Config& cfg) {
-    return make_uplink_config(cfg).num_symbols >= 2;
+    return make_uplink_config(cfg).ofdm.num_symbols >= 2;
 }
 
 // One-line startup summary of the duplex frame partition. `role` is "BS" or "UE".
@@ -1345,23 +1409,23 @@ inline void log_duplex_summary(const Config& cfg, const char* role) {
     const DuplexFrameLayout dl = build_duplex_frame_layout(cfg);
     if (!uplink_enabled(cfg)) {
         LOG_G_INFO() << "[" << role << "] duplex: uplink DISABLED (downlink-only); "
-                     << "num_symbols=" << cfg.num_symbols;
+                     << "num_symbols=" << cfg.ofdm.num_symbols;
         return;
     }
     const Config ul = make_uplink_config(cfg);
     std::ostringstream oss;
     oss << "[" << role << "] duplex partition: mode="
-        << duplex_mode_to_string(cfg.duplex.mode)
-        << ", frame_symbols=" << cfg.num_symbols;
-    if (cfg.duplex.mode == DuplexMode::TDD) {
-        const size_t dl_syms = cfg.num_symbols - dl.ul_count;
+        << duplex_mode_to_string(cfg.uplink.duplex.mode)
+        << ", frame_symbols=" << cfg.ofdm.num_symbols;
+    if (cfg.uplink.duplex.mode == DuplexMode::TDD) {
+        const size_t dl_syms = cfg.ofdm.num_symbols - dl.ul_count;
         oss << ", DL=" << dl_syms << ", guard=" << dl.ul_guard
-            << ", UL=" << ul.num_symbols
+            << ", UL=" << ul.ofdm.num_symbols
             << " (UL symbols [" << (dl.ul_start + dl.ul_guard) << ","
             << (dl.ul_start + dl.ul_count) << "))";
     } else {
-        oss << ", UL=" << ul.num_symbols << " (continuous), ul_center_freq="
-            << cfg.duplex.ul_center_freq << " Hz";
+        oss << ", UL=" << ul.ofdm.num_symbols << " (continuous), ul_center_freq="
+            << cfg.uplink.duplex.ul_center_freq << " Hz";
     }
     LOG_G_INFO() << oss.str();
 }
@@ -1370,17 +1434,17 @@ inline bool validate_cfo_training_period(const Config& cfg, std::string* error =
     if (!cfo_training_sequence_enabled(cfg)) {
         return true;
     }
-    if (cfg.cfo_training_period_samples == 0) {
+    if (cfg.ofdm.cfo_training_period_samples == 0) {
         if (error) *error = "cfo_training_period_samples must be greater than 0.";
         return false;
     }
-    if (cfg.cfo_training_period_samples >= cfg.fft_size) {
+    if (cfg.ofdm.cfo_training_period_samples >= cfg.ofdm.fft_size) {
         if (error) {
             *error = "cfo_training_period_samples must be smaller than fft_size.";
         }
         return false;
     }
-    if ((cfg.fft_size % cfg.cfo_training_period_samples) != 0) {
+    if ((cfg.ofdm.fft_size % cfg.ofdm.cfo_training_period_samples) != 0) {
         if (error) {
             *error = "cfo_training_period_samples must divide fft_size so the CFO field repeats exactly.";
         }
@@ -1394,7 +1458,7 @@ inline bool has_reserved_sync_symbol_overlap(const Config& cfg) {
         return false;
     }
     const size_t cfo_sym = cfo_training_symbol_index(cfg);
-    return cfo_sym == cfg.sync_pos || is_sec_sync_symbol(cfg, cfo_sym);
+    return cfo_sym == cfg.ofdm.sync_pos || is_sec_sync_symbol(cfg, cfo_sym);
 }
 
 inline bool dense_sensing_stride_hits_symbol(
@@ -1402,10 +1466,10 @@ inline bool dense_sensing_stride_hits_symbol(
     size_t stride,
     size_t symbol_idx)
 {
-    if (cfg.num_symbols == 0 || stride == 0 || symbol_idx >= cfg.num_symbols) {
+    if (cfg.ofdm.num_symbols == 0 || stride == 0 || symbol_idx >= cfg.ofdm.num_symbols) {
         return false;
     }
-    return (symbol_idx % std::gcd(stride, cfg.num_symbols)) == 0;
+    return (symbol_idx % std::gcd(stride, cfg.ofdm.num_symbols)) == 0;
 }
 
 inline std::string dense_sensing_stride_cfo_training_error(
@@ -1413,11 +1477,11 @@ inline std::string dense_sensing_stride_cfo_training_error(
     size_t stride,
     const std::string& context)
 {
-    if (cfg.num_symbols == 0 || stride == 0 || !cfo_training_sequence_enabled(cfg)) {
+    if (cfg.ofdm.num_symbols == 0 || stride == 0 || !cfo_training_sequence_enabled(cfg)) {
         return {};
     }
     const size_t sym = cfo_training_symbol_index(cfg);
-    if (sym < cfg.num_symbols && dense_sensing_stride_hits_symbol(cfg, stride, sym)) {
+    if (sym < cfg.ofdm.num_symbols && dense_sensing_stride_hits_symbol(cfg, stride, sym)) {
         return context + " selects symbol " + std::to_string(sym) + ", which is the CFO training field. "
                "CFO training fields are not valid sensing symbols; choose a sensing_symbol_stride "
                "that does not sample sync_pos+1.";
@@ -1452,7 +1516,7 @@ inline std::string normalize_sensing_output_mode_string(std::string mode) {
 }
 
 inline bool sensing_output_mode_is_compact_mask(const Config& cfg) {
-    return cfg.sensing_output_mode == kSensingOutputModeCompactMask;
+    return cfg.sensing.sensing_output_mode == kSensingOutputModeCompactMask;
 }
 
 inline const char* sensing_on_wire_format_to_string(SensingOnWireFormat format) {
@@ -1504,11 +1568,11 @@ inline std::string normalize_cuda_ldpc_decoder_backend_string(std::string backen
 }
 
 inline bool cuda_ldpc_decoder_backend_is_cpu(const Config& cfg) {
-    return cfg.cuda_ldpc_decoder_backend == kCudaLdpcDecoderBackendCpu;
+    return cfg.cuda.cuda_ldpc_decoder_backend == kCudaLdpcDecoderBackendCpu;
 }
 
 inline bool cuda_ldpc_decoder_backend_is_gpu(const Config& cfg) {
-    return cfg.cuda_ldpc_decoder_backend == kCudaLdpcDecoderBackendGpu;
+    return cfg.cuda.cuda_ldpc_decoder_backend == kCudaLdpcDecoderBackendGpu;
 }
 
 inline size_t sensing_on_wire_complex_bytes(SensingOnWireFormat format) {
@@ -1608,25 +1672,25 @@ inline uint32_t sensing_mask_hash_from_layout(
 }
 
 inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
-    if (cfg.num_symbols == 0) {
+    if (cfg.ofdm.num_symbols == 0) {
         throw std::runtime_error("num_symbols=0 is invalid for sensing mask layout.");
     }
-    if (cfg.fft_size == 0) {
+    if (cfg.ofdm.fft_size == 0) {
         throw std::runtime_error("fft_size=0 is invalid for sensing mask layout.");
     }
 
     SensingMaskLayout layout;
-    layout.num_symbols = cfg.num_symbols;
-    layout.fft_size = cfg.fft_size;
-    layout.symbol_to_selected_rank.assign(cfg.num_symbols, -1);
+    layout.num_symbols = cfg.ofdm.num_symbols;
+    layout.fft_size = cfg.ofdm.fft_size;
+    layout.symbol_to_selected_rank.assign(cfg.ofdm.num_symbols, -1);
 
-    std::vector<uint8_t> mask(cfg.num_symbols * cfg.fft_size, 0);
+    std::vector<uint8_t> mask(cfg.ofdm.num_symbols * cfg.ofdm.fft_size, 0);
     auto flat_index = [&cfg](size_t symbol_index, size_t subcarrier_index) {
-        return symbol_index * cfg.fft_size + subcarrier_index;
+        return symbol_index * cfg.ofdm.fft_size + subcarrier_index;
     };
 
-    for (size_t block_idx = 0; block_idx < cfg.sensing_mask_blocks.size(); ++block_idx) {
-        const auto& block = cfg.sensing_mask_blocks[block_idx];
+    for (size_t block_idx = 0; block_idx < cfg.sensing.sensing_mask_blocks.size(); ++block_idx) {
+        const auto& block = cfg.sensing.sensing_mask_blocks[block_idx];
         if (block.symbol_count == 0) {
             throw std::runtime_error(
                 "sensing_mask_blocks[" + std::to_string(block_idx) +
@@ -1637,14 +1701,14 @@ inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
                 "sensing_mask_blocks[" + std::to_string(block_idx) +
                 "].subcarrier_count must be greater than 0.");
         }
-        if (block.symbol_start >= cfg.num_symbols ||
-            block.symbol_start + block.symbol_count > cfg.num_symbols) {
+        if (block.symbol_start >= cfg.ofdm.num_symbols ||
+            block.symbol_start + block.symbol_count > cfg.ofdm.num_symbols) {
             throw std::runtime_error(
                 "sensing_mask_blocks[" + std::to_string(block_idx) +
                 "] exceeds the configured symbol range.");
         }
-        if (block.subcarrier_start >= cfg.fft_size ||
-            block.subcarrier_start + block.subcarrier_count > cfg.fft_size) {
+        if (block.subcarrier_start >= cfg.ofdm.fft_size ||
+            block.subcarrier_start + block.subcarrier_count > cfg.ofdm.fft_size) {
             throw std::runtime_error(
                 "sensing_mask_blocks[" + std::to_string(block_idx) +
                 "] exceeds the configured subcarrier range.");
@@ -1664,9 +1728,9 @@ inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
     }
 
     layout.selected_symbol_offsets.push_back(0);
-    for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
+    for (size_t sym = 0; sym < cfg.ofdm.num_symbols; ++sym) {
         size_t row_count = 0;
-        for (size_t sc = 0; sc < cfg.fft_size; ++sc) {
+        for (size_t sc = 0; sc < cfg.ofdm.fft_size; ++sc) {
             if (mask[flat_index(sym, sc)] == 0) {
                 continue;
             }
@@ -1710,7 +1774,7 @@ inline CompactSensingMaskAnalysis analyze_compact_sensing_mask(const Config& cfg
         analysis.incompatibility_reason = "compact_mask does not select any sensing RE.";
         return analysis;
     }
-    if (cfg.num_symbols == 0) {
+    if (cfg.ofdm.num_symbols == 0) {
         analysis.incompatibility_reason = "num_symbols=0 is invalid for compact_mask analysis.";
         return analysis;
     }
@@ -1744,7 +1808,7 @@ inline CompactSensingMaskAnalysis analyze_compact_sensing_mask(const Config& cfg
         }
     }
 
-    size_t expected_gap = cfg.num_symbols;
+    size_t expected_gap = cfg.ofdm.num_symbols;
     if (analysis.selected_symbol_count > 1) {
         const int first_gap = layout.selected_symbols[1] - layout.selected_symbols[0];
         if (first_gap <= 0) {
@@ -1770,7 +1834,7 @@ inline CompactSensingMaskAnalysis analyze_compact_sensing_mask(const Config& cfg
     }
 
     const size_t wrap_gap = static_cast<size_t>(
-        static_cast<int>(cfg.num_symbols) +
+        static_cast<int>(cfg.ofdm.num_symbols) +
         layout.selected_symbols.front() -
         layout.selected_symbols.back());
     if (wrap_gap != expected_gap) {
@@ -1782,16 +1846,16 @@ inline CompactSensingMaskAnalysis analyze_compact_sensing_mask(const Config& cfg
     analysis.regular_subsampling_compatible = true;
     analysis.implicit_symbol_stride = expected_gap;
 
-    if (cfg.range_fft_size < analysis.common_subcarrier_count) {
+    if (cfg.sensing.range_fft_size < analysis.common_subcarrier_count) {
         analysis.runtime_restriction_reason =
             "compact_mask regular sampling selects " + std::to_string(analysis.common_subcarrier_count) +
-            " subcarriers, which exceeds range_fft_size=" + std::to_string(cfg.range_fft_size) + '.';
+            " subcarriers, which exceeds range_fft_size=" + std::to_string(cfg.sensing.range_fft_size) + '.';
         return analysis;
     }
-    if (analysis.selected_symbol_count > cfg.doppler_fft_size) {
+    if (analysis.selected_symbol_count > cfg.sensing.doppler_fft_size) {
         analysis.runtime_restriction_reason =
             "compact_mask regular sampling selects " + std::to_string(analysis.selected_symbol_count) +
-            " symbols, which exceeds doppler_fft_size=" + std::to_string(cfg.doppler_fft_size) + '.';
+            " symbols, which exceeds doppler_fft_size=" + std::to_string(cfg.sensing.doppler_fft_size) + '.';
         return analysis;
     }
 
@@ -1808,7 +1872,7 @@ inline std::string compact_mask_runtime_fft_controls_reason(const Config& cfg) {
 }
 
 inline bool backend_sensing_processing_supported(const Config& cfg) {
-    if (!cfg.enable_backend_sensing_processing) {
+    if (!cfg.sensing.enable_backend_sensing_processing) {
         return false;
     }
     if (!sensing_output_mode_is_compact_mask(cfg)) {
@@ -1818,7 +1882,7 @@ inline bool backend_sensing_processing_supported(const Config& cfg) {
 }
 
 inline std::string backend_sensing_processing_reason(const Config& cfg) {
-    if (!cfg.enable_backend_sensing_processing) {
+    if (!cfg.sensing.enable_backend_sensing_processing) {
         return "backend sensing processing disabled";
     }
     if (!sensing_output_mode_is_compact_mask(cfg)) {
@@ -1829,7 +1893,7 @@ inline std::string backend_sensing_processing_reason(const Config& cfg) {
 
 inline size_t required_sensing_range_bin_count(const Config& cfg) {
     if (!sensing_output_mode_is_compact_mask(cfg)) {
-        return std::max<size_t>(cfg.fft_size, 1);
+        return std::max<size_t>(cfg.ofdm.fft_size, 1);
     }
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     if (analysis.regular_subsampling_compatible) {
@@ -1839,7 +1903,7 @@ inline size_t required_sensing_range_bin_count(const Config& cfg) {
 }
 
 inline size_t required_sensing_doppler_symbol_count(const Config& cfg) {
-    size_t required = std::max<size_t>(cfg.sensing_symbol_num, 1);
+    size_t required = std::max<size_t>(cfg.ofdm.sensing_symbol_num, 1);
     if (!sensing_output_mode_is_compact_mask(cfg)) {
         return required;
     }
@@ -1851,80 +1915,80 @@ inline size_t required_sensing_doppler_symbol_count(const Config& cfg) {
 }
 
 inline size_t resolved_sensing_view_range_bins(const Config& cfg) {
-    const size_t full_range_bins = std::max<size_t>(cfg.range_fft_size, 1);
-    if (cfg.sensing_view_range_bins == 0) {
+    const size_t full_range_bins = std::max<size_t>(cfg.sensing.range_fft_size, 1);
+    if (cfg.sensing.sensing_view_range_bins == 0) {
         return full_range_bins;
     }
-    return std::clamp(cfg.sensing_view_range_bins, size_t{1}, full_range_bins);
+    return std::clamp(cfg.sensing.sensing_view_range_bins, size_t{1}, full_range_bins);
 }
 
 inline size_t resolved_sensing_view_doppler_bins(const Config& cfg) {
-    const size_t full_doppler_bins = std::max<size_t>(cfg.doppler_fft_size, 1);
+    const size_t full_doppler_bins = std::max<size_t>(cfg.sensing.doppler_fft_size, 1);
     const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
-    if (cfg.sensing_view_doppler_bins == 0) {
+    if (cfg.sensing.sensing_view_doppler_bins == 0) {
         return full_doppler_bins;
     }
-    return std::clamp(cfg.sensing_view_doppler_bins, min_doppler_bins, full_doppler_bins);
+    return std::clamp(cfg.sensing.sensing_view_doppler_bins, min_doppler_bins, full_doppler_bins);
 }
 
 inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
     const size_t required_range = required_sensing_range_bin_count(cfg);
-    if (cfg.range_fft_size == 0) {
-        const size_t fallback_range = (required_range > 0) ? required_range : std::max<size_t>(cfg.fft_size, 1);
+    if (cfg.sensing.range_fft_size == 0) {
+        const size_t fallback_range = (required_range > 0) ? required_range : std::max<size_t>(cfg.ofdm.fft_size, 1);
         LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to " << fallback_range << '.';
-        cfg.range_fft_size = fallback_range;
+        cfg.sensing.range_fft_size = fallback_range;
     }
-    if (required_range > 0 && cfg.range_fft_size < required_range) {
-        LOG_G_WARN() << "range_fft_size=" << cfg.range_fft_size
+    if (required_range > 0 && cfg.sensing.range_fft_size < required_range) {
+        LOG_G_WARN() << "range_fft_size=" << cfg.sensing.range_fft_size
                      << " is smaller than the required sensing subcarrier count=" << required_range
                      << " for " << context_name
                      << ". Expanding range_fft_size to keep delay FFT buffers consistent.";
-        cfg.range_fft_size = required_range;
+        cfg.sensing.range_fft_size = required_range;
     }
-    if (cfg.doppler_fft_size == 0) {
+    if (cfg.sensing.doppler_fft_size == 0) {
         LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
-        cfg.doppler_fft_size = 1;
+        cfg.sensing.doppler_fft_size = 1;
     }
-    if (cfg.sensing_symbol_num == 0) {
+    if (cfg.ofdm.sensing_symbol_num == 0) {
         LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
-        cfg.sensing_symbol_num = 1;
+        cfg.ofdm.sensing_symbol_num = 1;
     }
 
     const size_t required_doppler = required_sensing_doppler_symbol_count(cfg);
-    if (cfg.doppler_fft_size < required_doppler) {
-        LOG_G_WARN() << "doppler_fft_size=" << cfg.doppler_fft_size
+    if (cfg.sensing.doppler_fft_size < required_doppler) {
+        LOG_G_WARN() << "doppler_fft_size=" << cfg.sensing.doppler_fft_size
                      << " is smaller than the required sensing symbol count=" << required_doppler
                      << " for " << context_name
                      << ". Expanding doppler_fft_size to keep sensing buffers consistent.";
-        cfg.doppler_fft_size = required_doppler;
+        cfg.sensing.doppler_fft_size = required_doppler;
     }
 }
 
 inline void normalize_sensing_view_bins(Config& cfg, const char* context_name) {
-    if (cfg.sensing_view_range_bins != 0 && cfg.sensing_view_range_bins > cfg.range_fft_size) {
+    if (cfg.sensing.sensing_view_range_bins != 0 && cfg.sensing.sensing_view_range_bins > cfg.sensing.range_fft_size) {
         LOG_G_WARN() << context_name
-                     << " sensing_view_range_bins=" << cfg.sensing_view_range_bins
-                     << " exceeds range_fft_size=" << cfg.range_fft_size
+                     << " sensing_view_range_bins=" << cfg.sensing.sensing_view_range_bins
+                     << " exceeds range_fft_size=" << cfg.sensing.range_fft_size
                      << ". Clamping backend view width to the configured range FFT size.";
-        cfg.sensing_view_range_bins = cfg.range_fft_size;
+        cfg.sensing.sensing_view_range_bins = cfg.sensing.range_fft_size;
     }
 
-    if (cfg.sensing_view_doppler_bins != 0) {
+    if (cfg.sensing.sensing_view_doppler_bins != 0) {
         const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
-        if (cfg.sensing_view_doppler_bins < min_doppler_bins) {
+        if (cfg.sensing.sensing_view_doppler_bins < min_doppler_bins) {
             LOG_G_WARN() << context_name
-                         << " sensing_view_doppler_bins=" << cfg.sensing_view_doppler_bins
+                         << " sensing_view_doppler_bins=" << cfg.sensing.sensing_view_doppler_bins
                          << " is smaller than the required slow-time symbol count="
                          << min_doppler_bins
                          << ". Clamping backend view height to preserve the full sensing aperture.";
-            cfg.sensing_view_doppler_bins = min_doppler_bins;
+            cfg.sensing.sensing_view_doppler_bins = min_doppler_bins;
         }
-        if (cfg.sensing_view_doppler_bins > cfg.doppler_fft_size) {
+        if (cfg.sensing.sensing_view_doppler_bins > cfg.sensing.doppler_fft_size) {
             LOG_G_WARN() << context_name
-                         << " sensing_view_doppler_bins=" << cfg.sensing_view_doppler_bins
-                         << " exceeds doppler_fft_size=" << cfg.doppler_fft_size
+                         << " sensing_view_doppler_bins=" << cfg.sensing.sensing_view_doppler_bins
+                         << " exceeds doppler_fft_size=" << cfg.sensing.doppler_fft_size
                          << ". Clamping backend view height to the configured Doppler FFT size.";
-            cfg.sensing_view_doppler_bins = cfg.doppler_fft_size;
+            cfg.sensing.sensing_view_doppler_bins = cfg.sensing.doppler_fft_size;
         }
     }
 }
@@ -1933,25 +1997,25 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     const Config& cfg,
     bool log_warnings = false)
 {
-    if (cfg.num_symbols == 0) {
+    if (cfg.ofdm.num_symbols == 0) {
         throw std::runtime_error("num_symbols=0 is invalid for data-resource layout.");
     }
-    if (cfg.sync_pos >= cfg.num_symbols) {
+    if (cfg.ofdm.sync_pos >= cfg.ofdm.num_symbols) {
         throw std::runtime_error(
-            "sync_pos=" + std::to_string(cfg.sync_pos) +
-            " is out of range for num_symbols=" + std::to_string(cfg.num_symbols) + '.');
+            "sync_pos=" + std::to_string(cfg.ofdm.sync_pos) +
+            " is out of range for num_symbols=" + std::to_string(cfg.ofdm.num_symbols) + '.');
     }
     if (sec_sync_symbol_enabled(cfg)) {
-        if (cfg.num_symbols < 2) {
+        if (cfg.ofdm.num_symbols < 2) {
             throw std::runtime_error("enable_sec_sync_symbol requires num_symbols >= 2.");
         }
-        if (cfg.sync_pos == 0) {
+        if (cfg.ofdm.sync_pos == 0) {
             throw std::runtime_error(
                 "enable_sec_sync_symbol requires sync_pos >= 1 so sync_pos-1 can hold the second sync symbol.");
         }
     }
     if (cfo_training_sequence_enabled(cfg)) {
-        if (cfg.sync_pos + 1 >= cfg.num_symbols) {
+        if (cfg.ofdm.sync_pos + 1 >= cfg.ofdm.num_symbols) {
             throw std::runtime_error(
                 "enable_cfo_training_sequence requires sync_pos+1 to be inside the frame.");
         }
@@ -1966,17 +2030,17 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     }
 
     DataResourceGridLayout layout;
-    layout.num_symbols = cfg.num_symbols;
-    layout.fft_size = cfg.fft_size;
-    layout.sync_pos = cfg.sync_pos;
+    layout.num_symbols = cfg.ofdm.num_symbols;
+    layout.fft_size = cfg.ofdm.fft_size;
+    layout.sync_pos = cfg.ofdm.sync_pos;
     const DuplexFrameLayout duplex_layout = build_duplex_frame_layout(cfg);
-    layout.midframe_pilot_symbol_mask.assign(cfg.num_symbols, 0);
-    layout.midframe_pilot_symbol_to_rank.assign(cfg.num_symbols, -1);
-    for (auto sym : cfg.midframe_pilot_symbols) {
-        if (sym >= cfg.num_symbols) {
+    layout.midframe_pilot_symbol_mask.assign(cfg.ofdm.num_symbols, 0);
+    layout.midframe_pilot_symbol_to_rank.assign(cfg.ofdm.num_symbols, -1);
+    for (auto sym : cfg.ofdm.midframe_pilot_symbols) {
+        if (sym >= cfg.ofdm.num_symbols) {
             if (log_warnings) {
                 LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
-                             << " outside num_symbols=" << cfg.num_symbols << '.';
+                             << " outside num_symbols=" << cfg.ofdm.num_symbols << '.';
             }
             continue;
         }
@@ -2005,7 +2069,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.midframe_pilot_symbol_count = layout.midframe_pilot_symbols.size();
     size_t downlink_symbol_count = 0;
     size_t reserved_downlink_symbol_count = 0;
-    for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
+    for (size_t sym = 0; sym < cfg.ofdm.num_symbols; ++sym) {
         if (!duplex_layout.is_downlink(sym)) {
             continue;
         }
@@ -2020,16 +2084,16 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             "Reserved sync/training symbols plus midframe_pilot_symbols exceed downlink symbols.");
     }
 
-    layout.pilot_mask.assign(cfg.fft_size, 0);
-    for (auto pos : cfg.pilot_positions) {
-        if (pos < cfg.fft_size) {
+    layout.pilot_mask.assign(cfg.ofdm.fft_size, 0);
+    for (auto pos : cfg.ofdm.pilot_positions) {
+        if (pos < cfg.ofdm.fft_size) {
             layout.pilot_mask[pos] = 1;
         }
     }
 
-    layout.subcarrier_to_non_pilot_index.assign(cfg.fft_size, -1);
-    layout.non_pilot_subcarrier_indices.reserve(cfg.fft_size);
-    for (size_t k = 0; k < cfg.fft_size; ++k) {
+    layout.subcarrier_to_non_pilot_index.assign(cfg.ofdm.fft_size, -1);
+    layout.non_pilot_subcarrier_indices.reserve(cfg.ofdm.fft_size);
+    for (size_t k = 0; k < cfg.ofdm.fft_size; ++k) {
         if (layout.pilot_mask[k] != 0) {
             continue;
         }
@@ -2040,8 +2104,8 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.num_non_pilot_subcarriers = layout.non_pilot_subcarrier_indices.size();
 
     layout.data_symbol_to_actual_symbol.reserve(downlink_symbol_count);
-    layout.actual_symbol_to_data_symbol.assign(cfg.num_symbols, -1);
-    for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
+    layout.actual_symbol_to_data_symbol.assign(cfg.ofdm.num_symbols, -1);
+    for (size_t sym = 0; sym < cfg.ofdm.num_symbols; ++sym) {
         if (!duplex_layout.is_downlink(sym) ||
             is_reserved_sync_symbol(cfg, sym) ||
             layout.midframe_pilot_symbol_mask[sym] != 0) {
@@ -2054,7 +2118,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.data_symbol_count = layout.data_symbol_to_actual_symbol.size();
     layout.non_pilot_re_count = layout.data_symbol_count * layout.num_non_pilot_subcarriers;
 
-    layout.payload_mask.assign(layout.non_pilot_re_count, cfg.data_resource_blocks_configured ? 0 : 1);
+    layout.payload_mask.assign(layout.non_pilot_re_count, cfg.resource_preview.data_resource_blocks_configured ? 0 : 1);
     layout.sensing_pilot_mask.assign(layout.non_pilot_re_count, 0);
     layout.payload_rank.assign(layout.non_pilot_re_count, -1);
     layout.non_pilot_offsets.resize(layout.data_symbol_count + 1, 0);
@@ -2067,9 +2131,9 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     size_t stripped_non_downlink_symbol_re = 0;
     size_t stripped_pilot_re = 0;
     size_t payload_sensing_pilot_overlap_re = 0;
-    if (cfg.data_resource_blocks_configured) {
-        for (size_t block_idx = 0; block_idx < cfg.data_resource_blocks.size(); ++block_idx) {
-            const auto& block = cfg.data_resource_blocks[block_idx];
+    if (cfg.resource_preview.data_resource_blocks_configured) {
+        for (size_t block_idx = 0; block_idx < cfg.resource_preview.data_resource_blocks.size(); ++block_idx) {
+            const auto& block = cfg.resource_preview.data_resource_blocks[block_idx];
             if (block.symbol_count == 0) {
                 throw std::runtime_error(
                     "data_resource_blocks[" + std::to_string(block_idx) +
@@ -2080,14 +2144,14 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
                     "data_resource_blocks[" + std::to_string(block_idx) +
                     "].subcarrier_count must be greater than 0.");
             }
-            if (block.symbol_start >= cfg.num_symbols ||
-                block.symbol_start + block.symbol_count > cfg.num_symbols) {
+            if (block.symbol_start >= cfg.ofdm.num_symbols ||
+                block.symbol_start + block.symbol_count > cfg.ofdm.num_symbols) {
                 throw std::runtime_error(
                     "data_resource_blocks[" + std::to_string(block_idx) +
                     "] exceeds the configured symbol range.");
             }
-            if (block.subcarrier_start >= cfg.fft_size ||
-                block.subcarrier_start + block.subcarrier_count > cfg.fft_size) {
+            if (block.subcarrier_start >= cfg.ofdm.fft_size ||
+                block.subcarrier_start + block.subcarrier_count > cfg.ofdm.fft_size) {
                 throw std::runtime_error(
                     "data_resource_blocks[" + std::to_string(block_idx) +
                     "] exceeds the configured subcarrier range.");
@@ -2168,7 +2232,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     }
     layout.payload_re_count = payload_rank;
 
-    if (log_warnings && cfg.data_resource_blocks_configured &&
+    if (log_warnings && cfg.resource_preview.data_resource_blocks_configured &&
         (stripped_reserved_symbol_re > 0 ||
          stripped_non_downlink_symbol_re > 0 ||
          stripped_pilot_re > 0)) {
@@ -2188,9 +2252,9 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
 
 inline void finalize_data_resource_grid_config(Config& cfg, const char* role_name) {
     const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg, true);
-    cfg.payload_re_count = layout.payload_re_count;
-    cfg.non_pilot_re_count = layout.non_pilot_re_count;
-    if (cfg.measurement_enable && cfg.payload_re_count == 0) {
+    cfg.resource_preview.payload_re_count = layout.payload_re_count;
+    cfg.resource_preview.non_pilot_re_count = layout.non_pilot_re_count;
+    if (cfg.measurement.measurement_enable && cfg.resource_preview.payload_re_count == 0) {
         throw std::runtime_error(
             std::string(role_name) +
             " measurement_enable requires at least one payload RE. "
@@ -2199,17 +2263,17 @@ inline void finalize_data_resource_grid_config(Config& cfg, const char* role_nam
 }
 
 inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
-    cfg.sensing_output_mode = normalize_sensing_output_mode_string(cfg.sensing_output_mode);
+    cfg.sensing.sensing_output_mode = normalize_sensing_output_mode_string(cfg.sensing.sensing_output_mode);
     if (!sensing_output_mode_is_compact_mask(cfg)) {
         validate_dense_sensing_stride(
             cfg,
-            cfg.sensing_symbol_stride,
+            cfg.sensing.sensing_symbol_stride,
             std::string(role_name) + " dense sensing stride");
-        if (cfg.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
+        if (cfg.sensing.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
             LOG_G_WARN() << role_name
                          << " requested enable_backend_sensing_processing=1, but the current sensing mode "
                          << "cannot provide dense backend RD output. Falling back to viewer-local processing.";
-            cfg.enable_backend_sensing_processing = false;
+            cfg.sensing.enable_backend_sensing_processing = false;
         }
         return;
     }
@@ -2219,13 +2283,13 @@ inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
             std::string(role_name) +
             " compact_mask mode requires a non-empty sensing_mask_blocks selection.");
     }
-    if (cfg.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
+    if (cfg.sensing.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
         LOG_G_WARN() << role_name
                      << " requested enable_backend_sensing_processing=1 in compact_mask mode, but the mask "
                      << "is not regular local-DD compatible: "
                      << backend_sensing_processing_reason(cfg)
                      << ". Falling back to viewer-local processing.";
-        cfg.enable_backend_sensing_processing = false;
+        cfg.sensing.enable_backend_sensing_processing = false;
     }
 }
 
@@ -2249,14 +2313,14 @@ inline constexpr size_t measurement_payload_header_size() {
 }
 
 inline bool measurement_mode_enabled(const Config& cfg) {
-    return cfg.measurement_enable && cfg.measurement_mode == "internal_prbs";
+    return cfg.measurement.measurement_enable && cfg.measurement.measurement_mode == "internal_prbs";
 }
 
 /**
  * @brief True when the radio I/O backend is the channel simulator (no USRP).
  */
 inline bool radio_is_sim(const Config& cfg) {
-    return cfg.radio_backend == "sim";
+    return cfg.radio.radio_backend == "sim";
 }
 
 /**
@@ -2265,7 +2329,7 @@ inline bool radio_is_sim(const Config& cfg) {
  * Shared by the BS and UE config writers so the two stay in sync.
  */
 inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
-    out << YAML::Key << "radio_backend" << YAML::Value << cfg.radio_backend;
+    out << YAML::Key << "radio_backend" << YAML::Value << cfg.radio.radio_backend;
     out << YAML::Key << "simulation" << YAML::Value << YAML::BeginMap;
     const SimConfig& sim = cfg.simulation;
     out << YAML::Key << "session" << YAML::Value << sim.session;
@@ -2318,7 +2382,7 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
  */
 inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
     if (config["radio"] && config["radio"].IsMap() && config["radio"]["radio_backend"]) {
-        cfg.radio_backend = config["radio"]["radio_backend"].as<std::string>();
+        cfg.radio.radio_backend = config["radio"]["radio_backend"].as<std::string>();
     }
     if (config["simulation"] && config["simulation"].IsMap()) {
         const YAML::Node& sim_node = config["simulation"];
@@ -2388,78 +2452,78 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
         ? config["uplink"]
         : YAML::Node();
     if (ul["enable_uplink"]) {
-        cfg.enable_uplink = ul["enable_uplink"].as<bool>();
+        cfg.uplink.enable_uplink = ul["enable_uplink"].as<bool>();
     }
     if (ul["duplex_mode"]) {
         const std::string raw = ul["duplex_mode"].as<std::string>();
-        DuplexMode mode = cfg.duplex.mode;
+        DuplexMode mode = cfg.uplink.duplex.mode;
         if (parse_duplex_mode_string(raw, mode)) {
-            cfg.duplex.mode = mode;
+            cfg.uplink.duplex.mode = mode;
         }
     }
     if (ul) {
-        if (ul["symbol_start"]) cfg.duplex.ul_symbol_start = ul["symbol_start"].as<size_t>();
-        if (ul["symbol_count"]) cfg.duplex.ul_symbol_count = ul["symbol_count"].as<size_t>();
-        if (ul["guard_symbols"]) cfg.duplex.ul_guard_symbols = ul["guard_symbols"].as<size_t>();
-        if (cfg.duplex.mode == DuplexMode::FDD && ul["center_freq"]) {
-            cfg.duplex.ul_center_freq = ul["center_freq"].as<double>();
+        if (ul["symbol_start"]) cfg.uplink.duplex.ul_symbol_start = ul["symbol_start"].as<size_t>();
+        if (ul["symbol_count"]) cfg.uplink.duplex.ul_symbol_count = ul["symbol_count"].as<size_t>();
+        if (ul["guard_symbols"]) cfg.uplink.duplex.ul_guard_symbols = ul["guard_symbols"].as<size_t>();
+        if (cfg.uplink.duplex.mode == DuplexMode::FDD && ul["center_freq"]) {
+            cfg.uplink.duplex.ul_center_freq = ul["center_freq"].as<double>();
         }
-        if (ul["debug_self_channel"]) cfg.uplink_debug_self_channel = ul["debug_self_channel"].as<bool>();
+        if (ul["debug_self_channel"]) cfg.uplink.debug_self_channel = ul["debug_self_channel"].as<bool>();
         if (ul["uplink_debug_self_channel"]) {
-            cfg.uplink_debug_self_channel = ul["uplink_debug_self_channel"].as<bool>();
+            cfg.uplink.debug_self_channel = ul["uplink_debug_self_channel"].as<bool>();
         }
-        if (ul["self_channel_ip"]) cfg.uplink_self_channel_ip = ul["self_channel_ip"].as<std::string>();
-        if (ul["self_channel_port"]) cfg.uplink_self_channel_port = ul["self_channel_port"].as<int>();
-        if (ul["self_pdf_ip"]) cfg.uplink_self_pdf_ip = ul["self_pdf_ip"].as<std::string>();
-        if (ul["self_pdf_port"]) cfg.uplink_self_pdf_port = ul["self_pdf_port"].as<int>();
+        if (ul["self_channel_ip"]) cfg.network_output.uplink_self_channel_ip = ul["self_channel_ip"].as<std::string>();
+        if (ul["self_channel_port"]) cfg.network_output.uplink_self_channel_port = ul["self_channel_port"].as<int>();
+        if (ul["self_pdf_ip"]) cfg.network_output.uplink_self_pdf_ip = ul["self_pdf_ip"].as<std::string>();
+        if (ul["self_pdf_port"]) cfg.network_output.uplink_self_pdf_port = ul["self_pdf_port"].as<int>();
         if (ul["uplink_self_channel_ip"]) {
-            cfg.uplink_self_channel_ip = ul["uplink_self_channel_ip"].as<std::string>();
+            cfg.network_output.uplink_self_channel_ip = ul["uplink_self_channel_ip"].as<std::string>();
         }
         if (ul["uplink_self_channel_port"]) {
-            cfg.uplink_self_channel_port = ul["uplink_self_channel_port"].as<int>();
+            cfg.network_output.uplink_self_channel_port = ul["uplink_self_channel_port"].as<int>();
         }
-        if (ul["uplink_self_pdf_ip"]) cfg.uplink_self_pdf_ip = ul["uplink_self_pdf_ip"].as<std::string>();
-        if (ul["uplink_self_pdf_port"]) cfg.uplink_self_pdf_port = ul["uplink_self_pdf_port"].as<int>();
+        if (ul["uplink_self_pdf_ip"]) cfg.network_output.uplink_self_pdf_ip = ul["uplink_self_pdf_ip"].as<std::string>();
+        if (ul["uplink_self_pdf_port"]) cfg.network_output.uplink_self_pdf_port = ul["uplink_self_pdf_port"].as<int>();
     }
-    if (cfg.duplex.mode != DuplexMode::FDD) {
-        cfg.duplex.ul_center_freq = 0.0;
+    if (cfg.uplink.duplex.mode != DuplexMode::FDD) {
+        cfg.uplink.duplex.ul_center_freq = 0.0;
     }
     if (ul["bs_dl_ul_timing_diff"]) {
-        cfg.bs_dl_ul_timing_diff = ul["bs_dl_ul_timing_diff"].as<int32_t>();
+        cfg.uplink.bs_dl_ul_timing_diff = ul["bs_dl_ul_timing_diff"].as<int32_t>();
     }
     if (ul["ue_timing_advance"]) {
-        cfg.ue_timing_advance = ul["ue_timing_advance"].as<int32_t>();
+        cfg.uplink.ue_timing_advance = ul["ue_timing_advance"].as<int32_t>();
     }
     if (ul["uplink_idle_waveform"]) {
-        cfg.uplink_idle_waveform = normalize_uplink_idle_waveform_string(
+        cfg.uplink.uplink_idle_waveform = normalize_uplink_idle_waveform_string(
             ul["uplink_idle_waveform"].as<std::string>());
     }
     const YAML::Node net = config["network_output"] && config["network_output"].IsMap()
         ? config["network_output"]
         : YAML::Node();
     if (net["uplink_self_channel_ip"]) {
-        cfg.uplink_self_channel_ip = net["uplink_self_channel_ip"].as<std::string>();
+        cfg.network_output.uplink_self_channel_ip = net["uplink_self_channel_ip"].as<std::string>();
     }
     if (net["uplink_self_channel_port"]) {
-        cfg.uplink_self_channel_port = net["uplink_self_channel_port"].as<int>();
+        cfg.network_output.uplink_self_channel_port = net["uplink_self_channel_port"].as<int>();
     }
     if (net["uplink_self_pdf_ip"]) {
-        cfg.uplink_self_pdf_ip = net["uplink_self_pdf_ip"].as<std::string>();
+        cfg.network_output.uplink_self_pdf_ip = net["uplink_self_pdf_ip"].as<std::string>();
     }
     if (net["uplink_self_pdf_port"]) {
-        cfg.uplink_self_pdf_port = net["uplink_self_pdf_port"].as<int>();
+        cfg.network_output.uplink_self_pdf_port = net["uplink_self_pdf_port"].as<int>();
     }
     if (net["self_channel_ip"]) {
-        cfg.uplink_self_channel_ip = net["self_channel_ip"].as<std::string>();
+        cfg.network_output.uplink_self_channel_ip = net["self_channel_ip"].as<std::string>();
     }
     if (net["self_channel_port"]) {
-        cfg.uplink_self_channel_port = net["self_channel_port"].as<int>();
+        cfg.network_output.uplink_self_channel_port = net["self_channel_port"].as<int>();
     }
     if (net["self_pdf_ip"]) {
-        cfg.uplink_self_pdf_ip = net["self_pdf_ip"].as<std::string>();
+        cfg.network_output.uplink_self_pdf_ip = net["self_pdf_ip"].as<std::string>();
     }
     if (net["self_pdf_port"]) {
-        cfg.uplink_self_pdf_port = net["self_pdf_port"].as<int>();
+        cfg.network_output.uplink_self_pdf_port = net["self_pdf_port"].as<int>();
     }
 }
 
@@ -2597,14 +2661,14 @@ inline double noise_variance_from_snr_linear(double snr_linear) {
 }
 
 inline double frame_duration_from_cfg(const Config& cfg) {
-    if (cfg.sample_rate <= 0.0) return 1.0;
-    return static_cast<double>(cfg.samples_per_frame()) / cfg.sample_rate;
+    if (cfg.rf_sampling.sample_rate <= 0.0) return 1.0;
+    return static_cast<double>(cfg.samples_per_frame()) / cfg.rf_sampling.sample_rate;
 }
 
 inline uint32_t reset_hold_frames_from_cfg(const Config& cfg) {
     const double frame_duration_s = frame_duration_from_cfg(cfg);
     if (frame_duration_s <= 0.0) return 1;
-    const double hold_frames = std::ceil(cfg.reset_hold_s / frame_duration_s);
+    const double hold_frames = std::ceil(cfg.sync_tracking.reset_hold_s / frame_duration_s);
     return static_cast<uint32_t>(std::max(1.0, hold_frames));
 }
 
@@ -2633,15 +2697,15 @@ inline std::optional<size_t> core_from_list_hint(const std::vector<int>& cores, 
 }
 
 inline std::optional<size_t> downlink_core_from_hint(const Config& cfg, size_t hint) {
-    return core_from_list_hint(cfg.downlink_cpu_cores, hint);
+    return core_from_list_hint(cfg.cpu_cores.downlink_cpu_cores, hint);
 }
 
 inline std::optional<size_t> uplink_core_from_hint(const Config& cfg, size_t hint) {
-    return core_from_list_hint(cfg.uplink_cpu_cores, hint);
+    return core_from_list_hint(cfg.cpu_cores.uplink_cpu_cores, hint);
 }
 
 inline std::optional<size_t> main_thread_core(const Config& cfg) {
-    return configured_core_to_optional(cfg.main_cpu_core);
+    return configured_core_to_optional(cfg.cpu_cores.main_cpu_core);
 }
 
 inline bool bind_current_thread_to_core(const std::optional<size_t>& core) {
@@ -2749,17 +2813,17 @@ inline void emit_resource_blocks_yaml(
 }
 
 inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
-    if (!cfg.data_resource_blocks_configured) {
+    if (!cfg.resource_preview.data_resource_blocks_configured) {
         return;
     }
-    emit_resource_blocks_yaml(out, "data_resource_blocks", cfg.data_resource_blocks);
+    emit_resource_blocks_yaml(out, "data_resource_blocks", cfg.resource_preview.data_resource_blocks);
 }
 
 inline void emit_sensing_mask_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
-    if (cfg.sensing_mask_blocks.empty()) {
+    if (cfg.sensing.sensing_mask_blocks.empty()) {
         return;
     }
-    emit_resource_blocks_yaml(out, "sensing_mask_blocks", cfg.sensing_mask_blocks);
+    emit_resource_blocks_yaml(out, "sensing_mask_blocks", cfg.sensing.sensing_mask_blocks);
 }
 
 inline bool load_resource_blocks_from_yaml(
@@ -2823,79 +2887,100 @@ inline bool load_resource_blocks_from_yaml(
 inline bool load_data_resource_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
     bool key_present = false;
     if (!load_resource_blocks_from_yaml(
-            cfg.data_resource_blocks,
+            cfg.resource_preview.data_resource_blocks,
             config,
             "data_resource_blocks",
             context_name,
             &key_present)) {
         return false;
     }
-    cfg.data_resource_blocks_configured = key_present;
+    cfg.resource_preview.data_resource_blocks_configured = key_present;
     return true;
 }
 
 inline bool load_sensing_mask_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
     return load_resource_blocks_from_yaml(
-        cfg.sensing_mask_blocks,
+        cfg.sensing.sensing_mask_blocks,
         config,
         "sensing_mask_blocks",
         context_name);
 }
 } // namespace config_detail
 
+inline void normalize_equalizer_config(EqualizerConfig& equalizer) {
+    if (equalizer.equalizer_mode != kEqualizerModeZf &&
+        equalizer.equalizer_mode != kEqualizerModeMmse) {
+        LOG_G_WARN() << "Unsupported equalizer_mode='" << equalizer.equalizer_mode
+                     << "'. Falling back to '" << kEqualizerModeMmse << "'.";
+        equalizer.equalizer_mode = kEqualizerModeMmse;
+    }
+    equalizer.channel_tracking_mode =
+        normalize_channel_tracking_mode_string(equalizer.channel_tracking_mode);
+    if (equalizer.equalizer_mag_floor <= 0.0 ||
+        !std::isfinite(equalizer.equalizer_mag_floor)) {
+        LOG_G_WARN() << "equalizer_mag_floor is invalid. Falling back to 1e-6.";
+        equalizer.equalizer_mag_floor = 1e-6;
+    }
+    if (equalizer.channel_tracking_min_pilot_snr <= 0.0 ||
+        !std::isfinite(equalizer.channel_tracking_min_pilot_snr)) {
+        LOG_G_WARN() << "channel_tracking_min_pilot_snr is invalid. Falling back to 1e-4.";
+        equalizer.channel_tracking_min_pilot_snr = 1e-4;
+    }
+}
+
 inline Config make_default_bs_config() {
     Config cfg;
-    cfg.fft_size = 1024;
-    cfg.cp_length = 128;
-    cfg.sync_pos = 1;
-    cfg.enable_sec_sync_symbol = false;
-    cfg.enable_cfo_training_sequence = false;
-    cfg.cfo_training_period_samples = 16;
-    cfg.sample_rate = 50e6;
-    cfg.bandwidth = 50e6;
-    cfg.center_freq = 2.4e9;
-    cfg.tx_gain = 30.0;
-    cfg.tx_channel = 0;
-    cfg.zc_root = 29;
-    cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
-    cfg.midframe_pilot_symbols = {};
-    cfg.midframe_pilot_seed = 0x4D46504Cu;
-    cfg.num_symbols = 100;
-    cfg.sensing_output_mode = kSensingOutputModeDense;
-    cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
-    cfg.enable_backend_sensing_processing = false;
-    cfg.cuda_mod_pipeline_slots = 2;
-    cfg.mono_sensing_output_enabled = true;
-    cfg.mono_sensing_ip = "";
-    cfg.mono_sensing_port = 8888;
-    cfg.control_port = 9999;
-    cfg.uplink_channel_ip = "0.0.0.0";
-    cfg.uplink_channel_port = 12358;
-    cfg.uplink_pdf_ip = "0.0.0.0";
-    cfg.uplink_pdf_port = 12359;
-    cfg.uplink_constellation_ip = "0.0.0.0";
-    cfg.uplink_constellation_port = 12356;
-    cfg.uplink_self_channel_ip = "0.0.0.0";
-    cfg.uplink_self_channel_port = 12360;
-    cfg.uplink_self_pdf_ip = "0.0.0.0";
-    cfg.uplink_self_pdf_port = 12361;
-    cfg.sensing_rx_channel_count = 1;
-    cfg.sensing_symbol_stride = 20;
-    cfg.tx_circular_buffer_size = 8;
-    cfg.data_packet_buffer_size = 32;
-    cfg.paired_frame_queue_size = 16;
-    cfg.udp_input_ip = "0.0.0.0";
-    cfg.udp_input_port = 50000;
-    cfg.radio_backend = "uhd";
+    cfg.ofdm.fft_size = 1024;
+    cfg.ofdm.cp_length = 128;
+    cfg.ofdm.sync_pos = 1;
+    cfg.ofdm.enable_sec_sync_symbol = false;
+    cfg.ofdm.enable_cfo_training_sequence = false;
+    cfg.ofdm.cfo_training_period_samples = 16;
+    cfg.rf_sampling.sample_rate = 50e6;
+    cfg.rf_sampling.bandwidth = 50e6;
+    cfg.downlink.center_freq = 2.4e9;
+    cfg.downlink.tx_gain = 30.0;
+    cfg.downlink.tx_channel = 0;
+    cfg.ofdm.zc_root = 29;
+    cfg.ofdm.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    cfg.ofdm.midframe_pilot_symbols = {};
+    cfg.ofdm.midframe_pilot_seed = 0x4D46504Cu;
+    cfg.ofdm.num_symbols = 100;
+    cfg.sensing.sensing_output_mode = kSensingOutputModeDense;
+    cfg.sensing.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    cfg.sensing.enable_backend_sensing_processing = false;
+    cfg.cuda.cuda_mod_pipeline_slots = 2;
+    cfg.network_output.mono_sensing_output_enabled = true;
+    cfg.network_output.mono_sensing_ip = "";
+    cfg.network_output.mono_sensing_port = 8888;
+    cfg.network_output.control_port = 9999;
+    cfg.network_output.uplink_channel_ip = "0.0.0.0";
+    cfg.network_output.uplink_channel_port = 12358;
+    cfg.network_output.uplink_pdf_ip = "0.0.0.0";
+    cfg.network_output.uplink_pdf_port = 12359;
+    cfg.network_output.uplink_constellation_ip = "0.0.0.0";
+    cfg.network_output.uplink_constellation_port = 12356;
+    cfg.network_output.uplink_self_channel_ip = "0.0.0.0";
+    cfg.network_output.uplink_self_channel_port = 12360;
+    cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
+    cfg.network_output.uplink_self_pdf_port = 12361;
+    cfg.sensing.sensing_rx_channel_count = 1;
+    cfg.sensing.sensing_symbol_stride = 20;
+    cfg.downlink_pipeline.tx_circular_buffer_size = 8;
+    cfg.downlink_pipeline.data_packet_buffer_size = 32;
+    cfg.sensing.paired_frame_queue_size = 16;
+    cfg.network_output.udp_input_ip = "0.0.0.0";
+    cfg.network_output.udp_input_port = 50000;
+    cfg.radio.radio_backend = "uhd";
     cfg.simulation = SimConfig{};
-    cfg.measurement_enable = false;
-    cfg.measurement_mode = "";
-    cfg.measurement_run_id = "";
-    cfg.measurement_output_dir = "";
-    cfg.measurement_payload_bytes = 1024;
-    cfg.measurement_prbs_seed = 0x5A;
-    cfg.measurement_packets_per_point = 1;
-    cfg.measurement_max_packets_per_frame = 1;
+    cfg.measurement.measurement_enable = false;
+    cfg.measurement.measurement_mode = "";
+    cfg.measurement.measurement_run_id = "";
+    cfg.measurement.measurement_output_dir = "";
+    cfg.measurement.measurement_payload_bytes = 1024;
+    cfg.measurement.measurement_prbs_seed = 0x5A;
+    cfg.measurement.measurement_packets_per_point = 1;
+    cfg.measurement.measurement_max_packets_per_frame = 1;
     return cfg;
 }
 
@@ -2923,52 +3008,52 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node runtime = config_detail::section_node(config, "runtime");
         const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
 
-        config_detail::load_value(ofdm, "fft_size", cfg.fft_size);
-        config_detail::load_value(ofdm, "cp_length", cfg.cp_length);
-        config_detail::load_value(ofdm, "sync_pos", cfg.sync_pos);
-        config_detail::load_value(ofdm, "enable_sec_sync_symbol", cfg.enable_sec_sync_symbol);
+        config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
+        config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);
+        config_detail::load_value(ofdm, "sync_pos", cfg.ofdm.sync_pos);
+        config_detail::load_value(ofdm, "enable_sec_sync_symbol", cfg.ofdm.enable_sec_sync_symbol);
         config_detail::load_value(
-            ofdm, "enable_cfo_training_sequence", cfg.enable_cfo_training_sequence);
+            ofdm, "enable_cfo_training_sequence", cfg.ofdm.enable_cfo_training_sequence);
         config_detail::load_value(
-            ofdm, "cfo_training_period_samples", cfg.cfo_training_period_samples);
-        config_detail::load_value(ofdm, "zc_root", cfg.zc_root);
-        config_detail::load_value(ofdm, "num_symbols", cfg.num_symbols);
-        config_detail::load_value(ofdm, "sensing_symbol_num", cfg.sensing_symbol_num);
+            ofdm, "cfo_training_period_samples", cfg.ofdm.cfo_training_period_samples);
+        config_detail::load_value(ofdm, "zc_root", cfg.ofdm.zc_root);
+        config_detail::load_value(ofdm, "num_symbols", cfg.ofdm.num_symbols);
+        config_detail::load_value(ofdm, "sensing_symbol_num", cfg.ofdm.sensing_symbol_num);
         if (ofdm["pilot_positions"]) {
-            cfg.pilot_positions = ofdm["pilot_positions"].as<std::vector<size_t>>();
+            cfg.ofdm.pilot_positions = ofdm["pilot_positions"].as<std::vector<size_t>>();
         }
         if (ofdm["midframe_pilot_symbols"]) {
-            cfg.midframe_pilot_symbols =
+            cfg.ofdm.midframe_pilot_symbols =
                 ofdm["midframe_pilot_symbols"].as<std::vector<size_t>>();
         }
-        config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.midframe_pilot_seed);
+        config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.ofdm.midframe_pilot_seed);
 
-        config_detail::load_value(cuda, "cuda_mod_pipeline_slots", cfg.cuda_mod_pipeline_slots);
+        config_detail::load_value(cuda, "cuda_mod_pipeline_slots", cfg.cuda.cuda_mod_pipeline_slots);
 
-        config_detail::load_value(sensing, "range_fft_size", cfg.range_fft_size);
-        config_detail::load_value(sensing, "doppler_fft_size", cfg.doppler_fft_size);
-        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing_view_range_bins);
+        config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
+        config_detail::load_value(sensing, "doppler_fft_size", cfg.sensing.doppler_fft_size);
+        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing.sensing_view_range_bins);
         config_detail::load_value(
-            sensing, "sensing_view_doppler_bins", cfg.sensing_view_doppler_bins);
-        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing_output_mode);
+            sensing, "sensing_view_doppler_bins", cfg.sensing.sensing_view_doppler_bins);
+        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing.sensing_output_mode);
         if (sensing["sensing_on_wire_format"]) {
-            cfg.sensing_on_wire_format = parse_sensing_on_wire_format_string(
+            cfg.sensing.sensing_on_wire_format = parse_sensing_on_wire_format_string(
                 sensing["sensing_on_wire_format"].as<std::string>());
         }
         config_detail::load_value(
-            sensing, "enable_backend_sensing_processing", cfg.enable_backend_sensing_processing);
-        config_detail::load_value(sensing, "rx_device_args", cfg.rx_device_args);
-        config_detail::load_value(sensing, "rx_clock_source", cfg.rx_clock_source);
-        config_detail::load_value(sensing, "rx_time_source", cfg.rx_time_source);
-        config_detail::load_value(sensing, "sensing_rx_wire_format", cfg.sensing_rx_wire_format);
-        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing_symbol_stride);
-        config_detail::load_value(sensing, "paired_frame_queue_size", cfg.paired_frame_queue_size);
+            sensing, "enable_backend_sensing_processing", cfg.sensing.enable_backend_sensing_processing);
+        config_detail::load_value(sensing, "rx_device_args", cfg.sensing.rx_device_args);
+        config_detail::load_value(sensing, "rx_clock_source", cfg.sensing.rx_clock_source);
+        config_detail::load_value(sensing, "rx_time_source", cfg.sensing.rx_time_source);
+        config_detail::load_value(sensing, "sensing_rx_wire_format", cfg.sensing.sensing_rx_wire_format);
+        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing.sensing_symbol_stride);
+        config_detail::load_value(sensing, "paired_frame_queue_size", cfg.sensing.paired_frame_queue_size);
         const bool has_sensing_count_key = static_cast<bool>(sensing["sensing_rx_channel_count"]);
         if (has_sensing_count_key) {
-            cfg.sensing_rx_channel_count = sensing["sensing_rx_channel_count"].as<uint32_t>();
+            cfg.sensing.sensing_rx_channel_count = sensing["sensing_rx_channel_count"].as<uint32_t>();
         }
         if (sensing["sensing_rx_channels"] && sensing["sensing_rx_channels"].IsSequence()) {
-            cfg.sensing_rx_channels.clear();
+            cfg.sensing.sensing_rx_channels.clear();
             for (const auto& node : sensing["sensing_rx_channels"]) {
                 SensingRxChannelConfig ch;
                 if (node["usrp_channel"]) ch.usrp_channel = node["usrp_channel"].as<uint32_t>();
@@ -2989,83 +3074,82 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
                 config_detail::load_optional_int_yaml(node["rx_cpu_core"], ch.rx_cpu_core);
                 config_detail::load_optional_int_yaml(
                     node["processing_cpu_core"], ch.processing_cpu_core);
-                cfg.sensing_rx_channels.push_back(ch);
+                cfg.sensing.sensing_rx_channels.push_back(ch);
             }
             if (!has_sensing_count_key) {
-                cfg.sensing_rx_channel_count =
-                    static_cast<uint32_t>(cfg.sensing_rx_channels.size());
+                cfg.sensing.sensing_rx_channel_count =
+                    static_cast<uint32_t>(cfg.sensing.sensing_rx_channels.size());
             }
         }
 
-        config_detail::load_value(rf, "sample_rate", cfg.sample_rate);
-        config_detail::load_value(rf, "bandwidth", cfg.bandwidth);
+        config_detail::load_value(rf, "sample_rate", cfg.rf_sampling.sample_rate);
+        config_detail::load_value(rf, "bandwidth", cfg.rf_sampling.bandwidth);
 
-        config_detail::load_value(usrp, "device_args", cfg.device_args);
-        config_detail::load_value(clock, "clock_source", cfg.clocksource);
-        config_detail::load_value(clock, "time_source", cfg.timesource);
+        config_detail::load_value(usrp, "device_args", cfg.usrp_device.device_args);
+        config_detail::load_value(clock, "clock_source", cfg.clock_time.clock_source);
+        config_detail::load_value(clock, "time_source", cfg.clock_time.time_source);
 
-        config_detail::load_value(downlink, "center_freq", cfg.center_freq);
-        config_detail::load_value(downlink, "tx_gain", cfg.tx_gain);
-        config_detail::load_value(downlink, "tx_channel", cfg.tx_channel);
-        config_detail::load_value(downlink, "tx_device_args", cfg.tx_device_args);
-        config_detail::load_value(downlink, "tx_clock_source", cfg.tx_clock_source);
-        config_detail::load_value(downlink, "tx_time_source", cfg.tx_time_source);
-        config_detail::load_value(downlink, "wire_format_tx", cfg.wire_format_tx);
+        config_detail::load_value(downlink, "center_freq", cfg.downlink.center_freq);
+        config_detail::load_value(downlink, "tx_gain", cfg.downlink.tx_gain);
+        config_detail::load_value(downlink, "tx_channel", cfg.downlink.tx_channel);
+        config_detail::load_value(downlink, "tx_device_args", cfg.downlink.tx_device_args);
+        config_detail::load_value(downlink, "tx_clock_source", cfg.downlink.tx_clock_source);
+        config_detail::load_value(downlink, "tx_time_source", cfg.downlink.tx_time_source);
+        config_detail::load_value(downlink, "wire_format_tx", cfg.downlink.wire_format_tx);
         config_detail::load_value(
-            downlink_pipeline, "tx_circular_buffer_size", cfg.tx_circular_buffer_size);
+            downlink_pipeline, "tx_circular_buffer_size", cfg.downlink_pipeline.tx_circular_buffer_size);
         config_detail::load_value(
-            downlink_pipeline, "data_packet_buffer_size", cfg.data_packet_buffer_size);
+            downlink_pipeline, "data_packet_buffer_size", cfg.downlink_pipeline.data_packet_buffer_size);
 
-        config_detail::load_value(uplink, "rx_gain", cfg.rx_gain);
-        cfg.uplink_rx_channel = cfg.rx_channel;
-        config_detail::load_value(uplink, "uplink_rx_channel", cfg.uplink_rx_channel);
-        config_detail::load_value(uplink, "uplink_rx_wire_format", cfg.uplink_rx_wire_format);
-        config_detail::load_value(uplink, "equalizer_mode", cfg.equalizer_mode);
+        config_detail::load_value(uplink, "rx_gain", cfg.uplink.rx_gain);
+        config_detail::load_value(uplink, "uplink_rx_channel", cfg.uplink.uplink_rx_channel);
+        config_detail::load_value(uplink, "uplink_rx_wire_format", cfg.uplink.uplink_rx_wire_format);
+        config_detail::load_value(uplink, "equalizer_mode", cfg.uplink.equalizer.equalizer_mode);
         if (uplink["channel_tracking_mode"]) {
-            cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(
+            cfg.uplink.equalizer.channel_tracking_mode = normalize_channel_tracking_mode_string(
                 uplink["channel_tracking_mode"].as<std::string>());
         }
-        config_detail::load_value(uplink, "equalizer_mag_floor", cfg.equalizer_mag_floor);
+        config_detail::load_value(uplink, "equalizer_mag_floor", cfg.uplink.equalizer.equalizer_mag_floor);
         config_detail::load_value(
-            uplink, "channel_tracking_min_pilot_snr", cfg.channel_tracking_min_pilot_snr);
+            uplink, "channel_tracking_min_pilot_snr", cfg.uplink.equalizer.channel_tracking_min_pilot_snr);
 
         load_simulation_config(config, cfg);
         load_duplex_config(config, cfg);
 
-        config_detail::load_value(measurement, "measurement_enable", cfg.measurement_enable);
-        config_detail::load_value(measurement, "measurement_mode", cfg.measurement_mode);
-        config_detail::load_value(measurement, "measurement_run_id", cfg.measurement_run_id);
-        config_detail::load_value(measurement, "measurement_output_dir", cfg.measurement_output_dir);
+        config_detail::load_value(measurement, "measurement_enable", cfg.measurement.measurement_enable);
+        config_detail::load_value(measurement, "measurement_mode", cfg.measurement.measurement_mode);
+        config_detail::load_value(measurement, "measurement_run_id", cfg.measurement.measurement_run_id);
+        config_detail::load_value(measurement, "measurement_output_dir", cfg.measurement.measurement_output_dir);
         config_detail::load_value(
-            measurement, "measurement_payload_bytes", cfg.measurement_payload_bytes);
-        config_detail::load_value(measurement, "measurement_prbs_seed", cfg.measurement_prbs_seed);
+            measurement, "measurement_payload_bytes", cfg.measurement.measurement_payload_bytes);
+        config_detail::load_value(measurement, "measurement_prbs_seed", cfg.measurement.measurement_prbs_seed);
         config_detail::load_value(
-            measurement, "measurement_packets_per_point", cfg.measurement_packets_per_point);
+            measurement, "measurement_packets_per_point", cfg.measurement.measurement_packets_per_point);
         config_detail::load_value(
-            measurement, "measurement_max_packets_per_frame", cfg.measurement_max_packets_per_frame);
+            measurement, "measurement_max_packets_per_frame", cfg.measurement.measurement_max_packets_per_frame);
 
-        config_detail::load_value(network, "udp_input_ip", cfg.udp_input_ip);
-        config_detail::load_value(network, "udp_input_port", cfg.udp_input_port);
-        config_detail::load_value(network, "udp_output_ip", cfg.ul_udp_output_ip);
-        config_detail::load_value(network, "udp_output_port", cfg.ul_udp_output_port);
+        config_detail::load_value(network, "udp_input_ip", cfg.network_output.udp_input_ip);
+        config_detail::load_value(network, "udp_input_port", cfg.network_output.udp_input_port);
+        config_detail::load_value(network, "udp_output_ip", cfg.network_output.ul_udp_output_ip);
+        config_detail::load_value(network, "udp_output_port", cfg.network_output.ul_udp_output_port);
         config_detail::load_value(
-            network, "mono_sensing_output_enabled", cfg.mono_sensing_output_enabled);
-        config_detail::load_value(network, "mono_sensing_ip", cfg.mono_sensing_ip);
-        config_detail::load_value(network, "mono_sensing_port", cfg.mono_sensing_port);
-        config_detail::load_value(network, "uplink_channel_ip", cfg.uplink_channel_ip);
-        config_detail::load_value(network, "uplink_channel_port", cfg.uplink_channel_port);
-        config_detail::load_value(network, "uplink_pdf_ip", cfg.uplink_pdf_ip);
-        config_detail::load_value(network, "uplink_pdf_port", cfg.uplink_pdf_port);
+            network, "mono_sensing_output_enabled", cfg.network_output.mono_sensing_output_enabled);
+        config_detail::load_value(network, "mono_sensing_ip", cfg.network_output.mono_sensing_ip);
+        config_detail::load_value(network, "mono_sensing_port", cfg.network_output.mono_sensing_port);
+        config_detail::load_value(network, "uplink_channel_ip", cfg.network_output.uplink_channel_ip);
+        config_detail::load_value(network, "uplink_channel_port", cfg.network_output.uplink_channel_port);
+        config_detail::load_value(network, "uplink_pdf_ip", cfg.network_output.uplink_pdf_ip);
+        config_detail::load_value(network, "uplink_pdf_port", cfg.network_output.uplink_pdf_port);
         config_detail::load_value(
-            network, "uplink_constellation_ip", cfg.uplink_constellation_ip);
+            network, "uplink_constellation_ip", cfg.network_output.uplink_constellation_ip);
         config_detail::load_value(
-            network, "uplink_constellation_port", cfg.uplink_constellation_port);
-        config_detail::load_value(network, "control_port", cfg.control_port);
+            network, "uplink_constellation_port", cfg.network_output.uplink_constellation_port);
+        config_detail::load_value(network, "control_port", cfg.network_output.control_port);
 
-        config_detail::load_value(cpu, "downlink_cpu_cores", cfg.downlink_cpu_cores);
-        config_detail::load_value(cpu, "uplink_cpu_cores", cfg.uplink_cpu_cores);
-        config_detail::load_value(cpu, "main_cpu_core", cfg.main_cpu_core);
-        config_detail::load_value(runtime, "profiling_modules", cfg.profiling_modules);
+        config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
+        config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
+        config_detail::load_value(cpu, "main_cpu_core", cfg.cpu_cores.main_cpu_core);
+        config_detail::load_value(runtime, "profiling_modules", cfg.runtime.profiling_modules);
 
         if (!config_detail::load_data_resource_blocks_from_yaml(
                 cfg, resource_preview, "BS config")) {
@@ -3085,50 +3169,51 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
 inline void normalize_bs_sensing_channels(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "BS sensing");
     normalize_sensing_view_bins(cfg, "BS sensing");
-    if (cfg.cuda_mod_pipeline_slots == 0) {
+    if (cfg.cuda.cuda_mod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
-        cfg.cuda_mod_pipeline_slots = 1;
+        cfg.cuda.cuda_mod_pipeline_slots = 1;
     }
-    if (cfg.tx_circular_buffer_size == 0) {
+    if (cfg.downlink_pipeline.tx_circular_buffer_size == 0) {
         LOG_G_WARN() << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
-        cfg.tx_circular_buffer_size = 1;
+        cfg.downlink_pipeline.tx_circular_buffer_size = 1;
     }
-    if (cfg.data_packet_buffer_size == 0) {
+    if (cfg.downlink_pipeline.data_packet_buffer_size == 0) {
         LOG_G_WARN() << "data_packet_buffer_size=0 is invalid. Clamping to 1.";
-        cfg.data_packet_buffer_size = 1;
+        cfg.downlink_pipeline.data_packet_buffer_size = 1;
     }
-    if (cfg.paired_frame_queue_size == 0) {
+    if (cfg.sensing.paired_frame_queue_size == 0) {
         LOG_G_WARN() << "paired_frame_queue_size=0 is invalid. Clamping to 1.";
-        cfg.paired_frame_queue_size = 1;
+        cfg.sensing.paired_frame_queue_size = 1;
     }
-    if (cfg.sensing_symbol_stride == 0) {
+    if (cfg.sensing.sensing_symbol_stride == 0) {
         LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
-        cfg.sensing_symbol_stride = 1;
+        cfg.sensing.sensing_symbol_stride = 1;
     }
-    if (cfg.measurement_enable) {
-        if (cfg.measurement_mode.empty()) {
-            cfg.measurement_mode = "internal_prbs";
+    if (cfg.measurement.measurement_enable) {
+        if (cfg.measurement.measurement_mode.empty()) {
+            cfg.measurement.measurement_mode = "internal_prbs";
         }
         if (!measurement_mode_enabled(cfg)) {
             LOG_G_WARN() << "Unsupported BS measurement_mode='"
-                         << cfg.measurement_mode << "'. Disabling measurement mode.";
-            cfg.measurement_enable = false;
+                         << cfg.measurement.measurement_mode << "'. Disabling measurement mode.";
+            cfg.measurement.measurement_enable = false;
         }
-        if (cfg.measurement_payload_bytes < measurement_payload_header_size()) {
-            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement_payload_bytes
+        if (cfg.measurement.measurement_payload_bytes < measurement_payload_header_size()) {
+            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement.measurement_payload_bytes
                          << " is smaller than the measurement header. Clamping to "
                          << measurement_payload_header_size() << '.';
-            cfg.measurement_payload_bytes = measurement_payload_header_size();
+            cfg.measurement.measurement_payload_bytes = measurement_payload_header_size();
         }
-        if (cfg.measurement_packets_per_point == 0) {
+        if (cfg.measurement.measurement_packets_per_point == 0) {
             LOG_G_WARN() << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
-            cfg.measurement_packets_per_point = 1;
+            cfg.measurement.measurement_packets_per_point = 1;
         }
     }
-    std::sort(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end());
-    cfg.midframe_pilot_symbols.erase(
-        std::unique(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end()),
-        cfg.midframe_pilot_symbols.end());
+    std::sort(cfg.ofdm.midframe_pilot_symbols.begin(), cfg.ofdm.midframe_pilot_symbols.end());
+    cfg.ofdm.midframe_pilot_symbols.erase(
+        std::unique(cfg.ofdm.midframe_pilot_symbols.begin(), cfg.ofdm.midframe_pilot_symbols.end()),
+        cfg.ofdm.midframe_pilot_symbols.end());
+    normalize_equalizer_config(cfg.uplink.equalizer);
     finalize_data_resource_grid_config(cfg, "BS");
     finalize_sensing_mask_config(cfg, "BS");
 
@@ -3141,145 +3226,145 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
         ch.time_source = "";
         ch.wire_format = "";
         ch.enable_system_delay_estimation = false;
-        ch.enable_sensing_output = cfg.mono_sensing_output_enabled;
+        ch.enable_sensing_output = cfg.network_output.mono_sensing_output_enabled;
         return ch;
     };
-    if (cfg.sensing_rx_channels.empty() && cfg.sensing_rx_channel_count > 0) {
-        cfg.sensing_rx_channels.push_back(make_default_ch0());
-        for (uint32_t i = 1; i < cfg.sensing_rx_channel_count; ++i) {
+    if (cfg.sensing.sensing_rx_channels.empty() && cfg.sensing.sensing_rx_channel_count > 0) {
+        cfg.sensing.sensing_rx_channels.push_back(make_default_ch0());
+        for (uint32_t i = 1; i < cfg.sensing.sensing_rx_channel_count; ++i) {
             auto ch = make_default_ch0();
             ch.usrp_channel = i;
-            cfg.sensing_rx_channels.push_back(ch);
+            cfg.sensing.sensing_rx_channels.push_back(ch);
         }
     }
 
-    if (cfg.sensing_rx_channel_count == 0) {
-        cfg.sensing_rx_channels.clear();
-    } else if (cfg.sensing_rx_channels.size() > cfg.sensing_rx_channel_count) {
-        cfg.sensing_rx_channels.resize(cfg.sensing_rx_channel_count);
-    } else if (cfg.sensing_rx_channels.size() < cfg.sensing_rx_channel_count) {
-        const auto base = cfg.sensing_rx_channels.empty() ? make_default_ch0() : cfg.sensing_rx_channels.front();
-        for (size_t i = cfg.sensing_rx_channels.size(); i < cfg.sensing_rx_channel_count; ++i) {
+    if (cfg.sensing.sensing_rx_channel_count == 0) {
+        cfg.sensing.sensing_rx_channels.clear();
+    } else if (cfg.sensing.sensing_rx_channels.size() > cfg.sensing.sensing_rx_channel_count) {
+        cfg.sensing.sensing_rx_channels.resize(cfg.sensing.sensing_rx_channel_count);
+    } else if (cfg.sensing.sensing_rx_channels.size() < cfg.sensing.sensing_rx_channel_count) {
+        const auto base = cfg.sensing.sensing_rx_channels.empty() ? make_default_ch0() : cfg.sensing.sensing_rx_channels.front();
+        for (size_t i = cfg.sensing.sensing_rx_channels.size(); i < cfg.sensing.sensing_rx_channel_count; ++i) {
             auto ch = base;
             ch.usrp_channel = static_cast<uint32_t>(base.usrp_channel + i);
-            cfg.sensing_rx_channels.push_back(ch);
+            cfg.sensing.sensing_rx_channels.push_back(ch);
         }
     }
 
-    if (cfg.mono_sensing_ip.empty()) {
-        cfg.mono_sensing_ip = "0.0.0.0";
+    if (cfg.network_output.mono_sensing_ip.empty()) {
+        cfg.network_output.mono_sensing_ip = "0.0.0.0";
     }
-    if (cfg.uplink_channel_ip.empty()) {
-        cfg.uplink_channel_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_channel_ip.empty()) {
+        cfg.network_output.uplink_channel_ip = "0.0.0.0";
     }
-    if (cfg.uplink_pdf_ip.empty()) {
-        cfg.uplink_pdf_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_pdf_ip.empty()) {
+        cfg.network_output.uplink_pdf_ip = "0.0.0.0";
     }
-    if (cfg.uplink_constellation_ip.empty()) {
-        cfg.uplink_constellation_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_constellation_ip.empty()) {
+        cfg.network_output.uplink_constellation_ip = "0.0.0.0";
     }
-    if (cfg.uplink_self_channel_ip.empty()) {
-        cfg.uplink_self_channel_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_self_channel_ip.empty()) {
+        cfg.network_output.uplink_self_channel_ip = "0.0.0.0";
     }
-    if (cfg.uplink_self_pdf_ip.empty()) {
-        cfg.uplink_self_pdf_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_self_pdf_ip.empty()) {
+        cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
     }
-    if (cfg.mono_sensing_port <= 0) {
-        LOG_G_WARN() << "mono_sensing_port=" << cfg.mono_sensing_port
+    if (cfg.network_output.mono_sensing_port <= 0) {
+        LOG_G_WARN() << "mono_sensing_port=" << cfg.network_output.mono_sensing_port
                      << " is invalid. Falling back to 8888.";
-        cfg.mono_sensing_port = 8888;
+        cfg.network_output.mono_sensing_port = 8888;
     }
 
-    cfg.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing_rx_channels.size());
+    cfg.sensing.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing.sensing_rx_channels.size());
 }
 
 inline Config make_default_ue_config() {
     Config cfg;
-    cfg.fft_size = 1024;
-    cfg.cp_length = 128;
-    cfg.enable_sec_sync_symbol = false;
-    cfg.enable_cfo_training_sequence = false;
-    cfg.cfo_training_period_samples = 16;
-    cfg.center_freq = 2.4e9;
-    cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
-    cfg.midframe_pilot_symbols = {};
-    cfg.midframe_pilot_seed = 0x4D46504Cu;
-    cfg.range_fft_size = 1024;
-    cfg.doppler_fft_size = 100;
-    cfg.num_symbols = 100;
-    cfg.sensing_symbol_num = 100;
-    cfg.cuda_demod_pipeline_slots = 3;
-    cfg.cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu;
-    cfg.cuda_ldpc_worker_buffers = 3;
-    cfg.cuda_ldpc_cross_frame_flush_frames = 2;
-    cfg.cuda_ldpc_cross_frame_flush_us = 1000.0;
-    cfg.frame_queue_size = 8;
-    cfg.sync_queue_size = 8;
-    cfg.sync_pos = 1;
-    cfg.sync_cfo_alias_search_range_hz = 800000.0;
-    cfg.reset_hold_s = 0.5;
-    cfg.sample_rate = 50e6;
-    cfg.bandwidth = 50e6;
-    cfg.rx_gain = 50.0;
-    cfg.rx_agc_enable = false;
-    cfg.rx_agc_low_threshold_db = 11.0;
-    cfg.rx_agc_high_threshold_db = 13.0;
-    cfg.rx_agc_max_step_db = 3.0;
-    cfg.rx_agc_update_frames = 4;
-    cfg.zc_root = 29;
-    cfg.device_args = "";
-    cfg.enable_bi_sensing = true;
-    cfg.bi_sensing_output_enabled = true;
-    cfg.bi_sensing_ip = "";
-    cfg.bi_sensing_port = 8889;
-    cfg.control_port = 10000;
-    cfg.channel_ip = "0.0.0.0";
-    cfg.channel_port = 12348;
-    cfg.pdf_ip = "0.0.0.0";
-    cfg.pdf_port = 12349;
-    cfg.uplink_self_channel_ip = "0.0.0.0";
-    cfg.uplink_self_channel_port = 12350;
-    cfg.uplink_self_pdf_ip = "0.0.0.0";
-    cfg.uplink_self_pdf_port = 12351;
-    cfg.constellation_ip = "0.0.0.0";
-    cfg.constellation_port = 12346;
-    cfg.vofa_debug_ip = "";
-    cfg.vofa_debug_port = 12347;
-    cfg.udp_output_ip = "";
-    cfg.software_sync = true;
-    cfg.predictive_delay = true;
-    cfg.akf_enable = true;
-    cfg.akf_bootstrap_frames = 64;
-    cfg.akf_innovation_window = 64;
-    cfg.akf_max_lag = 4;
-    cfg.akf_adapt_interval = 64;
-    cfg.akf_gate_sigma = 3.0;
-    cfg.akf_tikhonov_lambda = 1e-3;
-    cfg.akf_update_smooth = 0.2;
-    cfg.akf_q_wf_min = 1e-10;
-    cfg.akf_q_wf_max = 1e2;
-    cfg.akf_q_rw_min = 1e-12;
-    cfg.akf_q_rw_max = 1e1;
-    cfg.akf_r_min = 1e-8;
-    cfg.akf_r_max = 1e3;
-    cfg.equalizer_mode = kEqualizerModeMmse;
-    cfg.channel_tracking_mode = kChannelTrackingModePilotPhase;
-    cfg.equalizer_mag_floor = 1e-6;
-    cfg.channel_tracking_min_pilot_snr = 1e-4;
-    cfg.sensing_output_mode = kSensingOutputModeDense;
-    cfg.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
-    cfg.enable_backend_sensing_processing = false;
-    cfg.sensing_symbol_stride = 20;
-    cfg.radio_backend = "uhd";
+    cfg.ofdm.fft_size = 1024;
+    cfg.ofdm.cp_length = 128;
+    cfg.ofdm.enable_sec_sync_symbol = false;
+    cfg.ofdm.enable_cfo_training_sequence = false;
+    cfg.ofdm.cfo_training_period_samples = 16;
+    cfg.downlink.center_freq = 2.4e9;
+    cfg.ofdm.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
+    cfg.ofdm.midframe_pilot_symbols = {};
+    cfg.ofdm.midframe_pilot_seed = 0x4D46504Cu;
+    cfg.sensing.range_fft_size = 1024;
+    cfg.sensing.doppler_fft_size = 100;
+    cfg.ofdm.num_symbols = 100;
+    cfg.ofdm.sensing_symbol_num = 100;
+    cfg.cuda.cuda_demod_pipeline_slots = 3;
+    cfg.cuda.cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu;
+    cfg.cuda.cuda_ldpc_worker_buffers = 3;
+    cfg.cuda.cuda_ldpc_cross_frame_flush_frames = 2;
+    cfg.cuda.cuda_ldpc_cross_frame_flush_us = 1000.0;
+    cfg.ofdm.frame_queue_size = 8;
+    cfg.sync_tracking.sync_queue_size = 8;
+    cfg.ofdm.sync_pos = 1;
+    cfg.sync_tracking.sync_cfo_alias_search_range_hz = 800000.0;
+    cfg.sync_tracking.reset_hold_s = 0.5;
+    cfg.rf_sampling.sample_rate = 50e6;
+    cfg.rf_sampling.bandwidth = 50e6;
+    cfg.rf_sampling.rx_gain = 50.0;
+    cfg.rf_sampling.rx_agc_enable = false;
+    cfg.rf_sampling.rx_agc_low_threshold_db = 11.0;
+    cfg.rf_sampling.rx_agc_high_threshold_db = 13.0;
+    cfg.rf_sampling.rx_agc_max_step_db = 3.0;
+    cfg.rf_sampling.rx_agc_update_frames = 4;
+    cfg.ofdm.zc_root = 29;
+    cfg.usrp_device.device_args = "";
+    cfg.sensing.enable_bi_sensing = true;
+    cfg.network_output.bi_sensing_output_enabled = true;
+    cfg.network_output.bi_sensing_ip = "";
+    cfg.network_output.bi_sensing_port = 8889;
+    cfg.network_output.control_port = 10000;
+    cfg.network_output.channel_ip = "0.0.0.0";
+    cfg.network_output.channel_port = 12348;
+    cfg.network_output.pdf_ip = "0.0.0.0";
+    cfg.network_output.pdf_port = 12349;
+    cfg.network_output.uplink_self_channel_ip = "0.0.0.0";
+    cfg.network_output.uplink_self_channel_port = 12350;
+    cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
+    cfg.network_output.uplink_self_pdf_port = 12351;
+    cfg.network_output.constellation_ip = "0.0.0.0";
+    cfg.network_output.constellation_port = 12346;
+    cfg.network_output.vofa_debug_ip = "";
+    cfg.network_output.vofa_debug_port = 12347;
+    cfg.network_output.udp_output_ip = "";
+    cfg.sync_tracking.software_sync = true;
+    cfg.sync_tracking.predictive_delay = true;
+    cfg.sync_tracking.akf_enable = true;
+    cfg.sync_tracking.akf_bootstrap_frames = 64;
+    cfg.sync_tracking.akf_innovation_window = 64;
+    cfg.sync_tracking.akf_max_lag = 4;
+    cfg.sync_tracking.akf_adapt_interval = 64;
+    cfg.sync_tracking.akf_gate_sigma = 3.0;
+    cfg.sync_tracking.akf_tikhonov_lambda = 1e-3;
+    cfg.sync_tracking.akf_update_smooth = 0.2;
+    cfg.sync_tracking.akf_q_wf_min = 1e-10;
+    cfg.sync_tracking.akf_q_wf_max = 1e2;
+    cfg.sync_tracking.akf_q_rw_min = 1e-12;
+    cfg.sync_tracking.akf_q_rw_max = 1e1;
+    cfg.sync_tracking.akf_r_min = 1e-8;
+    cfg.sync_tracking.akf_r_max = 1e3;
+    cfg.downlink.equalizer.equalizer_mode = kEqualizerModeMmse;
+    cfg.downlink.equalizer.channel_tracking_mode = kChannelTrackingModePilotPhase;
+    cfg.downlink.equalizer.equalizer_mag_floor = 1e-6;
+    cfg.downlink.equalizer.channel_tracking_min_pilot_snr = 1e-4;
+    cfg.sensing.sensing_output_mode = kSensingOutputModeDense;
+    cfg.sensing.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    cfg.sensing.enable_backend_sensing_processing = false;
+    cfg.sensing.sensing_symbol_stride = 20;
+    cfg.radio.radio_backend = "uhd";
     cfg.simulation = SimConfig{};
-    cfg.measurement_enable = false;
-    cfg.measurement_mode = "";
-    cfg.measurement_run_id = "";
-    cfg.measurement_output_dir = "";
-    cfg.measurement_payload_bytes = 1024;
-    cfg.measurement_prbs_seed = 0x5A;
-    cfg.measurement_packets_per_point = 1;
-    cfg.measurement_max_packets_per_frame = 1;
+    cfg.measurement.measurement_enable = false;
+    cfg.measurement.measurement_mode = "";
+    cfg.measurement.measurement_run_id = "";
+    cfg.measurement.measurement_output_dir = "";
+    cfg.measurement.measurement_payload_bytes = 1024;
+    cfg.measurement.measurement_prbs_seed = 0x5A;
+    cfg.measurement.measurement_packets_per_point = 1;
+    cfg.measurement.measurement_max_packets_per_frame = 1;
     return cfg;
 }
 
@@ -3306,162 +3391,162 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node runtime = config_detail::section_node(config, "runtime");
         const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
 
-        config_detail::load_value(ofdm, "fft_size", cfg.fft_size);
-        config_detail::load_value(ofdm, "cp_length", cfg.cp_length);
-        config_detail::load_value(ofdm, "sync_pos", cfg.sync_pos);
-        config_detail::load_value(ofdm, "enable_sec_sync_symbol", cfg.enable_sec_sync_symbol);
+        config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
+        config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);
+        config_detail::load_value(ofdm, "sync_pos", cfg.ofdm.sync_pos);
+        config_detail::load_value(ofdm, "enable_sec_sync_symbol", cfg.ofdm.enable_sec_sync_symbol);
         config_detail::load_value(
-            ofdm, "enable_cfo_training_sequence", cfg.enable_cfo_training_sequence);
+            ofdm, "enable_cfo_training_sequence", cfg.ofdm.enable_cfo_training_sequence);
         config_detail::load_value(
-            ofdm, "cfo_training_period_samples", cfg.cfo_training_period_samples);
-        config_detail::load_value(ofdm, "num_symbols", cfg.num_symbols);
-        config_detail::load_value(ofdm, "sensing_symbol_num", cfg.sensing_symbol_num);
-        config_detail::load_value(ofdm, "frame_queue_size", cfg.frame_queue_size);
-        config_detail::load_value(ofdm, "zc_root", cfg.zc_root);
+            ofdm, "cfo_training_period_samples", cfg.ofdm.cfo_training_period_samples);
+        config_detail::load_value(ofdm, "num_symbols", cfg.ofdm.num_symbols);
+        config_detail::load_value(ofdm, "sensing_symbol_num", cfg.ofdm.sensing_symbol_num);
+        config_detail::load_value(ofdm, "frame_queue_size", cfg.ofdm.frame_queue_size);
+        config_detail::load_value(ofdm, "zc_root", cfg.ofdm.zc_root);
         if (ofdm["pilot_positions"]) {
-            cfg.pilot_positions = ofdm["pilot_positions"].as<std::vector<size_t>>();
+            cfg.ofdm.pilot_positions = ofdm["pilot_positions"].as<std::vector<size_t>>();
         }
         if (ofdm["midframe_pilot_symbols"]) {
-            cfg.midframe_pilot_symbols =
+            cfg.ofdm.midframe_pilot_symbols =
                 ofdm["midframe_pilot_symbols"].as<std::vector<size_t>>();
         }
-        config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.midframe_pilot_seed);
+        config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.ofdm.midframe_pilot_seed);
 
-        config_detail::load_value(cuda, "cuda_demod_pipeline_slots", cfg.cuda_demod_pipeline_slots);
+        config_detail::load_value(cuda, "cuda_demod_pipeline_slots", cfg.cuda.cuda_demod_pipeline_slots);
         if (cuda["cuda_ldpc_decoder_backend"]) {
-            cfg.cuda_ldpc_decoder_backend = normalize_cuda_ldpc_decoder_backend_string(
+            cfg.cuda.cuda_ldpc_decoder_backend = normalize_cuda_ldpc_decoder_backend_string(
                 cuda["cuda_ldpc_decoder_backend"].as<std::string>());
         }
-        config_detail::load_value(cuda, "cuda_ldpc_worker_buffers", cfg.cuda_ldpc_worker_buffers);
+        config_detail::load_value(cuda, "cuda_ldpc_worker_buffers", cfg.cuda.cuda_ldpc_worker_buffers);
         config_detail::load_value(
-            cuda, "cuda_ldpc_cross_frame_flush_frames", cfg.cuda_ldpc_cross_frame_flush_frames);
+            cuda, "cuda_ldpc_cross_frame_flush_frames", cfg.cuda.cuda_ldpc_cross_frame_flush_frames);
         config_detail::load_value(
-            cuda, "cuda_ldpc_cross_frame_flush_us", cfg.cuda_ldpc_cross_frame_flush_us);
+            cuda, "cuda_ldpc_cross_frame_flush_us", cfg.cuda.cuda_ldpc_cross_frame_flush_us);
 
-        config_detail::load_value(sensing, "enable_bi_sensing", cfg.enable_bi_sensing);
-        config_detail::load_value(sensing, "range_fft_size", cfg.range_fft_size);
-        config_detail::load_value(sensing, "doppler_fft_size", cfg.doppler_fft_size);
-        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing_output_mode);
+        config_detail::load_value(sensing, "enable_bi_sensing", cfg.sensing.enable_bi_sensing);
+        config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
+        config_detail::load_value(sensing, "doppler_fft_size", cfg.sensing.doppler_fft_size);
+        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing.sensing_output_mode);
         if (sensing["sensing_on_wire_format"]) {
-            cfg.sensing_on_wire_format = parse_sensing_on_wire_format_string(
+            cfg.sensing.sensing_on_wire_format = parse_sensing_on_wire_format_string(
                 sensing["sensing_on_wire_format"].as<std::string>());
         }
         config_detail::load_value(
-            sensing, "enable_backend_sensing_processing", cfg.enable_backend_sensing_processing);
-        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing_view_range_bins);
+            sensing, "enable_backend_sensing_processing", cfg.sensing.enable_backend_sensing_processing);
+        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing.sensing_view_range_bins);
         config_detail::load_value(
-            sensing, "sensing_view_doppler_bins", cfg.sensing_view_doppler_bins);
-        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing_symbol_stride);
+            sensing, "sensing_view_doppler_bins", cfg.sensing.sensing_view_doppler_bins);
+        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing.sensing_symbol_stride);
 
-        config_detail::load_value(rf, "sample_rate", cfg.sample_rate);
-        config_detail::load_value(rf, "bandwidth", cfg.bandwidth);
-        config_detail::load_value(rf, "rx_gain", cfg.rx_gain);
-        config_detail::load_value(rf, "rx_agc_enable", cfg.rx_agc_enable);
-        config_detail::load_value(rf, "rx_agc_low_threshold_db", cfg.rx_agc_low_threshold_db);
-        config_detail::load_value(rf, "rx_agc_high_threshold_db", cfg.rx_agc_high_threshold_db);
-        config_detail::load_value(rf, "rx_agc_max_step_db", cfg.rx_agc_max_step_db);
-        config_detail::load_value(rf, "rx_agc_update_frames", cfg.rx_agc_update_frames);
+        config_detail::load_value(rf, "sample_rate", cfg.rf_sampling.sample_rate);
+        config_detail::load_value(rf, "bandwidth", cfg.rf_sampling.bandwidth);
+        config_detail::load_value(rf, "rx_gain", cfg.rf_sampling.rx_gain);
+        config_detail::load_value(rf, "rx_agc_enable", cfg.rf_sampling.rx_agc_enable);
+        config_detail::load_value(rf, "rx_agc_low_threshold_db", cfg.rf_sampling.rx_agc_low_threshold_db);
+        config_detail::load_value(rf, "rx_agc_high_threshold_db", cfg.rf_sampling.rx_agc_high_threshold_db);
+        config_detail::load_value(rf, "rx_agc_max_step_db", cfg.rf_sampling.rx_agc_max_step_db);
+        config_detail::load_value(rf, "rx_agc_update_frames", cfg.rf_sampling.rx_agc_update_frames);
 
-        config_detail::load_value(usrp, "device_args", cfg.device_args);
-        config_detail::load_value(usrp, "clock_source", cfg.clocksource);
+        config_detail::load_value(usrp, "device_args", cfg.usrp_device.device_args);
+        config_detail::load_value(usrp, "clock_source", cfg.clock_time.clock_source);
 
-        config_detail::load_value(downlink, "center_freq", cfg.center_freq);
-        config_detail::load_value(downlink, "downlink_rx_wire_format", cfg.downlink_rx_wire_format);
-        config_detail::load_value(downlink, "rx_channel", cfg.rx_channel);
-        config_detail::load_value(downlink, "equalizer_mode", cfg.equalizer_mode);
+        config_detail::load_value(downlink, "center_freq", cfg.downlink.center_freq);
+        config_detail::load_value(downlink, "downlink_rx_wire_format", cfg.downlink.downlink_rx_wire_format);
+        config_detail::load_value(downlink, "rx_channel", cfg.downlink.rx_channel);
+        config_detail::load_value(downlink, "equalizer_mode", cfg.downlink.equalizer.equalizer_mode);
         if (downlink["channel_tracking_mode"]) {
-            cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(
+            cfg.downlink.equalizer.channel_tracking_mode = normalize_channel_tracking_mode_string(
                 downlink["channel_tracking_mode"].as<std::string>());
         }
-        config_detail::load_value(downlink, "equalizer_mag_floor", cfg.equalizer_mag_floor);
+        config_detail::load_value(downlink, "equalizer_mag_floor", cfg.downlink.equalizer.equalizer_mag_floor);
         config_detail::load_value(
-            downlink, "channel_tracking_min_pilot_snr", cfg.channel_tracking_min_pilot_snr);
+            downlink, "channel_tracking_min_pilot_snr", cfg.downlink.equalizer.channel_tracking_min_pilot_snr);
 
-        config_detail::load_value(uplink, "tx_gain", cfg.tx_gain);
-        config_detail::load_value(uplink, "tx_channel", cfg.tx_channel);
-        config_detail::load_value(uplink, "wire_format_tx", cfg.wire_format_tx);
+        config_detail::load_value(uplink, "tx_gain", cfg.uplink.tx_gain);
+        config_detail::load_value(uplink, "tx_channel", cfg.uplink.tx_channel);
+        config_detail::load_value(uplink, "wire_format_tx", cfg.uplink.wire_format_tx);
 
-        config_detail::load_value(sync, "sync_queue_size", cfg.sync_queue_size);
+        config_detail::load_value(sync, "sync_queue_size", cfg.sync_tracking.sync_queue_size);
         config_detail::load_value(
-            sync, "sync_cfo_alias_search_range_hz", cfg.sync_cfo_alias_search_range_hz);
-        config_detail::load_value(sync, "reset_hold_s", cfg.reset_hold_s);
-        config_detail::load_value(sync, "software_sync", cfg.software_sync);
-        config_detail::load_value(sync, "predictive_delay", cfg.predictive_delay);
-        config_detail::load_value(sync, "hardware_sync", cfg.hardware_sync);
-        config_detail::load_value(sync, "hardware_sync_tty", cfg.hardware_sync_tty);
-        config_detail::load_value(sync, "ocxo_pi_kp_fast", cfg.ocxo_pi_kp_fast);
-        config_detail::load_value(sync, "ocxo_pi_ki_fast", cfg.ocxo_pi_ki_fast);
-        config_detail::load_value(sync, "ocxo_pi_kp_slow", cfg.ocxo_pi_kp_slow);
-        config_detail::load_value(sync, "ocxo_pi_ki_slow", cfg.ocxo_pi_ki_slow);
+            sync, "sync_cfo_alias_search_range_hz", cfg.sync_tracking.sync_cfo_alias_search_range_hz);
+        config_detail::load_value(sync, "reset_hold_s", cfg.sync_tracking.reset_hold_s);
+        config_detail::load_value(sync, "software_sync", cfg.sync_tracking.software_sync);
+        config_detail::load_value(sync, "predictive_delay", cfg.sync_tracking.predictive_delay);
+        config_detail::load_value(sync, "hardware_sync", cfg.sync_tracking.hardware_sync);
+        config_detail::load_value(sync, "hardware_sync_tty", cfg.sync_tracking.hardware_sync_tty);
+        config_detail::load_value(sync, "ocxo_pi_kp_fast", cfg.sync_tracking.ocxo_pi_kp_fast);
+        config_detail::load_value(sync, "ocxo_pi_ki_fast", cfg.sync_tracking.ocxo_pi_ki_fast);
+        config_detail::load_value(sync, "ocxo_pi_kp_slow", cfg.sync_tracking.ocxo_pi_kp_slow);
+        config_detail::load_value(sync, "ocxo_pi_ki_slow", cfg.sync_tracking.ocxo_pi_ki_slow);
         config_detail::load_value(
-            sync, "ocxo_pi_switch_abs_error_ppm", cfg.ocxo_pi_switch_abs_error_ppm);
+            sync, "ocxo_pi_switch_abs_error_ppm", cfg.sync_tracking.ocxo_pi_switch_abs_error_ppm);
         config_detail::load_value(
-            sync, "ocxo_pi_switch_hold_s", cfg.ocxo_pi_switch_hold_s);
-        config_detail::load_value(sync, "ocxo_pi_max_step_fast_ppm", cfg.ocxo_pi_max_step_fast_ppm);
-        config_detail::load_value(sync, "ocxo_pi_max_step_slow_ppm", cfg.ocxo_pi_max_step_slow_ppm);
+            sync, "ocxo_pi_switch_hold_s", cfg.sync_tracking.ocxo_pi_switch_hold_s);
+        config_detail::load_value(sync, "ocxo_pi_max_step_fast_ppm", cfg.sync_tracking.ocxo_pi_max_step_fast_ppm);
+        config_detail::load_value(sync, "ocxo_pi_max_step_slow_ppm", cfg.sync_tracking.ocxo_pi_max_step_slow_ppm);
         if (sync["ocxo_pi_max_step_ppm"]) {
             const auto max_step = sync["ocxo_pi_max_step_ppm"].as<double>();
-            cfg.ocxo_pi_max_step_fast_ppm = max_step;
-            cfg.ocxo_pi_max_step_slow_ppm = max_step;
+            cfg.sync_tracking.ocxo_pi_max_step_fast_ppm = max_step;
+            cfg.sync_tracking.ocxo_pi_max_step_slow_ppm = max_step;
         }
-        config_detail::load_value(sync, "akf_enable", cfg.akf_enable);
-        config_detail::load_value(sync, "akf_bootstrap_frames", cfg.akf_bootstrap_frames);
-        config_detail::load_value(sync, "akf_innovation_window", cfg.akf_innovation_window);
-        config_detail::load_value(sync, "akf_max_lag", cfg.akf_max_lag);
-        config_detail::load_value(sync, "akf_adapt_interval", cfg.akf_adapt_interval);
-        config_detail::load_value(sync, "akf_gate_sigma", cfg.akf_gate_sigma);
-        config_detail::load_value(sync, "akf_tikhonov_lambda", cfg.akf_tikhonov_lambda);
-        config_detail::load_value(sync, "akf_update_smooth", cfg.akf_update_smooth);
-        config_detail::load_value(sync, "akf_q_wf_min", cfg.akf_q_wf_min);
-        config_detail::load_value(sync, "akf_q_wf_max", cfg.akf_q_wf_max);
-        config_detail::load_value(sync, "akf_q_rw_min", cfg.akf_q_rw_min);
-        config_detail::load_value(sync, "akf_q_rw_max", cfg.akf_q_rw_max);
-        config_detail::load_value(sync, "akf_r_min", cfg.akf_r_min);
-        config_detail::load_value(sync, "akf_r_max", cfg.akf_r_max);
-        config_detail::load_value(sync, "desired_peak_pos", cfg.desired_peak_pos);
+        config_detail::load_value(sync, "akf_enable", cfg.sync_tracking.akf_enable);
+        config_detail::load_value(sync, "akf_bootstrap_frames", cfg.sync_tracking.akf_bootstrap_frames);
+        config_detail::load_value(sync, "akf_innovation_window", cfg.sync_tracking.akf_innovation_window);
+        config_detail::load_value(sync, "akf_max_lag", cfg.sync_tracking.akf_max_lag);
+        config_detail::load_value(sync, "akf_adapt_interval", cfg.sync_tracking.akf_adapt_interval);
+        config_detail::load_value(sync, "akf_gate_sigma", cfg.sync_tracking.akf_gate_sigma);
+        config_detail::load_value(sync, "akf_tikhonov_lambda", cfg.sync_tracking.akf_tikhonov_lambda);
+        config_detail::load_value(sync, "akf_update_smooth", cfg.sync_tracking.akf_update_smooth);
+        config_detail::load_value(sync, "akf_q_wf_min", cfg.sync_tracking.akf_q_wf_min);
+        config_detail::load_value(sync, "akf_q_wf_max", cfg.sync_tracking.akf_q_wf_max);
+        config_detail::load_value(sync, "akf_q_rw_min", cfg.sync_tracking.akf_q_rw_min);
+        config_detail::load_value(sync, "akf_q_rw_max", cfg.sync_tracking.akf_q_rw_max);
+        config_detail::load_value(sync, "akf_r_min", cfg.sync_tracking.akf_r_min);
+        config_detail::load_value(sync, "akf_r_max", cfg.sync_tracking.akf_r_max);
+        config_detail::load_value(sync, "desired_peak_pos", cfg.sync_tracking.desired_peak_pos);
 
-        config_detail::load_value(measurement, "measurement_enable", cfg.measurement_enable);
-        config_detail::load_value(measurement, "measurement_mode", cfg.measurement_mode);
-        config_detail::load_value(measurement, "measurement_run_id", cfg.measurement_run_id);
-        config_detail::load_value(measurement, "measurement_output_dir", cfg.measurement_output_dir);
+        config_detail::load_value(measurement, "measurement_enable", cfg.measurement.measurement_enable);
+        config_detail::load_value(measurement, "measurement_mode", cfg.measurement.measurement_mode);
+        config_detail::load_value(measurement, "measurement_run_id", cfg.measurement.measurement_run_id);
+        config_detail::load_value(measurement, "measurement_output_dir", cfg.measurement.measurement_output_dir);
         config_detail::load_value(
-            measurement, "measurement_payload_bytes", cfg.measurement_payload_bytes);
-        config_detail::load_value(measurement, "measurement_prbs_seed", cfg.measurement_prbs_seed);
+            measurement, "measurement_payload_bytes", cfg.measurement.measurement_payload_bytes);
+        config_detail::load_value(measurement, "measurement_prbs_seed", cfg.measurement.measurement_prbs_seed);
         config_detail::load_value(
-            measurement, "measurement_packets_per_point", cfg.measurement_packets_per_point);
+            measurement, "measurement_packets_per_point", cfg.measurement.measurement_packets_per_point);
         config_detail::load_value(
-            measurement, "measurement_max_packets_per_frame", cfg.measurement_max_packets_per_frame);
+            measurement, "measurement_max_packets_per_frame", cfg.measurement.measurement_max_packets_per_frame);
 
-        config_detail::load_value(network, "bi_sensing_output_enabled", cfg.bi_sensing_output_enabled);
-        config_detail::load_value(network, "bi_sensing_ip", cfg.bi_sensing_ip);
-        config_detail::load_value(network, "bi_sensing_port", cfg.bi_sensing_port);
-        config_detail::load_value(network, "control_port", cfg.control_port);
-        config_detail::load_value(network, "channel_ip", cfg.channel_ip);
-        config_detail::load_value(network, "channel_port", cfg.channel_port);
-        config_detail::load_value(network, "pdf_ip", cfg.pdf_ip);
-        config_detail::load_value(network, "pdf_port", cfg.pdf_port);
-        config_detail::load_value(network, "constellation_ip", cfg.constellation_ip);
-        config_detail::load_value(network, "constellation_port", cfg.constellation_port);
-        config_detail::load_value(network, "udp_input_ip", cfg.ul_udp_input_ip);
-        config_detail::load_value(network, "udp_input_port", cfg.ul_udp_input_port);
-        config_detail::load_value(network, "udp_output_ip", cfg.udp_output_ip);
-        config_detail::load_value(network, "udp_output_port", cfg.udp_output_port);
-        config_detail::load_value(network, "self_channel_ip", cfg.uplink_self_channel_ip);
-        config_detail::load_value(network, "self_channel_port", cfg.uplink_self_channel_port);
-        config_detail::load_value(network, "self_pdf_ip", cfg.uplink_self_pdf_ip);
-        config_detail::load_value(network, "self_pdf_port", cfg.uplink_self_pdf_port);
+        config_detail::load_value(network, "bi_sensing_output_enabled", cfg.network_output.bi_sensing_output_enabled);
+        config_detail::load_value(network, "bi_sensing_ip", cfg.network_output.bi_sensing_ip);
+        config_detail::load_value(network, "bi_sensing_port", cfg.network_output.bi_sensing_port);
+        config_detail::load_value(network, "control_port", cfg.network_output.control_port);
+        config_detail::load_value(network, "channel_ip", cfg.network_output.channel_ip);
+        config_detail::load_value(network, "channel_port", cfg.network_output.channel_port);
+        config_detail::load_value(network, "pdf_ip", cfg.network_output.pdf_ip);
+        config_detail::load_value(network, "pdf_port", cfg.network_output.pdf_port);
+        config_detail::load_value(network, "constellation_ip", cfg.network_output.constellation_ip);
+        config_detail::load_value(network, "constellation_port", cfg.network_output.constellation_port);
+        config_detail::load_value(network, "udp_input_ip", cfg.network_output.ul_udp_input_ip);
+        config_detail::load_value(network, "udp_input_port", cfg.network_output.ul_udp_input_port);
+        config_detail::load_value(network, "udp_output_ip", cfg.network_output.udp_output_ip);
+        config_detail::load_value(network, "udp_output_port", cfg.network_output.udp_output_port);
+        config_detail::load_value(network, "self_channel_ip", cfg.network_output.uplink_self_channel_ip);
+        config_detail::load_value(network, "self_channel_port", cfg.network_output.uplink_self_channel_port);
+        config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
+        config_detail::load_value(network, "self_pdf_port", cfg.network_output.uplink_self_pdf_port);
 
-        config_detail::load_value(runtime, "default_out_ip", cfg.default_out_ip);
-        config_detail::load_value(runtime, "vofa_debug_ip", cfg.vofa_debug_ip);
-        config_detail::load_value(runtime, "vofa_debug_port", cfg.vofa_debug_port);
-        config_detail::load_value(runtime, "profiling_modules", cfg.profiling_modules);
+        config_detail::load_value(runtime, "default_out_ip", cfg.network_output.default_out_ip);
+        config_detail::load_value(runtime, "vofa_debug_ip", cfg.network_output.vofa_debug_ip);
+        config_detail::load_value(runtime, "vofa_debug_port", cfg.network_output.vofa_debug_port);
+        config_detail::load_value(runtime, "profiling_modules", cfg.runtime.profiling_modules);
 
         load_simulation_config(config, cfg);
         load_duplex_config(config, cfg);
 
-        config_detail::load_value(cpu, "downlink_cpu_cores", cfg.downlink_cpu_cores);
-        config_detail::load_value(cpu, "uplink_cpu_cores", cfg.uplink_cpu_cores);
-        config_detail::load_value(cpu, "main_cpu_core", cfg.main_cpu_core);
+        config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
+        config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
+        config_detail::load_value(cpu, "main_cpu_core", cfg.cpu_cores.main_cpu_core);
 
         if (!config_detail::load_data_resource_blocks_from_yaml(
                 cfg, resource_preview, "UE config")) {
@@ -3481,135 +3566,120 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
 inline void finalize_ue_network_defaults(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "deBS sensing");
     normalize_sensing_view_bins(cfg, "deBS sensing");
-    if (cfg.cuda_demod_pipeline_slots == 0) {
+    if (cfg.cuda.cuda_demod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
-        cfg.cuda_demod_pipeline_slots = 1;
+        cfg.cuda.cuda_demod_pipeline_slots = 1;
     }
-    cfg.cuda_ldpc_decoder_backend =
-        normalize_cuda_ldpc_decoder_backend_string(cfg.cuda_ldpc_decoder_backend);
-    if (cfg.cuda_ldpc_worker_buffers < 2) {
+    cfg.cuda.cuda_ldpc_decoder_backend =
+        normalize_cuda_ldpc_decoder_backend_string(cfg.cuda.cuda_ldpc_decoder_backend);
+    if (cfg.cuda.cuda_ldpc_worker_buffers < 2) {
         LOG_G_WARN() << "cuda_ldpc_worker_buffers<2 is invalid. Clamping to 2.";
-        cfg.cuda_ldpc_worker_buffers = 2;
+        cfg.cuda.cuda_ldpc_worker_buffers = 2;
     }
-    if (cfg.cuda_ldpc_cross_frame_flush_frames == 0) {
+    if (cfg.cuda.cuda_ldpc_cross_frame_flush_frames == 0) {
         LOG_G_WARN() << "cuda_ldpc_cross_frame_flush_frames=0 is invalid. Clamping to 1.";
-        cfg.cuda_ldpc_cross_frame_flush_frames = 1;
+        cfg.cuda.cuda_ldpc_cross_frame_flush_frames = 1;
     }
-    if (cfg.cuda_ldpc_cross_frame_flush_us < 0.0) {
+    if (cfg.cuda.cuda_ldpc_cross_frame_flush_us < 0.0) {
         LOG_G_WARN() << "cuda_ldpc_cross_frame_flush_us<0 is invalid. Clamping to 0 us.";
-        cfg.cuda_ldpc_cross_frame_flush_us = 0.0;
+        cfg.cuda.cuda_ldpc_cross_frame_flush_us = 0.0;
     }
-    if (cfg.frame_queue_size == 0) {
+    if (cfg.ofdm.frame_queue_size == 0) {
         LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
-        cfg.frame_queue_size = 1;
+        cfg.ofdm.frame_queue_size = 1;
     }
-    if (cfg.sync_queue_size == 0) {
+    if (cfg.sync_tracking.sync_queue_size == 0) {
         LOG_G_WARN() << "sync_queue_size=0 is invalid. Clamping to 1.";
-        cfg.sync_queue_size = 1;
+        cfg.sync_tracking.sync_queue_size = 1;
     }
-    if (cfg.sync_cfo_alias_search_range_hz < 0.0 ||
-        !std::isfinite(cfg.sync_cfo_alias_search_range_hz)) {
+    if (cfg.sync_tracking.sync_cfo_alias_search_range_hz < 0.0 ||
+        !std::isfinite(cfg.sync_tracking.sync_cfo_alias_search_range_hz)) {
         LOG_G_WARN() << "sync_cfo_alias_search_range_hz is invalid. Clamping to 0 Hz.";
-        cfg.sync_cfo_alias_search_range_hz = 0.0;
+        cfg.sync_tracking.sync_cfo_alias_search_range_hz = 0.0;
     }
-    if (cfg.reset_hold_s <= 0.0) {
+    if (cfg.sync_tracking.reset_hold_s <= 0.0) {
         LOG_G_WARN() << "reset_hold_s<=0 is invalid. Clamping to 0.5 s.";
-        cfg.reset_hold_s = 0.5;
+        cfg.sync_tracking.reset_hold_s = 0.5;
     }
-    if (cfg.sensing_symbol_stride == 0) {
+    if (cfg.sensing.sensing_symbol_stride == 0) {
         LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
-        cfg.sensing_symbol_stride = 1;
+        cfg.sensing.sensing_symbol_stride = 1;
     }
-    if (cfg.rx_agc_update_frames == 0) {
+    if (cfg.rf_sampling.rx_agc_update_frames == 0) {
         LOG_G_WARN() << "rx_agc_update_frames=0 is invalid. Clamping to 1.";
-        cfg.rx_agc_update_frames = 1;
+        cfg.rf_sampling.rx_agc_update_frames = 1;
     }
-    if (cfg.rx_agc_max_step_db <= 0.0) {
+    if (cfg.rf_sampling.rx_agc_max_step_db <= 0.0) {
         LOG_G_WARN() << "rx_agc_max_step_db<=0 is invalid. Clamping to 1 dB.";
-        cfg.rx_agc_max_step_db = 1.0;
+        cfg.rf_sampling.rx_agc_max_step_db = 1.0;
     }
-    if (cfg.rx_agc_low_threshold_db >= cfg.rx_agc_high_threshold_db) {
+    if (cfg.rf_sampling.rx_agc_low_threshold_db >= cfg.rf_sampling.rx_agc_high_threshold_db) {
         LOG_G_WARN() << "rx_agc_low_threshold_db>=rx_agc_high_threshold_db is invalid. Resetting to 11/13 dB.";
-        cfg.rx_agc_low_threshold_db = 11.0;
-        cfg.rx_agc_high_threshold_db = 13.0;
+        cfg.rf_sampling.rx_agc_low_threshold_db = 11.0;
+        cfg.rf_sampling.rx_agc_high_threshold_db = 13.0;
     }
-    if (cfg.equalizer_mode != kEqualizerModeZf &&
-        cfg.equalizer_mode != kEqualizerModeMmse) {
-        LOG_G_WARN() << "Unsupported equalizer_mode='" << cfg.equalizer_mode
-                     << "'. Falling back to '" << kEqualizerModeMmse << "'.";
-        cfg.equalizer_mode = kEqualizerModeMmse;
-    }
-    cfg.channel_tracking_mode = normalize_channel_tracking_mode_string(cfg.channel_tracking_mode);
-    if (cfg.equalizer_mag_floor <= 0.0 || !std::isfinite(cfg.equalizer_mag_floor)) {
-        LOG_G_WARN() << "equalizer_mag_floor is invalid. Falling back to 1e-6.";
-        cfg.equalizer_mag_floor = 1e-6;
-    }
-    if (cfg.channel_tracking_min_pilot_snr <= 0.0 ||
-        !std::isfinite(cfg.channel_tracking_min_pilot_snr)) {
-        LOG_G_WARN() << "channel_tracking_min_pilot_snr is invalid. Falling back to 1e-4.";
-        cfg.channel_tracking_min_pilot_snr = 1e-4;
-    }
+    normalize_equalizer_config(cfg.downlink.equalizer);
     {
-        std::sort(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end());
-        cfg.midframe_pilot_symbols.erase(
-            std::unique(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end()),
-            cfg.midframe_pilot_symbols.end());
+        std::sort(cfg.ofdm.midframe_pilot_symbols.begin(), cfg.ofdm.midframe_pilot_symbols.end());
+        cfg.ofdm.midframe_pilot_symbols.erase(
+            std::unique(cfg.ofdm.midframe_pilot_symbols.begin(), cfg.ofdm.midframe_pilot_symbols.end()),
+            cfg.ofdm.midframe_pilot_symbols.end());
     }
-    if (cfg.measurement_enable) {
-        if (cfg.measurement_mode.empty()) {
-            cfg.measurement_mode = "internal_prbs";
+    if (cfg.measurement.measurement_enable) {
+        if (cfg.measurement.measurement_mode.empty()) {
+            cfg.measurement.measurement_mode = "internal_prbs";
         }
         if (!measurement_mode_enabled(cfg)) {
             LOG_G_WARN() << "Unsupported UE measurement_mode='"
-                         << cfg.measurement_mode << "'. Disabling measurement mode.";
-            cfg.measurement_enable = false;
+                         << cfg.measurement.measurement_mode << "'. Disabling measurement mode.";
+            cfg.measurement.measurement_enable = false;
         }
-        if (cfg.measurement_payload_bytes < measurement_payload_header_size()) {
-            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement_payload_bytes
+        if (cfg.measurement.measurement_payload_bytes < measurement_payload_header_size()) {
+            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement.measurement_payload_bytes
                          << " is smaller than the measurement header. Clamping to "
                          << measurement_payload_header_size() << '.';
-            cfg.measurement_payload_bytes = measurement_payload_header_size();
+            cfg.measurement.measurement_payload_bytes = measurement_payload_header_size();
         }
-        if (cfg.measurement_packets_per_point == 0) {
+        if (cfg.measurement.measurement_packets_per_point == 0) {
             LOG_G_WARN() << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
-            cfg.measurement_packets_per_point = 1;
+            cfg.measurement.measurement_packets_per_point = 1;
         }
     }
     finalize_data_resource_grid_config(cfg, "UE");
     finalize_sensing_mask_config(cfg, "UE");
-    if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = "0.0.0.0";
-    if (cfg.channel_ip.empty()) cfg.channel_ip = "0.0.0.0";
-    if (cfg.pdf_ip.empty()) cfg.pdf_ip = "0.0.0.0";
-    if (cfg.constellation_ip.empty()) cfg.constellation_ip = "0.0.0.0";
-    if (cfg.uplink_self_channel_ip.empty()) cfg.uplink_self_channel_ip = "0.0.0.0";
-    if (cfg.uplink_self_pdf_ip.empty()) cfg.uplink_self_pdf_ip = "0.0.0.0";
-    if (cfg.vofa_debug_ip.empty()) cfg.vofa_debug_ip = cfg.default_out_ip;
-    if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_out_ip;
+    if (cfg.network_output.bi_sensing_ip.empty()) cfg.network_output.bi_sensing_ip = "0.0.0.0";
+    if (cfg.network_output.channel_ip.empty()) cfg.network_output.channel_ip = "0.0.0.0";
+    if (cfg.network_output.pdf_ip.empty()) cfg.network_output.pdf_ip = "0.0.0.0";
+    if (cfg.network_output.constellation_ip.empty()) cfg.network_output.constellation_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_self_channel_ip.empty()) cfg.network_output.uplink_self_channel_ip = "0.0.0.0";
+    if (cfg.network_output.uplink_self_pdf_ip.empty()) cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
+    if (cfg.network_output.vofa_debug_ip.empty()) cfg.network_output.vofa_debug_ip = cfg.network_output.default_out_ip;
+    if (cfg.network_output.udp_output_ip.empty()) cfg.network_output.udp_output_ip = cfg.network_output.default_out_ip;
 }
 
 inline void log_ue_sync_mode(const Config& cfg) {
-    if (cfg.hardware_sync && cfg.software_sync) {
+    if (cfg.sync_tracking.hardware_sync && cfg.sync_tracking.software_sync) {
         LOG_G_INFO() << "Both software_sync and hardware_sync are enabled.";
-    } else if (cfg.hardware_sync) {
+    } else if (cfg.sync_tracking.hardware_sync) {
         LOG_G_INFO() << "Hardware sync enabled.";
-    } else if (cfg.software_sync) {
+    } else if (cfg.sync_tracking.software_sync) {
         LOG_G_INFO() << "Software sync enabled.";
     } else {
         LOG_G_WARN() << "Both software_sync and hardware_sync are disabled.";
     }
     LOG_G_INFO() << "Predictive delay compensation "
-                 << (cfg.predictive_delay ? "enabled." : "disabled.");
+                 << (cfg.sync_tracking.predictive_delay ? "enabled." : "disabled.");
 }
 
 inline void log_ue_agc_mode(const Config& cfg) {
-    if (!cfg.rx_agc_enable) {
-        LOG_G_INFO() << "RX AGC disabled. Using fixed RX gain: " << cfg.rx_gain << " dB";
+    if (!cfg.rf_sampling.rx_agc_enable) {
+        LOG_G_INFO() << "RX AGC disabled. Using fixed RX gain: " << cfg.rf_sampling.rx_gain << " dB";
         return;
     }
-    LOG_G_INFO() << "RX AGC enabled. low_threshold_db=" << cfg.rx_agc_low_threshold_db
-                 << ", high_threshold_db=" << cfg.rx_agc_high_threshold_db
-                 << ", max_step_db=" << cfg.rx_agc_max_step_db
-                 << ", update_frames=" << cfg.rx_agc_update_frames;
+    LOG_G_INFO() << "RX AGC enabled. low_threshold_db=" << cfg.rf_sampling.rx_agc_low_threshold_db
+                 << ", high_threshold_db=" << cfg.rf_sampling.rx_agc_high_threshold_db
+                 << ", max_step_db=" << cfg.rf_sampling.rx_agc_max_step_db
+                 << ", update_frames=" << cfg.rf_sampling.rx_agc_update_frames;
 }
 
 /**
@@ -3736,11 +3806,11 @@ struct RxAgcAdjustment {
 class HardwareRxAgc {
 public:
     explicit HardwareRxAgc(const Config& cfg)
-        : _enabled(cfg.rx_agc_enable),
-          _low_threshold_db(cfg.rx_agc_low_threshold_db),
-          _high_threshold_db(cfg.rx_agc_high_threshold_db),
-          _max_step_db(cfg.rx_agc_max_step_db),
-          _update_frames(std::max<size_t>(1, cfg.rx_agc_update_frames)) {}
+        : _enabled(cfg.rf_sampling.rx_agc_enable),
+          _low_threshold_db(cfg.rf_sampling.rx_agc_low_threshold_db),
+          _high_threshold_db(cfg.rf_sampling.rx_agc_high_threshold_db),
+          _max_step_db(cfg.rf_sampling.rx_agc_max_step_db),
+          _update_frames(std::max<size_t>(1, cfg.rf_sampling.rx_agc_update_frames)) {}
 
     void initialize(double initial_gain_db, double hw_min_gain_db, double hw_max_gain_db) {
         _min_gain_db = std::min(hw_min_gain_db, hw_max_gain_db);
@@ -3946,8 +4016,8 @@ private:
 class SyncSearchRxGainSweep {
 public:
     explicit SyncSearchRxGainSweep(const Config& cfg)
-        : _enabled(cfg.rx_agc_enable),
-          _default_gain_db(cfg.rx_gain) {}
+        : _enabled(cfg.rf_sampling.rx_agc_enable),
+          _default_gain_db(cfg.rf_sampling.rx_gain) {}
 
     void initialize(double default_gain_db, double min_gain_db, double max_gain_db) {
         _min_gain_db = std::min(min_gain_db, max_gain_db);
@@ -4331,9 +4401,9 @@ inline size_t sensing_viewer_wire_rows(
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
     case SensingViewerFrameFormat::DenseRangeDoppler:
-        return cfg.doppler_fft_size;
+        return cfg.sensing.doppler_fft_size;
     case SensingViewerFrameFormat::CompactRaw:
-        return cfg.sensing_symbol_num;
+        return cfg.ofdm.sensing_symbol_num;
     case SensingViewerFrameFormat::CompactSparse:
     default:
         return 0;
@@ -4351,7 +4421,7 @@ inline size_t sensing_viewer_wire_cols(
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
     case SensingViewerFrameFormat::DenseRangeDoppler:
-        return cfg.range_fft_size;
+        return cfg.sensing.range_fft_size;
     case SensingViewerFrameFormat::CompactRaw:
         return analysis.common_subcarrier_count;
     case SensingViewerFrameFormat::CompactSparse:
@@ -4370,11 +4440,11 @@ inline size_t sensing_viewer_active_rows(
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
-        return std::min(cfg.sensing_symbol_num, cfg.doppler_fft_size);
+        return std::min(cfg.ofdm.sensing_symbol_num, cfg.sensing.doppler_fft_size);
     case SensingViewerFrameFormat::CompactRaw:
-        return cfg.sensing_symbol_num;
+        return cfg.ofdm.sensing_symbol_num;
     case SensingViewerFrameFormat::DenseRangeDoppler:
-        return cfg.doppler_fft_size;
+        return cfg.sensing.doppler_fft_size;
     case SensingViewerFrameFormat::CompactSparse:
     default:
         return 0;
@@ -4391,11 +4461,11 @@ inline size_t sensing_viewer_active_cols(
     const CompactSensingMaskAnalysis analysis = analyze_compact_sensing_mask(cfg);
     switch (sensing_viewer_frame_format(cfg, skip_sensing_fft)) {
     case SensingViewerFrameFormat::DenseChannelBuffer:
-        return std::min(cfg.fft_size, cfg.range_fft_size);
+        return std::min(cfg.ofdm.fft_size, cfg.sensing.range_fft_size);
     case SensingViewerFrameFormat::CompactRaw:
         return analysis.common_subcarrier_count;
     case SensingViewerFrameFormat::DenseRangeDoppler:
-        return cfg.range_fft_size;
+        return cfg.sensing.range_fft_size;
     case SensingViewerFrameFormat::CompactSparse:
     default:
         return 0;
@@ -4412,7 +4482,7 @@ inline uint32_t sensing_viewer_mask_hash(const Config& cfg)
 
 inline SensingViewerWireDataFormat sensing_viewer_wire_data_format(const Config& cfg)
 {
-    switch (cfg.sensing_on_wire_format) {
+    switch (cfg.sensing.sensing_on_wire_format) {
     case SensingOnWireFormat::ComplexFloat16:
         return SensingViewerWireDataFormat::ComplexFloat16;
     case SensingOnWireFormat::ComplexFloat32:
@@ -4448,9 +4518,9 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     packet.wire_cols = htonl(static_cast<uint32_t>(sensing_viewer_wire_cols(cfg, skip_sensing_fft)));
     packet.active_rows = htonl(static_cast<uint32_t>(sensing_viewer_active_rows(cfg, skip_sensing_fft)));
     packet.active_cols = htonl(static_cast<uint32_t>(sensing_viewer_active_cols(cfg, skip_sensing_fft)));
-    packet.frame_symbol_period = htonl(static_cast<uint32_t>(cfg.num_symbols));
-    packet.range_fft_size = htonl(static_cast<uint32_t>(cfg.range_fft_size));
-    packet.doppler_fft_size = htonl(static_cast<uint32_t>(cfg.doppler_fft_size));
+    packet.frame_symbol_period = htonl(static_cast<uint32_t>(cfg.ofdm.num_symbols));
+    packet.range_fft_size = htonl(static_cast<uint32_t>(cfg.sensing.range_fft_size));
+    packet.doppler_fft_size = htonl(static_cast<uint32_t>(cfg.sensing.doppler_fft_size));
     packet.compact_mask_hash = htonl(sensing_viewer_mask_hash(cfg));
     packet.wire_data_format = htonl(static_cast<uint32_t>(sensing_viewer_wire_data_format(cfg)));
     packet.stream_channel_count = htonl(stream_channel_count);
@@ -4461,13 +4531,13 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     packet.os_cfar_suppress_doppler = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_doppler)));
     packet.os_cfar_suppress_range = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_range)));
     // V7: physical radio parameters so the viewer can auto-configure axes and AoA.
-    if (cfg.center_freq > 0.0) {
+    if (cfg.downlink.center_freq > 0.0) {
         packet.center_freq_hz_div100 = htonl(static_cast<uint32_t>(
-            std::llround(std::clamp(cfg.center_freq / 100.0, 0.0, 4294967295.0))));
+            std::llround(std::clamp(cfg.downlink.center_freq / 100.0, 0.0, 4294967295.0))));
     }
-    if (cfg.sample_rate > 0.0) {
+    if (cfg.rf_sampling.sample_rate > 0.0) {
         packet.sample_rate_hz_div100 = htonl(static_cast<uint32_t>(
-            std::llround(std::clamp(cfg.sample_rate / 100.0, 0.0, 4294967295.0))));
+            std::llround(std::clamp(cfg.rf_sampling.sample_rate / 100.0, 0.0, 4294967295.0))));
     }
     if (antenna_spacing_m > 0.0) {
         packet.antenna_spacing_um = htonl(static_cast<uint32_t>(

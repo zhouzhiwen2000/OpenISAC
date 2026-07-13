@@ -80,20 +80,20 @@ inline int _predictive_delay_samples_from_cfo(const Config& cfg,
                                               double actual_rx_rf_freq_hz,
                                               double actual_rx_dsp_freq_hz,
                                               int64_t now_ns) {
-    if (!cfg.predictive_delay || source_frame_time_ns < 0 ||
+    if (!cfg.sync_tracking.predictive_delay || source_frame_time_ns < 0 ||
         !std::isfinite(detected_freq_offset_hz) ||
-        cfg.sample_rate <= 0.0 || cfg.samples_per_frame() == 0 ||
-        std::abs(cfg.center_freq) <= 0.0) {
+        cfg.rf_sampling.sample_rate <= 0.0 || cfg.samples_per_frame() == 0 ||
+        std::abs(cfg.downlink.center_freq) <= 0.0) {
         return 0;
     }
 
     const double tune_system_cfo_hz = rx_tune_system_cfo_hz(
-        cfg.center_freq,
+        cfg.downlink.center_freq,
         actual_rx_rf_freq_hz,
         actual_rx_dsp_freq_hz
     );
     const double clock_error_hz = detected_freq_offset_hz - tune_system_cfo_hz;
-    const double clock_error_ratio = clock_error_hz / cfg.center_freq;
+    const double clock_error_ratio = clock_error_hz / cfg.downlink.center_freq;
     const double predicted_samples_per_frame =
         clock_error_ratio * static_cast<double>(cfg.samples_per_frame());
     if (!std::isfinite(predicted_samples_per_frame) ||

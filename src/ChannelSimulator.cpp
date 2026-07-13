@@ -218,26 +218,26 @@ int main(int argc, char** argv) {
     }
 
     const SimConfig& sim = cfg.simulation;
-    const double fs = cfg.sample_rate;
-    const double lambda = kSpeedOfLight / cfg.center_freq;
+    const double fs = cfg.rf_sampling.sample_rate;
+    const double lambda = kSpeedOfLight / cfg.downlink.center_freq;
     // Selectively enable receive paths. Disabling a path means the hub neither
     // creates nor produces into its ring, so that path's consumer need not run
     // (and the hub will not block waiting for it).
     const bool enable_comm = sim.enable_comm_rx;
     const bool enable_uplink = sim.enable_uplink;
     const size_t num_channels =
-        sim.enable_sensing_rx ? cfg.sensing_rx_channels.size() : 0; // sensing antennas
+        sim.enable_sensing_rx ? cfg.sensing.sensing_rx_channels.size() : 0; // sensing antennas
     // Electrical ULA spacing d/lambda used in the steering phase. Derive it from the
     // PHYSICAL element spacing and the carrier so the simulated angles track
     // center_freq exactly like a real array (the viewers invert phase->angle using the
     // same physical spacing). Fall back to the legacy frequency-independent
     // wavelength spacing only when array_spacing_m is disabled (<= 0).
     const double spacing = (sim.array_spacing_m > 0.0)
-        ? sim.array_spacing_m * cfg.center_freq / kSpeedOfLight
+        ? sim.array_spacing_m * cfg.downlink.center_freq / kSpeedOfLight
         : sim.array_spacing_lambda;
 
     LOG_G_INFO() << "[ChannelSim] session=" << sim.session << " fs=" << fs
-                 << " Hz, center=" << cfg.center_freq
+                 << " Hz, center=" << cfg.downlink.center_freq
                  << " Hz, comm_rx=" << (enable_comm ? "on" : "off")
                  << ", sensing_channels=" << num_channels
                  << ", ULA spacing=" << spacing << " lambda ("

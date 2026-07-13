@@ -178,13 +178,13 @@ std::vector<AlignedVector> make_midframe_pilot_sequences(
 {
     std::vector<AlignedVector> sequences;
     sequences.reserve(layout.midframe_pilot_symbols.size());
-    const AlignedVector comb_pilot_seq = generate_zc_freq(cfg.fft_size, cfg.zc_root);
+    const AlignedVector comb_pilot_seq = generate_zc_freq(cfg.ofdm.fft_size, cfg.ofdm.zc_root);
     for (const int sym : layout.midframe_pilot_symbols) {
         sequences.push_back(generate_midframe_bpsk_pilot_freq(
-            cfg.fft_size,
-            cfg.midframe_pilot_seed,
+            cfg.ofdm.fft_size,
+            cfg.ofdm.midframe_pilot_seed,
             static_cast<size_t>(sym),
-            cfg.pilot_positions,
+            cfg.ofdm.pilot_positions,
             comb_pilot_seq));
     }
     return sequences;
@@ -196,8 +196,8 @@ AlignedVector make_cfo_training_sequence(const Config& cfg)
         return {};
     }
     return generate_cfo_training_freq(
-        cfg.fft_size,
-        cfg.cfo_training_period_samples);
+        cfg.ofdm.fft_size,
+        cfg.ofdm.cfo_training_period_samples);
 }
 } // namespace
 
@@ -219,25 +219,25 @@ public:
           _measurement_enabled(measurement_mode_enabled(cfg)),
           _duplex_layout(build_duplex_frame_layout(cfg)),
           _data_resource_layout(build_data_resource_grid_layout(cfg)),
-          zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
+          zc_freq_(generate_zc_freq(cfg.ofdm.fft_size, cfg.ofdm.zc_root)),
           _cfo_training_seq(make_cfo_training_sequence(cfg)),
           _midframe_pilot_seqs(make_midframe_pilot_sequences(cfg, _data_resource_layout)),
-          _sensing_pilot_zc_root(select_known_sensing_pilot_zc_root(cfg.fft_size, cfg.zc_root)),
-          sensing_pilot_freq_(generate_sensing_pilot_freq(cfg.fft_size, cfg.zc_root)),
+          _sensing_pilot_zc_root(select_known_sensing_pilot_zc_root(cfg.ofdm.fft_size, cfg.ofdm.zc_root)),
+          sensing_pilot_freq_(generate_sensing_pilot_freq(cfg.ofdm.fft_size, cfg.ofdm.zc_root)),
           _sync_scratch_buffer(cfg.sync_samples()),
-          frame_queue_(cfg.frame_queue_size),
-          sync_queue_(cfg.sync_queue_size, [&cfg]() {
+          frame_queue_(cfg.ofdm.frame_queue_size),
+          sync_queue_(cfg.sync_tracking.sync_queue_size, [&cfg]() {
               SyncBatch batch;
               batch.data.resize(cfg.sync_samples());
               batch.usrp_time_ns = -1;
               return batch;
           }),
-          _channel_estimator(cfg.fft_size),
-          _delay_processor(cfg.fft_size),
-          _sync_processor(cfg.sync_samples(), cfg.fft_size, cfg.cp_length, zc_freq_),
-          _uplink_self_zc_freq(generate_zc_freq(cfg.fft_size, make_uplink_config(cfg).zc_root)),
-          _uplink_self_debug_estimator(cfg.fft_size, cfg.cp_length),
-          _control_handler(cfg.bi_sensing_ip, cfg.control_port),
+          _channel_estimator(cfg.ofdm.fft_size),
+          _delay_processor(cfg.ofdm.fft_size),
+          _sync_processor(cfg.sync_samples(), cfg.ofdm.fft_size, cfg.ofdm.cp_length, zc_freq_),
+          _uplink_self_zc_freq(generate_zc_freq(cfg.ofdm.fft_size, make_uplink_config(cfg).ofdm.zc_root)),
+          _uplink_self_debug_estimator(cfg.ofdm.fft_size, cfg.ofdm.cp_length),
+          _control_handler(cfg.network_output.bi_sensing_ip, cfg.network_output.control_port),
           channel_sender_(2, [this](const auto& data) {
               channel_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
@@ -266,11 +266,11 @@ public:
           }),
           _sensing_frame_pool(32, [&cfg]() {
               SensingFrame frame;
-              frame.rx_symbols.resize(cfg.num_symbols);
-              frame.tx_symbols.resize(cfg.num_symbols);
-              for (size_t i = 0; i < cfg.num_symbols; ++i) {
-                  frame.rx_symbols[i].resize(cfg.fft_size);
-                  frame.tx_symbols[i].resize(cfg.fft_size);
+              frame.rx_symbols.resize(cfg.ofdm.num_symbols);
+              frame.tx_symbols.resize(cfg.ofdm.num_symbols);
+              for (size_t i = 0; i < cfg.ofdm.num_symbols; ++i) {
+                  frame.rx_symbols[i].resize(cfg.ofdm.fft_size);
+                  frame.tx_symbols[i].resize(cfg.ofdm.fft_size);
               }
               frame.CFO = 0.0f;
               frame.SFO = 0.0f;
@@ -283,36 +283,36 @@ public:
           _akf(make_akf_params(cfg), frame_duration_from_cfg(cfg)) {
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc_decoder.get_N(), 21);
         _measurement_active_epoch_id.store(0, std::memory_order_relaxed);
-        if (_measurement_enabled && !cfg_.measurement_output_dir.empty()) {
-            _measurement_summary_path = cfg_.measurement_output_dir + "/ue_measurement_summary.csv";
+        if (_measurement_enabled && !cfg_.measurement.measurement_output_dir.empty()) {
+            _measurement_summary_path = cfg_.measurement.measurement_output_dir + "/ue_measurement_summary.csv";
         }
         _build_cfo_symbol_skip_mask();
         _build_compact_payload_indices();
         LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
                      << " non-sync/non-pilot RE per frame"
-                     << (cfg_.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
+                     << (cfg_.resource_preview.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
         if (_data_resource_layout.sensing_pilot_re_count > 0) {
             LOG_G_INFO() << "Sensing-pilot sequence uses alternate ZC root "
                          << _sensing_pilot_zc_root
-                         << " (sync root=" << cfg_.zc_root << ").";
+                         << " (sync root=" << cfg_.ofdm.zc_root << ").";
         }
 
         init_usrp();
         init_filter();
         prepare_fftw();
         init_zmq_publishers();
-        if (cfg_.hardware_sync) {
-            _hw_sync = std::make_unique<HardwareSyncController>(cfg_.hardware_sync_tty);
+        if (cfg_.sync_tracking.hardware_sync) {
+            _hw_sync = std::make_unique<HardwareSyncController>(cfg_.sync_tracking.hardware_sync_tty);
             _hw_sync->configure_ocxo_pi(
-                cfg_.ocxo_pi_kp_fast,
-                cfg_.ocxo_pi_ki_fast,
-                cfg_.ocxo_pi_kp_slow,
-                cfg_.ocxo_pi_ki_slow,
-                cfg_.ocxo_pi_switch_abs_error_ppm,
-                cfg_.ocxo_pi_switch_hold_s,
-                cfg_.ocxo_pi_max_step_fast_ppm,
-                cfg_.ocxo_pi_max_step_slow_ppm
+                cfg_.sync_tracking.ocxo_pi_kp_fast,
+                cfg_.sync_tracking.ocxo_pi_ki_fast,
+                cfg_.sync_tracking.ocxo_pi_kp_slow,
+                cfg_.sync_tracking.ocxo_pi_ki_slow,
+                cfg_.sync_tracking.ocxo_pi_switch_abs_error_ppm,
+                cfg_.sync_tracking.ocxo_pi_switch_hold_s,
+                cfg_.sync_tracking.ocxo_pi_max_step_fast_ppm,
+                cfg_.sync_tracking.ocxo_pi_max_step_slow_ppm
             );
         }
         // Initialize sensing processing
@@ -333,7 +333,7 @@ public:
 
     void start() {
         _control_handler.start();
-        _ue_timing_advance.store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+        _ue_timing_advance.store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
         log_duplex_summary(cfg_, "UE");
 
         uhd::time_spec_t stream_start_time(0.0);
@@ -342,7 +342,7 @@ public:
             _uplink_tx->set_timed_tx(
                 stream_start_time,
                 usrp_->get_master_clock_rate(),
-                usrp_->get_tx_rate(cfg_.tx_channel));
+                usrp_->get_tx_rate(cfg_.uplink.tx_channel));
             LOG_G_INFO() << "[UE] timed RX/UL-TX stream start at "
                          << stream_start_time.get_real_secs()
                          << " s on the shared radio clock";
@@ -408,20 +408,20 @@ private:
 private:
     static AdaptiveCFOAKF::Params make_akf_params(const Config& cfg) {
         AdaptiveCFOAKF::Params p;
-        p.enable = cfg.akf_enable;
-        p.bootstrap_frames = cfg.akf_bootstrap_frames;
-        p.innovation_window = cfg.akf_innovation_window;
-        p.max_lag = cfg.akf_max_lag;
-        p.adapt_interval = cfg.akf_adapt_interval;
-        p.gate_sigma = cfg.akf_gate_sigma;
-        p.tikhonov_lambda = cfg.akf_tikhonov_lambda;
-        p.update_smooth = cfg.akf_update_smooth;
-        p.q_wf_min = cfg.akf_q_wf_min;
-        p.q_wf_max = cfg.akf_q_wf_max;
-        p.q_rw_min = cfg.akf_q_rw_min;
-        p.q_rw_max = cfg.akf_q_rw_max;
-        p.r_min = cfg.akf_r_min;
-        p.r_max = cfg.akf_r_max;
+        p.enable = cfg.sync_tracking.akf_enable;
+        p.bootstrap_frames = cfg.sync_tracking.akf_bootstrap_frames;
+        p.innovation_window = cfg.sync_tracking.akf_innovation_window;
+        p.max_lag = cfg.sync_tracking.akf_max_lag;
+        p.adapt_interval = cfg.sync_tracking.akf_adapt_interval;
+        p.gate_sigma = cfg.sync_tracking.akf_gate_sigma;
+        p.tikhonov_lambda = cfg.sync_tracking.akf_tikhonov_lambda;
+        p.update_smooth = cfg.sync_tracking.akf_update_smooth;
+        p.q_wf_min = cfg.sync_tracking.akf_q_wf_min;
+        p.q_wf_max = cfg.sync_tracking.akf_q_wf_max;
+        p.q_rw_min = cfg.sync_tracking.akf_q_rw_min;
+        p.q_rw_max = cfg.sync_tracking.akf_q_rw_max;
+        p.r_min = cfg.sync_tracking.akf_r_min;
+        p.r_max = cfg.sync_tracking.akf_r_max;
         return p;
     }
 
@@ -757,7 +757,7 @@ private:
         }
         std::lock_guard<std::mutex> lock(_uplink_tx_gain_mutex);
         try {
-            usrp_->set_tx_gain(_uplink_tx_gain_min_db, cfg_.tx_channel);
+            usrp_->set_tx_gain(_uplink_tx_gain_min_db, cfg_.uplink.tx_channel);
             _uplink_tx_gain_muted.store(true, std::memory_order_release);
         } catch (const std::exception& e) {
             LOG_RT_WARN() << "[UL-TX] failed to mute TX gain during sync search: " << e.what();
@@ -770,7 +770,7 @@ private:
         }
         std::lock_guard<std::mutex> lock(_uplink_tx_gain_mutex);
         try {
-            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.tx_channel);
+            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
             _uplink_tx_gain_muted.store(false, std::memory_order_release);
         } catch (const std::exception& e) {
             LOG_RT_WARN() << "[UL-TX] failed to restore TX gain after sync: " << e.what();
@@ -937,24 +937,24 @@ private:
     }
 
     void _build_cfo_symbol_skip_mask() {
-        _cfo_symbol_skip_mask.assign(cfg_.num_symbols, 0);
+        _cfo_symbol_skip_mask.assign(cfg_.ofdm.num_symbols, 0);
         if (_duplex_layout.mode != DuplexMode::TDD ||
             !_duplex_layout.uplink_enabled ||
-            cfg_.num_symbols == 0) {
+            cfg_.ofdm.num_symbols == 0) {
             return;
         }
 
-        for (size_t sym = 0; sym < cfg_.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < cfg_.ofdm.num_symbols; ++sym) {
             if (_duplex_layout.is_uplink(sym) || _duplex_layout.is_guard(sym)) {
                 _cfo_symbol_skip_mask[sym] = 1;
             }
         }
-        for (size_t sym = 0; sym < cfg_.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < cfg_.ofdm.num_symbols; ++sym) {
             if (_duplex_layout.is_uplink(sym) || _duplex_layout.is_guard(sym)) {
                 continue;
             }
-            const size_t prev = (sym == 0) ? (cfg_.num_symbols - 1) : (sym - 1);
-            const size_t next = (sym + 1 == cfg_.num_symbols) ? 0 : (sym + 1);
+            const size_t prev = (sym == 0) ? (cfg_.ofdm.num_symbols - 1) : (sym - 1);
+            const size_t next = (sym + 1 == cfg_.ofdm.num_symbols) ? 0 : (sym + 1);
             if (_duplex_layout.is_uplink(prev) || _duplex_layout.is_guard(prev) ||
                 _duplex_layout.is_uplink(next) || _duplex_layout.is_guard(next)) {
                 _cfo_symbol_skip_mask[sym] = 1;
@@ -994,8 +994,8 @@ private:
                 sym_err_power_acc += err_power;
                 sym_err_count += 1;
             }
-            for (size_t i = 0; i < cfg_.pilot_positions.size(); ++i) {
-                const size_t k = cfg_.pilot_positions[i];
+            for (size_t i = 0; i < cfg_.ofdm.pilot_positions.size(); ++i) {
+                const size_t k = cfg_.ofdm.pilot_positions[i];
                 if (k >= symbol.size()) {
                     continue;
                 }
@@ -1048,8 +1048,8 @@ private:
         AlignedVector& H_inv,
         float equalizer_noise_var
     ) const {
-        const float mag_floor = static_cast<float>(cfg_.equalizer_mag_floor);
-        if (cfg_.equalizer_mode == kEqualizerModeMmse) {
+        const float mag_floor = static_cast<float>(cfg_.downlink.equalizer.equalizer_mag_floor);
+        if (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse) {
             ChannelEstimator::compute_mmse_inverse(
                 H_est,
                 H_inv,
@@ -1067,12 +1067,12 @@ private:
         float global_beta,
         double fallback_noise_var
     ) {
-        if (symbols.empty() || cfg_.pilot_positions.empty() ||
+        if (symbols.empty() || cfg_.ofdm.pilot_positions.empty() ||
             _data_resource_layout.data_symbol_to_actual_symbol.size() < symbols.size()) {
             return fallback_noise_var;
         }
 
-        const float mag_floor = static_cast<float>(cfg_.equalizer_mag_floor);
+        const float mag_floor = static_cast<float>(cfg_.downlink.equalizer.equalizer_mag_floor);
         double err_acc = 0.0;
         size_t err_count = 0;
         for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
@@ -1080,12 +1080,12 @@ private:
             const AlignedVector& symbol_H_base =
                 _interpolated_channel_for_symbol(actual_symbol, H_est);
             const bool using_midframe_channel = (&symbol_H_base != &H_est);
-            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.sync_pos);
+            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.ofdm.sync_pos);
             const float phase_alpha = using_midframe_channel ? 0.0f : (global_alpha * relative_symbol_index);
             const float phase_beta = using_midframe_channel ? 0.0f : (global_beta * relative_symbol_index);
 
             const auto& symbol = symbols[sym_idx];
-            for (const size_t k : cfg_.pilot_positions) {
+            for (const size_t k : cfg_.ofdm.pilot_positions) {
                 if (k >= symbol.size() || k >= symbol_H_base.size() || k >= zc_freq_.size()) {
                     continue;
                 }
@@ -1111,11 +1111,11 @@ private:
     }
 
     double _average_channel_power(const AlignedVector& H_est) const {
-        const double floor_val = std::max(cfg_.equalizer_mag_floor, 1e-12);
+        const double floor_val = std::max(cfg_.downlink.equalizer.equalizer_mag_floor, 1e-12);
         double acc = 0.0;
         size_t count = 0;
-        if (!cfg_.pilot_positions.empty()) {
-            for (const size_t k : cfg_.pilot_positions) {
+        if (!cfg_.ofdm.pilot_positions.empty()) {
+            for (const size_t k : cfg_.ofdm.pilot_positions) {
                 if (k >= H_est.size()) {
                     continue;
                 }
@@ -1205,9 +1205,9 @@ private:
         _tracking_phase_buf.clear();
         _tracking_weights_buf.clear();
 
-        const float denom_floor = static_cast<float>(cfg_.equalizer_mag_floor);
-        const float min_weight = static_cast<float>(cfg_.channel_tracking_min_pilot_snr);
-        for (const size_t k : cfg_.pilot_positions) {
+        const float denom_floor = static_cast<float>(cfg_.downlink.equalizer.equalizer_mag_floor);
+        const float min_weight = static_cast<float>(cfg_.downlink.equalizer.channel_tracking_min_pilot_snr);
+        for (const size_t k : cfg_.ofdm.pilot_positions) {
             if (k >= symbol.size() || k >= H_base.size() || k >= zc_freq_.size()) {
                 continue;
             }
@@ -1278,7 +1278,7 @@ private:
             _measurement_epoch_tx_gain_x10.exchange(std::numeric_limits<int32_t>::min(),
                                                     std::memory_order_acq_rel);
 
-        const uint64_t packets_expected = cfg_.measurement_packets_per_point;
+        const uint64_t packets_expected = cfg_.measurement.measurement_packets_per_point;
         const uint64_t packets_failed =
             (successful_packets >= packets_expected) ? 0 : (packets_expected - successful_packets);
         const double ber_decoded = (compared_bits > 0)
@@ -1336,7 +1336,7 @@ private:
             "evm_slope_db_per_symbol_mean",
         };
         const std::vector<std::string> row{
-            cfg_.measurement_run_id,
+            cfg_.measurement.measurement_run_id,
             std::to_string(epoch_id),
             std::to_string(tx_gain_db),
             std::to_string(packets_expected),
@@ -1388,72 +1388,72 @@ private:
             return;
         }
         // Use device arguments from configuration
-        usrp_ = uhd::usrp::multi_usrp::make(cfg_.device_args);
-        usrp_->set_clock_source(cfg_.clocksource);
-        usrp_->set_rx_rate(cfg_.sample_rate);
-        usrp_->set_rx_bandwidth(cfg_.bandwidth, cfg_.rx_channel);
-        current_rx_tune_ = usrp_->set_rx_freq(uhd::tune_request_t(cfg_.center_freq), cfg_.rx_channel);
+        usrp_ = uhd::usrp::multi_usrp::make(cfg_.usrp_device.device_args);
+        usrp_->set_clock_source(cfg_.clock_time.clock_source);
+        usrp_->set_rx_rate(cfg_.rf_sampling.sample_rate);
+        usrp_->set_rx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.downlink.rx_channel);
+        current_rx_tune_ = usrp_->set_rx_freq(uhd::tune_request_t(cfg_.downlink.center_freq), cfg_.downlink.rx_channel);
         tune_initialized_ = true;
         LOG_G_INFO() << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
                      << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
                      << " Hz";
-        const auto gain_range = usrp_->get_rx_gain_range(cfg_.rx_channel);
+        const auto gain_range = usrp_->get_rx_gain_range(cfg_.downlink.rx_channel);
         _rx_gain_min_db = gain_range.start();
         _rx_gain_max_db = gain_range.stop();
-        const double initial_rx_gain_db = std::clamp(cfg_.rx_gain, _rx_gain_min_db, _rx_gain_max_db);
-        if (initial_rx_gain_db != cfg_.rx_gain) {
-            LOG_G_WARN() << "Configured rx_gain=" << cfg_.rx_gain
+        const double initial_rx_gain_db = std::clamp(cfg_.rf_sampling.rx_gain, _rx_gain_min_db, _rx_gain_max_db);
+        if (initial_rx_gain_db != cfg_.rf_sampling.rx_gain) {
+            LOG_G_WARN() << "Configured rx_gain=" << cfg_.rf_sampling.rx_gain
                          << " dB is outside hardware range ["
                          << _rx_gain_min_db << ", " << _rx_gain_max_db
                          << "] dB. Clamping to " << initial_rx_gain_db << " dB.";
         }
-        usrp_->set_rx_gain(initial_rx_gain_db, cfg_.rx_channel);
+        usrp_->set_rx_gain(initial_rx_gain_db, cfg_.downlink.rx_channel);
         _rx_agc.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
         _sync_search_gain_sweep.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
         LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
                      << "] dB, initial gain: " << initial_rx_gain_db << " dB";
 
-        uhd::stream_args_t args("fc32", cfg_.downlink_rx_wire_format);
+        uhd::stream_args_t args("fc32", cfg_.downlink.downlink_rx_wire_format);
         args.args["block_id"] = "radio";
-        args.channels = {cfg_.rx_channel};
+        args.channels = {cfg_.downlink.rx_channel};
         rx_stream_ = usrp_->get_rx_stream(args);
 
         if (uplink_enabled(cfg_)) {
             // Full-duplex uplink TX on the UE device. TDD: same carrier as RX.
             // FDD: the uplink carrier (duplex.ul_center_freq).
-            const double ul_freq = (cfg_.duplex.mode == DuplexMode::FDD &&
-                                    cfg_.duplex.ul_center_freq > 0.0)
-                ? cfg_.duplex.ul_center_freq : cfg_.center_freq;
-            usrp_->set_tx_rate(cfg_.sample_rate);
-            current_ul_tx_tune_ = usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.tx_channel);
-            const auto tx_gain_range = usrp_->get_tx_gain_range(cfg_.tx_channel);
+            const double ul_freq = (cfg_.uplink.duplex.mode == DuplexMode::FDD &&
+                                    cfg_.uplink.duplex.ul_center_freq > 0.0)
+                ? cfg_.uplink.duplex.ul_center_freq : cfg_.downlink.center_freq;
+            usrp_->set_tx_rate(cfg_.rf_sampling.sample_rate);
+            current_ul_tx_tune_ = usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.uplink.tx_channel);
+            const auto tx_gain_range = usrp_->get_tx_gain_range(cfg_.uplink.tx_channel);
             _uplink_tx_gain_min_db = tx_gain_range.start();
             _uplink_tx_gain_max_db = tx_gain_range.stop();
             _uplink_tx_gain_restore_db = std::clamp(
-                cfg_.tx_gain,
+                cfg_.uplink.tx_gain,
                 _uplink_tx_gain_min_db,
                 _uplink_tx_gain_max_db);
             _uplink_tx_gain_range_initialized = true;
-            if (_uplink_tx_gain_restore_db != cfg_.tx_gain) {
-                LOG_G_WARN() << "Configured tx_gain=" << cfg_.tx_gain
+            if (_uplink_tx_gain_restore_db != cfg_.uplink.tx_gain) {
+                LOG_G_WARN() << "Configured tx_gain=" << cfg_.uplink.tx_gain
                              << " dB is outside hardware range ["
                              << _uplink_tx_gain_min_db << ", "
                              << _uplink_tx_gain_max_db
                              << "] dB. Clamping to "
                              << _uplink_tx_gain_restore_db << " dB.";
             }
-            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.tx_channel);
-            usrp_->set_tx_bandwidth(cfg_.bandwidth, cfg_.tx_channel);
-            uhd::stream_args_t tx_args("fc32", cfg_.wire_format_tx);
-            tx_args.channels = {cfg_.tx_channel};
+            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
+            usrp_->set_tx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.uplink.tx_channel);
+            uhd::stream_args_t tx_args("fc32", cfg_.uplink.wire_format_tx);
+            tx_args.channels = {cfg_.uplink.tx_channel};
             _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
             _uplink_tx->set_tx_stream(usrp_->get_tx_stream(tx_args));
-            _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+            _uplink_tx->timing_advance().store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
             if (cfg_.should_profile("uplink")) {
-                LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.tx_channel
+                LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.uplink.tx_channel
                              << " @ " << format_freq_hz(ul_freq) << " Hz, "
-                             << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
-                             << "zc_root=" << _uplink_tx->uplink_config().zc_root;
+                             << _uplink_tx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
+                             << "zc_root=" << _uplink_tx->uplink_config().ofdm.zc_root;
             }
         }
     }
@@ -1467,8 +1467,8 @@ private:
         }
         rx_stream_ = _sim_radio->make_rx_streamer("rx.comm", cfg_.samples_per_frame());
         // Present a perfect tune so CFO/predictive-delay math sees zero tuning error.
-        current_rx_tune_.target_rf_freq = cfg_.center_freq;
-        current_rx_tune_.actual_rf_freq = cfg_.center_freq;
+        current_rx_tune_.target_rf_freq = cfg_.downlink.center_freq;
+        current_rx_tune_.actual_rf_freq = cfg_.downlink.center_freq;
         current_rx_tune_.target_dsp_freq = 0.0;
         current_rx_tune_.actual_dsp_freq = 0.0;
         tune_initialized_ = true;
@@ -1485,12 +1485,12 @@ private:
             _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
             _uplink_tx->set_tx_stream(
                 _sim_radio->make_tx_streamer("ul.tx", cfg_.samples_per_frame()));
-            _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+            _uplink_tx->timing_advance().store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
             // sim: continuous send paced by shm backpressure (no timed scheduling).
             if (cfg_.should_profile("uplink")) {
                 LOG_G_INFO() << "[UL-TX] uplink transmit enabled (sim ul.tx), "
-                             << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
-                             << "zc_root=" << _uplink_tx->uplink_config().zc_root;
+                             << _uplink_tx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
+                             << "zc_root=" << _uplink_tx->uplink_config().ofdm.zc_root;
             }
         }
     }
@@ -1505,10 +1505,10 @@ private:
             updater(_shared_sensing_cfg);
             _shared_sensing_cfg.generation++;
             const uint64_t next_symbol = _next_bistatic_frame_start_symbol.load(std::memory_order_relaxed);
-            if (cfg_.num_symbols == 0) {
+            if (cfg_.ofdm.num_symbols == 0) {
                 _shared_sensing_cfg.apply_symbol_index = next_symbol;
             } else {
-                const uint64_t frame_len = static_cast<uint64_t>(cfg_.num_symbols);
+                const uint64_t frame_len = static_cast<uint64_t>(cfg_.ofdm.num_symbols);
                 const uint64_t boundary = ((next_symbol + frame_len - 1) / frame_len) * frame_len;
                 _shared_sensing_cfg.apply_symbol_index = boundary;
             }
@@ -1709,7 +1709,7 @@ private:
         });
 
         _control_handler.register_request("PARM", [this](int32_t, const ControlCommandHandler::ControlPeer& peer) {
-            if (!cfg_.enable_bi_sensing) {
+            if (!cfg_.sensing.enable_bi_sensing) {
                 return;
             }
             SharedSensingRuntime snapshot;
@@ -1732,16 +1732,16 @@ private:
     }
 
     void init_sensing() {
-        _actual_subcarrier_indices.resize(cfg_.fft_size);
-        const size_t half_fft = static_cast<int>(cfg_.fft_size) / 2;
+        _actual_subcarrier_indices.resize(cfg_.ofdm.fft_size);
+        const size_t half_fft = static_cast<int>(cfg_.ofdm.fft_size) / 2;
         #pragma omp simd simdlen(16)
-        for (size_t i = 0; i < cfg_.fft_size; ++i) {
+        for (size_t i = 0; i < cfg_.ofdm.fft_size; ++i) {
             _actual_subcarrier_indices[i] = (i >= half_fft) ?
-                (static_cast<int>(i) - cfg_.fft_size) :
+                (static_cast<int>(i) - cfg_.ofdm.fft_size) :
                 static_cast<int>(i);
         }
 
-        if (!cfg_.enable_bi_sensing) {
+        if (!cfg_.sensing.enable_bi_sensing) {
             LOG_G_INFO() << "Bistatic sensing disabled by config.";
             return;
         }
@@ -1750,7 +1750,7 @@ private:
         _shared_sensing_cfg.sensing_symbol_stride =
             compact_mask_analysis.local_delay_doppler_supported
                 ? compact_mask_analysis.implicit_symbol_stride
-                : cfg_.sensing_symbol_stride;
+                : cfg_.sensing.sensing_symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
         _shared_sensing_cfg.generation = 1;
@@ -1759,13 +1759,13 @@ private:
 
         SensingRxChannelConfig bistatic_cfg;
         bistatic_cfg.enable_system_delay_estimation = false;
-        bistatic_cfg.enable_sensing_output = cfg_.bi_sensing_output_enabled;
+        bistatic_cfg.enable_sensing_output = cfg_.network_output.bi_sensing_output_enabled;
         _bistatic_sensing_channel = std::make_unique<SensingChannel>(
             cfg_,
             bistatic_cfg,
             SensingChannel::SensingRole::Bistatic,
-            cfg_.bi_sensing_ip,
-            cfg_.bi_sensing_port,
+            cfg_.network_output.bi_sensing_ip,
+            cfg_.network_output.bi_sensing_port,
             0,
             running_,
             nullptr,
@@ -1789,7 +1789,7 @@ private:
 
     void init_data_processing() {
         // Initialize UDP output sender
-        _udp_output_sender = std::make_unique<UdpSender>(cfg_.udp_output_ip, static_cast<uint16_t>(cfg_.udp_output_port));
+        _udp_output_sender = std::make_unique<UdpSender>(cfg_.network_output.udp_output_ip, static_cast<uint16_t>(cfg_.network_output.udp_output_port));
     }
 
     void adjust_rx_freq(double detected_offset, bool reset = false) {
@@ -1802,18 +1802,18 @@ private:
         new_tune_req.dsp_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
         if (reset) {
             // Reset tune request
-            new_tune_req.target_freq = cfg_.center_freq;
+            new_tune_req.target_freq = cfg_.downlink.center_freq;
             new_tune_req.dsp_freq = 0.0; // Reset DSP frequency
         }
         // Apply new tune (update DSP only, fast and does not affect LO).
         if (_sim_radio) {
             current_rx_tune_.target_rf_freq = new_tune_req.target_freq;
-            current_rx_tune_.actual_rf_freq = cfg_.center_freq;
+            current_rx_tune_.actual_rf_freq = cfg_.downlink.center_freq;
             current_rx_tune_.target_dsp_freq = new_tune_req.dsp_freq;
             current_rx_tune_.actual_dsp_freq = new_tune_req.dsp_freq;
             _sim_radio->set_comm_rx_freq_correction_hz(current_rx_tune_.actual_dsp_freq);
         } else {
-            current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.rx_channel);
+            current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.downlink.rx_channel);
             _retune_uplink_tx_from_rx_correction(current_rx_tune_.actual_dsp_freq);
         }
     }
@@ -1823,12 +1823,12 @@ private:
             return;
         }
         const double ul_base_freq =
-            (cfg_.duplex.mode == DuplexMode::FDD && cfg_.duplex.ul_center_freq > 0.0)
-                ? cfg_.duplex.ul_center_freq
-                : cfg_.center_freq;
+            (cfg_.uplink.duplex.mode == DuplexMode::FDD && cfg_.uplink.duplex.ul_center_freq > 0.0)
+                ? cfg_.uplink.duplex.ul_center_freq
+                : cfg_.downlink.center_freq;
         double tx_target_correction_hz = rx_dsp_correction_hz;
-        if (cfg_.duplex.mode == DuplexMode::FDD && cfg_.center_freq > 0.0 && ul_base_freq > 0.0) {
-            tx_target_correction_hz *= ul_base_freq / cfg_.center_freq;
+        if (cfg_.uplink.duplex.mode == DuplexMode::FDD && cfg_.downlink.center_freq > 0.0 && ul_base_freq > 0.0) {
+            tx_target_correction_hz *= ul_base_freq / cfg_.downlink.center_freq;
         }
 
         // UHD applies DSP tune signs differently: RX target = RF + DSP, TX target = RF - DSP.
@@ -1839,7 +1839,7 @@ private:
         tx_tune_req.dsp_freq = tx_dsp_correction_hz;
         tx_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
         tx_tune_req.dsp_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
-        current_ul_tx_tune_ = usrp_->set_tx_freq(tx_tune_req, cfg_.tx_channel);
+        current_ul_tx_tune_ = usrp_->set_tx_freq(tx_tune_req, cfg_.uplink.tx_channel);
         if (cfg_.should_profile("uplink")) {
             LOG_RT_INFO() << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
                           << format_freq_hz(ul_base_freq)
@@ -1851,9 +1851,9 @@ private:
         }
     }
     void prepare_fftw() {
-        fft_input_.resize(cfg_.fft_size);
-        fft_output_.resize(cfg_.fft_size);
-        fft_plan_ = fftwf_plan_dft_1d(cfg_.fft_size,
+        fft_input_.resize(cfg_.ofdm.fft_size);
+        fft_output_.resize(cfg_.ofdm.fft_size);
+        fft_plan_ = fftwf_plan_dft_1d(cfg_.ofdm.fft_size,
             reinterpret_cast<fftwf_complex*>(fft_input_.data()),
             reinterpret_cast<fftwf_complex*>(fft_output_.data()),
             FFTW_FORWARD, FFTW_MEASURE);
@@ -1862,39 +1862,39 @@ private:
         // full-band mid-frame pilot symbols).
         const size_t data_symbol_count = _data_resource_layout.data_symbol_count;
         _symbols_buf.resize(data_symbol_count);
-        for (auto& s : _symbols_buf) s.resize(cfg_.fft_size);
-        _sync_symbol_freq_buf.resize(cfg_.fft_size);
+        for (auto& s : _symbols_buf) s.resize(cfg_.ofdm.fft_size);
+        _sync_symbol_freq_buf.resize(cfg_.ofdm.fft_size);
         _midframe_symbol_freq_bufs.resize(_data_resource_layout.midframe_pilot_symbol_count);
-        for (auto& s : _midframe_symbol_freq_bufs) s.resize(cfg_.fft_size);
-        _midframe_tmp_h_buf.resize(cfg_.fft_size);
-        _midframe_interp_h_buf.resize(cfg_.fft_size);
+        for (auto& s : _midframe_symbol_freq_bufs) s.resize(cfg_.ofdm.fft_size);
+        _midframe_tmp_h_buf.resize(cfg_.ofdm.fft_size);
+        _midframe_interp_h_buf.resize(cfg_.ofdm.fft_size);
         _channel_anchor_h_bufs.reserve(1 + _data_resource_layout.midframe_pilot_symbol_count);
         _channel_anchor_symbols_buf.reserve(1 + _data_resource_layout.midframe_pilot_symbol_count);
-        _tracking_h_inv_buf.resize(cfg_.fft_size);
-        _tracking_pilot_indices_buf.reserve(cfg_.pilot_positions.size());
-        _tracking_phase_buf.reserve(cfg_.pilot_positions.size());
-        _tracking_weights_buf.reserve(cfg_.pilot_positions.size());
+        _tracking_h_inv_buf.resize(cfg_.ofdm.fft_size);
+        _tracking_pilot_indices_buf.reserve(cfg_.ofdm.pilot_positions.size());
+        _tracking_phase_buf.reserve(cfg_.ofdm.pilot_positions.size());
+        _tracking_weights_buf.reserve(cfg_.ofdm.pilot_positions.size());
 
         // Note: ChannelEstimator and DelayProcessor now manage their own FFT plans internally
     }
 
     void init_zmq_publishers() {
-        channel_pub_ = std::make_unique<ZmqByteSender>(cfg_.channel_ip, cfg_.channel_port);
-        pdf_pub_ = std::make_unique<ZmqByteSender>(cfg_.pdf_ip, cfg_.pdf_port);
-        constellation_pub_ = std::make_unique<ZmqByteSender>(cfg_.constellation_ip, cfg_.constellation_port);
+        channel_pub_ = std::make_unique<ZmqByteSender>(cfg_.network_output.channel_ip, cfg_.network_output.channel_port);
+        pdf_pub_ = std::make_unique<ZmqByteSender>(cfg_.network_output.pdf_ip, cfg_.network_output.pdf_port);
+        constellation_pub_ = std::make_unique<ZmqByteSender>(cfg_.network_output.constellation_ip, cfg_.network_output.constellation_port);
         if (uplink_self_channel_debug_enabled(cfg_)) {
             uplink_self_channel_pub_ = std::make_unique<ZmqByteSender>(
-                cfg_.uplink_self_channel_ip,
-                static_cast<uint16_t>(cfg_.uplink_self_channel_port));
+                cfg_.network_output.uplink_self_channel_ip,
+                static_cast<uint16_t>(cfg_.network_output.uplink_self_channel_port));
             uplink_self_pdf_pub_ = std::make_unique<ZmqByteSender>(
-                cfg_.uplink_self_pdf_ip,
-                static_cast<uint16_t>(cfg_.uplink_self_pdf_port));
+                cfg_.network_output.uplink_self_pdf_ip,
+                static_cast<uint16_t>(cfg_.network_output.uplink_self_pdf_port));
             LOG_G_INFO() << "[UL-TX] self-channel debug streams: channel="
-                         << cfg_.uplink_self_channel_ip << ':' << cfg_.uplink_self_channel_port
-                         << ", pdf=" << cfg_.uplink_self_pdf_ip << ':'
-                         << cfg_.uplink_self_pdf_port;
+                         << cfg_.network_output.uplink_self_channel_ip << ':' << cfg_.network_output.uplink_self_channel_port
+                         << ", pdf=" << cfg_.network_output.uplink_self_pdf_ip << ':'
+                         << cfg_.network_output.uplink_self_pdf_port;
         }
-        vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.vofa_debug_ip, cfg_.vofa_debug_port, 64);
+        vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.network_output.vofa_debug_ip, cfg_.network_output.vofa_debug_port, 64);
     }
 
     void _clear_frame_queue() {
@@ -1930,7 +1930,7 @@ private:
         double search_gain_db = 0.0;
         const bool reset_search_gain = _sync_search_gain_sweep.reset_to_default(
             [this](double gain_db) {
-                if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
+                if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
             },
             [this](double gain_db) {
                 _rx_agc.sync_to_gain(gain_db);
@@ -2180,7 +2180,7 @@ private:
      * Also estimates coarse Carrier Frequency Offset (CFO) using Cyclic Prefix (CP) correlation.
      */
     void process_sync_data(const AlignedVector& sync_data, int64_t sync_time_ns) {
-        const size_t symbol_len = cfg_.fft_size + cfg_.cp_length;
+        const size_t symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         const bool allow_freq_adjust = _control_time_gates.allow_freq_adjust(sync_time_ns);
         bool issued_freq_adjust = false;
         bool issued_alignment = false;
@@ -2188,7 +2188,7 @@ private:
         constexpr float kZcEnergyThreshold = 100.0f;
         constexpr float kSecSyncMetricThreshold = 0.10f;
         constexpr float kCfoTrainingMetricThreshold = 0.10f;
-        const size_t local_zc_search_radius = 2 * cfg_.cp_length;
+        const size_t local_zc_search_radius = 2 * cfg_.ofdm.cp_length;
         const bool log_sync_profile = cfg_.should_profile("sync");
         const bool collect_alias_candidates =
             log_sync_profile || cfo_training_sequence_enabled(cfg_);
@@ -2209,10 +2209,10 @@ private:
             estimate = SyncProcessor::estimate_cfo_from_training_symbol(
                 sync_data,
                 cfo_symbol_start,
-                cfg_.fft_size,
-                cfg_.cp_length,
-                cfg_.cfo_training_period_samples,
-                cfg_.sample_rate);
+                cfg_.ofdm.fft_size,
+                cfg_.ofdm.cp_length,
+                cfg_.ofdm.cfo_training_period_samples,
+                cfg_.rf_sampling.sample_rate);
             if (log_sync_profile) {
                 LOG_RT_INFO() << "CFO training field estimate: metric="
                               << estimate.metric
@@ -2222,12 +2222,12 @@ private:
             return estimate;
         };
 
-        if (cfg_.enable_sec_sync_symbol) {
+        if (cfg_.ofdm.enable_sec_sync_symbol) {
             const auto sec_result = SyncProcessor::detect_sec_sync_symbol(
                 sync_data,
-                cfg_.fft_size,
-                cfg_.cp_length,
-                cfg_.sample_rate);
+                cfg_.ofdm.fft_size,
+                cfg_.ofdm.cp_length,
+                cfg_.rf_sampling.sample_rate);
             if (sec_result.valid && sec_result.max_metric > kSecSyncMetricThreshold) {
                 const int expected_zc_start = sec_result.coarse_symbol_start +
                     static_cast<int>(symbol_len);
@@ -2243,15 +2243,15 @@ private:
                         max_search_start,
                         expected_zc_start + static_cast<int>(local_zc_search_radius))));
                 const double sec_alias_period_hz =
-                    cfg_.sample_rate / static_cast<double>(symbol_len);
+                    cfg_.rf_sampling.sample_rate / static_cast<double>(symbol_len);
                 const int sec_alias_span = sync_cfo_alias_span_from_range(
-                    cfg_.sync_cfo_alias_search_range_hz,
+                    cfg_.sync_tracking.sync_cfo_alias_search_range_hz,
                     sec_alias_period_hz);
 
                 auto refine_result = _sync_processor.refine_sec_sync_with_alias_search(
                     sync_data,
                     sec_result,
-                    cfg_.sample_rate,
+                    cfg_.rf_sampling.sample_rate,
                     search_start,
                     search_end,
                     sec_alias_span,
@@ -2278,7 +2278,7 @@ private:
                     initial_cfo_hz = refine_result.cfo_hz;
                     SyncProcessor::apply_cfo_compensation(
                         sync_data,
-                        cfg_.sample_rate,
+                        cfg_.rf_sampling.sample_rate,
                         initial_cfo_hz,
                         _sync_cfo_compensated_buffer);
                     LOG_RT_INFO() << "Second sync symbol coarse metric: " << sec_result.max_metric
@@ -2313,7 +2313,7 @@ private:
             int symbol_offset = max_pos % symbol_len;
             // Calculate available symbol count
             const size_t available_symbols = std::min(
-                static_cast<size_t>(cfg_.num_symbols*2),
+                static_cast<size_t>(cfg_.ofdm.num_symbols*2),
                 (sync_data.size() - symbol_offset) / symbol_len
             );
             
@@ -2323,10 +2323,10 @@ private:
                     used_sec_sync_symbol ? _sync_cfo_compensated_buffer : sync_data;
                 double phase_diff = SyncProcessor::estimate_cfo_phase(
                     cfo_est_data, symbol_offset, available_symbols,
-                    symbol_len, cfg_.cp_length, cfg_.fft_size
+                    symbol_len, cfg_.ofdm.cp_length, cfg_.ofdm.fft_size
                 );
                 const double residual_cfo_hz =
-                    SyncProcessor::phase_to_cfo(phase_diff, cfg_.sample_rate, cfg_.fft_size);
+                    SyncProcessor::phase_to_cfo(phase_diff, cfg_.rf_sampling.sample_rate, cfg_.ofdm.fft_size);
                 double cfo = used_sec_sync_symbol
                     ? (initial_cfo_hz + residual_cfo_hz)
                     : residual_cfo_hz;
@@ -2343,15 +2343,15 @@ private:
                             max_search_start,
                             max_pos + static_cast<int>(local_zc_search_radius))));
                     const double cp_alias_period_hz =
-                        cfg_.sample_rate / static_cast<double>(cfg_.fft_size);
+                        cfg_.rf_sampling.sample_rate / static_cast<double>(cfg_.ofdm.fft_size);
                     const int cp_alias_span = sync_cfo_alias_span_from_range(
-                        cfg_.sync_cfo_alias_search_range_hz,
+                        cfg_.sync_tracking.sync_cfo_alias_search_range_hz,
                         cp_alias_period_hz);
                     auto cp_refine = _sync_processor.refine_sync_cfo_alias(
                         sync_data,
                         residual_cfo_hz,
                         cp_alias_period_hz,
-                        cfg_.sample_rate,
+                        cfg_.rf_sampling.sample_rate,
                         cp_alias_search_start,
                         cp_alias_search_end,
                         cp_alias_span,
@@ -2384,13 +2384,13 @@ private:
                               << " symbols)";
 
                 int predictive_delay_samples = 0;
-                if (cfg_.predictive_delay) {
+                if (cfg_.sync_tracking.predictive_delay) {
                     const int frame_start_offset_samples =
-                        max_pos - static_cast<int>(cfg_.sync_pos * symbol_len);
+                        max_pos - static_cast<int>(cfg_.ofdm.sync_pos * symbol_len);
                     const int64_t detected_frame_time_ns =
                         sync_time_ns +
                         static_cast<int64_t>(std::llround(
-                            static_cast<double>(frame_start_offset_samples) * 1.0e9 / cfg_.sample_rate));
+                            static_cast<double>(frame_start_offset_samples) * 1.0e9 / cfg_.rf_sampling.sample_rate));
                     predictive_delay_samples =
                         _predictive_delay_samples_from_cfo(
                             cfg_,
@@ -2402,7 +2402,7 @@ private:
                 }
                 
                 // Perform initial CFO correction
-                if (cfg_.software_sync && allow_freq_adjust){
+                if (cfg_.sync_tracking.software_sync && allow_freq_adjust){
                     adjust_rx_freq(-cfo, false);
                     issued_freq_adjust = true;
                 }
@@ -2411,7 +2411,7 @@ private:
                 // schedule alignment; otherwise RX/TX windows can remain at the
                 // old/reset position even though sync detection succeeded.
                 sync_offset_ =
-                    (max_pos - cfg_.sync_pos * symbol_len - cfg_.desired_peak_pos +
+                    (max_pos - cfg_.ofdm.sync_pos * symbol_len - cfg_.sync_tracking.desired_peak_pos +
                      predictive_delay_samples);
                 if (sync_offset_ > 0) {
                     sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
@@ -2436,7 +2436,7 @@ private:
             const bool stepped_search_gain = _sync_search_gain_sweep.on_search_miss(
                 search_equivalent_frames,
                 [this](double gain_db) {
-                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
+                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
                 },
                 [this](double gain_db) {
                     _rx_agc.sync_to_gain(gain_db);
@@ -2494,7 +2494,7 @@ private:
 
                 if (frame_count >= REPORT_INTERVAL) {
                     double avg_time = total_processing_time / frame_count;
-                    double frame_duration = cfg_.samples_per_frame() / cfg_.sample_rate * 1000.0;
+                    double frame_duration = cfg_.samples_per_frame() / cfg_.rf_sampling.sample_rate * 1000.0;
                     double load = avg_time / frame_duration;
                     std::ostringstream oss;
                     oss << std::fixed << std::setprecision(2)
@@ -2533,12 +2533,12 @@ private:
         }
 
         const Config ul_cfg = _uplink_tx->uplink_config();
-        if (ul_cfg.num_symbols == 0) {
+        if (ul_cfg.ofdm.num_symbols == 0) {
             return;
         }
-        const size_t sym_len = cfg_.fft_size + cfg_.cp_length;
+        const size_t sym_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         const size_t local_tx_zc_start =
-            _duplex_layout.ul_sample_offset(cfg_) + ul_cfg.sync_pos * sym_len;
+            _duplex_layout.ul_sample_offset(cfg_) + ul_cfg.ofdm.sync_pos * sym_len;
 
         if (!_uplink_self_debug_estimator.estimate(
                 frame.frame_data,
@@ -2644,16 +2644,16 @@ private:
         if (sensing_enabled) {
             // Acquire the pooled frame only when bistatic sensing is enabled.
             sense_frame = _sensing_frame_pool.acquire();
-            sense_frame.rx_symbols.resize(cfg_.num_symbols);
-            sense_frame.tx_symbols.resize(cfg_.num_symbols);
+            sense_frame.rx_symbols.resize(cfg_.ofdm.num_symbols);
+            sense_frame.tx_symbols.resize(cfg_.ofdm.num_symbols);
         }
 
         // Reuse persistent buffers instead of allocating one AlignedVector per
-        // symbol every frame. _symbols_buf holds the cfg_.num_symbols-1 data
+        // symbol every frame. _symbols_buf holds the cfg_.ofdm.num_symbols-1 data
         // symbols; the sync symbol lands in _sync_symbol_freq_buf.
         std::vector<AlignedVector>& symbols = _symbols_buf;
         AlignedVector& sync_symbol_freq = _sync_symbol_freq_buf;
-        const size_t scale_n = cfg_.fft_size;
+        const size_t scale_n = cfg_.ofdm.fft_size;
         const float scale = 1.0f / sqrtf(static_cast<float>(scale_n));
         size_t pos = 0;
         prof_step_start = ProfileClock::now();
@@ -2664,8 +2664,8 @@ private:
         // traffic, and skipping the input copy changed nothing -- both measured
         // no faster in sim, so this stage is FFT-compute + scatter bound, not
         // copy bound.
-        for (size_t i = 0; i < cfg_.num_symbols; ++i) {
-            const bool is_sync = (i == cfg_.sync_pos);
+        for (size_t i = 0; i < cfg_.ofdm.num_symbols; ++i) {
+            const bool is_sync = (i == cfg_.ofdm.sync_pos);
             const int data_idx_int = is_sync ? -1 : _data_resource_layout.actual_symbol_to_data_symbol[i];
             std::complex<float>* __restrict__ dst = nullptr;
             if (is_sync) {
@@ -2679,8 +2679,8 @@ private:
                 }
             }
 
-            std::copy(frame.frame_data.begin() + pos + cfg_.cp_length,
-                     frame.frame_data.begin() + pos + cfg_.cp_length + cfg_.fft_size,
+            std::copy(frame.frame_data.begin() + pos + cfg_.ofdm.cp_length,
+                     frame.frame_data.begin() + pos + cfg_.ofdm.cp_length + cfg_.ofdm.fft_size,
                      fft_input_.begin());
 
             fftwf_execute(fft_plan_);
@@ -2705,7 +2705,7 @@ private:
                     dst[j] = src[j] * scale;
                 }
             }
-            pos += cfg_.fft_size + cfg_.cp_length;
+            pos += cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         }
         prof_step_end = ProfileClock::now();
         prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
@@ -2718,13 +2718,13 @@ private:
             sync_symbol_freq,
             zc_freq_,
             H_est,
-            cfg_.cp_length,
+            cfg_.ofdm.cp_length,
             &corrected_impulse_snr_linear_est);
         //_channel_estimator.estimate_from_sync_ls(sync_symbol_freq, zc_freq_, H_est);
 
         _channel_anchor_symbols_buf.clear();
         _channel_anchor_h_bufs.clear();
-        _channel_anchor_symbols_buf.push_back(static_cast<int>(cfg_.sync_pos));
+        _channel_anchor_symbols_buf.push_back(static_cast<int>(cfg_.ofdm.sync_pos));
         _channel_anchor_h_bufs.push_back(H_est);
         if (!_midframe_pilot_seqs.empty()) {
             for (size_t p = 0; p < _data_resource_layout.midframe_pilot_symbols.size(); ++p) {
@@ -2760,9 +2760,9 @@ private:
         std::vector<float>& weights = _weights_buf;                    // persistent scratch
         bool cfo_sfo_estimate_valid = FrequencyOffsetEstimator::compute_pilot_phase_diff(
             symbols,
-            cfg_.pilot_positions,
-            cfg_.fft_size,
-            cfg_.sync_pos,
+            cfg_.ofdm.pilot_positions,
+            cfg_.ofdm.fft_size,
+            cfg_.ofdm.sync_pos,
             pilot_indices,
             avg_phase_diff,
             weights,
@@ -2782,18 +2782,18 @@ private:
         
         // Convert alpha to CFO
         float detected_freq_offset = FrequencyOffsetEstimator::alpha_to_cfo(
-            alpha, cfg_.fft_size, cfg_.cp_length, cfg_.sample_rate
+            alpha, cfg_.ofdm.fft_size, cfg_.ofdm.cp_length, cfg_.rf_sampling.sample_rate
         );
         const double tune_system_cfo_hz = rx_tune_system_cfo_hz(
-            cfg_.center_freq,
+            cfg_.downlink.center_freq,
             current_rx_tune_.actual_rf_freq,
             current_rx_tune_.actual_dsp_freq
         );
         const double clock_error_hz =
             static_cast<double>(detected_freq_offset) - tune_system_cfo_hz;
         const double raw_error_ppm =
-            (std::abs(cfg_.center_freq) > 0.0)
-                ? (clock_error_hz / cfg_.center_freq * 1e6)
+            (std::abs(cfg_.downlink.center_freq) > 0.0)
+                ? (clock_error_hz / cfg_.downlink.center_freq * 1e6)
                 : 0.0;
         bool vofa_debug_valid = false;
         float vofa_raw_error_ppm = 0.0f;
@@ -2807,9 +2807,9 @@ private:
         bool issued_freq_adjust = false;
         bool issued_rx_gain_adjust = false;
 
-        if (cfg_.hardware_sync && cfo_sfo_estimate_valid) {
+        if (cfg_.sync_tracking.hardware_sync && cfo_sfo_estimate_valid) {
             const auto akf_result = _akf.update(raw_error_ppm);
-            const double control_error_ppm = cfg_.akf_enable
+            const double control_error_ppm = cfg_.sync_tracking.akf_enable
                 ? akf_result.filtered_error_ppm
                 : raw_error_ppm;
             vofa_debug_valid = true;
@@ -2833,7 +2833,7 @@ private:
                 _freq_offset_count = 0;
                 if(abs(_avg_freq_offset) > 2.0f)
                 {
-                    if (cfg_.software_sync && allow_freq_adjust){
+                    if (cfg_.sync_tracking.software_sync && allow_freq_adjust){
                         LOG_RT_INFO() << "Adjusting RX frequency by: " << _avg_freq_offset << " Hz";
                         adjust_rx_freq(-_avg_freq_offset, false);
                         issued_freq_adjust = true;
@@ -2870,7 +2870,7 @@ private:
             std::max<double>(corrected_impulse_snr_linear_est, 1e-6));
         const double equalizer_noise_var_fallback =
             equalized_noise_var * _average_channel_power(H_est);
-        const double equalizer_noise_var_est = (cfg_.equalizer_mode == kEqualizerModeMmse)
+        const double equalizer_noise_var_est = (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse)
             ? _estimate_equalizer_noise_var_from_pilots(
                 symbols,
                 H_est,
@@ -2878,7 +2878,7 @@ private:
                 beta,
                 equalizer_noise_var_fallback)
             : 0.0;
-        const float equalizer_noise_var = (cfg_.equalizer_mode == kEqualizerModeMmse)
+        const float equalizer_noise_var = (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse)
             ? static_cast<float>(equalizer_noise_var_est)
             : 0.0f;
 
@@ -2907,8 +2907,8 @@ private:
         auto prof_eq_sub_end = eq_tick();
         eq_accum(prof_eq_base_inv_us, prof_eq_sub_start, prof_eq_sub_end);
         const bool use_symbol_tracking =
-            cfg_.channel_tracking_mode != kChannelTrackingModeOff &&
-            !cfg_.pilot_positions.empty();
+            cfg_.downlink.equalizer.channel_tracking_mode != kChannelTrackingModeOff &&
+            !cfg_.ofdm.pilot_positions.empty();
 
         for (size_t i = 0; i < symbols.size(); ++i) {
             ++prof_eq_data_symbols;
@@ -2920,7 +2920,7 @@ private:
             prof_eq_sub_end = eq_tick();
             eq_accum(prof_eq_channel_select_us, prof_eq_sub_start, prof_eq_sub_end);
 
-            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.sync_pos);
+            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.ofdm.sync_pos);
             const bool using_midframe_channel = (&symbol_H_base != &H_est);
             if (using_midframe_channel) {
                 ++prof_eq_midframe_channel_symbols;
@@ -3005,7 +3005,7 @@ private:
         prof_step_start = ProfileClock::now();
         
         if (sensing_enabled) {
-            for (size_t i = 0; i < cfg_.num_symbols; ++i) {
+            for (size_t i = 0; i < cfg_.ofdm.num_symbols; ++i) {
                 // Reserved sync symbols always use the original ZC sequence.
                 if (is_zc_sync_symbol(cfg_, i)) {
                     sense_frame.tx_symbols[i] = zc_freq_;
@@ -3028,7 +3028,7 @@ private:
                     QPSKModulator::remodulate_symbol(
                         symbols[symbol_idx],
                         zc_freq_,
-                        cfg_.pilot_positions,
+                        cfg_.ofdm.pilot_positions,
                         sense_frame.tx_symbols[i]
                     );
                     const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[symbol_idx];
@@ -3055,10 +3055,10 @@ private:
         size_t max_index = 0;
         float max_mag = 0.0f;
         float average_mag = 0.0f;
-        DelayProcessor::find_peak(delay_spectrum, max_index, max_mag, average_mag, cfg_.cp_length);
+        DelayProcessor::find_peak(delay_spectrum, max_index, max_mag, average_mag, cfg_.ofdm.cp_length);
         
         // Adjust delay index to signed value
-        int adjusted_index = DelayProcessor::adjust_delay_index(max_index, cfg_.fft_size);
+        int adjusted_index = DelayProcessor::adjust_delay_index(max_index, cfg_.ofdm.fft_size);
 
         float fractional_delay = DelayProcessor::estimate_fractional_delay(delay_spectrum, max_index);
         float delay_offset_reading = adjusted_index + fractional_delay;
@@ -3069,16 +3069,16 @@ private:
         sfo_estimator.update(delay_offset_reading, frame.Alignment);
         auto _sfo_per_frame = sfo_estimator.get_sfo_per_frame();
 
-        // auto sfo_via_estimator = _sfo_per_frame/((cfg_.fft_size+cfg_.cp_length)*cfg_.num_symbols*cfg_.sample_rate);
-        // auto sfo_via_beta = -beta/((cfg_.fft_size+cfg_.cp_length)*cfg_.sample_rate/cfg_.fft_size*2*M_PI);
+        // auto sfo_via_estimator = _sfo_per_frame/((cfg_.ofdm.fft_size+cfg_.ofdm.cp_length)*cfg_.ofdm.num_symbols*cfg_.rf_sampling.sample_rate);
+        // auto sfo_via_beta = -beta/((cfg_.ofdm.fft_size+cfg_.ofdm.cp_length)*cfg_.rf_sampling.sample_rate/cfg_.ofdm.fft_size*2*M_PI);
         // LOG_G_INFO() << "SFO via estimator: " << sfo_via_estimator << std::endl;
         // LOG_G_INFO() << "SFO via beta: " << sfo_via_beta << std::endl;
         // LOG_G_INFO() << "ratio:" << sfo_via_beta/sfo_via_estimator <<std::endl;
         if (_sfo_per_frame != 0.0f) {
             //LOG_G_INFO() << "SFO Frame: " << _sfo_per_frame << std::endl;
         }
-        const size_t sync_symbol_len = cfg_.fft_size + cfg_.cp_length;
-        const size_t sync_symbol_offset = cfg_.sync_pos * sync_symbol_len;
+        const size_t sync_symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
+        const size_t sync_symbol_offset = cfg_.ofdm.sync_pos * sync_symbol_len;
         const std::complex<float>* sync_symbol_td = nullptr;
         size_t sync_symbol_td_count = 0;
         if (sync_symbol_offset + sync_symbol_len <= frame.frame_data.size()) {
@@ -3087,7 +3087,7 @@ private:
         }
         auto delay_offset = sfo_estimator.get_sensing_delay_offset();
         int predictive_delay_samples = 0;
-        if (cfg_.predictive_delay) {
+        if (cfg_.sync_tracking.predictive_delay) {
             predictive_delay_samples =
                 _predictive_delay_samples_from_cfo(
                     cfg_,
@@ -3098,7 +3098,7 @@ private:
                     time_spec_to_ns(radio_time_now()));
         }
         int delay_index_err =
-            adjusted_index - cfg_.desired_peak_pos + predictive_delay_samples;
+            adjusted_index - cfg_.sync_tracking.desired_peak_pos + predictive_delay_samples;
         if (allow_rx_gain_adjust) {
             RxAgcAdjustment agc_adjustment;
             issued_rx_gain_adjust = _rx_agc.maybe_apply_from_delay_peak(
@@ -3109,7 +3109,7 @@ private:
                 frame.usrp_time_ns,
                 _control_time_gates,
                 [this](double gain_db) {
-                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.rx_channel);
+                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
                 },
                 &agc_adjustment
             );
@@ -3126,8 +3126,8 @@ private:
                               << ", saturation=" << agc_adjustment.saturation_detected << ")";
             }
         }
-        if((max_mag/average_mag < 20.0f || (abs(delay_index_err) > cfg_.delay_adjust_step+5)) &&
-            (cfg_.software_sync || cfg_.hardware_sync) && allow_reset) {
+        if((max_mag/average_mag < 20.0f || (abs(delay_index_err) > cfg_.sync_tracking.delay_adjust_step+5)) &&
+            (cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync) && allow_reset) {
             _reset_count++;
             if (_reset_count >= _reset_hold_frames) {
                 _reset_count = 0;
@@ -3139,7 +3139,7 @@ private:
                 if (vofa_debug_sender_) {
                     vofa_debug_sender_->reset_counter();
                 }
-                if (cfg_.hardware_sync) {
+                if (cfg_.sync_tracking.hardware_sync) {
                     _hw_sync->reset_frequency_control(); // Reset hardware frequency control
                     _hw_sync->reset_ocxo_pi_state();
                     LOG_RT_INFO() << "OCXO PI state reset to fast stage after sync reset.";
@@ -3158,9 +3158,9 @@ private:
         {
             _sync_in_progress = false;
         }
-        if(abs(delay_index_err) >= cfg_.delay_adjust_step &&
-            abs(delay_index_err) < cfg_.cp_length  &&
-            ( cfg_.software_sync || cfg_.hardware_sync ) &&
+        if(abs(delay_index_err) >= cfg_.sync_tracking.delay_adjust_step &&
+            abs(delay_index_err) < cfg_.ofdm.cp_length  &&
+            ( cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync ) &&
             !_sync_in_progress &&
             allow_alignment)
         {   
@@ -3194,7 +3194,7 @@ private:
         if (sensing_enabled) {
             sense_frame.CFO = alpha;
             if (_sfo_per_frame != 0.0f) {
-                sense_frame.SFO = -_sfo_per_frame * (2 * M_PI) / (cfg_.fft_size * cfg_.num_symbols);
+                sense_frame.SFO = -_sfo_per_frame * (2 * M_PI) / (cfg_.ofdm.fft_size * cfg_.ofdm.num_symbols);
             } else {
                 sense_frame.SFO = beta;
             }

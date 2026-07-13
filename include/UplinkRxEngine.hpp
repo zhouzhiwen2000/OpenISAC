@@ -58,36 +58,36 @@ public:
           _cfg(make_uplink_config(link_cfg)),
           _duplex(build_duplex_frame_layout(link_cfg)),
           _layout(build_data_resource_grid_layout(_cfg)),
-          _zc_freq(generate_zc_freq(_cfg.fft_size, _cfg.zc_root)),
-          _link_zc_freq(generate_zc_freq(link_cfg.fft_size, link_cfg.zc_root)),
-          _self_debug_estimator(link_cfg.fft_size, link_cfg.cp_length),
-          _fft_in(_cfg.fft_size),
-          _fft_out(_cfg.fft_size),
-          _ce_in(_cfg.fft_size),
-          _ce_out(_cfg.fft_size),
+          _zc_freq(generate_zc_freq(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root)),
+          _link_zc_freq(generate_zc_freq(link_cfg.ofdm.fft_size, link_cfg.ofdm.zc_root)),
+          _self_debug_estimator(link_cfg.ofdm.fft_size, link_cfg.ofdm.cp_length),
+          _fft_in(_cfg.ofdm.fft_size),
+          _fft_out(_cfg.ofdm.fft_size),
+          _ce_in(_cfg.ofdm.fft_size),
+          _ce_out(_cfg.ofdm.fft_size),
           _period_samples(link_cfg.samples_per_frame()),
           _window_offset(_duplex.ul_sample_offset(link_cfg)),
           _window_samples(_duplex.ul_sample_count(link_cfg)),
-          _link_sample_rate(link_cfg.sample_rate > 0.0 ? link_cfg.sample_rate : 1.0),
+          _link_sample_rate(link_cfg.rf_sampling.sample_rate > 0.0 ? link_cfg.rf_sampling.sample_rate : 1.0),
           _rx_agc(link_cfg) {
-        if (_cfg.num_symbols < 2) {
+        if (_cfg.ofdm.num_symbols < 2) {
             throw std::runtime_error("UplinkRxEngine: uplink needs >= 2 OFDM symbols.");
         }
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
         _build_payload_indices();
         _build_tracking_tables();
         _fft_plan = fftwf_plan_dft_1d(
-            static_cast<int>(_cfg.fft_size),
+            static_cast<int>(_cfg.ofdm.fft_size),
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_fft_out.data()),
             FFTW_FORWARD, FFTW_MEASURE);
         _ce_ifft_plan = fftwf_plan_dft_1d(
-            static_cast<int>(_cfg.fft_size),
+            static_cast<int>(_cfg.ofdm.fft_size),
             reinterpret_cast<fftwf_complex*>(_ce_in.data()),
             reinterpret_cast<fftwf_complex*>(_ce_out.data()),
             FFTW_BACKWARD, FFTW_MEASURE);
         _udp_out = std::make_unique<UdpSender>(
-            link_cfg.ul_udp_output_ip, static_cast<uint16_t>(link_cfg.ul_udp_output_port));
+            link_cfg.network_output.ul_udp_output_ip, static_cast<uint16_t>(link_cfg.network_output.ul_udp_output_port));
         _rx_frame_queue.reset(4, [this]() {
             UplinkRxFrame frame;
             frame.samples.resize(_period_samples);
@@ -98,7 +98,7 @@ public:
             frame.llr.resize(_layout.payload_re_count * 2);
             return frame;
         });
-        _data_symbols.assign(_layout.data_symbol_count, AlignedVector(_cfg.fft_size));
+        _data_symbols.assign(_layout.data_symbol_count, AlignedVector(_cfg.ofdm.fft_size));
     }
 
     ~UplinkRxEngine() {
@@ -181,7 +181,7 @@ public:
         _payload_subcarrier_indices_flat.clear();
         _payload_subcarrier_indices_flat.reserve(_layout.payload_re_count);
         size_t data_symbol_idx = 0;
-        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < _cfg.ofdm.num_symbols; ++sym) {
             if (is_zc_sync_symbol(_cfg, sym)) continue;
             const size_t base = _layout.non_pilot_offsets[data_symbol_idx];
             for (size_t di = 0; di < _layout.num_non_pilot_subcarriers; ++di) {
@@ -200,15 +200,15 @@ public:
     // data-slot -> actual-symbol mapping reuses _layout.data_symbol_to_actual_symbol
     // (the same authoritative source that sizes _data_symbols).
     void _build_tracking_tables() {
-        _track_enabled = (_cfg.channel_tracking_mode != kChannelTrackingModeOff) &&
-                         !_cfg.pilot_positions.empty();
-        _use_mmse = (_cfg.equalizer_mode == kEqualizerModeMmse);
+        _track_enabled = (_cfg.uplink.equalizer.channel_tracking_mode != kChannelTrackingModeOff) &&
+                         !_cfg.ofdm.pilot_positions.empty();
+        _use_mmse = (_cfg.uplink.equalizer.equalizer_mode == kEqualizerModeMmse);
 
-        _actual_subcarrier_indices.resize(_cfg.fft_size);
-        const int half = static_cast<int>(_cfg.fft_size / 2);
-        for (size_t i = 0; i < _cfg.fft_size; ++i) {
+        _actual_subcarrier_indices.resize(_cfg.ofdm.fft_size);
+        const int half = static_cast<int>(_cfg.ofdm.fft_size / 2);
+        for (size_t i = 0; i < _cfg.ofdm.fft_size; ++i) {
             _actual_subcarrier_indices[i] = (static_cast<int>(i) >= half)
-                ? static_cast<int>(i) - static_cast<int>(_cfg.fft_size)
+                ? static_cast<int>(i) - static_cast<int>(_cfg.ofdm.fft_size)
                 : static_cast<int>(i);
         }
     }
@@ -219,19 +219,19 @@ public:
     // signal-normalized noise variance by the mean channel power |H|^2 puts it in
     // the same units as compute_mmse_inverse's |H|^2 + noise_var denominator.
     float _estimate_mmse_noise_var() {
-        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.fft_size * sizeof(std::complex<float>));
+        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.ofdm.fft_size * sizeof(std::complex<float>));
         fftwf_execute(_ce_ifft_plan);
         const float snr = ChannelEstimator::estimate_snr_from_impulse_response(
-            _ce_out, _cfg.cp_length);
+            _ce_out, _cfg.ofdm.cp_length);
         const double norm_nv = noise_variance_from_snr_linear(std::max(snr, 1e-6f));
 
         const auto* __restrict__ h = _h_est.data();
         double avg_power = 0.0;
         #pragma omp simd simdlen(16) reduction(+:avg_power)
-        for (size_t k = 0; k < _cfg.fft_size; ++k) {
+        for (size_t k = 0; k < _cfg.ofdm.fft_size; ++k) {
             avg_power += h[k].real() * h[k].real() + h[k].imag() * h[k].imag();
         }
-        avg_power /= static_cast<double>(_cfg.fft_size);
+        avg_power /= static_cast<double>(_cfg.ofdm.fft_size);
         return static_cast<float>(norm_nv * avg_power);
     }
 
@@ -484,19 +484,19 @@ public:
 
     void _process_frame(const AlignedVector& frame, uint64_t generation) {
         const std::complex<float>* win = frame.data() + _window_offset;
-        const size_t sym_len = _cfg.fft_size + _cfg.cp_length;
+        const size_t sym_len = _cfg.ofdm.fft_size + _cfg.ofdm.cp_length;
 
         // 1) Channel estimate from the sync symbol (symbol 0 of the UL frame).
-        _fft_symbol(win + /*sym0*/ 0 * sym_len + _cfg.cp_length, _sync_freq_buf);
+        _fft_symbol(win + /*sym0*/ 0 * sym_len + _cfg.ofdm.cp_length, _sync_freq_buf);
         ChannelEstimator::estimate_from_sync_ls(_sync_freq_buf, _zc_freq, _h_est);
 
         // 2) FFT every data symbol (scaled, pre-equalization). The frequency-domain
         //    symbols are produced before equalization so the pilot-phase tracker can
         //    measure the residual phase ramp from adjacent-symbol pilot products.
         size_t data_idx = 0;
-        for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
+        for (size_t sym = 0; sym < _cfg.ofdm.num_symbols; ++sym) {
             if (is_zc_sync_symbol(_cfg, sym)) continue;
-            _fft_symbol(win + sym * sym_len + _cfg.cp_length, _data_symbols[data_idx]);
+            _fft_symbol(win + sym * sym_len + _cfg.ofdm.cp_length, _data_symbols[data_idx]);
             ++data_idx;
         }
 
@@ -508,7 +508,7 @@ public:
         float alpha = 0.0f, beta = 0.0f;
         if (_track_enabled) {
             const bool est_valid = FrequencyOffsetEstimator::compute_pilot_phase_diff(
-                _data_symbols, _cfg.pilot_positions, _cfg.fft_size, _cfg.sync_pos,
+                _data_symbols, _cfg.ofdm.pilot_positions, _cfg.ofdm.fft_size, _cfg.ofdm.sync_pos,
                 _pilot_indices_buf, _avg_phase_diff_buf, _weights_buf,
                 &_layout.data_symbol_to_actual_symbol, nullptr);
             if (est_valid) {
@@ -527,10 +527,10 @@ public:
         if (_use_mmse) {
             ChannelEstimator::compute_mmse_inverse(
                 _h_est, _h_inv, _estimate_mmse_noise_var(),
-                static_cast<float>(_cfg.equalizer_mag_floor));
+                static_cast<float>(_cfg.uplink.equalizer.equalizer_mag_floor));
         } else {
             ChannelEstimator::compute_zf_inverse(
-                _h_est, _h_inv, static_cast<float>(_cfg.equalizer_mag_floor));
+                _h_est, _h_inv, static_cast<float>(_cfg.uplink.equalizer.equalizer_mag_floor));
         }
 
         // 5) Equalize + derotate each data symbol in place. Reuses the SIMD
@@ -539,7 +539,7 @@ public:
         //    tracking is off, alpha=beta=0 and this is plain ZF/MMSE equalization.
         for (size_t i = 0; i < _data_symbols.size(); ++i) {
             const int rel = _layout.data_symbol_to_actual_symbol[i] -
-                            static_cast<int>(_cfg.sync_pos);
+                            static_cast<int>(_cfg.ofdm.sync_pos);
             ChannelEstimator::equalize_symbol(
                 _data_symbols[i], _h_inv,
                 alpha * static_cast<float>(rel),
@@ -549,7 +549,7 @@ public:
 
         // 6) Noise variance from equalized pilots -> LLR scale.
         const double noise_var = QPSK_LLR::estimate_noise_variance(
-            _data_symbols, _cfg.pilot_positions, _zc_freq);
+            _data_symbols, _cfg.ofdm.pilot_positions, _zc_freq);
 
         // Periodic alignment-health / drift indicator: with a locked frame the
         // sync-symbol channel estimate stays a clean impulse (|H| flat). A rising
@@ -611,14 +611,14 @@ public:
     }
 
     void _fft_symbol(const std::complex<float>* time_in, AlignedVector& freq_out) {
-        std::memcpy(_fft_in.data(), time_in, _cfg.fft_size * sizeof(std::complex<float>));
+        std::memcpy(_fft_in.data(), time_in, _cfg.ofdm.fft_size * sizeof(std::complex<float>));
         fftwf_execute(_fft_plan);
-        freq_out.resize(_cfg.fft_size);
-        const float s = 1.0f / std::sqrt(static_cast<float>(_cfg.fft_size));
+        freq_out.resize(_cfg.ofdm.fft_size);
+        const float s = 1.0f / std::sqrt(static_cast<float>(_cfg.ofdm.fft_size));
         const auto* __restrict__ src = _fft_out.data();
         auto* __restrict__ dst = freq_out.data();
         #pragma omp simd simdlen(16)
-        for (size_t k = 0; k < _cfg.fft_size; ++k) dst[k] = src[k] * s;
+        for (size_t k = 0; k < _cfg.ofdm.fft_size; ++k) dst[k] = src[k] * s;
     }
 
     // Parse LdpcPacketFraming packets out of the frame LLR stream and decode.
@@ -677,23 +677,23 @@ public:
     void _run_agc(const AlignedVector& frame) {
         if (!_rx_agc.enabled() || !_apply_gain) return;
         // Delay spectrum (impulse response) from the channel estimate.
-        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.fft_size * sizeof(std::complex<float>));
+        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.ofdm.fft_size * sizeof(std::complex<float>));
         fftwf_execute(_ce_ifft_plan);
         float peak = 0.0f;
         double sum = 0.0;
         const auto* __restrict__ ce = _ce_out.data();
         #pragma omp simd simdlen(16) reduction(max:peak) reduction(+:sum)
-        for (size_t i = 0; i < _cfg.fft_size; ++i) {
+        for (size_t i = 0; i < _cfg.ofdm.fft_size; ++i) {
             const float re = ce[i].real();
             const float im = ce[i].imag();
             const float m = std::sqrt(re * re + im * im);
             peak = std::max(peak, m);
             sum += m;
         }
-        const float avg = static_cast<float>(sum / static_cast<double>(_cfg.fft_size));
-        const std::complex<float>* sync_time = frame.data() + _window_offset + _cfg.cp_length;
+        const float avg = static_cast<float>(sum / static_cast<double>(_cfg.ofdm.fft_size));
+        const std::complex<float>* sync_time = frame.data() + _window_offset + _cfg.ofdm.cp_length;
         _rx_agc.maybe_apply_from_delay_peak(
-            peak, avg, sync_time, _cfg.fft_size, _host_now_ns(), _agc_gates,
+            peak, avg, sync_time, _cfg.ofdm.fft_size, _host_now_ns(), _agc_gates,
             [this](double g) { if (_apply_gain) _apply_gain(g); });
     }
 
@@ -702,8 +702,8 @@ public:
             (!_self_channel_debug_sink && !_self_delay_debug_sink)) {
             return;
         }
-        const size_t link_sym_len = _link_cfg.fft_size + _link_cfg.cp_length;
-        const size_t local_tx_zc_start = _link_cfg.sync_pos * link_sym_len;
+        const size_t link_sym_len = _link_cfg.ofdm.fft_size + _link_cfg.ofdm.cp_length;
+        const size_t local_tx_zc_start = _link_cfg.ofdm.sync_pos * link_sym_len;
         if (!_self_debug_estimator.estimate(
                 frame,
                 local_tx_zc_start,
@@ -733,15 +733,15 @@ public:
 
         const bool need_delay = static_cast<bool>(_delay_debug_sink);
         if (need_delay) {
-            const size_t half = _cfg.fft_size / 2;
+            const size_t half = _cfg.ofdm.fft_size / 2;
             for (size_t i = 0; i < half; ++i) {
                 _ce_in[i] = _h_est[i + half];
                 _ce_in[i + half] = _h_est[i];
             }
             fftwf_execute(_ce_ifft_plan);
-            _delay_spectrum.resize(_cfg.fft_size);
-            const float scale = 1.0f / std::sqrt(static_cast<float>(_cfg.fft_size));
-            for (size_t i = 0; i < _cfg.fft_size; ++i) {
+            _delay_spectrum.resize(_cfg.ofdm.fft_size);
+            const float scale = 1.0f / std::sqrt(static_cast<float>(_cfg.ofdm.fft_size));
+            for (size_t i = 0; i < _cfg.ofdm.fft_size; ++i) {
                 _delay_spectrum[i] = _ce_out[i] * scale;
             }
             _delay_debug_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
@@ -749,15 +749,15 @@ public:
 
         const bool need_self_delay = static_cast<bool>(_self_delay_debug_sink) && !_self_h_est.empty();
         if (need_self_delay) {
-            const size_t half = _link_cfg.fft_size / 2;
+            const size_t half = _link_cfg.ofdm.fft_size / 2;
             for (size_t i = 0; i < half; ++i) {
                 _ce_in[i] = _self_h_est[i + half];
                 _ce_in[i + half] = _self_h_est[i];
             }
             fftwf_execute(_ce_ifft_plan);
-            _self_delay_spectrum.resize(_link_cfg.fft_size);
-            const float scale = 1.0f / std::sqrt(static_cast<float>(_link_cfg.fft_size));
-            for (size_t i = 0; i < _link_cfg.fft_size; ++i) {
+            _self_delay_spectrum.resize(_link_cfg.ofdm.fft_size);
+            const float scale = 1.0f / std::sqrt(static_cast<float>(_link_cfg.ofdm.fft_size));
+            for (size_t i = 0; i < _link_cfg.ofdm.fft_size; ++i) {
                 _self_delay_spectrum[i] = _ce_out[i] * scale;
             }
             _self_delay_debug_sink(AlignedVector(_self_delay_spectrum.begin(), _self_delay_spectrum.end()));
