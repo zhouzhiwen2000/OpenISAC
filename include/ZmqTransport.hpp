@@ -8,12 +8,10 @@
  * (no DSP), sitting alongside Common.hpp's IO vocabulary.
  *
  * Two roles are provided:
- *  - SharedPubSocket / bind_pub(): PUB sockets for one-way data streams
+ *  - SharedPubSocket / bind_pub(): XPUB sockets for one-way data streams
  *    (sensing frames + debug plots). Backend binds, frontend SUB connects.
- *    PUB never blocks the producer: when a subscriber is slow or absent,
- *    messages are dropped at the high-water mark. This mirrors UDP's
- *    real-time "drop old frames" behaviour and keeps hard-real-time threads
- *    free of back-pressure.
+ *    Sends are non-blocking and XPUB_NODROP turns high-water-mark overflow
+ *    into EAGAIN, allowing the caller to warn instead of losing data silently.
  *  - ControlRouter: a ROUTER socket for the bidirectional control/params
  *    channel. Backend binds ROUTER, frontend connects DEALER.
  *
@@ -22,7 +20,7 @@
  *    logical senders cannot independently target the same port. bind_pub()
  *    therefore returns a process-wide shared, mutex-guarded PUB socket keyed
  *    by endpoint, so multiple SensingDataSenders to the same port share one
- *    bound socket.
+ *    bound XPUB socket.
  *  - ZMQ sockets are NOT thread-safe. ControlRouter owns its socket on the
  *    single poll thread and accepts outbound messages via a thread-safe
  *    queue (post_send), which the poll loop drains. Never call the socket
@@ -66,17 +64,18 @@ struct MsgPart {
 };
 
 /**
- * @brief Shared PUB socket bound to a single endpoint.
+ * @brief Shared XPUB socket bound to a single endpoint.
  *
  * Multipart sends are atomic (a multipart message is only delivered to
- * subscribers once complete) and never block: PUB silently drops messages
- * when the high-water mark is reached or no subscriber is connected.
+ * subscribers once complete) and never block. High-water-mark overflow is
+ * reported to the caller as a failed send instead of being dropped silently.
  */
 class SharedPubSocket {
 public:
     explicit SharedPubSocket(const std::string& endpoint)
-        : _socket(global_context(), zmq::socket_type::pub) {
+        : _socket(global_context(), zmq::socket_type::xpub) {
         _socket.set(zmq::sockopt::sndhwm, 8);  // small: keep only recent frames
+        _socket.set(zmq::sockopt::xpub_nodrop, 1);
         _socket.set(zmq::sockopt::linger, 0);
         try {
             _socket.bind(endpoint);
@@ -95,32 +94,51 @@ public:
             return true;
         }
         std::lock_guard<std::mutex> lock(_mutex);
-        const size_t n = parts.size();
-        for (size_t i = 0; i < n; ++i) {
-            zmq::message_t msg(parts[i].data, parts[i].size);
-            const zmq::send_flags flags =
-                ((i + 1 < n) ? zmq::send_flags::sndmore : zmq::send_flags::none) |
-                zmq::send_flags::dontwait;
-            // PUB never blocks; on internal failure we drop the rest of the
-            // (incomplete) multipart message rather than risk a partial frame.
-            if (!_socket.send(msg, flags)) {
-                return false;
+        _drain_subscription_events();
+        try {
+            const size_t n = parts.size();
+            for (size_t i = 0; i < n; ++i) {
+                zmq::message_t msg(parts[i].data, parts[i].size);
+                const zmq::send_flags flags =
+                    ((i + 1 < n) ? zmq::send_flags::sndmore : zmq::send_flags::none) |
+                    zmq::send_flags::dontwait;
+                if (!_socket.send(msg, flags)) {
+                    return false;
+                }
             }
+        } catch (const zmq::error_t&) {
+            return false;
         }
         return true;
     }
 
-    void send_single(const void* data, size_t size) {
-        send_multipart({MsgPart{data, size}});
+    bool send_single(const void* data, size_t size) {
+        return send_multipart({MsgPart{data, size}});
     }
 
 private:
+    void _drain_subscription_events() {
+        while (true) {
+            zmq::message_t event;
+            try {
+                if (!_socket.recv(event, zmq::recv_flags::dontwait)) {
+                    return;
+                }
+            } catch (const zmq::error_t& e) {
+                if (e.num() == EAGAIN) {
+                    return;
+                }
+                return;
+            }
+        }
+    }
+
     zmq::socket_t _socket;
     std::mutex _mutex;
 };
 
 /**
- * @brief Return a process-wide shared PUB socket bound to `endpoint`.
+ * @brief Return a process-wide shared XPUB socket bound to `endpoint`.
  *
  * The socket is reference-counted: it is created on first request and
  * destroyed once the last holder releases it, allowing a later rebind after
@@ -158,9 +176,9 @@ public:
         , _max_outq(max_outq) {
         _socket.set(zmq::sockopt::linger, 0);
         _socket.set(zmq::sockopt::rcvtimeo, 5);  // ms; bounds poll latency
-        // Drop messages addressed to unknown/disconnected peers instead of
-        // raising EHOSTUNREACH.
-        _socket.set(zmq::sockopt::router_mandatory, 0);
+        // Report unknown/disconnected peers as EHOSTUNREACH so the owner can
+        // emit a warning instead of silently losing the control reply.
+        _socket.set(zmq::sockopt::router_mandatory, 1);
         try {
             _socket.bind(endpoint);
         } catch (const zmq::error_t& e) {
@@ -200,24 +218,30 @@ public:
         if (p != nullptr && size > 0) {
             payload.assign(p, p + size);
         }
+        bool evicted = false;
         std::lock_guard<std::mutex> lock(_out_mutex);
         while (_max_outq > 0 && _outq.size() >= _max_outq) {
             _outq.pop_front();
+            evicted = true;
         }
         _outq.emplace_back(identity, std::move(payload));
-        return true;
+        return !evicted;
     }
 
     /// Flush queued replies. Must be called only from the owning poll thread.
-    void flush() {
+    size_t flush() {
         std::deque<std::pair<PeerId, std::vector<uint8_t>>> pending;
         {
             std::lock_guard<std::mutex> lock(_out_mutex);
             pending.swap(_outq);
         }
+        size_t failed = 0;
         for (auto& item : pending) {
-            (void)_send_reply_multipart(item.first, item.second);
+            if (!_send_reply_multipart(item.first, item.second)) {
+                ++failed;
+            }
         }
+        return failed;
     }
 
 private:
@@ -233,13 +257,17 @@ private:
         if (parts.empty()) {
             return true;
         }
-        for (size_t i = 0; i < parts.size(); ++i) {
-            zmq::message_t msg(parts[i].data, parts[i].size);
-            const zmq::send_flags flags =
-                (i + 1 < parts.size()) ? zmq::send_flags::sndmore : zmq::send_flags::none;
-            if (!_socket.send(msg, flags)) {
-                return false;
+        try {
+            for (size_t i = 0; i < parts.size(); ++i) {
+                zmq::message_t msg(parts[i].data, parts[i].size);
+                const zmq::send_flags flags =
+                    (i + 1 < parts.size()) ? zmq::send_flags::sndmore : zmq::send_flags::none;
+                if (!_socket.send(msg, flags)) {
+                    return false;
+                }
             }
+        } catch (const zmq::error_t&) {
+            return false;
         }
         return true;
     }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import sys
 import time
 from pathlib import Path
@@ -30,6 +31,9 @@ try:
     import zmq
 except ImportError as exc:  # pragma: no cover - startup dependency check
     raise SystemExit("pyzmq is required. Install it with `pip install pyzmq`.") from exc
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _slider_value_from_snr(snr_db: float) -> int:
@@ -196,9 +200,11 @@ class ChannelSimControlWindow(QtWidgets.QMainWindow):
         try:
             self._socket.send(build_channel_sim_snr_command(snr_db), flags=zmq.NOBLOCK)
         except zmq.Again:
+            LOGGER.warning("Channel-simulator control socket busy; dropping SNR command")
             self._set_status("Control socket is busy; command dropped")
             return
         except Exception as exc:
+            LOGGER.warning("Channel-simulator SNR command send failed; dropping command: %s", exc)
             self._set_status(f"Send failed: {exc}")
             return
         if snr_db is None:
@@ -214,8 +220,10 @@ class ChannelSimControlWindow(QtWidgets.QMainWindow):
             self._socket.send(build_channel_sim_snr_request(), flags=zmq.NOBLOCK)
             self._last_request_s = time.monotonic()
         except zmq.Again:
+            LOGGER.warning("Channel-simulator control socket busy; dropping status request")
             return
         except Exception as exc:
+            LOGGER.warning("Channel-simulator status request send failed; dropping request: %s", exc)
             self._set_status(f"Request failed: {exc}")
 
     def _poll_socket(self) -> None:

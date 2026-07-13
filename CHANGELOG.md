@@ -8,6 +8,30 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-11 - 运行期丢帧非阻塞化与丢包告警
+
+### Summary
+
+感知与调试输出的生产路径改为有界、非阻塞入队：队列满时丢弃新帧并输出带累计计数的 Warn 日志，不再等待后台发送线程。系统同时补齐通信、感知、恢复、ARQ、控制与可视化链路中的运行期丢包可观测性；正常 shutdown 清理队列保持静默。
+
+### Changes
+
+- 单通道与聚合感知 sender、latest-only 调试 sender 和 viewer 显示队列在满载或合并旧帧时明确告警；ZMQ 数据发布改用 `XPUB_NODROP`，使发送端高水位溢出以非阻塞失败返回并记录 Warn。
+- UDP 输入使用完整数据报缓冲并读取 Linux `SO_RXQ_OVFL` 元数据，显式报告内核接收队列溢出、应用缓冲截断和收发失败。
+- 补齐 ARQ 窗口跳跃、重排淘汰、最大重传次数、恢复代际淘汰、部分 RX 帧以及 LDPC/eRTM 无效数据的 Warn 级诊断。
+
+## 2026-07-11 - eRTM 同帧感知测量与异步调试输出
+
+### Summary
+
+UE 将 eRTM 作为感知链路中的 TO 测量：CPU 感知帧携带同一接收帧生成的下行信道估计，CUDA UE 则在当前 demod/sensing frame 进入感知处理前完成估计。由此移除独立 eRTM 计算线程、全局“最新下行信道”快照和 pending alignment 补偿，避免 TO 结果与实际被校正的感知帧使用不同的下行坐标。
+
+### Changes
+
+- LDPC 路径仍只识别并投递 BS 上行测量；CPU sensing 线程或 CUDA 当前帧处理阶段消费最新报告，并在新报告或接收对齐后用当前帧下行信道重算 `TO_UE`。Alignment 会强制重算；若 CPU Alignment 感知帧因队列满被丢弃，该请求顺延到下一幅实际进入 sensing 的帧。
+- 未启用双基地感知时，CPU UE 仍在主处理路径消费 eRTM 报告，保留 TO 日志与 debug 功能。
+- eRTM debug multipart 输出改由有界 `LatestOnly` 后台 sender 发布；感知路径准备拥有数据的 debug frame 后只做非阻塞入队，ZMQ socket 操作和 message 构造不再占用感知计算线程。
+
 ## 2026-07-10 - 双向多通道信号处理文档统一
 
 ### Summary

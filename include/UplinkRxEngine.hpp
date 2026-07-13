@@ -652,6 +652,12 @@ public:
             if (target != applied_diff) {
                 int64_t delta = target - applied_diff;
                 while (delta < 0) delta += static_cast<int64_t>(_period_samples);
+                if (delta > 0) {
+                    LOG_RT_WARN_M(UlRx) << "[UL-RX] applying runtime DUTI change by discarding "
+                                  << delta << " RX samples"
+                                  << ": previous=" << applied_diff
+                                  << ", target=" << target;
+                }
                 discard(delta);
                 applied_diff = target;
             }
@@ -685,6 +691,9 @@ public:
                 if (!_consume_alignment_frame(
                         frame->samples.data(), correction, &first_sample_idx, start_time)) {
                     if (!_running.load(std::memory_order_relaxed)) break;
+                    LOG_RT_WARN_HZ_M(UlRx, 5)
+                        << "[UL-RX] alignment-frame read failed; dropping partial frame"
+                        << ": correction_samples=" << correction;
                     continue;
                 }
             } else {
@@ -696,6 +705,14 @@ public:
             }
             if (read.samples != _period_samples ||
                 _restart_requested.load(std::memory_order_acquire)) {
+                if (read.samples > 0 && _running.load(std::memory_order_relaxed)) {
+                    LOG_RT_WARN_HZ_M(UlRx, 5)
+                        << "[UL-RX] dropping incomplete or restart-interrupted RX frame"
+                        << ": received_samples=" << read.samples
+                        << ", expected_samples=" << _period_samples
+                        << ", restart_requested="
+                        << _restart_requested.load(std::memory_order_relaxed);
+                }
                 if (!_running.load(std::memory_order_relaxed)) break;
                 continue;
             }
@@ -760,6 +777,12 @@ public:
             const uint64_t generation = frame->generation;
             if (generation == _stream_generation.load(std::memory_order_acquire)) {
                 _process_frame(frame->samples, generation, frame->frame_index);
+            } else {
+                LOG_RT_WARN_HZ_M(UlRx, 5)
+                    << "[UL-RX] dropping stale signal-processing frame"
+                    << ": frame_generation=" << generation
+                    << ", current_generation="
+                    << _stream_generation.load(std::memory_order_relaxed);
             }
             _rx_frame_queue.consumer_pop();
         }
@@ -780,6 +803,12 @@ public:
                 backoff.reset();
                 if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
                     _decode_llr_stream(frame->llr, _deint_scratch_i16, _payload_llr_scratch_i16);
+                } else {
+                    LOG_RT_WARN_HZ_M(UlRx, 5)
+                        << "[UL-RX] dropping stale fixed-point LLR frame"
+                        << ": frame_generation=" << frame->generation
+                        << ", current_generation="
+                        << _stream_generation.load(std::memory_order_relaxed);
                 }
                 _llr_queue_i16.consumer_pop();
             }
@@ -793,6 +822,12 @@ public:
                 backoff.reset();
                 if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
                     _decode_llr_stream(frame->llr, _deint_scratch, _payload_llr_scratch);
+                } else {
+                    LOG_RT_WARN_HZ_M(UlRx, 5)
+                        << "[UL-RX] dropping stale floating-point LLR frame"
+                        << ": frame_generation=" << frame->generation
+                        << ", current_generation="
+                        << _stream_generation.load(std::memory_order_relaxed);
                 }
                 _llr_queue.consumer_pop();
             }
@@ -983,6 +1018,7 @@ public:
         const size_t bytes_per_block = (_ldpc.get_K() + 7) / 8;
         if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
             bytes_per_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock) {
+            LOG_G_ERROR_M(UlRx) << "[UL-RX] LDPC dimensions do not match packet framing; dropping LLR frame";
             return;
         }
         size_t symbol_offset = 0;
@@ -993,13 +1029,23 @@ public:
             LdpcMiniHeader hdr;
             if (!LdpcPacketFraming::decode_mini_header_llrs(
                     frame_llr.data() + control_off + LdpcPacketFraming::kMarkerBits, hdr)) {
+                LOG_RT_WARN_HZ_M(UlRx, 5)
+                    << "[UL-RX] mini-header decode failed; dropping remainder of LLR frame"
+                    << ": symbol_offset=" << symbol_offset;
                 break;
             }
             const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(hdr.payload_len);
             const size_t required = payload_blocks * bits_per_block;
             const size_t payload_off = control_off + LdpcPacketFraming::kControlBits;
             const size_t next_off = symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
-            if (payload_off + required > frame_llr.size()) break;
+            if (payload_off + required > frame_llr.size()) {
+                LOG_RT_WARN_HZ_M(UlRx, 5)
+                    << "[UL-RX] payload extends beyond LLR frame; dropping incomplete packet"
+                    << ": seq=" << hdr.seq
+                    << ", required_bits=" << required
+                    << ", available_bits=" << (frame_llr.size() - payload_off);
+                break;
+            }
             if (payload_blocks == 0) { symbol_offset = next_off; continue; }
 
             // Reuse scratch buffers across packets (decode thread, but still on
@@ -1023,9 +1069,24 @@ public:
                 // ARQ intercept: if callback set and returns true, skip UDP output
                 if (!_arq_payload_intercept ||
                     !_arq_payload_intercept(payload_ptr, hdr.payload_len, hdr.seq, hdr.flags)) {
-                    _udp_out->send(payload_ptr, hdr.payload_len);
+                    try {
+                        _udp_out->send(payload_ptr, hdr.payload_len);
+                    } catch (const std::exception& e) {
+                        LOG_G_WARN_M(UlRx) << "[UL-RX] UDP output failed; dropping decoded packet"
+                                     << ": seq=" << hdr.seq
+                                     << ", payload_bytes=" << hdr.payload_len
+                                     << ", error=" << e.what();
+                        symbol_offset = next_off;
+                        continue;
+                    }
                 }
                 _decoded_count.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                LOG_RT_WARN_HZ_M(UlRx, 5)
+                    << "[UL-RX] LDPC decoder returned a short payload; dropping packet"
+                    << ": seq=" << hdr.seq
+                    << ", decoded_bytes=" << decoded.size()
+                    << ", expected_bytes=" << hdr.payload_len;
             }
             symbol_offset = next_off;
         }

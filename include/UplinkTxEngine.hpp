@@ -199,7 +199,12 @@ public:
     // payload and let _ldpc_encode_proc drain it, mirroring the BS-side pattern.
     bool inject_arq_feedback(const ArqFeedback& feedback) {
         if (!_arq_feedback_enabled) {
-            _arq_feedback_dropped_disabled.fetch_add(1, std::memory_order_relaxed);
+            const uint64_t dropped =
+                _arq_feedback_dropped_disabled.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN_M(ArqUl) << "[UL-TX ARQ] feedback disabled; dropping ACK"
+                             << ": dropped=" << dropped;
+            }
             return false;
         }
         std::vector<uint8_t> fb_payload;
@@ -242,6 +247,14 @@ public:
         if (_ldpc_encode_thread.joinable()) _ldpc_encode_thread.join();
         if (_mod_thread.joinable()) _mod_thread.join();
         if (_tx_thread.joinable()) _tx_thread.join();
+
+        {
+            std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+            _arq_pending_feedback.clear();
+        }
+        _raw_udp_buffer.clear();
+        _packet_buffer.clear();
+        _period_queue.clear();
     }
 
 private:
@@ -334,8 +347,9 @@ private:
                     pending_fb.swap(_arq_pending_feedback);
                 }
                 for (auto& fb : pending_fb) {
-                    _encode_and_enqueue_payload(fb.data(), fb.size(), false, true);
-                    _arq_feedback_drained.fetch_add(1, std::memory_order_relaxed);
+                    if (_encode_and_enqueue_payload(fb.data(), fb.size(), false, true)) {
+                        _arq_feedback_drained.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
                 pending_fb.clear();
             }
@@ -343,7 +357,11 @@ private:
             // ARQ: check for retransmissions first (priority over new data)
             if (_arq_enabled) {
                 const int64_t now = arq_now_ms();
-                _ul_arq_tx.drop_abandoned(now);
+                const size_t abandoned = _ul_arq_tx.drop_abandoned(now);
+                if (abandoned > 0) {
+                    LOG_G_WARN_M(ArqUl) << "[UL-TX ARQ] max retries exceeded; dropping "
+                                 << abandoned << " unacknowledged packets";
+                }
                 _ul_arq_tx.get_retransmit(retransmit_seqs, now);
                 for (uint16_t seq : retransmit_seqs) {
                     ArqTxEntry entry;
@@ -354,14 +372,26 @@ private:
                         // Cheap retransmit: push pre-encoded QPSK directly
                         AlignedIntVector retrans(entry.encoded_qpsk);
                         SPSCBackoff bo;
+                        bool enqueued = false;
                         while (_running.load(std::memory_order_relaxed)) {
-                            if (_packet_buffer.try_push(std::move(retrans))) break;
+                            if (_packet_buffer.try_push(std::move(retrans))) {
+                                enqueued = true;
+                                break;
+                            }
                             bo.pause();
+                        }
+                        if (!enqueued) {
+                            break;
                         }
                         _ul_arq_tx.mark_transmitted(seq, now);
                     } else {
                         // Re-encode from raw payload
-                        _encode_and_enqueue_payload(entry.raw_payload.data(), entry.raw_payload.size(), false);
+                        if (!_encode_and_enqueue_payload(
+                                entry.raw_payload.data(), entry.raw_payload.size(), false)) {
+                            LOG_G_WARN_M(ArqUl) << "[UL-TX ARQ] retransmission was not queued"
+                                         << ": seq=" << seq;
+                            break;
+                        }
                         _ul_arq_tx.mark_transmitted(seq, now);
                     }
                 }
@@ -435,17 +465,49 @@ private:
             return;
         }
         ::fcntl(sock, F_SETFL, O_NONBLOCK);
+        const bool overflow_reporting = enable_udp_rx_overflow_reporting(sock);
+        if (!overflow_reporting) {
+            LOG_G_WARN_M(UlTx) << "[UL-TX] UDP input could not enable kernel overflow reporting; "
+                          << "socket-buffer drops may be unobservable";
+        }
         if (LOG_MOD_ON(UlTx)) {
             LOG_G_INFO_M(UlTx) << "[UL-TX] uplink payload UDP input on " << _link_cfg.network_output.ul_udp_input_ip << ":"
                          << _link_cfg.network_output.ul_udp_input_port;
         }
 
         std::vector<uint8_t> buf(65536);
+        uint32_t last_kernel_drop_count = 0;
         while (_running.load(std::memory_order_relaxed)) {
-            const ssize_t n = ::recvfrom(sock, buf.data(), buf.size(), 0, nullptr, nullptr);
-            if (n <= 0) {
+            const UdpDatagramReceiveResult received =
+                receive_udp_datagram(sock, buf.data(), buf.size());
+            if (received.bytes < 0) {
                 if (!_running.load(std::memory_order_relaxed)) break;
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    LOG_G_WARN_M(UlTx) << "[UL-TX] UDP input receive failed: "
+                                  << std::strerror(errno);
+                }
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
+                continue;
+            }
+            if (received.has_kernel_drop_count) {
+                const uint32_t dropped = received.kernel_drop_count - last_kernel_drop_count;
+                last_kernel_drop_count = received.kernel_drop_count;
+                if (dropped > 0) {
+                    LOG_G_WARN_M(UlTx) << "[UL-TX] UDP socket receive buffer overflow; kernel dropped "
+                                  << dropped << " datagrams"
+                                  << ": cumulative=" << received.kernel_drop_count;
+                }
+            }
+            if (received.truncated) {
+                LOG_G_WARN_M(UlTx) << "[UL-TX] UDP input datagram exceeded receive buffer; dropping truncated packet"
+                              << ": copied_bytes=" << received.bytes
+                              << ", buffer_bytes=" << buf.size();
+                continue;
+            }
+            const ssize_t n = received.bytes;
+            if (n == 0) {
+                LOG_RT_WARN_HZ_M(UlTx, 1)
+                    << "[UL-TX] UDP input received an empty datagram; dropping packet";
                 continue;
             }
             RawUdpPacket* pkt = _raw_udp_buffer.producer_slot();
@@ -464,22 +526,29 @@ private:
         close_sock();
     }
 
-    void _encode_and_enqueue_payload(const uint8_t* data, size_t len, bool track_arq = true,
+    bool _encode_and_enqueue_payload(const uint8_t* data, size_t len, bool track_arq = true,
                                      bool is_feedback = false) {
         const size_t bytes_per_block = (_ldpc.get_K() + 7) / 8;
         if (bytes_per_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock ||
             _ldpc.get_N() != LdpcPacketFraming::kLdpcCodeBitsPerBlock) {
             throw std::runtime_error("UplinkTxEngine: LDPC dimensions do not match framing.");
         }
-        if (!LdpcPacketFraming::payload_len_fits(len)) return;
+        if (!LdpcPacketFraming::payload_len_fits(len)) {
+            static std::atomic<uint64_t> oversize_drop_count{0};
+            const uint64_t dropped =
+                oversize_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN_M(UlTx) << "[UL-TX] payload exceeds mini-header limit; dropping"
+                            << ": payload_bytes=" << len << ", dropped=" << dropped;
+            }
+            return false;
+        }
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(len);
         const size_t packet_qpsk = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
         if (packet_qpsk > _layout.payload_re_count) {
-            if (LOG_MOD_ON(UlTx)) {
-                LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] dropping payload: " << packet_qpsk
-                                  << " qpsk syms > capacity " << _layout.payload_re_count;
-            }
-            return;
+            LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] dropping payload: " << packet_qpsk
+                              << " qpsk syms > capacity " << _layout.payload_re_count;
+            return false;
         }
 
         AlignedIntVector packet;
@@ -516,13 +585,26 @@ private:
         if (_arq_enabled && track_arq && !is_feedback) {
             const int64_t now = arq_now_ms();
             AlignedIntVector arq_copy(packet); // copy before move
-            _ul_arq_tx.try_insert_encoded(hdr.seq, data, len, std::move(arq_copy), now);
+            if (!_ul_arq_tx.try_insert_encoded(
+                    hdr.seq, data, len, std::move(arq_copy), now)) {
+                LOG_G_WARN_M(ArqUl) << "[UL-TX ARQ] failed to track packet in TX window"
+                             << ": seq=" << hdr.seq
+                             << "; packet will not be retransmittable";
+            }
         }
+        bool enqueued = false;
         SPSCBackoff backoff;
         while (_running.load(std::memory_order_relaxed)) {
-            if (_packet_buffer.try_push(std::move(packet))) break;
+            if (_packet_buffer.try_push(std::move(packet))) {
+                enqueued = true;
+                break;
+            }
             backoff.pause();
         }
+        if (!enqueued && !packet.empty()) {
+            return false;
+        }
+        return enqueued;
     }
 
     // ---- Build one uplink frame's IQ into period_buffer at the UL window ----
@@ -546,6 +628,9 @@ private:
             const size_t room = _layout.payload_re_count - data_pool.size();
             if (slot->size() > room) {
                 if (slot->size() > _layout.payload_re_count) {
+                    LOG_RT_WARN_M(UlTx) << "[UL-TX] encoded packet exceeds frame capacity; "
+                                  << "dropping queue head: qpsk_syms=" << slot->size()
+                                  << ", capacity=" << _layout.payload_re_count;
                     _packet_buffer.consumer_pop();  // oversized: drop to avoid stall
                 }
                 break;
@@ -681,7 +766,12 @@ private:
                 first = true;
                 // Drop stale periods; TX will inject blank periods until mod refills.
                 // Only the mod thread may produce into the queue (SPSC contract).
+                const size_t dropped_periods = _period_queue.size();
                 _period_queue.clear();
+                if (dropped_periods > 0) {
+                    LOG_RT_WARN_M(UlTx) << "[UL-TX] timed restart dropped "
+                                  << dropped_periods << " queued transmit periods";
+                }
                 active_restart_epoch =
                     _scheduled_restart_epoch.load(std::memory_order_acquire);
                 recovery_log_periods_remaining = 8;
@@ -712,7 +802,7 @@ private:
             // full period (zeros) so the USRP never starves. Modulation may be
             // catching up after restart or under load.
             const AlignedVector& period_src = has_frame ? *frame : _blank_period_frame;
-            if (!has_frame && LOG_MOD_ON(UlTx)) {
+            if (!has_frame) {
                 LOG_RT_WARN_HZ_M(UlTx, 5) << "[UL-TX] blank period injected (period queue empty)";
             }
 
@@ -790,12 +880,11 @@ private:
             }
             if (!result.complete && _running.load(std::memory_order_relaxed)) {
                 _tx_error_count.fetch_add(1, std::memory_order_relaxed);
-                if (LOG_MOD_ON(UlTx)) {
-                    LOG_RT_WARN_M(UlTx) << "[UL-TX] short send/underflow: "
-                                  << (result.expected_samples - result.sent_samples)
-                                  << " samples not sent"
-                                  << (has_frame ? "" : " (blank period)");
-                }
+                LOG_RT_WARN_M(UlTx) << "[UL-TX] short send; dropping "
+                              << (result.expected_samples - result.sent_samples)
+                              << " unsent samples"
+                              << (has_frame ? "" : " (blank period)")
+                              << " due to underflow";
             }
             if (first && active_restart_epoch != 0 && result.sent_samples > 0) {
                 _submitted_restart_epoch.store(active_restart_epoch, std::memory_order_release);
@@ -921,12 +1010,10 @@ private:
             const size_t insert_samples = static_cast<size_t>(-delta);
             result.expected_samples += insert_samples;
             if (insert_samples > 0) {
-                if (LOG_MOD_ON(UlTx)) {
-                    LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] delaying stream by lengthening this period by "
-                                      << insert_samples << " samples (target_shift="
-                                      << target_shift_samples << ", applied_shift="
-                                      << target_shift_samples << ")";
-                }
+                LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] delaying stream by lengthening this period by "
+                                  << insert_samples << " samples (target_shift="
+                                  << target_shift_samples << ", applied_shift="
+                                  << target_shift_samples << ")";
             }
             const size_t sent = _send_period_samples(frame, 0, frame.size(), frame_md);
             result.sent_samples += sent;
@@ -950,13 +1037,11 @@ private:
                 frame.size());
             result.expected_samples -= skip_samples;
             if (skip_samples > 0) {
-                if (LOG_MOD_ON(UlTx)) {
-                    LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] advancing stream by shortening this period by "
-                                      << skip_samples << " samples (target_shift="
-                                      << target_shift_samples << ", applied_shift="
-                                      << (applied_shift_samples + static_cast<int64_t>(skip_samples))
-                                      << ")";
-                }
+                LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] advancing stream by dropping "
+                                  << skip_samples << " samples from this period (target_shift="
+                                  << target_shift_samples << ", applied_shift="
+                                  << (applied_shift_samples + static_cast<int64_t>(skip_samples))
+                                  << ")";
             }
             if (skip_samples >= frame.size()) {
                 applied_shift_samples += static_cast<int64_t>(skip_samples);

@@ -5259,6 +5259,9 @@ public:
         _ack_base = 0;
         _ack_bitmap = 0;
         _skip_count = 0;
+        _outside_window_drop_count = 0;
+        _reorder_drop_count = 0;
+        _skip_buffer_drop_count = 0;
         _reorder_buffer.clear();
     }
 
@@ -5297,6 +5300,7 @@ public:
         }
         if (adjusted_bit_idx >= static_cast<int16_t>(_window_size) ||
             adjusted_bit_idx >= 64) {
+            _outside_window_drop_count++;
             return false;
         }
         const uint64_t bit = static_cast<uint64_t>(1) << adjusted_bit_idx;
@@ -5314,6 +5318,7 @@ public:
             _reorder_buffer.emplace(seq, std::vector<uint8_t>(payload, payload + len));
             if (_reorder_buffer.size() > _max_reorder_buf) {
                 _reorder_buffer.erase(_reorder_buffer.begin());
+                _reorder_drop_count++;
             }
         }
 
@@ -5368,6 +5373,9 @@ public:
     uint64_t dup_count() const { return _dup_count; }
     uint64_t accepted_count() const { return _accepted_count; }
     uint64_t skip_count() const { return _skip_count; }
+    uint64_t outside_window_drop_count() const { return _outside_window_drop_count; }
+    uint64_t reorder_drop_count() const { return _reorder_drop_count; }
+    uint64_t skip_buffer_drop_count() const { return _skip_buffer_drop_count; }
 
 private:
     void _skip_to_include(uint16_t seq) {
@@ -5399,6 +5407,7 @@ private:
         for (auto it = _reorder_buffer.begin(); it != _reorder_buffer.end(); ) {
             if (arq_seq_diff(it->first, _ack_base) < 0) {
                 it = _reorder_buffer.erase(it);
+                _skip_buffer_drop_count++;
             } else {
                 ++it;
             }
@@ -5426,6 +5435,9 @@ private:
     uint64_t _dup_count = 0;
     uint64_t _accepted_count = 0;
     uint64_t _skip_count = 0;
+    uint64_t _outside_window_drop_count = 0;
+    uint64_t _reorder_drop_count = 0;
+    uint64_t _skip_buffer_drop_count = 0;
     std::map<uint16_t, std::vector<uint8_t>> _reorder_buffer;
 };
 

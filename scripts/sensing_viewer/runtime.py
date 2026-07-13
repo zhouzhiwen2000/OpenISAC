@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from queue import Empty, Full
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,10 +34,16 @@ class FrameBuffer:
         return self.frame_id, b"".join(self.buffer[:self.total_chunks])
 
 
-def drop_oldest_then_put(queue_obj, item) -> None:
+def drop_oldest_then_put(queue_obj, item, *, queue_name: str = "viewer queue") -> bool:
     if queue_obj.full():
         try:
             queue_obj.get_nowait()
-        except Exception:
+            LOGGER.warning("%s full; dropping oldest queued item", queue_name)
+        except Empty:
             pass
-    queue_obj.put(item)
+    try:
+        queue_obj.put_nowait(item)
+        return True
+    except Full:
+        LOGGER.warning("%s remained full; dropping newest item", queue_name)
+        return False

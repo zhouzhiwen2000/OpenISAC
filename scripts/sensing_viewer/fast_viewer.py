@@ -1,5 +1,6 @@
 import argparse
 import importlib
+import logging
 import numpy as np
 import sys
 import os
@@ -105,6 +106,20 @@ DEFAULT_CHANNEL_COUNT = VIEWER_CONFIG.default_channels
 STREAM_PREFIX = "[BI]" if IS_BI_MODE else "[AGG]"
 STREAM_DESCRIPTION = "bi-sensing" if IS_BI_MODE else "aggregated sensing"
 CONTROL_IDENTITY_PREFIX = "bi-sensing" if IS_BI_MODE else "sensing-fast"
+LOGGER = logging.getLogger(__name__)
+_DROP_WARNING_COUNTS = {}
+_DROP_WARNING_LOCK = threading.Lock()
+
+
+def _warn_drop(key, increment, message, *args):
+    increment = max(1, int(increment))
+    with _DROP_WARNING_LOCK:
+        previous = _DROP_WARNING_COUNTS.get(key, 0)
+        total = previous + increment
+        _DROP_WARNING_COUNTS[key] = total
+    if total <= 20 or previous // 100 != total // 100:
+        LOGGER.warning(message + "; dropped=%d", *args, total)
+    return total
 
 
 # ====== Global Configuration ======
@@ -436,21 +451,9 @@ def reset_processing_state():
             ch.range_time_data = None
         with ch.micro_lock:
             ch.micro_doppler_buffer.clear()
-        while True:
-            try:
-                ch.display_queue.get_nowait()
-            except Empty:
-                break
-            except Exception:
-                break
+        _clear_queue(ch.display_queue, f"CH{ch.ch_id + 1} display queue during processing reset")
         ch.current_display_data = {}
-    while True:
-        try:
-            aggregate_frame_queue.get_nowait()
-        except Empty:
-            break
-        except Exception:
-            break
+    _clear_queue(aggregate_frame_queue, "aggregate sensing queue during processing reset")
     with phase_bundle_lock:
         latest_phase_bundle_frame_id = None
         latest_phase_bundle_rd_complex = None
@@ -637,6 +640,11 @@ def backend_stream_unsupported(viewer_params):
 
 
 def warn_unsupported_backend_params(prefix, viewer_params):
+    LOGGER.warning(
+        "%s fast sensing viewer does not support backend sensing output; ignoring stream: %s",
+        prefix,
+        viewer_params.describe(),
+    )
     print(
         f"{prefix} Warning: fast sensing viewer does not support backend sensing output; "
         f"ignoring backend stream until sender returns to local/raw mode. "
@@ -646,24 +654,37 @@ def warn_unsupported_backend_params(prefix, viewer_params):
 
 def warn_unsupported_backend_payload(prefix, kind, frame_id=None):
     frame_text = "" if frame_id is None else f" frame {int(frame_id)}"
+    _warn_drop(
+        f"unsupported_backend_payload:{kind}",
+        1,
+        "%s fast sensing viewer does not support backend output; dropping %s%s",
+        prefix,
+        kind,
+        frame_text,
+    )
     print(
         f"{prefix} Warning: fast sensing viewer does not support backend sensing output; "
         f"dropping backend {kind}{frame_text}. Use plot_backend_sensing.py instead."
     )
 
 
-def _clear_queue(queue_obj):
+def _clear_queue(queue_obj, queue_name="viewer queue"):
+    dropped = 0
     while True:
         try:
             queue_obj.get_nowait()
+            dropped += 1
         except Empty:
             break
         except Exception:
             break
+    if dropped > 0:
+        LOGGER.warning("Cleared %s; dropping %d queued items", queue_name, dropped)
+    return dropped
 
 
 def _clear_control_tx_queue():
-    _clear_queue(control_tx_queue)
+    _clear_queue(control_tx_queue, "control TX queue")
 
 
 def queue_startup_backend_sync():
@@ -675,8 +696,11 @@ def queue_startup_backend_sync():
         startup_sync_queued_generation = generation
     try:
         startup_sync_queue.put_nowait(generation)
-    except Exception:
-        pass
+    except Full:
+        LOGGER.warning(
+            "Startup sync queue full; dropping sync request for generation %d",
+            generation,
+        )
 
 
 def reconnect_backend(host):
@@ -789,6 +813,7 @@ def _current_control_channel_id():
 
 def _send_control_packet(packet, endpoint, error_prefix):
     if endpoint is None:
+        LOGGER.warning("%s; no endpoint is available, dropping control packet", error_prefix)
         return False
     try:
         control_tx_queue.put_nowait((packet, endpoint, error_prefix))
@@ -796,15 +821,18 @@ def _send_control_packet(packet, endpoint, error_prefix):
     except Full:
         try:
             control_tx_queue.get_nowait()
-        except Exception:
+            LOGGER.warning("Control TX queue full; dropping oldest queued control packet")
+        except Empty:
             pass
         try:
             control_tx_queue.put_nowait((packet, endpoint, error_prefix))
             return True
         except Exception as e:
+            LOGGER.warning("%s; dropping control packet: %s", error_prefix, e)
             print(f"{error_prefix}: control TX queue full: {e}")
             return False
     except Exception as e:
+        LOGGER.warning("%s; dropping control packet: %s", error_prefix, e)
         print(f"{error_prefix}: {e}")
         return False
 
@@ -823,9 +851,20 @@ def _flush_control_tx_queue(local_socket):
             try:
                 control_tx_queue.put_nowait((packet, _endpoint, error_prefix))
             except Exception:
+                LOGGER.warning(
+                    "%s via %s: send would block and retry queue is full; dropping control packet",
+                    error_prefix,
+                    CONTROL_ENDPOINT,
+                )
                 print(f"{error_prefix} via {CONTROL_ENDPOINT}: send would block")
             break
         except Exception as e:
+            LOGGER.warning(
+                "%s via %s failed; dropping control packet: %s",
+                error_prefix,
+                CONTROL_ENDPOINT,
+                e,
+            )
             print(f"{error_prefix} via {CONTROL_ENDPOINT}: {e}")
 
 
@@ -924,18 +963,46 @@ def _queue_display_frame(ch, frame_item):
     if ch.display_queue.full():
         try:
             ch.display_queue.get_nowait()
-        except Exception:
+            _warn_drop(
+                f"display_queue_oldest:{ch.ch_id}",
+                1,
+                "CH%d display queue full; dropping oldest display frame",
+                ch.ch_id + 1,
+            )
+        except Empty:
             pass
-    ch.display_queue.put(frame_item)
+    try:
+        ch.display_queue.put_nowait(frame_item)
+    except Full:
+        _warn_drop(
+            f"display_queue_newest:{ch.ch_id}",
+            1,
+            "CH%d display queue remained full; dropping newest display frame",
+            ch.ch_id + 1,
+        )
 
 
 def _queue_aggregate_frame(frame_id, channel_frames):
     if aggregate_frame_queue.full():
         try:
             aggregate_frame_queue.get_nowait()
-        except Exception:
+            _warn_drop(
+                "aggregate_queue_oldest",
+                1,
+                "Aggregate sensing queue full; dropping oldest frame before queuing frame %d",
+                frame_id,
+            )
+        except Empty:
             pass
-    aggregate_frame_queue.put((int(frame_id), channel_frames))
+    try:
+        aggregate_frame_queue.put_nowait((int(frame_id), channel_frames))
+    except Full:
+        _warn_drop(
+            "aggregate_queue_newest",
+            1,
+            "Aggregate sensing queue remained full; dropping newest frame %d",
+            frame_id,
+        )
 
 
 def _update_detected_sender(target_channels, addr, update_control_port=False):
@@ -970,8 +1037,8 @@ def _handle_viewer_params(target_channels, params, prefix):
     if radio:
         try:
             radio_params_queue.put_nowait(radio)
-        except Exception:
-            pass
+        except Full:
+            LOGGER.warning("Radio-parameter queue full; dropping newest parameter update")
 
 
 def _aggregate_logical_channel_count(payload):
@@ -1000,6 +1067,13 @@ def _dispatch_aggregate_payload(frame_id_hint, aggregate_payload, viewer_params,
     channel_frames = [None] * len(CHANNELS)
     for ch_id, decoded in decoded_frames:
         if ch_id < 0 or ch_id >= len(CHANNELS):
+            LOGGER.warning(
+                "%s dropping channel %d from aggregate frame %d: viewer has %d channels",
+                prefix,
+                ch_id,
+                decoded.frame_id,
+                len(CHANNELS),
+            )
             print(
                 f"{prefix} Dropping channel {ch_id} from aggregate frame {decoded.frame_id}: "
                 f"viewer only has {len(CHANNELS)} channels"
@@ -1036,12 +1110,19 @@ def control_receiver():
             continue
         except Exception as e:
             if running:
+                LOGGER.warning("Fast viewer control receive failed: %s", e)
                 print(f"[CTRL] Socket error: {e}")
             continue
 
         data = parts[-1] if parts else b""
         try:
             if len(data) < 8 or data[:4] != CTRL_HEADER:
+                _warn_drop(
+                    "invalid_control_packet",
+                    1,
+                    "Fast viewer dropped an invalid control packet with %d bytes",
+                    len(data),
+                )
                 continue
 
             command = data[4:8]
@@ -1050,6 +1131,13 @@ def control_receiver():
                 if params is not None:
                     _handle_viewer_params(CHANNELS, params, "[CTRL]")
                     queue_startup_backend_sync()
+                else:
+                    _warn_drop(
+                        "invalid_params_packet",
+                        1,
+                        "Fast viewer dropped an invalid params packet with %d bytes",
+                        len(data),
+                    )
             elif command == READY_COMMAND:
                 if CHANNELS and (
                     get_viewer_params(CHANNELS[0]).version == 0
@@ -1057,6 +1145,7 @@ def control_receiver():
                 ):
                     request_viewer_params(0)
         except Exception as e:
+            LOGGER.warning("Fast viewer dropped an invalid control reply: %s", e)
             print(f"[CTRL] Receiver error: {e}")
 
     try:
@@ -1116,6 +1205,7 @@ def udp_receiver(port):
             events = dict(poller.poll(timeout=500))
         except Exception as e:
             if running:
+                LOGGER.warning("%s sensing poll failed: %s", STREAM_PREFIX, e)
                 print(f"{STREAM_PREFIX} Socket error: {e}")
             continue
 
@@ -1139,6 +1229,12 @@ def udp_receiver(port):
                     _request_params_if_needed(
                         f"{STREAM_PREFIX} Single-channel stream detected before viewer params arrived; requesting params"
                     )
+                    _warn_drop(
+                        "missing_params_bi",
+                        1,
+                        "%s dropping single-channel sensing frame because viewer parameters are unavailable",
+                        STREAM_PREFIX,
+                    )
                     continue
                 if metadata_payload is not None or backend_stream_unsupported(viewer_params):
                     warn_unsupported_backend_payload(STREAM_PREFIX, "sensing frame")
@@ -1158,6 +1254,12 @@ def udp_receiver(port):
                 _request_params_if_needed(
                     f"{STREAM_PREFIX} Aggregate stream detected before viewer params arrived; requesting params"
                 )
+                _warn_drop(
+                    "missing_params_aggregate",
+                    1,
+                    "%s dropping aggregate sensing frame because viewer parameters are unavailable",
+                    STREAM_PREFIX,
+                )
                 continue
 
             # This fast viewer does not support backend-side processing output.
@@ -1167,11 +1269,16 @@ def udp_receiver(port):
             if not data_payload:
                 continue
             if len(data_payload) < 4 or struct.unpack("!I", data_payload[:4])[0] != AGGREGATE_MAGIC_VERSION:
+                LOGGER.warning(
+                    "%s dropping non-aggregated sensing frame; legacy per-channel mode is unsupported",
+                    STREAM_PREFIX,
+                )
                 print(f"{STREAM_PREFIX} Ignoring non-aggregated sensing frame; legacy per-channel mode is no longer supported")
                 continue
             _dispatch_aggregate_payload(int(0), data_payload, viewer_params, STREAM_PREFIX)
 
         except Exception as e:
+            LOGGER.warning("%s dropped a received sensing frame: %s", STREAM_PREFIX, e)
             print(f"{STREAM_PREFIX} Receiver error: {e}")
             for ch in CHANNELS:
                 ch.last_param_error = str(e)
@@ -2959,13 +3066,24 @@ def dsp_worker():
 
     while running:
         latest_bundle = None
+        superseded_bundles = 0
         while True:
             try:
+                if latest_bundle is not None:
+                    superseded_bundles += 1
                 latest_bundle = aggregate_frame_queue.get_nowait()
             except Empty:
                 break
             except Exception:
                 break
+
+        if superseded_bundles > 0:
+            _warn_drop(
+                "dsp_superseded_aggregate",
+                superseded_bundles,
+                "DSP worker superseded %d queued aggregate sensing frames with the latest frame",
+                superseded_bundles,
+            )
 
         if latest_bundle is None:
             time.sleep(0.001)
@@ -3000,6 +3118,11 @@ def dsp_worker():
 
         for ch_idx, raw_frame in active_frames:
             if ch_idx not in batch_outputs:
+                LOGGER.warning(
+                    "DSP produced no output for CH%d aggregate frame %d; dropping channel frame",
+                    ch_idx + 1,
+                    frame_id,
+                )
                 continue
             ch = CHANNELS[ch_idx]
             rd_spectrum, range_time_view, rd_complex = batch_outputs[ch_idx]
@@ -3018,6 +3141,12 @@ def dsp_worker():
                 bundle_results[ch_idx] = result
                 bundle_rd_complex[ch_idx] = result.get('rd_complex')
             except Exception as e:
+                LOGGER.warning(
+                    "CH%d dropped aggregate frame %d after DSP finalization failed: %s",
+                    ch.ch_id + 1,
+                    frame_id,
+                    e,
+                )
                 print(f"[CH{ch.ch_id + 1}] DSP Worker Error: {e}")
                 import traceback
                 traceback.print_exc()
@@ -5702,8 +5831,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # Pull latest display item from each channel
         for ch in CHANNELS:
             latest = None
+            superseded = 0
             while not ch.display_queue.empty():
+                if latest is not None:
+                    superseded += 1
                 latest = ch.display_queue.get()
+
+            if superseded > 0:
+                _warn_drop(
+                    f"ui_superseded:{ch.ch_id}",
+                    superseded,
+                    "UI superseded %d queued CH%d display frames with the latest frame",
+                    superseded,
+                    ch.ch_id + 1,
+                )
 
             if latest is not None:
                 ch.current_display_data = latest

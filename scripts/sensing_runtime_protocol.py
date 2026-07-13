@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import struct
 
 import numpy as np
@@ -9,6 +10,9 @@ try:
     import zmq
 except ImportError:  # pragma: no cover - surfaced lazily by the transport helpers
     zmq = None
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 CTRL_HEADER = b"CTRL"
@@ -240,12 +244,13 @@ def make_tcp_endpoint(ip: str, port: int) -> str:
 
 
 def make_data_sub(endpoint: str, rcvhwm: int = 4, conflate: bool = False):
-    """SUB socket for a sensing data stream (small HWM, drop-old semantics).
+    """SUB socket for a sensing data stream with a bounded receive queue.
 
     ``conflate=True`` used to set ZMQ_CONFLATE. That option is unsafe with
     multipart publishers (libzmq can abort with fq.cpp ``!_more``), so we only
     apply a small RCVHWM and let callers keep the latest complete message in
-    user space.
+    user space. The backend XPUB uses XPUB_NODROP, so HWM overflow is reported
+    and warned at the sender instead of being silent.
     """
     z = _require_zmq()
     ctx = z.Context.instance()
@@ -289,6 +294,12 @@ def recv_sensing_frame(sock, flags: int = 0):
         return None
     if not parts:
         return None
+    if len(parts) > 2:
+        LOGGER.warning(
+            "Sensing frame has %d multipart sections; dropping %d unexpected sections",
+            len(parts),
+            len(parts) - 2,
+        )
     data = parts[0]
     metadata = parts[1] if len(parts) > 1 and parts[1] else None
     return data, metadata

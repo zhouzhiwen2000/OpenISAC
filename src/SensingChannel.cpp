@@ -614,6 +614,7 @@ public:
                 have_rx = true;
             }
             if (rx_item.generation != current_generation) {
+                _log_stale_rx(rx_item.frame_seq, rx_item.generation, current_generation);
                 _recycle_one(std::move(rx_item.samples));
                 have_rx = false;
                 continue;
@@ -627,6 +628,7 @@ public:
                 have_tx = true;
             }
             if (tx_item.generation != current_generation) {
+                _log_stale_tx(tx_item.frame_seq, tx_item.generation, current_generation);
                 have_tx = false;
                 continue;
             }
@@ -725,6 +727,30 @@ private:
         }
     }
 
+    void _log_stale_rx(uint64_t frame_seq, uint64_t frame_generation, uint64_t current_generation) {
+        ++_stale_rx_drop_count;
+        if (_stale_rx_drop_count <= 20 || (_stale_rx_drop_count % 100) == 0) {
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _logical_id
+                          << "] dropping stale RX frame after generation change"
+                          << ": frame_seq=" << frame_seq
+                          << ", frame_generation=" << frame_generation
+                          << ", current_generation=" << current_generation
+                          << ", drop_count=" << _stale_rx_drop_count;
+        }
+    }
+
+    void _log_stale_tx(uint64_t frame_seq, uint64_t frame_generation, uint64_t current_generation) {
+        ++_stale_tx_drop_count;
+        if (_stale_tx_drop_count <= 20 || (_stale_tx_drop_count % 100) == 0) {
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _logical_id
+                          << "] dropping stale TX frame after generation change"
+                          << ": frame_seq=" << frame_seq
+                          << ", frame_generation=" << frame_generation
+                          << ", current_generation=" << current_generation
+                          << ", drop_count=" << _stale_tx_drop_count;
+        }
+    }
+
     void _track_gap(int64_t signed_gap) {
         if (signed_gap == _last_signed_gap) {
             _same_gap_streak++;
@@ -753,6 +779,8 @@ private:
     size_t _frame_samples = 0;
     uint64_t _rx_drop_count = 0;
     uint64_t _tx_drop_count = 0;
+    uint64_t _stale_rx_drop_count = 0;
+    uint64_t _stale_tx_drop_count = 0;
     int64_t _last_signed_gap = std::numeric_limits<int64_t>::min();
     uint64_t _same_gap_streak = 0;
 };
@@ -1121,7 +1149,7 @@ bool SensingChannel::enqueue_tx_symbols(
     tx_frame.frame_seq = frame_seq;
     tx_frame.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     const bool pushed = _rx_io.paired_queue->push_tx(std::move(tx_frame));
-    if (!pushed) {
+    if (!pushed && !_stop_requested.load(std::memory_order_relaxed)) {
         LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
                           << "] paired TX queue full, dropping newest TX sensing frame";
     }
@@ -1139,6 +1167,12 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
         return;
     }
 
+    if (frame.rx_symbols.size() != frame.tx_symbols.size()) {
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                      << "] bistatic RX/TX symbol counts differ; dropping unmatched symbols"
+                      << ": rx_symbols=" << frame.rx_symbols.size()
+                      << ", tx_symbols=" << frame.tx_symbols.size();
+    }
     const size_t symbols_in_frame = std::min(frame.rx_symbols.size(), frame.tx_symbols.size());
     if (symbols_in_frame == 0) {
         return;
@@ -1932,6 +1966,15 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
 void SensingChannel::_handle_alignment() {
     const int32_t discard = _rx_io.discard_samples.load();
     const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());
+    if (discard > 0) {
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                      << "] alignment will drop " << discard
+                      << " leading RX samples to advance the sensing frame boundary";
+    } else if (discard < 0) {
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                      << "] alignment will pad " << -static_cast<int64_t>(discard)
+                      << " leading samples because the aligned sensing frame has no data for them";
+    }
     if (frame_samples > 0 && discard != 0 && (discard % frame_samples) == 0) {
         LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                       << "] applying ALGN with integer-frame shift: discard="
@@ -2018,8 +2061,10 @@ void SensingChannel::_handle_alignment() {
     rx_item.frame_seq = frame_seq;
     rx_item.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     if (!_rx_io.paired_queue->push_rx(std::move(rx_item))) {
-        LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
-                          << "] paired RX queue full during alignment, dropping newest RX frame";
+        if (!_stop_requested.load(std::memory_order_relaxed)) {
+            LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
+                              << "] paired RX queue full during alignment, dropping newest RX frame";
+        }
         _rx_io.next_rx_frame_seq = frame_seq + 1;
         _rx_io.rx_frame_pool.release(std::move(rx_item.samples));
         return;
@@ -2115,8 +2160,10 @@ void SensingChannel::_handle_normal_rx() {
     rx_item.frame_seq = frame_seq;
     rx_item.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     if (!_rx_io.paired_queue->push_rx(std::move(rx_item))) {
-        LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
-                          << "] paired RX queue full, dropping newest RX frame";
+        if (!_stop_requested.load(std::memory_order_relaxed)) {
+            LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
+                              << "] paired RX queue full, dropping newest RX frame";
+        }
         _rx_io.next_rx_frame_seq = frame_seq + 1;
         _rx_io.rx_frame_pool.release(std::move(rx_item.samples));
         return;
@@ -2707,6 +2754,10 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
 
     const size_t symbol_count = std::min(frame.rx_symbols.size(), _cfg.ofdm.sensing_symbol_num);
     if (symbol_count < sensing_params.sensing_symbol_num) {
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                      << "] sensing frame has too few time-domain symbols; dropping missing rows"
+                      << ": received=" << symbol_count
+                      << ", expected=" << sensing_params.sensing_symbol_num;
         _compute.sensing_core.clear_channel_buffer();
     }
     const int plan_input_alignment = fftwf_alignment_of(
@@ -2754,6 +2805,10 @@ void SensingChannel::_sensing_process_freq(const SensingFrame& frame, uint64_t f
     using ProfileClock = std::chrono::steady_clock;
     const size_t symbol_count = std::min(frame.rx_symbols.size(), _cfg.ofdm.sensing_symbol_num);
     if (symbol_count < _compute.sensing_core.params().sensing_symbol_num) {
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                      << "] sensing frame has too few frequency-domain symbols; dropping missing rows"
+                      << ": received=" << symbol_count
+                      << ", expected=" << _compute.sensing_core.params().sensing_symbol_num;
         _compute.sensing_core.clear_channel_buffer();
     }
     const auto prep_start = ProfileClock::now();

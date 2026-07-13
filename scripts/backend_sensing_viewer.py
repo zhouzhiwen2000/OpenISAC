@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import logging
 import os
 import socket
 import struct
@@ -10,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 
 import numpy as np
 import pyqtgraph as pg
@@ -66,6 +67,11 @@ TARGET_TEXT_POINT_LIMIT = 12
 TARGET_SECTOR_RANGE_RINGS = 4
 TARGET_SECTOR_DEFAULT_ZERO_RANGE_BIN = 0
 TARGET_SECTOR_DEFAULT_MAX_RANGE_BINS = 100
+LOGGER = logging.getLogger(__name__)
+
+
+def _drop_report_due(previous: int, total: int) -> bool:
+    return total <= 20 or previous // 100 != total // 100
 
 
 LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
@@ -186,6 +192,12 @@ class BackendViewerRuntime:
         self._pending_lock = threading.Lock()
         self._display_queue: Queue[DisplayFrame] = Queue(maxsize=32)
         self._pending_bundles: dict[int, PendingBundle] = {}
+        self._pending_bundle_drop_count = 0
+        self._duplicate_bundle_part_drop_count = 0
+        self._display_queue_drop_count = 0
+        self._display_superseded_count = 0
+        self._missing_params_drop_count = 0
+        self._control_drop_count = 0
         # ZeroMQ DEALER for the bidirectional control/params channel: it both
         # sends commands and receives PARM/RDY replies from the backend ROUTER.
         # The backend host is known up front (connect target), so the control
@@ -247,17 +259,37 @@ class BackendViewerRuntime:
         with self._params_lock:
             self._viewer_params = LEGACY_VIEWER_PARAMS
         with self._pending_lock:
+            pending_dropped = len(self._pending_bundles)
             self._pending_bundles.clear()
+        if pending_dropped > 0:
+            LOGGER.warning(
+                "Backend sensing viewer reconnect discarded %d incomplete frame bundles",
+                pending_dropped,
+            )
+        display_dropped = 0
         while not self._display_queue.empty():
             try:
                 self._display_queue.get_nowait()
+                display_dropped += 1
             except Empty:
                 break
+        if display_dropped > 0:
+            LOGGER.warning(
+                "Backend sensing viewer reconnect discarded %d queued display frames",
+                display_dropped,
+            )
+        radio_params_dropped = 0
         while not self.radio_params_queue.empty():
             try:
                 self.radio_params_queue.get_nowait()
+                radio_params_dropped += 1
             except Empty:
                 break
+        if radio_params_dropped > 0:
+            LOGGER.warning(
+                "Backend sensing viewer reconnect discarded %d queued radio-parameter updates",
+                radio_params_dropped,
+            )
         with self._phase_bundle_lock:
             self._latest_phase_bundle_frame_id = None
             self._latest_phase_bundle_rd_complex = None
@@ -352,6 +384,12 @@ class BackendViewerRuntime:
             return True
         except Exception as exc:
             self._last_error = str(exc)
+            LOGGER.warning(
+                "Failed to %s via %s; control packet dropped: %s",
+                description,
+                self._control_endpoint,
+                exc,
+            )
             print(f"Failed to {description} via {self._control_endpoint}: {exc}")
             return False
 
@@ -362,6 +400,19 @@ class BackendViewerRuntime:
                 items.append(self._display_queue.get_nowait())
             except Empty:
                 break
+        channel_counts: dict[int, int] = {}
+        for item in items:
+            channel_counts[item.ch_id] = channel_counts.get(item.ch_id, 0) + 1
+        superseded = sum(max(0, count - 1) for count in channel_counts.values())
+        if superseded > 0:
+            previous = self._display_superseded_count
+            self._display_superseded_count += superseded
+            if _drop_report_due(previous, self._display_superseded_count):
+                LOGGER.warning(
+                    "Backend sensing UI superseded %d queued channel frames with newer frames; dropped=%d",
+                    superseded,
+                    self._display_superseded_count,
+                )
         return items
 
     def _set_viewer_params(self, params: ViewerRuntimeParams) -> None:
@@ -381,8 +432,10 @@ class BackendViewerRuntime:
         if radio:
             try:
                 self.radio_params_queue.put_nowait(radio)
-            except Exception:
-                pass
+            except Full:
+                LOGGER.warning(
+                    "Backend sensing viewer radio-parameter queue full; dropping newest update"
+                )
 
     def _aggregate_logical_channel_count(self, payload: bytes) -> int | None:
         if len(payload) < 24:
@@ -401,6 +454,13 @@ class BackendViewerRuntime:
 
     def _handle_control_packet(self, data: bytes, addr: tuple[str, int], _prefix: str) -> bool:
         if len(data) < 8 or data[:4] != CTRL_HEADER:
+            self._control_drop_count += 1
+            if _drop_report_due(self._control_drop_count - 1, self._control_drop_count):
+                LOGGER.warning(
+                    "Backend sensing viewer dropped an invalid control packet; bytes=%d, dropped=%d",
+                    len(data),
+                    self._control_drop_count,
+                )
             return False
 
         command = data[4:8]
@@ -408,6 +468,14 @@ class BackendViewerRuntime:
             params = parse_params_packet(data)
             if params is not None:
                 self._set_viewer_params(params)
+            else:
+                self._control_drop_count += 1
+                if _drop_report_due(self._control_drop_count - 1, self._control_drop_count):
+                    LOGGER.warning(
+                        "Backend sensing viewer dropped an invalid params packet; bytes=%d, dropped=%d",
+                        len(data),
+                        self._control_drop_count,
+                    )
         elif command == READY_COMMAND:
             if self.get_viewer_params().version == 0 or self._last_error is not None:
                 self.request_viewer_params()
@@ -431,6 +499,7 @@ class BackendViewerRuntime:
             except Exception as exc:
                 if self._running:
                     self._last_error = str(exc)
+                    LOGGER.warning("Backend viewer control receive failed: %s", exc)
                     print(f"[CTRL] Receiver socket error: {exc}")
                 continue
 
@@ -439,25 +508,58 @@ class BackendViewerRuntime:
                 self._handle_control_packet(data, None, "[CTRL]")
             except Exception as exc:
                 self._last_error = str(exc)
+                LOGGER.warning("Backend viewer dropped an invalid control reply: %s", exc)
                 print(f"[CTRL] Receiver error: {exc}")
 
     def _prune_pending_bundles(self) -> None:
         with self._pending_lock:
             while len(self._pending_bundles) > PENDING_BUNDLE_LIMIT:
                 oldest_frame_id = min(self._pending_bundles.keys())
-                self._pending_bundles.pop(oldest_frame_id, None)
+                pending = self._pending_bundles.pop(oldest_frame_id, None)
+                self._pending_bundle_drop_count += 1
+                LOGGER.warning(
+                    "Backend sensing viewer evicted incomplete frame bundle %d: raw=%s, metadata=%s, dropped=%d",
+                    oldest_frame_id,
+                    bool(pending and pending.raw_frames is not None),
+                    bool(pending and pending.metadata_frames is not None),
+                    self._pending_bundle_drop_count,
+                )
 
     def _store_raw_frames(self, frame_id: int, frames: dict[int, np.ndarray]) -> None:
         with self._pending_lock:
             pending = self._pending_bundles.setdefault(int(frame_id), PendingBundle())
+            duplicate = pending.raw_frames is not None
             pending.raw_frames = frames
+        if duplicate:
+            self._duplicate_bundle_part_drop_count += 1
+            if _drop_report_due(
+                self._duplicate_bundle_part_drop_count - 1,
+                self._duplicate_bundle_part_drop_count,
+            ):
+                LOGGER.warning(
+                    "Backend sensing viewer replaced duplicate raw data for frame %d; dropped=%d",
+                    frame_id,
+                    self._duplicate_bundle_part_drop_count,
+                )
         self._prune_pending_bundles()
         self._try_dispatch_bundle(frame_id)
 
     def _store_metadata_frames(self, frame_id: int, frames: dict[int, object]) -> None:
         with self._pending_lock:
             pending = self._pending_bundles.setdefault(int(frame_id), PendingBundle())
+            duplicate = pending.metadata_frames is not None
             pending.metadata_frames = frames
+        if duplicate:
+            self._duplicate_bundle_part_drop_count += 1
+            if _drop_report_due(
+                self._duplicate_bundle_part_drop_count - 1,
+                self._duplicate_bundle_part_drop_count,
+            ):
+                LOGGER.warning(
+                    "Backend sensing viewer replaced duplicate metadata for frame %d; dropped=%d",
+                    frame_id,
+                    self._duplicate_bundle_part_drop_count,
+                )
         self._prune_pending_bundles()
         self._try_dispatch_bundle(frame_id)
 
@@ -489,6 +591,12 @@ class BackendViewerRuntime:
                 )
             except Exception as exc:
                 self._last_error = str(exc)
+                LOGGER.warning(
+                    "Failed to process CH%d frame %d; dropping channel frame: %s",
+                    ch_id + 1,
+                    frame_id,
+                    exc,
+                )
                 print(f"Failed to process CH{ch_id + 1} frame {frame_id}: {exc}")
                 continue
 
@@ -502,9 +610,31 @@ class BackendViewerRuntime:
             if self._display_queue.full():
                 try:
                     self._display_queue.get_nowait()
-                except Exception:
+                    self._display_queue_drop_count += 1
+                    if _drop_report_due(
+                        self._display_queue_drop_count - 1,
+                        self._display_queue_drop_count,
+                    ):
+                        LOGGER.warning(
+                            "Backend sensing viewer display queue full; dropping oldest frame: dropped=%d",
+                            self._display_queue_drop_count,
+                        )
+                except Empty:
                     pass
-            self._display_queue.put(display_frame)
+            try:
+                self._display_queue.put_nowait(display_frame)
+            except Full:
+                self._display_queue_drop_count += 1
+                if _drop_report_due(
+                    self._display_queue_drop_count - 1,
+                    self._display_queue_drop_count,
+                ):
+                    LOGGER.warning(
+                        "Backend sensing viewer display queue remained full; dropping newest CH%d frame %d: dropped=%d",
+                        ch_id + 1,
+                        frame_id,
+                        self._display_queue_drop_count,
+                    )
 
         with self._phase_bundle_lock:
             self._latest_phase_bundle_frame_id = int(frame_id)
@@ -698,6 +828,7 @@ class BackendViewerRuntime:
             except Exception as exc:
                 if self._running:
                     self._last_error = str(exc)
+                    LOGGER.warning("Backend sensing viewer poll failed: %s", exc)
                     print(f"Receiver socket error: {exc}")
                 continue
 
@@ -720,6 +851,15 @@ class BackendViewerRuntime:
                         if detected_count is not None:
                             self.ensure_channel_count(detected_count, reason="aggregate frame")
                     request_params_if_needed()
+                    self._missing_params_drop_count += 1
+                    if _drop_report_due(
+                        self._missing_params_drop_count - 1,
+                        self._missing_params_drop_count,
+                    ):
+                        LOGGER.warning(
+                            "Backend sensing viewer dropped a frame because viewer parameters are unavailable; dropped=%d",
+                            self._missing_params_drop_count,
+                        )
                     continue
 
                 frame_counter += 1
@@ -730,6 +870,7 @@ class BackendViewerRuntime:
                     self._handle_completed_payload(hint, metadata_payload, is_metadata=True)
             except Exception as exc:
                 self._last_error = str(exc)
+                LOGGER.warning("Backend sensing viewer dropped a received frame: %s", exc)
                 print(f"Receiver error: {exc}")
                 self.request_viewer_params()
 

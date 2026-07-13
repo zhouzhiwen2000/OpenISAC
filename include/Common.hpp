@@ -4595,9 +4595,15 @@ private:
 struct SensingFrame {
     std::vector<AlignedVector> rx_symbols;  // Received symbol collection
     std::vector<AlignedVector> tx_symbols;  // Corresponding transmitted symbol collection
+    // The local downlink estimate produced from the same received frame.  eRTM
+    // consumes it on the sensing thread so the TO measurement and the sensing
+    // correction share one downlink-frame coordinate system.
+    AlignedVector ertm_downlink_channel_freq;
     float CFO;
     float SFO;
     float delay_offset;
+    int alignment_samples = 0;
+    bool force_ertm_remeasure = false;
     uint64_t generation = 0;
 };
 
@@ -5033,6 +5039,70 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     return packet;
 }
 
+struct UdpDatagramReceiveResult {
+    ssize_t bytes = -1;
+    bool truncated = false;
+    bool has_kernel_drop_count = false;
+    uint32_t kernel_drop_count = 0;
+};
+
+inline bool enable_udp_rx_overflow_reporting(int sockfd) {
+#ifdef SO_RXQ_OVFL
+    const int enabled = 1;
+    return setsockopt(
+               sockfd, SOL_SOCKET, SO_RXQ_OVFL,
+               &enabled, sizeof(enabled)) == 0;
+#else
+    (void)sockfd;
+    return false;
+#endif
+}
+
+/**
+ * @brief Receive one UDP datagram and expose kernel/truncation loss metadata.
+ *
+ * SO_RXQ_OVFL reports the cumulative number of datagrams dropped by the local
+ * socket receive queue. MSG_TRUNC identifies an application buffer that was
+ * too small for the datagram. The caller owns delta tracking and warning logs.
+ */
+inline UdpDatagramReceiveResult receive_udp_datagram(
+    int sockfd, void* buffer, size_t buffer_size)
+{
+    UdpDatagramReceiveResult result;
+    iovec iov{};
+    iov.iov_base = buffer;
+    iov.iov_len = buffer_size;
+
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(uint32_t))]{};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    result.bytes = recvmsg(sockfd, &msg, 0);
+    if (result.bytes < 0) {
+        return result;
+    }
+    result.truncated = (msg.msg_flags & MSG_TRUNC) != 0;
+#ifdef SO_RXQ_OVFL
+    for (cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+         cmsg != nullptr;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_RXQ_OVFL &&
+            cmsg->cmsg_len >= CMSG_LEN(sizeof(uint32_t))) {
+            std::memcpy(
+                &result.kernel_drop_count,
+                CMSG_DATA(cmsg),
+                sizeof(result.kernel_drop_count));
+            result.has_kernel_drop_count = true;
+            break;
+        }
+    }
+#endif
+    return result;
+}
+
 /**
  * @brief Base Class for UDP Senders.
  * 
@@ -5441,6 +5511,18 @@ private:
 class ZmqPubSender {
 protected:
     std::shared_ptr<zmq_transport::SharedPubSocket> pub_;
+    std::atomic<uint64_t> _send_drop_count{0};
+
+    void _warn_send_drop(const char* kind, size_t part_count, size_t size_bytes) {
+        const uint64_t dropped =
+            _send_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (dropped <= 20 || (dropped % 100) == 0) {
+            LOG_G_WARN_M(Config) << "ZeroMQ PUB " << kind
+                         << " failed; dropping outbound frame: parts=" << part_count
+                         << ", bytes=" << size_bytes
+                         << ", dropped=" << dropped;
+        }
+    }
 
 public:
     ZmqPubSender(const std::string& ip, uint16_t port) {
@@ -5450,12 +5532,24 @@ public:
     virtual ~ZmqPubSender() = default;
 
     template <typename T>
-    void send_raw(const T* data, size_t size_bytes) {
-        pub_->send_single(static_cast<const void*>(data), size_bytes);
+    bool send_raw(const T* data, size_t size_bytes) {
+        if (!pub_->send_single(static_cast<const void*>(data), size_bytes)) {
+            _warn_send_drop("single-part send", 1, size_bytes);
+            return false;
+        }
+        return true;
     }
 
-    void send_frame(const std::vector<zmq_transport::MsgPart>& parts) {
-        pub_->send_multipart(parts);
+    bool send_frame(const std::vector<zmq_transport::MsgPart>& parts) {
+        if (!pub_->send_multipart(parts)) {
+            size_t size_bytes = 0;
+            for (const auto& part : parts) {
+                size_bytes += part.size;
+            }
+            _warn_send_drop("multipart send", parts.size(), size_bytes);
+            return false;
+        }
+        return true;
     }
 };
 
@@ -5478,6 +5572,37 @@ public:
 };
 
 /**
+ * @brief Owned eRTM debug frame handed from DSP to the asynchronous sender.
+ *
+ * Keeping the multipart buffers alive in one movable object lets the producer
+ * enqueue without calling the ZeroMQ socket.  The sender thread only builds
+ * byte views after it owns the frame.
+ */
+struct ErtmDebugFrameData {
+    std::vector<uint8_t> header;
+    AlignedVector uplink_delay;
+    AlignedVector downlink_delay;
+    std::vector<float> correlation;
+    AlignedVector corrected_uplink_delay;
+    AlignedVector corrected_downlink_delay;
+};
+
+inline std::vector<zmq_transport::MsgPart> make_ertm_debug_msg_parts(
+    const ErtmDebugFrameData& frame)
+{
+    return {
+        {frame.header.data(), frame.header.size()},
+        {frame.uplink_delay.data(), frame.uplink_delay.size() * sizeof(std::complex<float>)},
+        {frame.downlink_delay.data(), frame.downlink_delay.size() * sizeof(std::complex<float>)},
+        {frame.correlation.data(), frame.correlation.size() * sizeof(float)},
+        {frame.corrected_uplink_delay.data(),
+         frame.corrected_uplink_delay.size() * sizeof(std::complex<float>)},
+        {frame.corrected_downlink_delay.data(),
+         frame.corrected_downlink_delay.size() * sizeof(std::complex<float>)},
+    };
+}
+
+/**
  * @brief VOFA+ FireWater debug sender.
  *
  * Sends N float channels in little-endian with FireWater tail:
@@ -5490,7 +5615,22 @@ public:
           interval_frames_(std::max<size_t>(interval_frames, 1)) {}
 
     void send_channels(const float* channels, size_t channel_count) {
-        if (channels == nullptr || channel_count == 0 || channel_count > kMaxChannels) {
+        if (channel_count == 0) {
+            return;
+        }
+        if (channels == nullptr) {
+            const uint64_t dropped = ++send_drop_count_;
+            LOG_RT_WARN_M(Demod) << "VOFA+ debug frame has a null payload; dropping frame"
+                          << ": channels=" << channel_count
+                          << ", dropped=" << dropped;
+            return;
+        }
+        if (channel_count > kMaxChannels) {
+            const uint64_t dropped = ++send_drop_count_;
+            LOG_RT_WARN_M(Demod) << "VOFA+ debug frame has too many channels; dropping frame"
+                          << ": channels=" << channel_count
+                          << ", max_channels=" << kMaxChannels
+                          << ", dropped=" << dropped;
             return;
         }
         if (++frame_counter_ < interval_frames_) {
@@ -5501,7 +5641,17 @@ public:
         const size_t payload_bytes = channel_count * sizeof(float);
         std::memcpy(packet_buffer_.data(), channels, payload_bytes);
         std::memcpy(packet_buffer_.data() + payload_bytes, kFireWaterTail.data(), kFireWaterTail.size());
-        udp_sender_.send(packet_buffer_.data(), payload_bytes + kFireWaterTail.size());
+        try {
+            udp_sender_.send(packet_buffer_.data(), payload_bytes + kFireWaterTail.size());
+        } catch (const std::exception& e) {
+            const uint64_t dropped = ++send_drop_count_;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_RT_WARN_M(Demod) << "VOFA+ UDP debug send failed; dropping frame"
+                              << ": channels=" << channel_count
+                              << ", dropped=" << dropped
+                              << ", error=" << e.what();
+            }
+        }
     }
 
     template <size_t N>
@@ -5520,6 +5670,7 @@ private:
     UdpSender udp_sender_;
     size_t interval_frames_ = 64;
     size_t frame_counter_ = 0;
+    uint64_t send_drop_count_ = 0;
     std::array<uint8_t, kMaxChannels * sizeof(float) + kFireWaterTail.size()> packet_buffer_{};
 };
 
@@ -5574,6 +5725,7 @@ public:
         if (_send_thread.joinable()) {
             _send_thread.join();
         }
+        _data_queue.clear();
     }
 
     void push_data(const AlignedVector& data) {
@@ -5589,8 +5741,7 @@ public:
         uint64_t first_symbol_index,
         std::vector<uint8_t> metadata)
     {
-        if (!_enabled) return;
-        if (!_running.load()) return;
+        if (!_accepting_frames()) return;
 
         FrameData frame_data;
         frame_data.data = data;
@@ -5612,8 +5763,7 @@ public:
         uint64_t first_symbol_index,
         std::vector<uint8_t> metadata)
     {
-        if (!_enabled) return;
-        if (!_running.load()) return;
+        if (!_accepting_frames()) return;
 
         FrameData frame_data;
         frame_data.data = std::move(data);
@@ -5627,8 +5777,7 @@ public:
         uint32_t mask_hash,
         uint64_t frame_start_symbol_index)
     {
-        if (!_enabled) return;
-        if (!_running.load()) return;
+        if (!_accepting_frames()) return;
 
         FrameData frame_data;
         frame_data.data = data;
@@ -5643,8 +5792,7 @@ public:
         uint32_t mask_hash,
         uint64_t frame_start_symbol_index)
     {
-        if (!_enabled) return;
-        if (!_running.load()) return;
+        if (!_accepting_frames()) return;
 
         FrameData frame_data;
         frame_data.data = std::move(data);
@@ -5670,8 +5818,7 @@ public:
         uint64_t first_symbol_index,
         std::vector<uint8_t> metadata
     ) {
-        if (!_enabled) return;
-        if (!_running.load()) return;
+        if (!_accepting_frames()) return;
 
         FrameData frame_data;
         frame_data.owner = std::move(owner);
@@ -5689,8 +5836,7 @@ public:
         uint32_t mask_hash,
         uint64_t frame_start_symbol_index
     ) {
-        if (!_enabled) return;
-        if (!_running.load()) return;
+        if (!_accepting_frames()) return;
 
         FrameData frame_data;
         frame_data.owner = std::move(owner);
@@ -5706,10 +5852,24 @@ private:
     bool _enabled = true;
     SensingOnWireFormat _wire_data_format = SensingOnWireFormat::ComplexFloat32;
 
+    bool _accepting_frames() {
+        return _enabled && _running.load(std::memory_order_acquire);
+    }
+
     void _queue_frame(FrameData&& frame_data) {
-        spsc_wait_push(_data_queue, std::move(frame_data), [this]() {
-            return !_running.load(std::memory_order_acquire);
-        });
+        if (_data_queue.try_push(std::move(frame_data))) {
+            return;
+        }
+        if (!_running.load(std::memory_order_acquire)) {
+            return;
+        }
+        const uint64_t dropped =
+            _queue_full_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (dropped <= 20 || (dropped % 100) == 0) {
+            LOG_RT_WARN_M(Sensing) << "Sensing sender queue full; dropping newest frame"
+                          << ": queue=" << _data_queue.size() << "/" << _data_queue.capacity()
+                          << ", dropped=" << dropped;
+        }
     }
 
     void run() {
@@ -5905,6 +6065,7 @@ private:
     }
 
     std::atomic<bool> _running{false};
+    std::atomic<uint64_t> _queue_full_drop_count{0};
     SPSCRingBuffer<FrameData> _data_queue;
     std::thread _send_thread;
 };
@@ -5965,6 +6126,9 @@ public:
         if (_send_thread.joinable()) {
             _send_thread.join();
         }
+        for (auto& queue : _channel_queues) {
+            queue.clear();
+        }
     }
 
     uint32_t channel_count() const {
@@ -5989,7 +6153,7 @@ public:
         uint64_t first_symbol_index,
         std::vector<uint8_t> metadata)
     {
-        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        if (!_accepting_frames()) return;
         FrameData frame_data;
         frame_data.data = data;
         frame_data.first_symbol_index = first_symbol_index;
@@ -6007,7 +6171,7 @@ public:
         uint64_t first_symbol_index,
         std::vector<uint8_t> metadata)
     {
-        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        if (!_accepting_frames()) return;
         FrameData frame_data;
         frame_data.data = std::move(data);
         frame_data.first_symbol_index = first_symbol_index;
@@ -6021,7 +6185,7 @@ public:
         uint32_t mask_hash,
         uint64_t frame_start_symbol_index)
     {
-        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        if (!_accepting_frames()) return;
         FrameData frame_data;
         frame_data.data = data;
         frame_data.first_symbol_index = frame_start_symbol_index;
@@ -6036,7 +6200,7 @@ public:
         uint32_t mask_hash,
         uint64_t frame_start_symbol_index)
     {
-        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        if (!_accepting_frames()) return;
         FrameData frame_data;
         frame_data.data = std::move(data);
         frame_data.first_symbol_index = frame_start_symbol_index;
@@ -6063,7 +6227,7 @@ public:
         uint64_t first_symbol_index,
         std::vector<uint8_t> metadata)
     {
-        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        if (!_accepting_frames()) return;
         FrameData frame_data;
         frame_data.owner = std::move(owner);
         frame_data.external_data = data;
@@ -6081,7 +6245,7 @@ public:
         uint32_t mask_hash,
         uint64_t frame_start_symbol_index)
     {
-        if (!_enabled || !_running.load(std::memory_order_acquire)) return;
+        if (!_accepting_frames()) return;
         FrameData frame_data;
         frame_data.owner = std::move(owner);
         frame_data.external_data = data;
@@ -6105,6 +6269,10 @@ private:
 
     static constexpr size_t kMaxPendingAggregateFrames = 4;
 
+    bool _accepting_frames() {
+        return _enabled && _running.load(std::memory_order_acquire);
+    }
+
     int32_t _channel_index(uint32_t channel_id) const {
         if (channel_id >= _channel_index_by_id.size()) {
             return -1;
@@ -6119,9 +6287,21 @@ private:
             return;
         }
         auto& queue = _channel_queues[static_cast<size_t>(channel_index)];
-        spsc_wait_push(queue, std::move(frame_data), [this]() {
-            return !_running.load(std::memory_order_acquire);
-        });
+        if (queue.try_push(std::move(frame_data))) {
+            return;
+        }
+        if (!_running.load(std::memory_order_acquire)) {
+            return;
+        }
+        const uint64_t dropped =
+            _queue_full_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (dropped <= 20 || (dropped % 100) == 0) {
+            LOG_RT_WARN_M(SensingAggregate)
+                << "Aggregated sensing channel queue full; dropping newest frame"
+                << ": channel_id=" << channel_id
+                << ", queue=" << queue.size() << "/" << queue.capacity()
+                << ", dropped=" << dropped;
+        }
     }
 
     static size_t _payload_complex_count(const FrameData& frame_data) {
@@ -6292,6 +6472,15 @@ private:
                 if (!pending.present[channel_index]) {
                     pending.present[channel_index] = 1;
                     pending.received_channels++;
+                } else {
+                    const uint64_t dropped =
+                        _duplicate_channel_drop_count.fetch_add(
+                            1, std::memory_order_relaxed) + 1;
+                    LOG_G_WARN_M(SensingAggregate)
+                        << "Aggregated sensing received a duplicate channel frame; replacing older data"
+                        << ": channel_id=" << _channel_ids[channel_index]
+                        << ", frame_start_symbol_index=" << frame_start_symbol_index
+                        << ", dropped=" << dropped;
                 }
                 pending.frames[channel_index] = std::move(frame_data);
 
@@ -6323,6 +6512,8 @@ private:
     std::vector<SPSCRingBuffer<FrameData>> _channel_queues;
     std::map<uint64_t, PendingAggregateFrame> _pending_frames;
     std::atomic<bool> _running{false};
+    std::atomic<uint64_t> _queue_full_drop_count{0};
+    std::atomic<uint64_t> _duplicate_channel_drop_count{0};
     std::thread _send_thread;
 };
 
@@ -6516,12 +6707,14 @@ public:
         size_t queue_size,
         SendFunction send_func,
         std::chrono::milliseconds interval,
-        DeliveryMode mode = DeliveryMode::QueuedBlocking
+        DeliveryMode mode = DeliveryMode::QueuedBlocking,
+        std::string name = "DataSender"
     )
         : queue_(queue_size),
           send_func_(std::move(send_func)),
           send_interval_(interval),
           delivery_mode_(mode),
+          name_(std::move(name)),
           running_(false) {}
 
     ~DataSender() {
@@ -6534,7 +6727,19 @@ public:
             // Display/telemetry path: never block the producer. If the queue is
             // full, drop the newest update and let the sender drain to the most
             // recent queued snapshot on its next scheduled wake-up.
-            queue_.try_push(std::move(data));
+            if (!queue_.try_push(std::move(data))) {
+                if (!running_.load(std::memory_order_acquire)) {
+                    return;
+                }
+                const uint64_t dropped =
+                    queue_full_drop_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dropped <= 20 || (dropped % 100) == 0) {
+                    LOG_RT_WARN_M(Config) << name_
+                                  << " queue full; dropping newest outbound update"
+                                  << ": queue=" << queue_.size() << "/" << queue_.capacity()
+                                  << ", dropped=" << dropped;
+                }
+            }
             return;
         }
         spsc_wait_push(queue_, std::move(data), [this]() {
@@ -6552,6 +6757,7 @@ public:
         if (!running_) return;
         running_.store(false);
         if (thread_.joinable()) thread_.join();
+        queue_.clear();
     }
 
 private:
@@ -6570,14 +6776,27 @@ private:
                 }
 
                 DataPackage newer;
+                size_t superseded = 0;
                 while (queue_.try_pop(newer)) {
                     latest = std::move(newer);
+                    ++superseded;
+                }
+                if (superseded > 0) {
+                    const uint64_t dropped =
+                        superseded_drop_count_.fetch_add(
+                            superseded, std::memory_order_relaxed) + superseded;
+                    if (dropped <= 20 || (dropped % 100) < superseded) {
+                        LOG_G_WARN_M(Config) << name_
+                                     << " superseded queued updates with the latest frame"
+                                     << ": dropped=" << dropped;
+                    }
                 }
 
                 try {
                     send_func_(latest);
                 } catch (const std::exception& e) {
-                    LOG_G_WARN_M(Config) << "DataSender error: " << e.what();
+                    LOG_G_WARN_M(Config) << name_
+                                 << " send failed; dropping outbound update: " << e.what();
                 }
                 continue;
             }
@@ -6594,7 +6813,8 @@ private:
             try {
                 send_func_(data);
             } catch (const std::exception& e) {
-                LOG_G_WARN_M(Config) << "DataSender error: " << e.what();
+                LOG_G_WARN_M(Config) << name_
+                             << " send failed; dropping outbound update: " << e.what();
             }
 
             // Update next send time
@@ -6611,8 +6831,11 @@ private:
     SendFunction send_func_;
     std::chrono::milliseconds send_interval_;
     DeliveryMode delivery_mode_;
+    std::string name_;
     std::thread thread_;
     std::atomic<bool> running_;
+    std::atomic<uint64_t> queue_full_drop_count_{0};
+    std::atomic<uint64_t> superseded_drop_count_{0};
 };
 
 /**
@@ -6784,12 +7007,22 @@ private:
             }
         }
         for (const auto& peer : peers) {
-            _router->post_send(peer, data, size);
+            if (!_router->post_send(peer, data, size)) {
+                const uint64_t dropped =
+                    _control_outbound_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                LOG_G_WARN_M(Config) << "Control outbound queue evicted or rejected a reply"
+                             << ": dropped=" << dropped;
+            }
         }
     }
 
     void _send_to(const ControlPeer& peer, const void* data, size_t size) {
-        _router->post_send(peer, data, size);
+        if (!_router->post_send(peer, data, size)) {
+            const uint64_t dropped =
+                _control_outbound_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            LOG_G_WARN_M(Config) << "Control outbound queue evicted or rejected a reply"
+                         << ": dropped=" << dropped;
+        }
     }
 
     void _run() {
@@ -6803,8 +7036,15 @@ private:
             }
             // Flush replies/heartbeats queued by other threads (the ROUTER
             // socket is only ever touched on this thread).
-            _router->flush();
+            const size_t failed = _router->flush();
+            if (_running.load(std::memory_order_acquire) && failed > 0) {
+                const uint64_t dropped =
+                    _control_send_drop_count.fetch_add(failed, std::memory_order_relaxed) + failed;
+                LOG_G_WARN_M(Config) << "Control ROUTER failed to deliver " << failed
+                             << " queued replies: dropped=" << dropped;
+            }
         }
+        _router->flush();
     }
 
     void _dispatch(const ControlPeer& identity, const std::vector<uint8_t>& payload) {
@@ -6918,6 +7158,8 @@ private:
     std::unique_ptr<zmq_transport::ControlRouter> _router;
     std::atomic<bool> _running{false};
     std::thread _thread;
+    std::atomic<uint64_t> _control_outbound_drop_count{0};
+    std::atomic<uint64_t> _control_send_drop_count{0};
     mutable std::mutex _mutex;
     std::unordered_map<std::string, Callback> _handlers;
     std::unordered_map<std::string, RequestCallback> _request_handlers;

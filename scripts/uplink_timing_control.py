@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import sys
 import time
 from argparse import ArgumentParser, Namespace
@@ -31,6 +32,9 @@ try:
     import zmq
 except ImportError as exc:  # pragma: no cover - startup dependency check
     raise SystemExit("pyzmq is required. Install it with `pip install pyzmq`.") from exc
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def build_status_request(command: bytes) -> bytes:
@@ -183,9 +187,11 @@ class TimingControlRow(QtWidgets.QGroupBox):
         try:
             self._socket.send(build_control_command(self.command, int(value)), flags=zmq.NOBLOCK)
         except zmq.Again:
+            LOGGER.warning("Uplink timing control socket busy; dropping %r command", self.command)
             self._set_status("Control socket is busy; command dropped")
             return
         except Exception as exc:
+            LOGGER.warning("Uplink timing command send failed; dropping %r command: %s", self.command, exc)
             self._set_status(f"Send failed: {exc}")
             return
         self.value_spin.setValue(int(value))
@@ -206,8 +212,10 @@ class TimingControlRow(QtWidgets.QGroupBox):
             self._last_request_s = time.monotonic()
             self._pending_request = True
         except zmq.Again:
+            LOGGER.warning("Uplink timing control socket busy; dropping %r status request", self.command)
             return
         except Exception as exc:
+            LOGGER.warning("Uplink timing status request failed; dropping %r request: %s", self.command, exc)
             self._set_status(f"Request failed: {exc}")
 
     def poll_socket(self) -> None:

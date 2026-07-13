@@ -167,19 +167,24 @@ public:
         _data_packet_ingest_ts(cfg.downlink_pipeline.data_packet_buffer_size),
         _uplink_channel_sender(2, [this](const auto& data) {
             _uplink_channel_pub->send_container(data);
-        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+           "BS uplink channel debug sender"),
         _uplink_pdf_sender(2, [this](const auto& data) {
             _uplink_pdf_pub->send_container(data);
-        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+           "BS uplink delay-spectrum debug sender"),
         _uplink_constellation_sender(10, [this](const auto& data) {
             _uplink_constellation_pub->send_container(data);
-        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+           "BS uplink constellation debug sender"),
         _uplink_self_channel_sender(2, [this](const auto& data) {
             _uplink_self_channel_pub->send_container(data);
-        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+           "BS uplink self-channel debug sender"),
         _uplink_self_pdf_sender(2, [this](const auto& data) {
             _uplink_self_pdf_pub->send_container(data);
-        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly)
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+           "BS uplink self-spectrum debug sender")
     {
         _measurement_tx_gain_x10.store(
             static_cast<int32_t>(std::llround(cfg.downlink.tx_gain * 10.0)),
@@ -378,6 +383,15 @@ public:
         if (_ldpc_encode_thread.joinable()) _ldpc_encode_thread.join();
         _tx_async_exit_requested.store(true, std::memory_order_relaxed);
         if (_tx_async_thread.joinable()) _tx_async_thread.join();
+
+        {
+            std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+            _arq_pending_feedback.clear();
+        }
+        _raw_udp_buffer.clear();
+        _data_packet_buffer.clear();
+        _circular_buffer.clear();
+        _data_packet_ingest_ts.clear();
 
         for (auto& ch : _sensing_channels) {
             ch->join();
@@ -903,9 +917,8 @@ private:
                 channel_freq,
                 payload,
                 &pack_error)) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] failed to pack TO payload: " << pack_error;
-            }
+            LOG_G_WARN_M(Ertm) << "[eRTM] failed to pack TO payload; dropping measurement: "
+                         << pack_error;
             _ertm_last_injected_frame = current_frame;
             return false;
         }
@@ -913,12 +926,10 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
         const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
         if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload does not fit in one downlink frame: payload_bytes="
-                             << payload.size()
-                             << ", qpsk_syms=" << packet_qpsk_symbols
-                             << ", frame_capacity=" << _data_resource_layout.payload_re_count;
-            }
+            LOG_G_WARN_M(Ertm) << "[eRTM] TO payload does not fit in one downlink frame; dropping measurement"
+                         << ": payload_bytes=" << payload.size()
+                         << ", qpsk_syms=" << packet_qpsk_symbols
+                         << ", frame_capacity=" << _data_resource_layout.payload_re_count;
             _ertm_last_injected_frame = current_frame;
             return false;
         }
@@ -1897,7 +1908,11 @@ private:
                 if (do_latency_profile) {
                     const int64_t encoded_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-                    _data_packet_ingest_ts.try_push(PktTimestamps{pkt_ingest_ns, encoded_ns});
+                    if (!_data_packet_ingest_ts.try_push(
+                            PktTimestamps{pkt_ingest_ns, encoded_ns})) {
+                        LOG_RT_WARN_HZ_M(ModProfiling, 5)
+                            << "[BS profiling] timestamp queue full; dropping packet timing metadata";
+                    }
                 }
                 break;
             }
@@ -1925,7 +1940,14 @@ private:
                                               std::move(arq_copy), tx_due_ms)) {
                 _arq_dl_packets_tracked.fetch_add(1, std::memory_order_relaxed);
             } else {
-                _arq_dl_track_failures.fetch_add(1, std::memory_order_relaxed);
+                const uint64_t failures =
+                    _arq_dl_track_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (failures <= 20 || (failures % 100) == 0) {
+                    LOG_G_WARN_M(ArqDl) << "[BS ARQ DL] failed to track transmitted packet"
+                                 << ": seq=" << arq_seq
+                                 << ", failures=" << failures
+                                 << "; packet cannot be retransmitted";
+                }
                 _log_arq_profile_if_due("track_failed", now);
             }
         }
@@ -1947,11 +1969,20 @@ private:
             ArqFeedback ack;
             if (ArqFeedback::try_unpack(data, len, ack)) {
                 const int64_t now = arq_now_ms();
+                size_t released = 0;
                 if (ack.direction != 0) {
-                    _arq_dl_ack_direction_mismatch.fetch_add(1, std::memory_order_relaxed);
+                    const uint64_t dropped =
+                        _arq_dl_ack_direction_mismatch.fetch_add(
+                            1, std::memory_order_relaxed) + 1;
+                    if (dropped <= 20 || (dropped % 100) == 0) {
+                        LOG_G_WARN_M(ArqDl) << "[BS ARQ DL] ACK direction mismatch; dropping feedback"
+                                     << ": direction=" << static_cast<int>(ack.direction)
+                                     << ", expected=0, dropped=" << dropped;
+                    }
                     _log_arq_profile_if_due("dl_ack_direction_bad", now);
+                } else {
+                    released = _dl_arq_tx.process_ack(ack, now);
                 }
-                const size_t released = _dl_arq_tx.process_ack(ack, now);
                 _arq_dl_acks_received.fetch_add(1, std::memory_order_relaxed);
                 _arq_dl_ack_released_total.fetch_add(released, std::memory_order_relaxed);
                 _arq_dl_last_ack_base.store(ack.ack_base, std::memory_order_relaxed);
@@ -1959,14 +1990,40 @@ private:
                 _arq_dl_last_ack_released.store(released, std::memory_order_relaxed);
                 _log_arq_profile_if_due("dl_ack", now);
             } else {
-                _arq_dl_invalid_feedback.fetch_add(1, std::memory_order_relaxed);
+                const uint64_t dropped =
+                    _arq_dl_invalid_feedback.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dropped <= 20 || (dropped % 100) == 0) {
+                    LOG_G_WARN_M(ArqDl) << "[BS ARQ DL] invalid ACK feedback; dropping packet"
+                                 << ": payload_bytes=" << len
+                                 << ", dropped=" << dropped;
+                }
                 _log_arq_profile_if_due("invalid_feedback", arq_now_ms());
             }
             return true; // consumed; do not forward to UDP
         }
         _arq_ul_intercept_data_flags.fetch_add(1, std::memory_order_relaxed);
         if (_cfg.uplink_arq.arq_enabled) {
+            const uint64_t skip_before = _ul_arq_rx.skip_count();
+            const uint64_t outside_before = _ul_arq_rx.outside_window_drop_count();
+            const uint64_t reorder_before = _ul_arq_rx.reorder_drop_count();
+            const uint64_t skip_buffer_before = _ul_arq_rx.skip_buffer_drop_count();
             const bool accepted = _ul_arq_rx.process_received(seq, data, len);
+            if (_ul_arq_rx.skip_count() != skip_before) {
+                LOG_G_WARN_M(ArqUl) << "[BS ARQ UL] advanced receive window past missing packets"
+                             << ": seq=" << seq
+                             << ", skip_count=" << _ul_arq_rx.skip_count();
+            }
+            if (_ul_arq_rx.outside_window_drop_count() != outside_before) {
+                LOG_G_WARN_M(ArqUl) << "[BS ARQ UL] packet remained outside receive window; dropping"
+                             << ": seq=" << seq
+                             << ", dropped=" << _ul_arq_rx.outside_window_drop_count();
+            }
+            if (_ul_arq_rx.reorder_drop_count() != reorder_before ||
+                _ul_arq_rx.skip_buffer_drop_count() != skip_buffer_before) {
+                LOG_G_WARN_M(ArqUl) << "[BS ARQ UL] ordered-delivery buffer discarded packets"
+                             << ": capacity_drops=" << _ul_arq_rx.reorder_drop_count()
+                             << ", window_skip_drops=" << _ul_arq_rx.skip_buffer_drop_count();
+            }
             if (accepted) {
                 _arq_ul_data_accepted.fetch_add(1, std::memory_order_relaxed);
             } else {
@@ -2149,13 +2206,47 @@ private:
             return;
         }
         fcntl(sock, F_SETFL, O_NONBLOCK);
+        const bool overflow_reporting = enable_udp_rx_overflow_reporting(sock);
+        if (!overflow_reporting) {
+            LOG_G_WARN_M(Mod) << "BS UDP input could not enable kernel overflow reporting; "
+                         << "socket-buffer drops may be unobservable";
+        }
 
-        std::vector<uint8_t> udp_buf(25200);
+        // A legal UDP datagram can carry up to 65,507 bytes. Keep a full-size
+        // buffer so oversized application payloads are rejected explicitly by
+        // the framing checks below instead of being silently truncated by recv().
+        std::vector<uint8_t> udp_buf(65536);
         uint64_t dropped_payload_warn_count = 0;
+        uint32_t last_kernel_drop_count = 0;
         while (_running.load(std::memory_order_relaxed)) {
-            const ssize_t recv_len = recv(sock, udp_buf.data(), udp_buf.size(), 0);
-            if (recv_len <= 0) {
+            const UdpDatagramReceiveResult received =
+                receive_udp_datagram(sock, udp_buf.data(), udp_buf.size());
+            if (received.bytes < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    LOG_G_WARN_M(Mod) << "BS UDP input receive failed: " << std::strerror(errno);
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (received.has_kernel_drop_count) {
+                const uint32_t dropped = received.kernel_drop_count - last_kernel_drop_count;
+                last_kernel_drop_count = received.kernel_drop_count;
+                if (dropped > 0) {
+                    LOG_G_WARN_M(Mod) << "BS UDP socket receive buffer overflow; kernel dropped "
+                                 << dropped << " datagrams"
+                                 << ": cumulative=" << received.kernel_drop_count;
+                }
+            }
+            if (received.truncated) {
+                LOG_G_WARN_M(Mod) << "BS UDP input datagram exceeded receive buffer; dropping truncated packet"
+                             << ": copied_bytes=" << received.bytes
+                             << ", buffer_bytes=" << udp_buf.size();
+                continue;
+            }
+            const ssize_t recv_len = received.bytes;
+            if (recv_len == 0) {
+                LOG_RT_WARN_HZ_M(Mod, 1)
+                    << "BS UDP input received an empty datagram; dropping packet";
                 continue;
             }
             if (_data_resource_layout.payload_re_count == 0) {
@@ -2201,15 +2292,21 @@ private:
                 }
                 for (auto& fb : pending_fb) {
                     EncodePacketProfile profile;
-                    _encode_and_enqueue_payload(fb.data(), fb.size(), 0, false, profile, false, true);
-                    _arq_dl_feedback_transmitted.fetch_add(1, std::memory_order_relaxed);
+                    if (_encode_and_enqueue_payload(
+                            fb.data(), fb.size(), 0, false, profile, false, true)) {
+                        _arq_dl_feedback_transmitted.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
 
             if (_arq_enabled) {
                 // ARQ: handle DL retransmissions (priority over new data)
                 const int64_t now = arq_now_ms();
-                _dl_arq_tx.drop_abandoned(now);
+                const size_t abandoned = _dl_arq_tx.drop_abandoned(now);
+                if (abandoned > 0) {
+                    LOG_G_WARN_M(ArqDl) << "[BS ARQ DL] max retries exceeded; dropping "
+                                 << abandoned << " unacknowledged packets";
+                }
                 _dl_arq_tx.get_retransmit(retransmit_seqs, now);
                 for (uint16_t seq : retransmit_seqs) {
                     const size_t encoded_cap = _data_packet_buffer.capacity();
@@ -2251,9 +2348,12 @@ private:
                             break;
                         }
                         EncodePacketProfile profile;
-                        _encode_and_enqueue_payload(
+                        const bool enqueued = _encode_and_enqueue_payload(
                             entry.raw_payload.data(), entry.raw_payload.size(),
                             0, false, profile, false);
+                        if (!enqueued) {
+                            break;
+                        }
                         const size_t payload_blocks =
                             LdpcPacketFraming::payload_blocks_for_len(entry.raw_payload.size());
                         const size_t packet_qpsk_symbols =
@@ -2402,7 +2502,10 @@ private:
                 // Consume paired timestamps; use first packet's timestamps as frame reference
                 if (do_latency_profile) {
                     PktTimestamps pts{};
-                    _data_packet_ingest_ts.try_pop(pts);
+                    if (!_data_packet_ingest_ts.try_pop(pts)) {
+                        LOG_RT_WARN_HZ_M(ModProfiling, 5)
+                            << "[BS profiling] missing packet timing metadata for encoded payload";
+                    }
                     if (frame_ingest_ns == 0) {
                         frame_ingest_ns = pts.ingest_ns;
                         frame_encoded_ns = pts.encoded_ns;

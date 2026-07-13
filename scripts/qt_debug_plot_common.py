@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,6 +18,7 @@ except ImportError:
 PLOT_BACKGROUND = "#0f172a"
 PLOT_FOREGROUND = "#e5e7eb"
 PLOT_AXIS = "#94a3b8"
+LOGGER = logging.getLogger(__name__)
 
 pg.setConfigOptions(background=PLOT_BACKGROUND, foreground=PLOT_FOREGROUND, antialias=True)
 
@@ -99,7 +101,8 @@ def make_sub_socket(endpoint: str, *, conflate: bool) -> zmq.Socket:
     sock = ctx.socket(zmq.SUB)
     sock.setsockopt(zmq.LINGER, 0)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
-    # Small HWM: drop old frames when the GUI poll falls behind.
+    # Small bounded receive queue. Backend XPUB_NODROP reports overflow to the
+    # sender, while poll_socket reports user-space latest-frame coalescing.
     sock.setsockopt(zmq.RCVHWM, 2 if conflate else 8)
     sock.connect(endpoint)
     return sock
@@ -123,6 +126,7 @@ class DebugPlotWindow(QtWidgets.QMainWindow):
         self.multipart = multipart
         self.conflate = conflate and not multipart
         self.sock: zmq.Socket | None = None
+        self._superseded_message_count = 0
 
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
@@ -178,6 +182,7 @@ class DebugPlotWindow(QtWidgets.QMainWindow):
         if self.sock is None:
             return
         latest = None
+        superseded = 0
         while True:
             try:
                 # Always receive full multi-part messages. Single-part streams
@@ -187,19 +192,35 @@ class DebugPlotWindow(QtWidgets.QMainWindow):
             except zmq.Again:
                 break
             except Exception as exc:
+                LOGGER.warning("Debug viewer receive failed: %s", exc)
                 self.status_label.setText(f"Receive error: {exc}")
                 return
             if not parts:
                 continue
+            if latest is not None:
+                superseded += 1
             if self.multipart:
                 latest = parts
             else:
                 latest = parts[0]
+        if superseded > 0:
+            previous = self._superseded_message_count
+            self._superseded_message_count += superseded
+            if (
+                self._superseded_message_count <= 20
+                or previous // 100 != self._superseded_message_count // 100
+            ):
+                LOGGER.warning(
+                    "Debug viewer superseded %d queued messages with the latest frame; dropped=%d",
+                    superseded,
+                    self._superseded_message_count,
+                )
         if latest is None:
             return
         try:
             self.handle_message(latest)
         except Exception as exc:
+            LOGGER.warning("Debug viewer dropped an invalid frame: %s", exc)
             self.status_label.setText(f"Frame error: {exc}")
 
     def handle_message(self, message) -> None:

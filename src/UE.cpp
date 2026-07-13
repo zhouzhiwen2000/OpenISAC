@@ -244,25 +244,40 @@ public:
           _control_handler(cfg.network_output.bi_sensing_ip, cfg.network_output.control_port),
           channel_sender_(2, [this](const auto& data) {
               channel_pub_->send_container(data);
-          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+             "UE channel debug sender"),
           pdf_sender_(2, [this](const auto& data) {
               pdf_pub_->send_container(data);
-          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+             "UE delay-spectrum debug sender"),
           constellation_sender_(10, [this](const auto& data) {
               constellation_pub_->send_container(data);
-          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+             "UE constellation debug sender"),
           uplink_self_channel_sender_(2, [this](const auto& data) {
               uplink_self_channel_pub_->send_container(data);
-          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+             "UE uplink self-channel debug sender"),
           uplink_self_pdf_sender_(2, [this](const auto& data) {
               uplink_self_pdf_pub_->send_container(data);
-          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly,
+             "UE uplink self-spectrum debug sender"),
           uplink_self_scan_sender_(2, [this](const auto& data) {
               if (!uplink_self_scan_pub_ || data.empty()) {
                   return;
               }
               uplink_self_scan_pub_->send(data.data(), data.size());
-          }, std::chrono::milliseconds(50), DataSender<uint8_t>::DeliveryMode::LatestOnly),
+          }, std::chrono::milliseconds(50), DataSender<uint8_t>::DeliveryMode::LatestOnly,
+             "UE uplink self-scan debug sender"),
+          ertm_debug_sender_(2, [this](const auto& frames) {
+              if (!ertm_debug_pub_ || frames.empty()) {
+                  return;
+              }
+              const auto parts = make_ertm_debug_msg_parts(frames.back());
+              ertm_debug_pub_->send_frame(parts);
+          }, std::chrono::milliseconds(50),
+             DataSender<ErtmDebugFrameData>::DeliveryMode::LatestOnly,
+             "UE eRTM debug sender"),
           // Initialize object pools for memory reuse
           _rx_frame_pool(32, [&cfg]() {
               RxFrame frame;
@@ -289,6 +304,11 @@ public:
               frame.CFO = 0.0f;
               frame.SFO = 0.0f;
               frame.delay_offset = 0.0f;
+              frame.alignment_samples = 0;
+              frame.force_ertm_remeasure = false;
+              if (cfg.uplink.ertm_to_enable) {
+                  frame.ertm_downlink_channel_freq.resize(cfg.ofdm.fft_size);
+              }
               return frame;
           }),
           _rx_agc(cfg),
@@ -395,10 +415,8 @@ public:
                 uplink_self_scan_sender_.start();
             }
         }
-
-        if (cfg_.uplink.ertm_to_enable) {
-            _ertm_thread_running.store(true, std::memory_order_release);
-            _ertm_process_thread = std::thread(&UEEngine::_ertm_process_proc, this);
+        if (cfg_.uplink.ertm_debug_output_enabled) {
+            ertm_debug_sender_.start();
         }
     }
 
@@ -420,8 +438,6 @@ public:
         // Stop data processing thread
         _bit_processing_running.store(false);
         if (_bit_processing_thread.joinable()) _bit_processing_thread.join();
-        _ertm_thread_running.store(false, std::memory_order_release);
-        if (_ertm_process_thread.joinable()) _ertm_process_thread.join();
         if (_measurement_enabled) {
             _switch_measurement_epoch(0);
         }
@@ -433,6 +449,7 @@ public:
         uplink_self_channel_sender_.stop();
         uplink_self_pdf_sender_.stop();
         uplink_self_scan_sender_.stop();
+        ertm_debug_sender_.stop();
         _control_handler.stop();
     }
 
@@ -587,8 +604,8 @@ private:
             LOG_G_WARN_M(Recovery) << "[UE recovery] reset_receive_state generation="
                          << next_generation
                          << ", restart_epoch=" << restart_epoch
-                         << ", pending_ertm_alignment="
-                         << _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed)
+                         << ", ertm_measurement_available="
+                         << _ertm_absolute_delay_available.load(std::memory_order_relaxed)
                          << ", ul_tx_rx_shift="
                          << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed)
                          << ", waveform_enabled="
@@ -742,19 +759,14 @@ private:
 
     // Per-frame demod scratch lives in CpuDemodWorkerContext (one per demod
     // worker); per-frame outputs live in the CpuDemodResult ring slots.
-    SeqlockedChannelEstimate _ertm_latest_dl_channel;
-    bool _ertm_missing_delay_warned = false;
     std::atomic<double> _ertm_latest_to_ue_samples{0.0};
     std::atomic<uint64_t> _ertm_latest_to_ue_seq{0};
     std::atomic<bool> _ertm_absolute_delay_available{false};
-    std::atomic<double> _ertm_absolute_pending_alignment_samples{0.0};
-    // eRTM TO payloads are processed off the RT demod/decode threads: the
-    // decode thread only classifies+enqueues (cheap), a plain (non-pinned,
-    // non-RT-priority) background thread does the unpack/FFT/correlate/log/
-    // debug-publish work so its periodic FFT bursts never stall LDPC decode.
+    // The decode thread only classifies and enqueues BS reports.  The single
+    // sensing consumer retains the newest report and pairs it with the local
+    // downlink estimate carried by the sensing frame currently being handled.
     SPSCRingBuffer<std::vector<uint8_t>> _ertm_payload_queue{8};
-    std::thread _ertm_process_thread;
-    std::atomic<bool> _ertm_thread_running{false};
+    std::vector<uint8_t> _ertm_latest_bs_payload;
 
     // Core computation instances (manage their own FFT plans)
     ChannelEstimator _channel_estimator;
@@ -804,6 +816,7 @@ private:
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_channel_sender_;
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_pdf_sender_;
     DataSender<uint8_t> uplink_self_scan_sender_;
+    DataSender<ErtmDebugFrameData> ertm_debug_sender_;
     uint32_t _reset_count = 0;
     // Debug publish stride: constellation / channel / PDF snapshots are copied
     // out of the demod path once every N frames (senders pace at 50 ms anyway).
@@ -818,6 +831,10 @@ private:
     std::mutex _shared_sensing_cfg_mutex;
     std::unique_ptr<SensingChannel> _bistatic_sensing_channel;
     std::atomic<uint64_t> _next_bistatic_frame_start_symbol{0};
+    // Owned by the demod-result collector.  If the aligned sensing frame is
+    // dropped before enqueue, carry the mandatory eRTM refresh to the next
+    // frame that actually reaches the sensing consumer.
+    bool _ertm_remeasure_deferred_after_sensing_drop = false;
 
     double _freq_offset_sum = 0.0f; // Average frequency offset
     size_t _freq_offset_count = 0; // Sensing symbol count
@@ -1359,17 +1376,11 @@ private:
     std::atomic<uint64_t> _arq_dl_feedback_seen{0};
     std::atomic<uint64_t> _arq_dl_feedback_valid{0};
     std::atomic<uint64_t> _arq_dl_feedback_invalid{0};
+    std::atomic<uint64_t> _arq_dl_feedback_unhandled{0};
     std::atomic<uint64_t> _arq_dl_ack_generated{0};
     std::atomic<uint64_t> _arq_dl_ack_injected{0};
     std::atomic<uint64_t> _arq_dl_ack_no_uplink_tx{0};
     std::atomic<uint64_t> _arq_dl_ack_inject_failed{0};
-
-    void _store_ertm_downlink_channel_freq(const AlignedVector& channel_freq) {
-        if (!cfg_.uplink.ertm_to_enable || channel_freq.size() != cfg_.ofdm.fft_size) {
-            return;
-        }
-        _ertm_latest_dl_channel.store(channel_freq);
-    }
 
     bool _compute_ertm_oversampled_delay_spectrum(
         const AlignedVector& channel_freq,
@@ -1621,78 +1632,108 @@ private:
         }
 
         const size_t wire_bins = _ertm_debug_window_bins(n);
-        AlignedVector wire_uplink_delay;
-        AlignedVector wire_downlink_delay;
-        AlignedVector wire_corrected_uplink_delay;
-        AlignedVector wire_corrected_downlink_delay;
-        std::vector<float> wire_correlation;
-        _copy_center_delay_window(bs_uplink_delay, wire_bins, wire_uplink_delay);
-        _copy_center_delay_window(ue_downlink_delay, wire_bins, wire_downlink_delay);
-        _copy_center_delay_window(corrected_uplink_delay, wire_bins, wire_corrected_uplink_delay);
-        _copy_center_delay_window(corrected_downlink_delay, wire_bins, wire_corrected_downlink_delay);
-        _copy_center_delay_window(correlation, wire_bins, wire_correlation);
+        ErtmDebugFrameData frame;
+        _copy_center_delay_window(bs_uplink_delay, wire_bins, frame.uplink_delay);
+        _copy_center_delay_window(ue_downlink_delay, wire_bins, frame.downlink_delay);
+        _copy_center_delay_window(
+            corrected_uplink_delay, wire_bins, frame.corrected_uplink_delay);
+        _copy_center_delay_window(
+            corrected_downlink_delay, wire_bins, frame.corrected_downlink_delay);
+        _copy_center_delay_window(correlation, wire_bins, frame.correlation);
 
-        std::vector<uint8_t> header;
-        header.reserve(112);
+        frame.header.reserve(112);
         static constexpr uint8_t kMagic[8] = {'E', 'R', 'T', 'M', 'D', 'B', 'G', '1'};
-        header.insert(header.end(), kMagic, kMagic + sizeof(kMagic));
-        _append_u32_le(header, 3);  // format version
-        _append_u32_le(header, static_cast<uint32_t>(wire_bins));
-        _append_u32_le(header, static_cast<uint32_t>(cfg_.ofdm.fft_size));
-        _append_u32_le(header, static_cast<uint32_t>(_ertm_delay_oversample_factor));
-        _append_u32_le(header, bs_payload.seq);
-        _append_u32_le(header, static_cast<uint32_t>(peak_index));
-        _append_i64_le(header, signed_shift_bins);
-        _append_i32_le(header, bs_payload.duti_samples);
-        _append_i32_le(header, tadv_samples);
-        _append_double_le(header, bs_payload.sample_rate);
-        _append_double_le(header, metric);
-        _append_double_le(header, rf_delay_samples);
-        _append_double_le(header, tau_c_samples);
-        _append_double_le(header, to_bs_ue_samples);
-        _append_double_le(header, to_ue_samples);
-        _append_double_le(header, to_bs_samples);
+        frame.header.insert(frame.header.end(), kMagic, kMagic + sizeof(kMagic));
+        _append_u32_le(frame.header, 3);  // format version
+        _append_u32_le(frame.header, static_cast<uint32_t>(wire_bins));
+        _append_u32_le(frame.header, static_cast<uint32_t>(cfg_.ofdm.fft_size));
+        _append_u32_le(frame.header, static_cast<uint32_t>(_ertm_delay_oversample_factor));
+        _append_u32_le(frame.header, bs_payload.seq);
+        _append_u32_le(frame.header, static_cast<uint32_t>(peak_index));
+        _append_i64_le(frame.header, signed_shift_bins);
+        _append_i32_le(frame.header, bs_payload.duti_samples);
+        _append_i32_le(frame.header, tadv_samples);
+        _append_double_le(frame.header, bs_payload.sample_rate);
+        _append_double_le(frame.header, metric);
+        _append_double_le(frame.header, rf_delay_samples);
+        _append_double_le(frame.header, tau_c_samples);
+        _append_double_le(frame.header, to_bs_ue_samples);
+        _append_double_le(frame.header, to_ue_samples);
+        _append_double_le(frame.header, to_bs_samples);
 
-        const size_t spectrum_bytes = wire_bins * sizeof(std::complex<float>);
-        const size_t corr_bytes = wire_bins * sizeof(float);
-        std::vector<zmq_transport::MsgPart> parts{
-            {header.data(), header.size()},
-            {wire_uplink_delay.data(), spectrum_bytes},
-            {wire_downlink_delay.data(), spectrum_bytes},
-            {wire_correlation.data(), corr_bytes},
-            {wire_corrected_uplink_delay.data(), spectrum_bytes},
-            {wire_corrected_downlink_delay.data(), spectrum_bytes},
-        };
-        ertm_debug_pub_->send_frame(parts);
+        DataSender<ErtmDebugFrameData>::DataPackage package;
+        package.emplace_back(std::move(frame));
+        ertm_debug_sender_.add_data(std::move(package));
     }
 
     // Fast-path classifier, called inline from the LDPC decode/bit-processing
-    // thread. Only cheap checks happen here; the actual unpack/FFT/correlate/
-    // log/debug-publish work is handed off to _ertm_process_proc() on a plain
-    // background thread so it never stalls real-time decode.
+    // thread. Only cheap checks happen here; sensing consumes the queued report
+    // and pairs it with the downlink channel from its current frame.
     bool _handle_ertm_payload(std::vector<uint8_t>& payload, uint8_t flags) {
         if (!LdpcPacketFraming::is_ertm_timing_flags(flags)) {
             return false;
         }
         if (!cfg_.uplink.ertm_to_enable) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_INFO_M(Ertm) << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
-            }
+            LOG_RT_WARN_HZ_M(Ertm, 1)
+                << "[eRTM] TO measurement received while eRTM is disabled; dropping report";
             return true;
         }
         if (!_ertm_payload_queue.try_push(std::move(payload))) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload queue full; dropping report";
+            static std::atomic<uint64_t> drop_count{0};
+            const uint64_t dropped = drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload queue full; dropping report"
+                             << ": dropped=" << dropped;
             }
         }
         return true;
     }
 
-    // Runs on the background _ertm_process_thread. Unpacks the BS TO payload,
-    // pulls the latest local downlink channel snapshot, computes the
-    // oversampled delay spectra + cross-correlation, logs the derived
-    // one-way delays, and (if enabled) publishes the debug frame.
-    void _process_ertm_payload(const std::vector<uint8_t>& payload) {
+    bool _send_udp_output_packet(const uint8_t* data, size_t size, const char* source) {
+        try {
+            _udp_output_sender->send(data, size);
+            return true;
+        } catch (const std::exception& e) {
+            LOG_G_WARN_M(DemodLdpc) << "[UE] UDP output failed; dropping decoded packet"
+                                 << ": source=" << source
+                                 << ", payload_bytes=" << size
+                                 << ", error=" << e.what();
+            return false;
+        }
+    }
+
+    void _apply_uplink_arq_feedback(const ArqFeedback& ack, const char* source) {
+        if (ack.direction != 1) {
+            const uint64_t dropped =
+                _arq_dl_feedback_invalid.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN_M(ArqUl) << "[UE ARQ UL] ACK direction mismatch; dropping feedback"
+                              << ": source=" << source
+                              << ", direction=" << static_cast<int>(ack.direction)
+                              << ", expected=1, dropped=" << dropped;
+            }
+            return;
+        }
+        if (!_uplink_tx || !_uplink_tx->arq_enabled()) {
+            const uint64_t dropped =
+                _arq_dl_feedback_unhandled.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (dropped <= 20 || (dropped % 100) == 0) {
+                LOG_G_WARN_M(ArqUl) << "[UE ARQ UL] no active uplink ARQ TX; dropping ACK feedback"
+                              << ": source=" << source
+                              << ", dropped=" << dropped;
+            }
+            return;
+        }
+        _uplink_tx->arq_tx_window().process_ack(ack, arq_now_ms());
+    }
+
+    // Computes one eRTM measurement against the downlink estimate supplied by
+    // the frame consumer.  The caller therefore controls the exact sensing
+    // frame coordinate system used by TO_UE.
+    void _process_ertm_payload(
+        const std::vector<uint8_t>& payload,
+        const AlignedVector& local_channel_freq)
+    {
         ErtmTimingPayloadView bs_payload;
         std::string unpack_error;
         if (!ErtmTimingPayload::unpack(
@@ -1701,18 +1742,12 @@ private:
                 static_cast<uint32_t>(cfg_.ofdm.fft_size),
                 bs_payload,
                 &unpack_error)) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] invalid TO payload: " << unpack_error;
-            }
+            LOG_G_WARN_M(Ertm) << "[eRTM] invalid TO payload; dropping report: " << unpack_error;
             return;
         }
-
-        AlignedVector local_channel_freq;
-        if (!_ertm_latest_dl_channel.load(local_channel_freq)) {
-            if (LOG_MOD_ON(Ertm) && !_ertm_missing_delay_warned) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload received before local downlink channel estimate is available";
-                _ertm_missing_delay_warned = true;
-            }
+        if (local_channel_freq.size() != cfg_.ofdm.fft_size) {
+            LOG_RT_WARN_HZ_M(Ertm, 1)
+                << "[eRTM] current downlink frame has an invalid channel estimate size";
             return;
         }
 
@@ -1720,9 +1755,7 @@ private:
         AlignedVector local_delay;
         if (!_compute_ertm_oversampled_delay_spectrum(bs_payload.channel_freq, 0.0, bs_uplink_delay) ||
             !_compute_ertm_oversampled_delay_spectrum(local_channel_freq, 0.0, local_delay)) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute oversampled delay spectra";
-            }
+            LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute oversampled delay spectra; dropping report";
             return;
         }
 
@@ -1740,9 +1773,7 @@ private:
                 publish_debug ? &correlation_spectrum : nullptr,
                 &peak_index,
                 &centroid3_delta_bins)) {
-            if (LOG_MOD_ON(Ertm)) {
-                LOG_G_WARN_M(Ertm) << "[eRTM] failed to correlate delay spectra";
-            }
+            LOG_G_WARN_M(Ertm) << "[eRTM] failed to correlate delay spectra; dropping report";
             return;
         }
 
@@ -1773,12 +1804,9 @@ private:
                                      << ", previous_to_ue=" << previous_to_ue
                                      << " samples, current_to_ue=" << to_ue_samples
                                      << " samples, to_ue_diff=" << to_ue_diff
-                                     << " samples, pending_alignment="
-                                     << _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed)
                                      << " samples";
                     }
                 }
-                _update_ertm_absolute_pending_alignment(to_ue_diff);
             }
             _ertm_latest_to_ue_samples.store(to_ue_samples, std::memory_order_relaxed);
             _ertm_latest_to_ue_seq.store(bs_payload.seq, std::memory_order_relaxed);
@@ -1808,26 +1836,17 @@ private:
             LOG_G_INFO_M(Ertm) << oss.str();
         }
         if (publish_debug) {
-            // Match the sensing path's continuity compensation across integer
-            // receive alignments.  The pending term is applied to TO_UE there;
-            // TO_BS gets the opposite term so their sum remains tau_c.
-            const double pending_alignment =
-                _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
-            const double continuous_to_ue_samples = to_ue_samples + pending_alignment;
-            const double continuous_to_bs_samples = to_bs_samples - pending_alignment;
             // Delay-spectrum shifting uses the opposite sign of the effective
             // timing offset (SensingChannel applies the inverse phase directly).
-            const double correction_to_ue_samples = -continuous_to_ue_samples;
-            const double correction_to_bs_samples = -continuous_to_bs_samples;
+            const double correction_to_ue_samples = -to_ue_samples;
+            const double correction_to_bs_samples = -to_bs_samples;
             AlignedVector corrected_uplink_delay;
             AlignedVector corrected_downlink_delay;
             if (!_compute_ertm_oversampled_delay_spectrum(
                     bs_payload.channel_freq, correction_to_bs_samples, corrected_uplink_delay) ||
                 !_compute_ertm_oversampled_delay_spectrum(
                     local_channel_freq, correction_to_ue_samples, corrected_downlink_delay)) {
-                if (LOG_MOD_ON(Ertm)) {
-                    LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute TO-corrected debug spectra";
-                }
+                LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute TO-corrected debug spectra; dropping debug frame";
                 return;
             }
             _publish_ertm_debug_frame(
@@ -1849,64 +1868,48 @@ private:
         }
     }
 
-    void _record_ertm_absolute_pending_alignment(double alignment_samples) {
-        if (alignment_samples == 0.0 ||
-            cfg_.sensing.delay_correction_mode != kSensingDelayCorrectionModeErtmAbsolute ||
-            !_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
+    void _update_ertm_measurement_for_downlink_frame(
+        const AlignedVector& local_channel_freq,
+        bool force_remeasure,
+        int alignment_samples)
+    {
+        if (!cfg_.uplink.ertm_to_enable) {
             return;
         }
 
-        const double pending_alignment = -std::round(alignment_samples);
-        _ertm_absolute_pending_alignment_samples.store(
-            pending_alignment,
-            std::memory_order_relaxed);
-
-        if (LOG_MOD_ON(Ertm)) {
-            LOG_G_INFO_M(Ertm) << "[eRTM] pending sensing alignment compensation updated"
-                         << " alignment=" << alignment_samples
-                         << " samples, pending_alignment=" << pending_alignment
-                         << " samples";
+        // This fixes the local DL/sensing-frame pairing.  The BS report is
+        // still an asynchronously sampled UL measurement; pairing those two
+        // radio snapshots by epoch is a separate protocol concern.
+        bool received_new_report = false;
+        size_t queued_reports = 0;
+        std::vector<uint8_t> payload;
+        while (_ertm_payload_queue.try_pop(payload)) {
+            _ertm_latest_bs_payload = std::move(payload);
+            received_new_report = true;
+            ++queued_reports;
         }
-    }
-
-    void _update_ertm_absolute_pending_alignment(double to_ue_diff) {
-        double pending = _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
-        if (std::abs(pending) < 0.5) {
-            return;
+        if (queued_reports > 1) {
+            LOG_G_WARN_M(Ertm) << "[eRTM] superseding queued BS UL reports with the latest report"
+                         << ": dropped=" << (queued_reports - 1);
         }
-
-        constexpr double kPendingAlignmentJumpThreshold = 0.7;
-        if (std::abs(to_ue_diff) <= kPendingAlignmentJumpThreshold) {
-            return;
-        }
-
-        const double rounded_jump = std::round(to_ue_diff);
-        const double updated_pending = pending - rounded_jump;
-        const double stored_pending = (std::abs(updated_pending) < 0.5) ? 0.0 : updated_pending;
-        if (_ertm_absolute_pending_alignment_samples.compare_exchange_strong(
-                pending,
-                stored_pending,
-                std::memory_order_relaxed,
-                std::memory_order_relaxed)) {
-            if (stored_pending == 0.0) {
-                if (LOG_MOD_ON(Ertm)) {
-                    LOG_G_INFO_M(Ertm) << "[eRTM] cleared pending sensing alignment compensation after TO_UE jump"
-                                 << " pending_alignment=" << pending
-                                 << " samples, to_ue_diff=" << to_ue_diff
-                                 << " samples, rounded_jump=" << rounded_jump
-                                 << " samples";
-                }
-            } else {
-                if (LOG_MOD_ON(Ertm)) {
-                    LOG_G_INFO_M(Ertm) << "[eRTM] updated pending sensing alignment compensation after TO_UE jump"
-                                 << " previous_pending_alignment=" << pending
-                                 << " samples, to_ue_diff=" << to_ue_diff
-                                 << " samples, rounded_jump=" << rounded_jump
-                                 << " samples, pending_alignment=" << stored_pending
-                                 << " samples";
-                }
+        if (_ertm_latest_bs_payload.empty()) {
+            if (force_remeasure) {
+                LOG_RT_WARN_HZ_M(Ertm, 1)
+                    << "[eRTM] Alignment requires a TO remeasurement, but no BS UL report is cached yet";
             }
+            return;
         }
+        if (!received_new_report && !force_remeasure) {
+            return;
+        }
+
+        if (force_remeasure && LOG_MOD_ON(Ertm)) {
+            LOG_G_INFO_M(Ertm) << "[eRTM] forced TO remeasurement after Alignment"
+                         << " alignment=" << alignment_samples << " samples"
+                         << ", deferred_after_sensing_drop="
+                         << (alignment_samples == 0 ? "true" : "false");
+        }
+        _process_ertm_payload(_ertm_latest_bs_payload, local_channel_freq);
     }
 
     float _select_sensing_delay_offset(float tracking_delay_offset) {
@@ -1915,33 +1918,15 @@ private:
             if (_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
                 const double to_ue_samples =
                     _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
-                const double pending_alignment =
-                    _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
                 // SensingChannel::delay_offset is a frequency-domain inverse
                 // phase correction, so positive TO_UE removes positive UE delay.
-                base_delay_offset = static_cast<float>(to_ue_samples + pending_alignment);
+                base_delay_offset = static_cast<float>(to_ue_samples);
             } else {
                 LOG_RT_WARN_HZ_M(Ertm, 1) << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "
                     << "but no valid TO_UE estimate is available yet; using los_tracking delay";
             }
         }
         return base_delay_offset + _user_delay_offset.load(std::memory_order_relaxed);
-    }
-
-    // Plain background thread: no RT scheduling priority, no core pinning.
-    // Only consumes _ertm_payload_queue, so an OS-default scheduling slice is
-    // fine given the ~1-per-report-interval cadence.
-    void _ertm_process_proc() {
-        SPSCBackoff backoff;
-        while (_ertm_thread_running.load(std::memory_order_acquire)) {
-            std::vector<uint8_t> payload;
-            if (!_ertm_payload_queue.try_pop(payload)) {
-                backoff.pause();
-                continue;
-            }
-            backoff.reset();
-            _process_ertm_payload(payload);
-        }
     }
 
     void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
@@ -1993,6 +1978,8 @@ private:
             << _arq_dl_feedback_valid.load(std::memory_order_relaxed)
             << " invalid="
             << _arq_dl_feedback_invalid.load(std::memory_order_relaxed)
+            << " unhandled="
+            << _arq_dl_feedback_unhandled.load(std::memory_order_relaxed)
             << "\n  ack_tx: generated="
             << _arq_dl_ack_generated.load(std::memory_order_relaxed)
             << " injected="
@@ -3056,7 +3043,6 @@ private:
     // planning is not thread-safe.
     void prepare_fftw() {
         if (cfg_.uplink.ertm_to_enable) {
-            _ertm_latest_dl_channel.resize(cfg_.ofdm.fft_size);
             _ertm_delay_oversample_factor = std::max<size_t>(1, cfg_.uplink.ertm_delay_oversample_factor);
             if (cfg_.ofdm.fft_size > std::numeric_limits<size_t>::max() / _ertm_delay_oversample_factor) {
                 throw std::runtime_error("eRTM oversampled FFT size overflows size_t");
@@ -3143,19 +3129,32 @@ private:
         vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.network_output.vofa_debug_ip, cfg_.network_output.vofa_debug_port, 64);
     }
 
-    void _clear_frame_queue() {
+    size_t _clear_frame_queue(const char* reason, bool warn = true) {
+        size_t dropped = 0;
         RxFrame frame;
         while (frame_queue_.try_pop(frame)) {
             _rx_frame_pool.release(std::move(frame));
+            ++dropped;
         }
+        if (warn && dropped > 0) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] dropping " << dropped
+                          << " queued RX frames: reason=" << reason;
+        }
+        return dropped;
     }
 
     void _clear_recovery_queues_from_process_thread() {
-        _clear_frame_queue();
+        const size_t dropped_frames = _clear_frame_queue("stream recovery");
+        const size_t dropped_sync = sync_queue_.size();
         sync_queue_.clear();
-        if (LOG_MOD_ON(Recovery)) {
-            LOG_RT_WARN_M(Recovery) << "[UE recovery] cleared queued RX/sync batches for generation="
+        if (dropped_sync > 0) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] dropping " << dropped_sync
+                          << " queued sync batches: generation="
                           << _sync_generation.load(std::memory_order_acquire);
+        }
+        if (dropped_frames > 0 || dropped_sync > 0) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] queue clear complete: rx_frames="
+                          << dropped_frames << ", sync_batches=" << dropped_sync;
         }
     }
 
@@ -3274,8 +3273,13 @@ private:
         // polluting the pools). Their consumers already drop frames whose
         // generation predates the bump above, so stale entries drain naturally
         // within a few frames.
-        _clear_frame_queue();
+        _clear_frame_queue("enter sync search");
+        const size_t dropped_sync = sync_queue_.size();
         sync_queue_.clear();
+        if (dropped_sync > 0) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] entering sync search dropped "
+                          << dropped_sync << " queued sync batches";
+        }
         state_ = RxState::SYNC_SEARCH;
     }
 
@@ -3460,11 +3464,28 @@ private:
             received += got;
         }
 
-        if (sync_batch == nullptr || received < cfg_.sync_samples()) {
+        if (sync_batch == nullptr) {
+            if (running_.load(std::memory_order_relaxed)) {
+                LOG_RT_WARN_HZ_M(Sync, 5) << "UE sync queue full; dropping newly received sync batch"
+                                << ": received_samples=" << received;
+            }
+            return;
+        }
+        if (received < cfg_.sync_samples()) {
+            if (received > 0 && running_.load(std::memory_order_relaxed)) {
+                LOG_RT_WARN_HZ_M(Sync, 5) << "UE sync read ended early; dropping partial sync batch"
+                                << ": received_samples=" << received
+                                << ", expected_samples=" << cfg_.sync_samples();
+            }
             return;
         }
         if (batch_generation != _sync_generation.load(std::memory_order_acquire) ||
             _stream_restart_requested.load(std::memory_order_acquire)) {
+            LOG_RT_WARN_HZ_M(Recovery, 5)
+                << "UE sync generation changed before enqueue; dropping completed sync batch"
+                << ": batch_generation=" << batch_generation
+                << ", current_generation="
+                << _sync_generation.load(std::memory_order_relaxed);
             return;
         }
         sync_batch->usrp_time_ns = first_time_ns;
@@ -3512,7 +3533,7 @@ private:
             received += got;
         }
         if (received < total_read) {
-            if (LOG_MOD_ON(Recovery)) {
+            if (received > 0 && running_.load(std::memory_order_relaxed)) {
                 LOG_RT_WARN_M(Recovery) << "[UE recovery] alignment_rx_abort alignment_id="
                               << alignment_id
                               << ", alignment=" << alignment_samples
@@ -3533,6 +3554,17 @@ private:
         frame.usrp_time_ns = frame_time_ns;
         frame.host_enqueue_time_ns = do_latency_profile ? host_now_ns() : 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
+        if (positive_shift > 0) {
+            LOG_RT_WARN_M(Recovery)
+                << "UE alignment is dropping " << positive_shift
+                << " leading RX samples to advance the frame boundary"
+                << ": alignment_id=" << alignment_id;
+        } else if (negative_shift > 0) {
+            LOG_RT_WARN_M(Recovery)
+                << "UE alignment is padding " << negative_shift
+                << " leading samples because the aligned RX frame has no data for them"
+                << ": alignment_id=" << alignment_id;
+        }
         // Fresh acquisition: re-anchor the UL-TX window to this committed RX
         // frame's boundary phase on the timed grid. Uses the same reference as
         // the alignment_output_frame_start boundary log (this frame's own RX
@@ -3578,11 +3610,13 @@ private:
         if (!frame_queue_.try_push(std::move(frame))) {
             // Alignment frames carry Alignment!=0 used to clear _sync_in_progress.
             // Dropping them can leave the tracking latch stuck until a hard reset.
-            LOG_RT_WARN_HZ_M(Sync, 5)
-                << "[delay_track] alignment_frame_drop queue_full alignment="
-                << alignment_samples
-                << " alignment_id=" << alignment_id
-                << " (sync_in_progress latch may stick until reset)";
+            if (running_.load(std::memory_order_relaxed)) {
+                LOG_RT_WARN_HZ_M(Sync, 5)
+                    << "[delay_track] alignment_frame_drop queue_full alignment="
+                    << alignment_samples
+                    << " alignment_id=" << alignment_id
+                    << " (sync_in_progress latch may stick until reset)";
+            }
             _rx_frame_pool.release(std::move(frame));
         }
         if (LOG_MOD_ON(Recovery)) {
@@ -3670,10 +3704,18 @@ private:
                 frame.host_enqueue_time_ns = host_now_ns();
             }
             if (!frame_queue_.try_push(std::move(frame))) {
-                LOG_RT_WARN_HZ(5) << "RX frame queue full, dropping newest frame";
+                if (running_.load(std::memory_order_relaxed)) {
+                    LOG_RT_WARN_HZ(5) << "RX frame queue full, dropping newest frame";
+                }
                 _rx_frame_pool.release(std::move(frame));
             }
         } else {
+            if (received > 0 && running_.load(std::memory_order_relaxed)) {
+                LOG_RT_WARN_HZ_M(Recovery, 5)
+                    << "UE normal RX read ended early; dropping partial frame"
+                    << ": received_samples=" << received
+                    << ", expected_samples=" << cfg_.samples_per_frame();
+            }
             _rx_frame_pool.release(std::move(frame));
         }
     }
@@ -3938,7 +3980,7 @@ private:
                                   << ", generation="
                                   << _sync_generation.load(std::memory_order_relaxed);
                 }
-                _clear_frame_queue();
+                _clear_frame_queue("fresh alignment scheduled");
                 _schedule_receive_alignment(static_cast<int32_t>(sync_offset_));
                 issued_alignment = true;
             } else {
@@ -4116,12 +4158,10 @@ private:
                 sync_backoff.reset();
                 if (sync_batch->generation !=
                     _sync_generation.load(std::memory_order_acquire)) {
-                    if (LOG_MOD_ON(Recovery)) {
-                        LOG_RT_WARN_M(Recovery) << "[UE recovery] dropped stale sync batch generation="
-                                      << sync_batch->generation
-                                      << ", current_generation="
-                                      << _sync_generation.load(std::memory_order_acquire);
-                    }
+                    LOG_RT_WARN_M(Recovery) << "[UE recovery] dropping stale sync batch"
+                                  << ": batch_generation=" << sync_batch->generation
+                                  << ", current_generation="
+                                  << _sync_generation.load(std::memory_order_acquire);
                     sync_queue_.consumer_pop();
                     continue;
                 }
@@ -4155,6 +4195,11 @@ private:
                     if (frame_queue_.try_pop(frame)) {
                         if (frame.generation !=
                             _sync_generation.load(std::memory_order_acquire)) {
+                            LOG_RT_WARN_HZ_M(Recovery, 5)
+                                << "[UE recovery] dropping stale RX frame before demod"
+                                << ": frame_generation=" << frame.generation
+                                << ", current_generation="
+                                << _sync_generation.load(std::memory_order_relaxed);
                             _rx_frame_pool.release(std::move(frame));
                             continue;
                         }
@@ -4202,6 +4247,8 @@ private:
             }
         }
         _stop_cpu_demod_workers();
+        _clear_frame_queue("demod pipeline shutdown", false);
+        sync_queue_.clear();
         _report_cpu_demod_profile_if_needed(demod_profile, do_eq_breakdown);
         log_process_load();
     }
@@ -4421,6 +4468,11 @@ private:
         // Skip the DSP but still emit the result token so the per-slot pending
         // accounting stays gapless; the collector releases the frame.
         if (result.generation != _sync_generation.load(std::memory_order_acquire)) {
+            LOG_RT_WARN_HZ_M(Recovery, 5)
+                << "[UE recovery] dropping stale demod task before DSP"
+                << ": frame_generation=" << result.generation
+                << ", current_generation="
+                << _sync_generation.load(std::memory_order_relaxed);
             result.dropped = true;
             return;
         }
@@ -4820,8 +4872,16 @@ private:
 
     bool _collect_cpu_demod_result(CpuDemodResult& result, CpuDemodProfile& prof_acc) {
         using ProfileClock = std::chrono::high_resolution_clock;
-        if (result.dropped ||
-            result.generation != _sync_generation.load(std::memory_order_acquire)) {
+        if (result.dropped) {
+            _release_cpu_demod_result(result);
+            return true;
+        }
+        if (result.generation != _sync_generation.load(std::memory_order_acquire)) {
+            LOG_RT_WARN_HZ_M(Recovery, 5)
+                << "[UE recovery] dropping completed demod result after generation change"
+                << ": frame_generation=" << result.generation
+                << ", current_generation="
+                << _sync_generation.load(std::memory_order_relaxed);
             _release_cpu_demod_result(result);
             return true;
         }
@@ -5220,8 +5280,16 @@ private:
             prof_step_end - prof_step_start).count();
 
         prof_step_start = ProfileClock::now();
+        // Without the bistatic sensing pipeline, keep eRTM/debug functionality
+        // by consuming reports here.  With sensing enabled, that thread is the
+        // sole consumer of both the report queue and the eRTM FFT plans.
+        if (!_bistatic_sensing_channel) {
+            _update_ertm_measurement_for_downlink_frame(
+                result.h_est,
+                frame.Alignment != 0,
+                frame.Alignment);
+        }
         if (result.has_sensing) {
-            _record_ertm_absolute_pending_alignment(static_cast<double>(frame.Alignment));
             result.sense_frame.CFO = result.alpha;
             if (sfo_per_frame != 0.0f) {
                 result.sense_frame.SFO =
@@ -5229,10 +5297,36 @@ private:
             } else {
                 result.sense_frame.SFO = result.beta;
             }
-            result.sense_frame.delay_offset = _select_sensing_delay_offset(delay_offset);
+            result.sense_frame.delay_offset = delay_offset;
+            result.sense_frame.alignment_samples = frame.Alignment;
+            result.sense_frame.force_ertm_remeasure =
+                frame.Alignment != 0 ||
+                _ertm_remeasure_deferred_after_sensing_drop;
+            if (cfg_.uplink.ertm_to_enable) {
+                if (result.sense_frame.ertm_downlink_channel_freq.size() !=
+                    result.h_est.size()) {
+                    result.sense_frame.ertm_downlink_channel_freq.resize(
+                        result.h_est.size());
+                }
+                std::copy(
+                    result.h_est.begin(),
+                    result.h_est.end(),
+                    result.sense_frame.ertm_downlink_channel_freq.begin());
+            }
             result.sense_frame.generation = frame.generation;
-            if (!sensing_queue_.try_push(std::move(result.sense_frame))) {
-                LOG_RT_WARN_HZ(5) << "Bistatic sensing queue full; dropping newest sensing frame";
+            const bool force_ertm_remeasure =
+                result.sense_frame.force_ertm_remeasure;
+            if (sensing_queue_.try_push(std::move(result.sense_frame))) {
+                if (force_ertm_remeasure) {
+                    _ertm_remeasure_deferred_after_sensing_drop = false;
+                }
+            } else {
+                if (force_ertm_remeasure) {
+                    _ertm_remeasure_deferred_after_sensing_drop = true;
+                }
+                if (running_.load(std::memory_order_relaxed)) {
+                    LOG_RT_WARN_HZ(5) << "Bistatic sensing queue full; dropping newest sensing frame";
+                }
                 _sensing_frame_pool.release(std::move(result.sense_frame));
             }
             result.has_sensing = false;
@@ -5242,7 +5336,6 @@ private:
             prof_step_end - prof_step_start).count();
 
         prof_step_start = ProfileClock::now();
-        _store_ertm_downlink_channel_freq(result.h_est);
         if (result.debug_frame) {
             // Strided debug publishing (stride chosen at dispatch): the senders
             // are LatestOnly with a 50 ms pace, so one snapshot every
@@ -5507,10 +5600,20 @@ private:
             }
             sensing_backoff.reset();
             if (frame.generation != _sync_generation.load(std::memory_order_acquire)) {
+                LOG_RT_WARN_HZ_M(Recovery, 5)
+                    << "[UE recovery] dropping stale sensing frame"
+                    << ": frame_generation=" << frame.generation
+                    << ", current_generation="
+                    << _sync_generation.load(std::memory_order_relaxed);
                 _sensing_frame_pool.release(std::move(frame));
                 continue;
             }
             if (_bistatic_sensing_channel) {
+                _update_ertm_measurement_for_downlink_frame(
+                    frame.ertm_downlink_channel_freq,
+                    frame.force_ertm_remeasure,
+                    frame.alignment_samples);
+                frame.delay_offset = _select_sensing_delay_offset(frame.delay_offset);
                 const uint64_t frame_symbol_count = static_cast<uint64_t>(frame.rx_symbols.size());
                 const uint64_t frame_start_symbol = _next_bistatic_frame_start_symbol.fetch_add(
                     frame_symbol_count,
@@ -5518,6 +5621,10 @@ private:
                 );
                 _bistatic_sensing_channel->process_bistatic_frame(frame, frame_start_symbol);
             }
+            _sensing_frame_pool.release(std::move(frame));
+        }
+        SensingFrame frame;
+        while (sensing_queue_.try_pop(frame)) {
             _sensing_frame_pool.release(std::move(frame));
         }
     }
@@ -5563,9 +5670,7 @@ private:
             if (!LdpcPacketFraming::decode_mini_header_llrs(
                     llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
                     mini_header)) {
-                if (LOG_MOD_ON(Demod)) {
-                    LOG_G_WARN_M(Demod) << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
-                }
+                LOG_G_WARN_M(Demod) << "[Demod] Mini-header CRC/version check failed; dropping remainder of frame.";
                 break;
             }
 
@@ -5644,31 +5749,37 @@ private:
                     MeasurementPayloadMetadata meta;
                     if (parse_measurement_payload(udp_data.data(), udp_data.size(), meta)) {
                         handled_measurement_payload = true;
-                        if (meta.epoch_id != 0) {
-                            const uint32_t active_epoch =
-                                _measurement_active_epoch_id.load(std::memory_order_relaxed);
-                            if (active_epoch != 0 && meta.epoch_id == active_epoch) {
-                                if (build_measurement_payload(expected_measurement_payload, meta)) {
-                                    const auto compare = compare_measurement_payload(
-                                        expected_measurement_payload,
-                                        udp_data.data(),
-                                        udp_data.size());
-                                    _measurement_compared_bits.fetch_add(
-                                        compare.compared_bits, std::memory_order_relaxed);
-                                    _measurement_bit_errors.fetch_add(
-                                        compare.bit_errors, std::memory_order_relaxed);
-                                    if (compare.exact_match) {
-                                        _measurement_successful_packets.fetch_add(
-                                            1, std::memory_order_relaxed);
-                                    }
-                                    _measurement_epoch_tx_gain_x10.store(
-                                        meta.tx_gain_x10, std::memory_order_relaxed);
-                                } else {
-                                    LOG_G_WARN_M(Demod) << "[Demod] Failed to rebuild expected measurement payload"
-                                                 << " for epoch " << meta.epoch_id
-                                                 << " seq " << meta.seq_in_epoch;
+                        const uint32_t active_epoch =
+                            _measurement_active_epoch_id.load(std::memory_order_relaxed);
+                        if (meta.epoch_id != 0 &&
+                            active_epoch != 0 &&
+                            meta.epoch_id == active_epoch) {
+                            if (build_measurement_payload(expected_measurement_payload, meta)) {
+                                const auto compare = compare_measurement_payload(
+                                    expected_measurement_payload,
+                                    udp_data.data(),
+                                    udp_data.size());
+                                _measurement_compared_bits.fetch_add(
+                                    compare.compared_bits, std::memory_order_relaxed);
+                                _measurement_bit_errors.fetch_add(
+                                    compare.bit_errors, std::memory_order_relaxed);
+                                if (compare.exact_match) {
+                                    _measurement_successful_packets.fetch_add(
+                                        1, std::memory_order_relaxed);
                                 }
+                                _measurement_epoch_tx_gain_x10.store(
+                                    meta.tx_gain_x10, std::memory_order_relaxed);
+                            } else {
+                                LOG_G_WARN_M(Demod) << "[Demod] Failed to rebuild expected measurement payload; dropping packet"
+                                             << " for epoch " << meta.epoch_id
+                                             << " seq " << meta.seq_in_epoch;
                             }
+                        } else {
+                            LOG_RT_WARN_HZ_M(Demod, 5)
+                                << "[Demod] measurement epoch is inactive or stale; dropping packet"
+                                << ": packet_epoch=" << meta.epoch_id
+                                << ", active_epoch=" << active_epoch
+                                << ", seq=" << meta.seq_in_epoch;
                         }
                     }
                 }
@@ -5683,19 +5794,50 @@ private:
                             ArqFeedback ack;
                             if (ArqFeedback::try_unpack(udp_data.data(), udp_data.size(), ack)) {
                                 _arq_dl_feedback_valid.fetch_add(1, std::memory_order_relaxed);
-                                if (_uplink_tx && _uplink_tx->arq_enabled()) {
-                                    _uplink_tx->arq_tx_window().process_ack(ack, arq_now_ms());
-                                }
+                                _apply_uplink_arq_feedback(
+                                    ack, "decoded downlink payload");
                             } else {
-                                _arq_dl_feedback_invalid.fetch_add(1, std::memory_order_relaxed);
+                                const uint64_t dropped =
+                                    _arq_dl_feedback_invalid.fetch_add(
+                                        1, std::memory_order_relaxed) + 1;
+                                if (dropped <= 20 || (dropped % 100) == 0) {
+                                    LOG_G_WARN_M(ArqDl) << "[UE ARQ DL] invalid ACK feedback; dropping packet"
+                                                 << ": payload_bytes=" << udp_data.size()
+                                                 << ", dropped=" << dropped;
+                                }
                             }
                             _log_arq_profile_if_due("dl_feedback", arq_now_ms());
                             arq_consumed = true; // never forward feedback to user UDP
                         } else {
                             // Data packet; process through DL RX ARQ window.
                             _arq_dl_data_seen.fetch_add(1, std::memory_order_relaxed);
+                            const uint64_t skip_before = _dl_arq_rx.skip_count();
+                            const uint64_t outside_before =
+                                _dl_arq_rx.outside_window_drop_count();
+                            const uint64_t reorder_before = _dl_arq_rx.reorder_drop_count();
+                            const uint64_t skip_buffer_before =
+                                _dl_arq_rx.skip_buffer_drop_count();
                             const bool accepted = _dl_arq_rx.process_received(
                                 mini_header.seq, udp_data.data(), udp_data.size());
+                            if (_dl_arq_rx.skip_count() != skip_before) {
+                                LOG_G_WARN_M(ArqDl) << "[UE ARQ DL] advanced receive window past missing packets"
+                                             << ": seq=" << mini_header.seq
+                                             << ", skip_count=" << _dl_arq_rx.skip_count();
+                            }
+                            if (_dl_arq_rx.outside_window_drop_count() != outside_before) {
+                                LOG_G_WARN_M(ArqDl) << "[UE ARQ DL] packet remained outside receive window; dropping"
+                                             << ": seq=" << mini_header.seq
+                                             << ", dropped="
+                                             << _dl_arq_rx.outside_window_drop_count();
+                            }
+                            if (_dl_arq_rx.reorder_drop_count() != reorder_before ||
+                                _dl_arq_rx.skip_buffer_drop_count() != skip_buffer_before) {
+                                LOG_G_WARN_M(ArqDl) << "[UE ARQ DL] ordered-delivery buffer discarded packets"
+                                             << ": capacity_drops="
+                                             << _dl_arq_rx.reorder_drop_count()
+                                             << ", window_skip_drops="
+                                             << _dl_arq_rx.skip_buffer_drop_count();
+                            }
                             if (!accepted) {
                                 _arq_dl_data_duplicates.fetch_add(1, std::memory_order_relaxed);
                                 arq_consumed = true; // duplicate, suppress
@@ -5714,12 +5856,24 @@ private:
                                 ArqFeedback fb = _dl_arq_rx.generate_ack();
                                 _arq_dl_ack_generated.fetch_add(1, std::memory_order_relaxed);
                                 if (!_uplink_tx) {
-                                    _arq_dl_ack_no_uplink_tx.fetch_add(1, std::memory_order_relaxed);
+                                    const uint64_t dropped =
+                                        _arq_dl_ack_no_uplink_tx.fetch_add(
+                                            1, std::memory_order_relaxed) + 1;
+                                    if (dropped <= 20 || (dropped % 100) == 0) {
+                                        LOG_G_WARN_M(Arq) << "[UE ARQ] no uplink TX; dropping ACK feedback"
+                                                     << ": dropped=" << dropped;
+                                    }
                                     _log_arq_profile_if_due("ack_no_uplink_tx", now);
                                 } else if (_uplink_tx->inject_arq_feedback(fb)) {
                                     _arq_dl_ack_injected.fetch_add(1, std::memory_order_relaxed);
                                 } else {
-                                    _arq_dl_ack_inject_failed.fetch_add(1, std::memory_order_relaxed);
+                                    const uint64_t dropped =
+                                        _arq_dl_ack_inject_failed.fetch_add(
+                                            1, std::memory_order_relaxed) + 1;
+                                    if (dropped <= 20 || (dropped % 100) == 0) {
+                                        LOG_G_WARN_M(Arq) << "[UE ARQ] failed to enqueue ACK feedback; dropping it"
+                                                     << ": dropped=" << dropped;
+                                    }
                                     _log_arq_profile_if_due("ack_inject_failed", now);
                                 }
                                 _dl_arq_rx.mark_ack_sent(now);
@@ -5729,7 +5883,8 @@ private:
                     }
 
                     if (!arq_consumed) {
-                        _udp_output_sender->send(udp_data.data(), udp_data.size());
+                        _send_udp_output_packet(
+                            udp_data.data(), udp_data.size(), "decoded downlink payload");
                     }
 
                     // For ordered delivery, flush any contiguous deliverable packets
@@ -5737,7 +5892,8 @@ private:
                         std::vector<std::vector<uint8_t>> deliverable;
                         _dl_arq_rx.get_deliverable(deliverable);
                         for (auto& pkt : deliverable) {
-                            _udp_output_sender->send(pkt.data(), pkt.size());
+                            _send_udp_output_packet(
+                                pkt.data(), pkt.size(), "ordered ARQ downlink payload");
                         }
                     }
                     if (!latency_recorded &&
@@ -5881,6 +6037,11 @@ private:
             result->packets.clear();
             result->payload_bytes.clear();
             if (task.generation != _sync_generation.load(std::memory_order_acquire)) {
+                LOG_RT_WARN_HZ_M(Recovery, 5)
+                    << "[UE recovery] dropping stale LDPC task before decode"
+                    << ": frame_generation=" << task.generation
+                    << ", current_generation="
+                    << _sync_generation.load(std::memory_order_relaxed);
                 result->dropped = true; // stale after resync; token keeps order
             } else if (task.is_i16) {
                 _decode_llr_frame(task.llr_i16, ctx.deint_scratch_i16,
@@ -5979,6 +6140,12 @@ private:
                     maybe_log_snr();
                     _process_decoded_packets(*result, do_latency_profile,
                                              expected_measurement_payload);
+                } else if (!result->dropped) {
+                    LOG_RT_WARN_HZ_M(Recovery, 5)
+                        << "[UE recovery] dropping decoded LDPC result after generation change"
+                        << ": frame_generation=" << result->generation
+                        << ", current_generation="
+                        << _sync_generation.load(std::memory_order_relaxed);
                 }
                 slot.result_queue.consumer_pop();
                 --slot.pending;
@@ -6027,6 +6194,11 @@ private:
                 llr_backoff.reset();
                 if (frame_llr.llr.empty()) continue;
                 if (frame_llr.generation != _sync_generation.load(std::memory_order_acquire)) {
+                    LOG_RT_WARN_HZ_M(Recovery, 5)
+                        << "[UE recovery] dropping stale fixed-point LLR frame"
+                        << ": frame_generation=" << frame_llr.generation
+                        << ", current_generation="
+                        << _sync_generation.load(std::memory_order_relaxed);
                     _llr_pool_i16.release(std::move(frame_llr.llr));
                     continue;
                 }
@@ -6049,6 +6221,11 @@ private:
                 llr_backoff.reset();
                 if (frame_llr.llr.empty()) continue;
                 if (frame_llr.generation != _sync_generation.load(std::memory_order_acquire)) {
+                    LOG_RT_WARN_HZ_M(Recovery, 5)
+                        << "[UE recovery] dropping stale floating-point LLR frame"
+                        << ": frame_generation=" << frame_llr.generation
+                        << ", current_generation="
+                        << _sync_generation.load(std::memory_order_relaxed);
                     _llr_pool.release(std::move(frame_llr.llr));
                     continue;
                 }
@@ -6069,6 +6246,18 @@ private:
             }
         }
         _stop_cpu_ldpc_workers();
+        LlrFrameI16 pending_i16;
+        while (_data_llr_buffer_i16.try_pop(pending_i16)) {
+            if (!pending_i16.llr.empty()) {
+                _llr_pool_i16.release(std::move(pending_i16.llr));
+            }
+        }
+        LlrFrame pending_float;
+        while (_data_llr_buffer.try_pop(pending_float)) {
+            if (!pending_float.llr.empty()) {
+                _llr_pool.release(std::move(pending_float.llr));
+            }
+        }
     }
 };
 
