@@ -12,6 +12,7 @@ simulation:
   target_snr_db: 40.0  # Initial target SNR in dB when snr_control_enable is true
   control_port: 10002  # ChannelSimulator ZMQ control port for runtime SNR commands
   cfo_hz: 5000.0  # Initial carrier offset before UE RX correction in Hz
+  sample_rate_offset_ppm: 0.0  # UE sample-clock offset relative to the BS clock in ppm
   timing_offset_samples: 0  # Constant integer sample delay injected on RX
   array_spacing_m: 0.04283  # Physical ULA element spacing in meters; set <=0 to use array_spacing_lambda
   array_spacing_lambda: 0.5  # Legacy fixed ULA spacing in wavelengths

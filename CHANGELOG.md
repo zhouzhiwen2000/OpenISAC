@@ -8,6 +8,20 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-28 - 信道仿真器采样率偏差
+
+### Summary
+
+本次更新为 ChannelSimulator 增加 UE 相对 BS 的 `sample_rate_offset_ppm` 采样时钟偏差仿真。
+
+### Changes
+
+- 新增 `simulation.sample_rate_offset_ppm` 配置项，并同步到 BS/UE sim 模板、Web 配置编辑器 schema 和信道仿真器文档。
+  影响：默认 `0` 保持原有仿真行为；设置非零值时可在不修改 BS/UE 标称 `sample_rate` 的情况下引入信号级采样率偏差。
+
+- ChannelSimulator 在 BS->UE communication path 上按 UE/BS 采样率 ratio 重采样，在 UE->BS uplink path 上按 reciprocal ratio 重采样。
+  影响：BS 端 TX、uplink RX 和所有 monostatic sensing RX 通道保持同一个 BS 采样时钟；UE 端 downlink RX 和 uplink TX 保持同一个 UE 采样时钟。
+
 ## 2026-06-26 - 空口 ARQ 丢包重传
 
 ### Summary

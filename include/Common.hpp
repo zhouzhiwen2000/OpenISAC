@@ -224,6 +224,7 @@ struct SimConfig {
     double target_snr_db = 40.0;               // Target SNR when snr_control_enable is true
     int control_port = 10002;                  // ZMQ ROUTER port for ChannelSimulator runtime controls
     double cfo_hz = 0.0;                        // Initial carrier offset before simulated RX correction (Hz)
+    double sample_rate_offset_ppm = 0.0;        // UE sample clock offset relative to the BS clock (ppm)
     int timing_offset_samples = 0;             // Constant integer sample delay injected on RX
     // Physical ULA element spacing in meters. The steering vector's electrical spacing
     // (d/lambda) is derived from this and `center_freq`, so the simulated angles track
@@ -2370,6 +2371,7 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::Key << "target_snr_db" << YAML::Value << sim.target_snr_db;
     out << YAML::Key << "control_port" << YAML::Value << sim.control_port;
     out << YAML::Key << "cfo_hz" << YAML::Value << sim.cfo_hz;
+    out << YAML::Key << "sample_rate_offset_ppm" << YAML::Value << sim.sample_rate_offset_ppm;
     out << YAML::Key << "timing_offset_samples" << YAML::Value << sim.timing_offset_samples;
     out << YAML::Key << "array_spacing_m" << YAML::Value << sim.array_spacing_m;
     out << YAML::Key << "array_spacing_lambda" << YAML::Value << sim.array_spacing_lambda;
@@ -2425,6 +2427,7 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["target_snr_db"]) sim.target_snr_db = sim_node["target_snr_db"].as<double>();
         if (sim_node["control_port"]) sim.control_port = sim_node["control_port"].as<int>();
         if (sim_node["cfo_hz"]) sim.cfo_hz = sim_node["cfo_hz"].as<double>();
+        if (sim_node["sample_rate_offset_ppm"]) sim.sample_rate_offset_ppm = sim_node["sample_rate_offset_ppm"].as<double>();
         if (sim_node["timing_offset_samples"]) sim.timing_offset_samples = sim_node["timing_offset_samples"].as<int>();
         if (sim_node["array_spacing_m"]) sim.array_spacing_m = sim_node["array_spacing_m"].as<double>();
         if (sim_node["array_spacing_lambda"]) sim.array_spacing_lambda = sim_node["array_spacing_lambda"].as<double>();

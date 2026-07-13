@@ -68,6 +68,11 @@ common:
       kind: float
       default: 0.0
       optional: true
+    - key: sample_rate_offset_ppm
+      comment: UE sample-clock offset relative to the BS clock in ppm
+      kind: float
+      default: 0.0
+      optional: true
     - key: timing_offset_samples
       comment: Constant integer sample delay injected on RX
       kind: int

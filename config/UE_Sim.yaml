@@ -5,6 +5,7 @@ radio:
 # ===== Channel simulator =====
 simulation:
   session: oisac_sim  # Shared-memory namespace used by BS, UE, and ChannelSimulator
+  sample_rate_offset_ppm: 0  # UE sample-clock offset relative to the BS clock in ppm
 
 # ===== RF / Sampling =====
 rf_sampling:

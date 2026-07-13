@@ -21,6 +21,9 @@
 #include <csignal>
 #include <cstdint>
 #include <fstream>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <limits>
 #include <memory>
 #include <string>
@@ -104,6 +107,136 @@ void handle_signal(int) {
 }
 
 double db_to_linear_amplitude(double db) { return std::pow(10.0, db / 20.0); }
+
+double sinc(double x) {
+    if (std::abs(x) < 1e-12) {
+        return 1.0;
+    }
+    const double pix = (0.5 * kTwoPi) * x;
+    return std::sin(pix) / pix;
+}
+
+double bessel_i0(double x) {
+    double sum = 1.0;
+    double term = 1.0;
+    const double y = 0.25 * x * x;
+    for (int k = 1; k < 30; ++k) {
+        term *= y / static_cast<double>(k * k);
+        sum += term;
+        if (term < sum * 1e-14) {
+            break;
+        }
+    }
+    return sum;
+}
+
+class PolyphaseSincResampler {
+public:
+    explicit PolyphaseSincResampler(double source_step, double sample_rate_ratio)
+        : _source_step(source_step)
+    {
+        _buffer.assign(kCenter, sample_t(0.0f, 0.0f));
+        _read_pos = static_cast<double>(kCenter);
+
+        constexpr double beta = 8.0;
+        const double i0_beta = bessel_i0(beta);
+        const double cutoff = std::min(1.0, std::max(0.0, sample_rate_ratio));
+        for (size_t phase = 0; phase < kPhases; ++phase) {
+            const double frac = static_cast<double>(phase) / static_cast<double>(kPhases);
+            double sum = 0.0;
+            for (size_t k = 0; k < kTaps; ++k) {
+                const double rel = frac + static_cast<double>(kCenter) - static_cast<double>(k);
+                const double pos = (2.0 * static_cast<double>(k)) /
+                    static_cast<double>(kTaps - 1) - 1.0;
+                const double window =
+                    bessel_i0(beta * std::sqrt(std::max(0.0, 1.0 - pos * pos))) / i0_beta;
+                const double coeff = cutoff * sinc(cutoff * rel) * window;
+                _coeffs[phase * kTaps + k] = static_cast<float>(coeff);
+                sum += coeff;
+            }
+            if (std::abs(sum) > 1e-30) {
+                const float inv_sum = static_cast<float>(1.0 / sum);
+                for (size_t k = 0; k < kTaps; ++k) {
+                    _coeffs[phase * kTaps + k] *= inv_sum;
+                }
+            }
+        }
+    }
+
+    void append(const sample_t* data, size_t count) {
+        _buffer.insert(_buffer.end(), data, data + count);
+    }
+
+    void produce(std::vector<sample_t>& out) {
+        out.clear();
+        out.reserve(static_cast<size_t>(
+            std::max(0.0, static_cast<double>(_buffer.size()) / std::max(_source_step, 1e-12))));
+        while (true) {
+            auto base = static_cast<size_t>(_read_pos);
+            const double frac = _read_pos - static_cast<double>(base);
+            size_t phase = static_cast<size_t>(std::floor(frac * static_cast<double>(kPhases) + 0.5));
+            if (phase >= kPhases) {
+                phase = 0;
+                ++base;
+            }
+            if (base + kRight >= _buffer.size()) {
+                break;
+            }
+            out.push_back(filter_aos(&_buffer[base - kCenter], &_coeffs[phase * kTaps]));
+            _read_pos += _source_step;
+        }
+
+        const auto base = static_cast<size_t>(_read_pos);
+        const size_t drop = base > kCenter ? (base - kCenter) : 0;
+        if (drop > 0) {
+            _buffer.erase(_buffer.begin(), _buffer.begin() + static_cast<std::ptrdiff_t>(drop));
+            _read_pos -= static_cast<double>(drop);
+        }
+    }
+
+private:
+    static constexpr size_t kTaps = 32;
+    static constexpr size_t kPhases = 1024;
+    static constexpr size_t kCenter = 15;
+    static constexpr size_t kRight = kTaps - kCenter - 1;
+
+    static sample_t filter_aos(const sample_t* samples, const float* coeffs) {
+#if defined(__AVX2__)
+        __m256 acc = _mm256_setzero_ps();
+        const float* sample_f = reinterpret_cast<const float*>(samples);
+        for (size_t k = 0; k < kTaps; k += 4) {
+            const __m256 x = _mm256_loadu_ps(sample_f + 2 * k);
+            const __m256 c = _mm256_set_ps(
+                coeffs[k + 3], coeffs[k + 3],
+                coeffs[k + 2], coeffs[k + 2],
+                coeffs[k + 1], coeffs[k + 1],
+                coeffs[k + 0], coeffs[k + 0]);
+#if defined(__FMA__)
+            acc = _mm256_fmadd_ps(x, c, acc);
+#else
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(x, c));
+#endif
+        }
+        alignas(32) float lanes[8];
+        _mm256_store_ps(lanes, acc);
+        return sample_t(
+            lanes[0] + lanes[2] + lanes[4] + lanes[6],
+            lanes[1] + lanes[3] + lanes[5] + lanes[7]);
+#else
+        sample_t acc(0.0f, 0.0f);
+        #pragma omp simd
+        for (size_t k = 0; k < kTaps; ++k) {
+            acc += samples[k] * coeffs[k];
+        }
+        return acc;
+#endif
+    }
+
+    double _source_step = 1.0;
+    double _read_pos = 0.0;
+    std::vector<sample_t> _buffer;
+    std::vector<float> _coeffs = std::vector<float>(kPhases * kTaps, 0.0f);
+};
 
 constexpr int32_t kSnrControlDisabled = std::numeric_limits<int32_t>::min();
 
@@ -219,6 +352,18 @@ int main(int argc, char** argv) {
 
     const SimConfig& sim = cfg.simulation;
     const double fs = cfg.rf_sampling.sample_rate;
+    const double sample_rate_offset_ppm = sim.sample_rate_offset_ppm;
+    if (!std::isfinite(sample_rate_offset_ppm)) {
+        LOG_G_ERROR() << "[ChannelSim] sample_rate_offset_ppm must be finite.";
+        return 1;
+    }
+    const double ue_to_bs_sample_rate_ratio = 1.0 + sample_rate_offset_ppm * 1e-6;
+    if (ue_to_bs_sample_rate_ratio < 0.9 || ue_to_bs_sample_rate_ratio > 1.1) {
+        LOG_G_ERROR() << "[ChannelSim] sample_rate_offset_ppm=" << sample_rate_offset_ppm
+                      << " is outside the supported +/-100000 ppm range.";
+        return 1;
+    }
+    const bool sro_on = std::abs(sample_rate_offset_ppm) > 1e-12;
     const double lambda = kSpeedOfLight / cfg.downlink.center_freq;
     // Selectively enable receive paths. Disabling a path means the hub neither
     // creates nor produces into its ring, so that path's consumer need not run
@@ -238,7 +383,9 @@ int main(int argc, char** argv) {
 
     LOG_G_INFO() << "[ChannelSim] session=" << sim.session << " fs=" << fs
                  << " Hz, center=" << cfg.downlink.center_freq
-                 << " Hz, comm_rx=" << (enable_comm ? "on" : "off")
+                 << " Hz, sample_rate_offset_ppm=" << sample_rate_offset_ppm
+                 << " (UE/BS ratio=" << ue_to_bs_sample_rate_ratio << ")"
+                 << ", comm_rx=" << (enable_comm ? "on" : "off")
                  << ", sensing_channels=" << num_channels
                  << ", ULA spacing=" << spacing << " lambda ("
                  << (sim.array_spacing_m > 0.0
@@ -366,6 +513,7 @@ int main(int argc, char** argv) {
     // The UE writes its simulated RX frequency correction into the shared
     // control block, so the comm path rotates with the residual CFO after retuning.
     cf cfo_phasor(1.0f, 0.0f);
+    const double comm_rx_sample_rate = fs * ue_to_bs_sample_rate_ratio;
     double last_logged_rx_freq_correction_hz = 0.0;
     bool have_logged_rx_freq_correction = false;
 
@@ -434,17 +582,28 @@ int main(int argc, char** argv) {
 
     // --- Processing buffers ---
     const size_t max_chunk = std::max<size_t>(cfg.samples_per_frame(), 4096);
+    const size_t max_ul_input_chunk = static_cast<size_t>(
+        std::ceil(static_cast<double>(max_chunk) * std::max(1.0, ue_to_bs_sample_rate_ratio))) + 64;
     std::vector<sample_t> in_chunk(max_chunk);
     std::vector<sample_t> ext(L + max_chunk);                 // [history | new chunk]
     std::fill(ext.begin(), ext.begin() + L, sample_t(0.0f, 0.0f));
     std::vector<std::vector<sample_t>> out_sens(num_channels, std::vector<sample_t>(max_chunk));
     std::vector<sample_t> out_comm(max_chunk);
-    // Uplink processing buffers: [history | new chunk] for the TDL, plus an input
-    // staging buffer and the channel output published to rx.ul.
-    std::vector<sample_t> ul_in(max_chunk);
-    std::vector<sample_t> ul_out(max_chunk);
-    std::vector<sample_t> ul_ext(ul_L + max_chunk);
+    std::vector<sample_t> comm_sro_out;
+    PolyphaseSincResampler comm_sro_resampler(
+        1.0 / ue_to_bs_sample_rate_ratio,
+        ue_to_bs_sample_rate_ratio);
+    // Uplink processing buffers: [history | new UE-clock chunk] for the TDL, plus
+    // staging/output buffers. A BS-clock chunk of M samples spans about M*ratio
+    // UE samples, then the reciprocal resampler publishes BS-clock rx.ul samples.
+    std::vector<sample_t> ul_in(max_ul_input_chunk);
+    std::vector<sample_t> ul_out(max_ul_input_chunk);
+    std::vector<sample_t> ul_sro_out;
+    std::vector<sample_t> ul_ext(ul_L + max_ul_input_chunk);
     if (enable_uplink) std::fill(ul_ext.begin(), ul_ext.begin() + ul_L, sample_t(0.0f, 0.0f));
+    PolyphaseSincResampler ul_sro_resampler(
+        ue_to_bs_sample_rate_ratio,
+        1.0 / ue_to_bs_sample_rate_ratio);
     // Per-target precomputed base signal (gain * delayed x * Doppler) for the
     // monostatic path. Computing this once per target isolates the serial Doppler
     // recurrence so the per-channel accumulation below stays contiguous,
@@ -536,6 +695,17 @@ int main(int argc, char** argv) {
             }
         }
 
+        size_t comm_count = M;
+        if (enable_comm && sro_on) {
+            comm_sro_resampler.append(out_comm.data(), M);
+            comm_sro_resampler.produce(comm_sro_out);
+            comm_count = comm_sro_out.size();
+            if (out_comm.size() < comm_count) {
+                out_comm.resize(comm_count);
+            }
+            std::copy(comm_sro_out.begin(), comm_sro_out.end(), out_comm.begin());
+        }
+
         // --- Apply RX carrier frequency offset to the whole comm signal ---
         if (enable_comm) {
             const double rx_freq_correction_hz = ctrl.comm_rx_freq_correction_hz();
@@ -548,11 +718,12 @@ int main(int argc, char** argv) {
                 last_logged_rx_freq_correction_hz = rx_freq_correction_hz;
                 have_logged_rx_freq_correction = true;
             }
-            const double cfo_dphi = (fs > 0.0) ? (kTwoPi * residual_cfo_hz / fs) : 0.0;
+            const double cfo_dphi =
+                (comm_rx_sample_rate > 0.0) ? (kTwoPi * residual_cfo_hz / comm_rx_sample_rate) : 0.0;
             const cf cfo_step(
                 static_cast<float>(std::cos(cfo_dphi)),
                 static_cast<float>(std::sin(cfo_dphi)));
-            for (size_t n = 0; n < M; ++n) {
+            for (size_t n = 0; n < comm_count; ++n) {
                 out_comm[n] *= cfo_phasor;
                 cfo_phasor *= cfo_step;
             }
@@ -579,7 +750,7 @@ int main(int argc, char** argv) {
                 (void)scale_clean_signal_to_snr(out_sens[k].data(), M, target_snr_db, noise_power);
             }
             if (enable_comm) {
-                (void)scale_clean_signal_to_snr(out_comm.data(), M, target_snr_db, noise_power);
+                (void)scale_clean_signal_to_snr(out_comm.data(), comm_count, target_snr_db, noise_power);
             }
         }
 
@@ -590,7 +761,7 @@ int main(int argc, char** argv) {
                 noise_gen.add(out_sens[k].data(), M, sigma);
             }
             if (enable_comm) {
-                noise_gen.add(out_comm.data(), M, sigma);
+                noise_gen.add(out_comm.data(), comm_count, sigma);
             }
         }
 
@@ -599,17 +770,21 @@ int main(int argc, char** argv) {
             sens_rings[k]->push_block(out_sens[k].data(), M, running);
         }
         if (enable_comm) {
-            comm_ring.push_block(out_comm.data(), M, running);
+            comm_ring.push_block(out_comm.data(), comm_count, running);
         }
 
-        // --- Uplink (UE->BS): drain UE TX for this chunk, apply TDL + AWGN ---
-        // Non-blocking read of up to M samples. We forward exactly the samples the
-        // UE produced (no zero-padding): rx.ul is a faithful, contiguous copy of
-        // the UE uplink frame stream, so the BS reads it frame-aligned from sample
-        // 0 with no sync loop. When the UE has nothing, nothing is forwarded (the
-        // BS recv simply waits), and the hub still makes downlink progress.
+        // --- Uplink (UE->BS): drain UE TX for this BS-clock chunk, apply TDL + AWGN ---
+        // When SRO is enabled, the UE sample stream advances at UE/BS ratio relative
+        // to the BS clock, then the reciprocal resampler publishes rx.ul on the BS
+        // clock. When the UE has nothing, nothing is forwarded (the BS recv simply
+        // waits), and the hub still makes downlink progress.
         if (enable_uplink) {
-            const size_t got = ul_tx_ring.pop_block(ul_in.data(), M, running, 0.0);
+            const size_t desired_ul_input = sro_on
+                ? std::max<size_t>(
+                      1,
+                      static_cast<size_t>(std::ceil(static_cast<double>(M) * ue_to_bs_sample_rate_ratio)))
+                : M;
+            const size_t got = ul_tx_ring.pop_block(ul_in.data(), desired_ul_input, running, 0.0);
             if (got > 0) {
                 std::copy(ul_in.begin(), ul_in.begin() + got, ul_ext.begin() + ul_L);
                 for (size_t n = 0; n < got; ++n) {
@@ -620,14 +795,26 @@ int main(int argc, char** argv) {
                     }
                     ul_out[n] = acc;
                 }
+                size_t ul_count = got;
+                if (sro_on) {
+                    ul_sro_resampler.append(ul_out.data(), got);
+                    ul_sro_resampler.produce(ul_sro_out);
+                    ul_count = ul_sro_out.size();
+                    if (ul_out.size() < ul_count) {
+                        ul_out.resize(ul_count);
+                    }
+                    std::copy(ul_sro_out.begin(), ul_sro_out.end(), ul_out.begin());
+                }
                 // NOTE: no per-chunk SNR-control scaling on the uplink — the uplink
                 // frame is zero-padded within the DL period, so chunk-wise power
                 // normalization would vary the signal level across the frame and
                 // break the BS equalization. Uplink SNR = tap gain vs AWGN.
-                if (noise_on) {
-                    noise_gen.add(ul_out.data(), got, static_cast<float>(noise_sigma));
+                if (noise_on && ul_count > 0) {
+                    noise_gen.add(ul_out.data(), ul_count, static_cast<float>(noise_sigma));
                 }
-                ul_rx_ring.push_block(ul_out.data(), got, running);
+                if (ul_count > 0) {
+                    ul_rx_ring.push_block(ul_out.data(), ul_count, running);
+                }
                 // Slide uplink history (last ul_L samples of the extended buffer).
                 std::copy(ul_ext.begin() + got, ul_ext.begin() + got + ul_L, ul_ext.begin());
             }

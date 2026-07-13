@@ -80,6 +80,7 @@ simulation:
   enable_sensing_rx: true        # produce the sensing RX paths (false = comm-only)
   noise_power_dbfs: -50          # AWGN per RX channel; <= -200 disables
   cfo_hz: 0.0                    # relative CFO on the communication/bistatic RX
+  sample_rate_offset_ppm: 0.0    # UE sample clock offset relative to the BS clock
   timing_offset_samples: 0       # fixed integer sample offset, folded into path delays
   array_spacing_m: 0.04283       # physical ULA spacing (m); d/λ scales with center_freq
                                  # (42.83 mm = λ/2 @ 3.5 GHz, matches the sensing viewers).
@@ -97,6 +98,13 @@ simulation:
 ```
 
 The number of sensing antennas equals the number of `sensing_rx_channels` entries.
+
+`sample_rate_offset_ppm` models one endpoint-level sampling clock error: the UE
+sample rate is `BS_rate * (1 + ppm * 1e-6)`. BS TX, BS uplink RX, and all BS
+sensing RX channels stay on the same BS sample clock; UE downlink RX and UE
+uplink TX stay on the same UE sample clock. The simulator therefore resamples
+the BS->UE communication path by that ratio and the UE->BS uplink path by its
+reciprocal, while monostatic BS sensing channels are not resampled.
 
 `targets` describes the scatterer scene seen by monostatic sensing and generates the
 corresponding array response for each sensing antenna. The bistatic (communication)
