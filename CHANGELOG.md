@@ -8,6 +8,37 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-19 - ZeroMQ debug 监听地址默认值修正
+
+### Summary
+
+本次更新修正了解调端 ZeroMQ debug PUB 输出的默认监听地址语义，并让简单 Matplotlib debug viewer 支持运行时切换后端 Host。
+
+### Changes
+
+- `channel_ip`、`pdf_ip` 和 `constellation_ip` 默认改为 `0.0.0.0`，字段留空时也解析为 `0.0.0.0`，不再继承 `default_out_ip`。
+  影响：ZeroMQ PUB socket 不会再尝试绑定远端目标地址；远端 viewer 应连接后端机器的实际网卡 IP。
+
+- 更新 Demodulator 示例配置、benchmark 模板、README、网页文档和 Web 配置编辑器 schema。
+  影响：模板和配置 UI 都明确区分 ZeroMQ 监听地址与 UDP/VOFA 目标地址。
+
+- 为 `plot_channel.py`、`plot_pdf.py` 和 `plot_const.py` 增加 Host 输入框与 Connect 按钮。
+  影响：这些简单 debug viewer 可以在窗口内切换连接的后端地址，不需要手动修改脚本常量。
+
+## 2026-06-19 - ChannelSimulator 在线 SNR 控制
+
+### Summary
+
+本次更新为 ChannelSimulator 增加独立 ZeroMQ 控制端口和在线目标 SNR 调整能力，并提供专用 Python 控制界面。
+
+### Changes
+
+- 新增 `simulation.snr_control_enable`、`simulation.target_snr_db` 和 `simulation.control_port` 配置。
+  影响：仿真链路可以在 AWGN 噪声功率固定的情况下，通过缩放加噪前的有效信号实时改变目标 SNR。
+
+- 新增 `scripts/channel_sim_control.py`。
+  影响：开发者可以通过 PyQt 界面连接 ChannelSimulator 的 ZMQ 控制端口，查询/设置目标 SNR 或关闭目标 SNR 缩放。
+
 ## 2026-06-13 - CFO 训练、viewer 重构与配置编辑器增强
 
 ### Summary

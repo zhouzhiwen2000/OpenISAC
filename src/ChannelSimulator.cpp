@@ -21,6 +21,7 @@
 #include <csignal>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -103,6 +104,54 @@ void handle_signal(int) {
 }
 
 double db_to_linear_amplitude(double db) { return std::pow(10.0, db / 20.0); }
+
+constexpr int32_t kSnrControlDisabled = std::numeric_limits<int32_t>::min();
+
+int32_t snr_db_to_command_value(double snr_db) {
+    if (!std::isfinite(snr_db)) {
+        return kSnrControlDisabled;
+    }
+    const double clamped = std::clamp(snr_db, -200.0, 200.0);
+    return static_cast<int32_t>(std::llround(clamped * 100.0));
+}
+
+double command_value_to_snr_db(int32_t value) {
+    return static_cast<double>(value) / 100.0;
+}
+
+float scale_clean_signal_to_snr(
+    sample_t* data,
+    size_t count,
+    double target_snr_db,
+    double noise_power)
+{
+    if (data == nullptr || count == 0 || noise_power <= 0.0 ||
+        !std::isfinite(target_snr_db)) {
+        return 1.0f;
+    }
+
+    double signal_power = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        signal_power += static_cast<double>(std::norm(data[i]));
+    }
+    signal_power /= static_cast<double>(count);
+    if (signal_power <= 1e-30 || !std::isfinite(signal_power)) {
+        return 1.0f;
+    }
+
+    const double snr_linear = std::pow(10.0, target_snr_db / 10.0);
+    const double target_signal_power = noise_power * snr_linear;
+    const float scale = static_cast<float>(std::sqrt(target_signal_power / signal_power));
+    if (!std::isfinite(scale)) {
+        return 1.0f;
+    }
+
+    #pragma omp simd
+    for (size_t i = 0; i < count; ++i) {
+        data[i] *= scale;
+    }
+    return scale;
+}
 
 // Precomputed per-target parameters.
 struct Target {
@@ -268,12 +317,18 @@ int main(int argc, char** argv) {
 
     // --- Noise setup ---
     const bool noise_on = sim.noise_power_dbfs > -200.0;
-    const double noise_sigma = noise_on ? std::sqrt(std::pow(10.0, sim.noise_power_dbfs / 10.0) / 2.0) : 0.0;
+    const double noise_power = noise_on ? std::pow(10.0, sim.noise_power_dbfs / 10.0) : 0.0;
+    const double noise_sigma = noise_on ? std::sqrt(noise_power / 2.0) : 0.0;
     // A single shared noise stream feeds every output. Generation is serial: the
     // noise kernel is vectorized and so cheap per chunk that an OpenMP fork per chunk
     // measured as a net loss even at 32 channels, so per-channel streams would buy
     // nothing but complexity here.
     NoiseGen noise_gen(0xC0FFEE);
+    std::atomic<int32_t> target_snr_centidb{
+        sim.snr_control_enable ? snr_db_to_command_value(sim.target_snr_db) : kSnrControlDisabled};
+    if (sim.snr_control_enable && !noise_on) {
+        LOG_G_WARN() << "[ChannelSim] target SNR control requested, but noise_power_dbfs <= -200 disables AWGN.";
+    }
 
     // --- Comm CFO ---
     // `simulation.cfo_hz` is the injected transmitter/receiver carrier mismatch.
@@ -303,6 +358,37 @@ int main(int argc, char** argv) {
         comm_ring.create(sim_shm::make_shm_name(sim.session, "rx.comm"), sim.ring_capacity_samples);
     }
 
+    std::unique_ptr<ControlCommandHandler> control_handler;
+    if (sim.control_port > 0) {
+        control_handler = std::make_unique<ControlCommandHandler>("0.0.0.0", sim.control_port);
+        control_handler->register_command("SNR ", [&target_snr_centidb, noise_on](int32_t value) {
+            if (value == kSnrControlDisabled) {
+                target_snr_centidb.store(kSnrControlDisabled, std::memory_order_release);
+                LOG_G_INFO() << "[ChannelSim] target SNR scaling disabled";
+                return;
+            }
+            const int32_t clamped = std::clamp<int32_t>(value, -20000, 20000);
+            target_snr_centidb.store(clamped, std::memory_order_release);
+            LOG_G_INFO() << "[ChannelSim] target SNR set to "
+                         << command_value_to_snr_db(clamped) << " dB"
+                         << (noise_on ? "" : " (AWGN is disabled)");
+        });
+        control_handler->register_request("SNR ", [&target_snr_centidb, &control_handler](
+            int32_t,
+            const ControlCommandHandler::ControlPeer& peer)
+        {
+            control_handler->send_control_status(
+                peer,
+                "SNR ",
+                target_snr_centidb.load(std::memory_order_acquire));
+        });
+        control_handler->start();
+        LOG_G_INFO() << "[ChannelSim] ZMQ control ready on port " << sim.control_port
+                     << " (command SNR = dB*100; value INT32_MIN disables scaling)";
+    } else {
+        LOG_G_INFO() << "[ChannelSim] ZMQ control disabled (simulation.control_port <= 0)";
+    }
+
     LOG_G_INFO() << "[ChannelSim] Shared memory ready. Waiting for transmit samples... (Ctrl-C to stop)";
 
     // --- Processing buffers ---
@@ -320,6 +406,7 @@ int main(int argc, char** argv) {
 
     uint64_t total_produced = 0;
     auto last_log = std::chrono::steady_clock::now();
+    int32_t last_logged_snr_centidb = std::numeric_limits<int32_t>::max();
 
     while (!g_stop.load() && running->load(std::memory_order_acquire) != 0) {
         const size_t M = tx_ring.pop_upto(in_chunk.data(), max_chunk, running);
@@ -426,6 +513,29 @@ int main(int argc, char** argv) {
             if (mag > 1e-6f) cfo_phasor /= mag;
         }
 
+        // --- Target SNR scaling ---
+        // The clean simulated signal is scaled before AWGN, so online SNR changes
+        // leave the noise floor fixed and adjust only the effective signal level.
+        const int32_t snr_centidb = target_snr_centidb.load(std::memory_order_acquire);
+        if (snr_centidb != last_logged_snr_centidb) {
+            if (snr_centidb == kSnrControlDisabled) {
+                LOG_G_INFO() << "[ChannelSim] target SNR scaling is off";
+            } else {
+                LOG_G_INFO() << "[ChannelSim] applying target SNR "
+                             << command_value_to_snr_db(snr_centidb) << " dB";
+            }
+            last_logged_snr_centidb = snr_centidb;
+        }
+        if (noise_on && snr_centidb != kSnrControlDisabled) {
+            const double target_snr_db = command_value_to_snr_db(snr_centidb);
+            for (size_t k = 0; k < num_channels; ++k) {
+                (void)scale_clean_signal_to_snr(out_sens[k].data(), M, target_snr_db, noise_power);
+            }
+            if (enable_comm) {
+                (void)scale_clean_signal_to_snr(out_comm.data(), M, target_snr_db, noise_power);
+            }
+        }
+
         // --- AWGN ---
         if (noise_on) {
             const float sigma = static_cast<float>(noise_sigma);
@@ -459,6 +569,9 @@ int main(int argc, char** argv) {
     }
 
     LOG_G_INFO() << "[ChannelSim] Stopping. Cleaning up shared memory.";
+    if (control_handler) {
+        control_handler->stop();
+    }
     ctrl.stop();
     // Give clients a moment to observe the stop flag before unlinking.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));

@@ -3,18 +3,17 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 import zmq
-from sensing_runtime_protocol import make_debug_sub_conflate, make_tcp_endpoint
+from debug_zmq_viewer import DebugZmqConnector
 
 # Backend host (the C++ backend PUB-binds this debug stream port).
 HOST = "127.0.0.1"
 UDP_PORT = 12349
 FFT_SIZE = 1024
 
-# Configure ZeroMQ SUB receiver (CONFLATE: only the latest frame is kept).
-sock = make_debug_sub_conflate(make_tcp_endpoint(HOST, UDP_PORT))
-
 # Create plotting window
 fig, ax = plt.subplots()
+fig.subplots_adjust(bottom=0.16)
+connector = DebugZmqConnector(fig, UDP_PORT, HOST)
 x = np.arange(FFT_SIZE)
 line, = ax.plot(x, np.zeros(FFT_SIZE))
 vline = ax.axvline(0, color='r', linestyle='--', alpha=0)
@@ -26,7 +25,7 @@ ax.set_title('Channel Delay Profile with Peak Marker')
 plt.grid(True)
 def update(frame):
     try:
-        data = sock.recv(flags=zmq.NOBLOCK)
+        data = connector.recv(flags=zmq.NOBLOCK)
         if len(data) == FFT_SIZE * 8:
             # Data processing
             cdata = np.frombuffer(data, dtype=np.complex64)

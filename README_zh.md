@@ -215,7 +215,7 @@ cmake ..
 make -j$(nproc)
 ```
 
-> 后端↔前端通信（感知数据流 + 控制/参数通道）现已基于 **ZeroMQ**。后端按配置的监听 IP/端口为感知/调试数据流绑定 PUB socket、为控制通道绑定 ROUTER socket；示例 YAML 使用 `0.0.0.0` 作为感知/控制监听 IP。Python 前端用 SUB/DEALER socket 连接。让某个前端连接远端后端时，使用其 `--host <ip>` 参数或 Backend IP 输入框（默认 `127.0.0.1`）。
+> 后端↔前端通信（感知数据流 + 控制/参数通道）现已基于 **ZeroMQ**。后端按配置的监听 IP/端口为感知/调试数据流绑定 PUB socket、为控制通道绑定 ROUTER socket；示例 YAML 使用 `0.0.0.0` 作为感知/调试/控制监听 IP。Python 前端用 SUB/DEALER socket 连接。让某个前端连接远端后端时，使用其 `--host <ip>` 参数或 Backend IP 输入框（默认 `127.0.0.1`）。
  
 #### 5. 系统性能调优
 运行提供的脚本以优化您的系统设置，以满足实时处理需求：
@@ -667,17 +667,17 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链和输出；设为 `false` 时 `OFDMDemodulator` 不会启动双站感知通道。 |
 | `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 双站感知数据流和控制通道的 ZMQ 监听 IP。使用 `0.0.0.0` 可接受远端前端连接；使用 `127.0.0.1` 则仅允许本机连接。 |
 | `bi_sensing_port` | `int` | `8889` | 双站感知数据流的 ZeroMQ PUB 绑定端口。 |
-| `channel_ip` | `string` / IPv4 | `127.0.0.1` | 信道估计输出 IP。 |
-| `channel_port` | `int` | `12348` | 信道估计输出端口。 |
-| `pdf_ip` | `string` / IPv4 | `127.0.0.1` | PDP/PDF 输出 IP。 |
-| `pdf_port` | `int` | `12349` | PDP/PDF 输出端口。 |
-| `constellation_ip` | `string` / IPv4 | `127.0.0.1` | 星座图输出 IP。 |
-| `constellation_port` | `int` | `12346` | 星座图输出端口。 |
+| `channel_ip` | `string` / IPv4 | `0.0.0.0` | 信道估计输出的 ZeroMQ PUB 监听 IP。留空会解析为 `0.0.0.0`，不会使用 `default_out_ip`。 |
+| `channel_port` | `int` | `12348` | 信道估计输出的 ZeroMQ PUB 绑定端口。 |
+| `pdf_ip` | `string` / IPv4 | `0.0.0.0` | PDP/PDF 输出的 ZeroMQ PUB 监听 IP。留空会解析为 `0.0.0.0`，不会使用 `default_out_ip`。 |
+| `pdf_port` | `int` | `12349` | PDP/PDF 输出的 ZeroMQ PUB 绑定端口。 |
+| `constellation_ip` | `string` / IPv4 | `0.0.0.0` | 星座图输出的 ZeroMQ PUB 监听 IP。留空会解析为 `0.0.0.0`，不会使用 `default_out_ip`。 |
+| `constellation_port` | `int` | `12346` | 星座图输出的 ZeroMQ PUB 绑定端口。 |
 | `vofa_debug_ip` | `string` / IPv4 | `127.0.0.1` | VOFA+ 调试输出 IP。 |
 | `vofa_debug_port` | `int` | `12347` | VOFA+ 调试输出端口。 |
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | 解码后业务数据输出 IP。 |
 | `udp_output_port` | `int` | `50001` | 解码后业务数据输出端口。 |
-| `default_out_ip` | `string` / IPv4 | `127.0.0.1` | 默认输出 IP；其他输出 IP 留空时使用该值。 |
+| `default_out_ip` | `string` / IPv4 | `127.0.0.1` | UDP 业务数据和 VOFA+ 调试输出的默认目标 IP；对应 IP 字段留空时使用该值。ZeroMQ PUB 监听 IP 不继承该值。 |
 | `control_port` | `int` | `10001` | 双向控制通道的 ZeroMQ ROUTER 绑定端口。 |
 | `measurement_enable` | `bool` | `false` | 启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 `udp_output_*`，而是直接用于 BER/BLER/EVM 统计。CPU 二进制会在本地处理该模式。 |
 | `measurement_mode` | `string` | `internal_prbs` | 测量模式选择。目前仅支持 `internal_prbs`；非法值会在配置归一化阶段自动关闭测量模式。 |

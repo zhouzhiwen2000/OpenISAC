@@ -215,6 +215,9 @@ struct SimConfig {
     bool enable_comm_rx = true;                // produce the communication RX channel (run with OFDMDemodulator)
     bool enable_sensing_rx = true;             // produce the monostatic sensing RX channels (one per antenna)
     double noise_power_dbfs = -100.0;          // AWGN power per RX channel (dBFS); very low = effectively off
+    bool snr_control_enable = false;           // Enable target-SNR scaling of clean signal before AWGN
+    double target_snr_db = 40.0;               // Target SNR when snr_control_enable is true
+    int control_port = 10002;                  // ZMQ ROUTER port for ChannelSimulator runtime controls
     double cfo_hz = 0.0;                        // Initial carrier offset before simulated RX correction (Hz)
     int timing_offset_samples = 0;             // Constant integer sample delay injected on RX
     // Physical ULA element spacing in meters. The steering vector's electrical spacing
@@ -846,11 +849,11 @@ struct Config {
     std::string bi_sensing_ip = "0.0.0.0";
     int bi_sensing_port = 8889;
     int control_port = 9999;
-    std::string channel_ip = "127.0.0.1";
+    std::string channel_ip = "0.0.0.0";
     int channel_port = 12348;
-    std::string pdf_ip = "127.0.0.1";
+    std::string pdf_ip = "0.0.0.0";
     int pdf_port = 12349;
-    std::string constellation_ip = "127.0.0.1";
+    std::string constellation_ip = "0.0.0.0";
     int constellation_port = 12346;
     std::string vofa_debug_ip = "127.0.0.1";
     int vofa_debug_port = 12347;
@@ -1842,6 +1845,9 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::Key << "enable_comm_rx" << YAML::Value << sim.enable_comm_rx;
     out << YAML::Key << "enable_sensing_rx" << YAML::Value << sim.enable_sensing_rx;
     out << YAML::Key << "noise_power_dbfs" << YAML::Value << sim.noise_power_dbfs;
+    out << YAML::Key << "snr_control_enable" << YAML::Value << sim.snr_control_enable;
+    out << YAML::Key << "target_snr_db" << YAML::Value << sim.target_snr_db;
+    out << YAML::Key << "control_port" << YAML::Value << sim.control_port;
     out << YAML::Key << "cfo_hz" << YAML::Value << sim.cfo_hz;
     out << YAML::Key << "timing_offset_samples" << YAML::Value << sim.timing_offset_samples;
     out << YAML::Key << "array_spacing_m" << YAML::Value << sim.array_spacing_m;
@@ -1891,6 +1897,9 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["enable_comm_rx"]) sim.enable_comm_rx = sim_node["enable_comm_rx"].as<bool>();
         if (sim_node["enable_sensing_rx"]) sim.enable_sensing_rx = sim_node["enable_sensing_rx"].as<bool>();
         if (sim_node["noise_power_dbfs"]) sim.noise_power_dbfs = sim_node["noise_power_dbfs"].as<double>();
+        if (sim_node["snr_control_enable"]) sim.snr_control_enable = sim_node["snr_control_enable"].as<bool>();
+        if (sim_node["target_snr_db"]) sim.target_snr_db = sim_node["target_snr_db"].as<double>();
+        if (sim_node["control_port"]) sim.control_port = sim_node["control_port"].as<int>();
         if (sim_node["cfo_hz"]) sim.cfo_hz = sim_node["cfo_hz"].as<double>();
         if (sim_node["timing_offset_samples"]) sim.timing_offset_samples = sim_node["timing_offset_samples"].as<int>();
         if (sim_node["array_spacing_m"]) sim.array_spacing_m = sim_node["array_spacing_m"].as<double>();
@@ -2674,11 +2683,11 @@ inline Config make_default_demodulator_config() {
     cfg.bi_sensing_ip = "";
     cfg.bi_sensing_port = 8889;
     cfg.control_port = 10000;
-    cfg.channel_ip = "";
+    cfg.channel_ip = "0.0.0.0";
     cfg.channel_port = 12348;
-    cfg.pdf_ip = "";
+    cfg.pdf_ip = "0.0.0.0";
     cfg.pdf_port = 12349;
-    cfg.constellation_ip = "";
+    cfg.constellation_ip = "0.0.0.0";
     cfg.constellation_port = 12346;
     cfg.vofa_debug_ip = "";
     cfg.vofa_debug_port = 12347;
@@ -3102,9 +3111,9 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
     finalize_data_resource_grid_config(cfg, "Demodulator");
     finalize_sensing_mask_config(cfg, "Demodulator");
     if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = "0.0.0.0";
-    if (cfg.channel_ip.empty()) cfg.channel_ip = cfg.default_out_ip;
-    if (cfg.pdf_ip.empty()) cfg.pdf_ip = cfg.default_out_ip;
-    if (cfg.constellation_ip.empty()) cfg.constellation_ip = cfg.default_out_ip;
+    if (cfg.channel_ip.empty()) cfg.channel_ip = "0.0.0.0";
+    if (cfg.pdf_ip.empty()) cfg.pdf_ip = "0.0.0.0";
+    if (cfg.constellation_ip.empty()) cfg.constellation_ip = "0.0.0.0";
     if (cfg.vofa_debug_ip.empty()) cfg.vofa_debug_ip = cfg.default_out_ip;
     if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_out_ip;
 }
@@ -5384,6 +5393,22 @@ public:
         }
         send_sensing_viewer_params(peer, packet);
         return true;
+    }
+
+    void send_control_status(
+        const ControlPeer& peer,
+        const std::string& command,
+        int32_t value)
+    {
+        if (command.size() != 4) {
+            LOG_G_WARN() << "Control status command id must be exactly 4 bytes";
+            return;
+        }
+        ControlCommand reply;
+        std::memcpy(reply.header, "CTRL", 4);
+        std::memcpy(reply.command, command.data(), 4);
+        reply.value = htonl(value);
+        _send_to(peer, &reply, sizeof(reply));
     }
 
 private:

@@ -213,7 +213,7 @@ cmake ..
 make -j$(nproc)
 ```
 
-> Backend↔Frontend communication (sensing streams + the control/params channel) runs over **ZeroMQ**. The backend binds PUB sockets for the sensing/debug streams and a ROUTER socket for control on the configured listen IP/ports; the sample YAMLs use `0.0.0.0` for sensing/control listen IPs. Python viewers connect with SUB/DEALER sockets. Point a viewer at a remote backend with its `--host <ip>` flag or Backend IP field (default `127.0.0.1`).
+> Backend↔Frontend communication (sensing streams + the control/params channel) runs over **ZeroMQ**. The backend binds PUB sockets for the sensing/debug streams and a ROUTER socket for control on the configured listen IP/ports; the sample YAMLs use `0.0.0.0` for sensing/debug/control listen IPs. Python viewers connect with SUB/DEALER sockets. Point a viewer at a remote backend with its `--host <ip>` flag or Backend IP field (default `127.0.0.1`).
  
 #### 5. System Performance Tuning
 Run the provided script to optimize your system settings for real-time processing:
@@ -667,17 +667,17 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and output. When set to `false`, `OFDMDemodulator` skips bistatic sensing channel startup. |
 | `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the bistatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `bi_sensing_port` | `int` | `8889` | ZeroMQ PUB bind port for the bistatic sensing stream. |
-| `channel_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for channel-estimation output. |
-| `channel_port` | `int` | `12348` | Destination port for channel-estimation output. |
-| `pdf_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for PDP/PDF output. |
-| `pdf_port` | `int` | `12349` | Destination port for PDP/PDF output. |
-| `constellation_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for constellation output. |
-| `constellation_port` | `int` | `12346` | Destination port for constellation output. |
+| `channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
+| `channel_port` | `int` | `12348` | ZeroMQ PUB bind port for channel-estimation output. |
+| `pdf_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for PDP/PDF output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
+| `pdf_port` | `int` | `12349` | ZeroMQ PUB bind port for PDP/PDF output. |
+| `constellation_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for constellation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
+| `constellation_port` | `int` | `12346` | ZeroMQ PUB bind port for constellation output. |
 | `vofa_debug_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for VOFA+ debug output. |
 | `vofa_debug_port` | `int` | `12347` | Destination port for VOFA+ debug output. |
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for decoded payload output. |
 | `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
-| `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default output IP used when output IP fields are empty. |
+| `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value. |
 | `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
 | `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. The CPU binaries handle this mode locally. |
 | `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |

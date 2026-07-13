@@ -67,11 +67,11 @@ enable_bi_sensing: true
 bi_sensing_ip: "0.0.0.0"
 bi_sensing_port: 8889
 control_port: 10001
-channel_ip: ""
+channel_ip: "0.0.0.0"
 channel_port: 12348
-pdf_ip: ""
+pdf_ip: "0.0.0.0"
 pdf_port: 12349
-constellation_ip: ""
+constellation_ip: "0.0.0.0"
 constellation_port: 12346
 udp_output_ip: ""
 udp_output_port: 50001

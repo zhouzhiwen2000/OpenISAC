@@ -17,6 +17,8 @@ REQ_HEADER = b"REQ "
 READY_COMMAND = b"RDY "
 PARAMS_COMMAND = b"PARM"
 CALIBRATE_SYSTEM_RESPONSE_COMMAND = b"CALB"
+CHANNEL_SIM_SNR_COMMAND = b"SNR "
+CHANNEL_SIM_SNR_DISABLED = -(2**31)
 
 COMPACT_MAGIC_VERSION = 0x43534D31  # "CSM1"
 AGGREGATE_MAGIC_VERSION = 0x41534731  # "ASG1"
@@ -296,6 +298,15 @@ def build_control_command(command: bytes, value: int = 0) -> bytes:
 
 def build_system_response_calibration_command(value: int = 0) -> bytes:
     return build_control_command(CALIBRATE_SYSTEM_RESPONSE_COMMAND, value)
+
+
+def build_channel_sim_snr_command(snr_db: float | None) -> bytes:
+    value = CHANNEL_SIM_SNR_DISABLED if snr_db is None else int(round(float(snr_db) * 100.0))
+    return build_control_command(CHANNEL_SIM_SNR_COMMAND, value)
+
+
+def build_channel_sim_snr_request() -> bytes:
+    return REQUEST_PACKET_STRUCT.pack(REQ_HEADER, CHANNEL_SIM_SNR_COMMAND, 0)
 
 
 def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:

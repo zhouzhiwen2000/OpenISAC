@@ -72,11 +72,11 @@ enable_bi_sensing: true  # Enable bistatic sensing pipeline and ZMQ output
 bi_sensing_ip: "0.0.0.0"  # Bistatic sensing ZMQ listen IP
 bi_sensing_port: 8889  # Bistatic sensing ZMQ listen port
 control_port: 10001  # ZMQ port for runtime control commands
-channel_ip: ""  # Channel-estimate output IP (empty = use default_out_ip)
+channel_ip: "0.0.0.0"  # Channel-estimate ZMQ listen IP
 channel_port: 12348  # Channel-estimate output port
-pdf_ip: ""  # Delay-spectrum output IP (empty = use default_out_ip)
+pdf_ip: "0.0.0.0"  # Delay-spectrum ZMQ listen IP
 pdf_port: 12349  # Delay-spectrum output port
-constellation_ip: ""  # Constellation output IP (empty = use default_out_ip)
+constellation_ip: "0.0.0.0"  # Constellation ZMQ listen IP
 constellation_port: 12346  # Constellation output port
 udp_output_ip: ""  # Payload output IP (empty = use default_out_ip)
 udp_output_port: 50001  # Payload output port

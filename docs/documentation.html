@@ -97,7 +97,7 @@ cmake ..
 make -j$(nproc)
 </code></pre>
 <blockquote>
-<p>Backend↔Frontend communication (sensing streams + the control/params channel) runs over <strong>ZeroMQ</strong>. The backend binds PUB sockets for the sensing/debug streams and a ROUTER socket for control on the configured listen IP/ports; the sample YAMLs use <code>0.0.0.0</code> for sensing/control listen IPs. Python viewers connect with SUB/DEALER sockets. Point a viewer at a remote backend with its <code>--host &lt;ip&gt;</code> flag or Backend IP field (default <code>127.0.0.1</code>).</p>
+<p>Backend↔Frontend communication (sensing streams + the control/params channel) runs over <strong>ZeroMQ</strong>. The backend binds PUB sockets for the sensing/debug streams and a ROUTER socket for control on the configured listen IP/ports; the sample YAMLs use <code>0.0.0.0</code> for sensing/debug/control listen IPs. Python viewers connect with SUB/DEALER sockets. Point a viewer at a remote backend with its <code>--host &lt;ip&gt;</code> flag or Backend IP field (default <code>127.0.0.1</code>).</p>
 </blockquote>
 <h4 id="5-system-performance-tuning">5. System Performance Tuning</h4>
 <p>Run the provided script to optimize your system settings for real-time processing:</p>
@@ -1102,38 +1102,38 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <tr>
 <td style="text-align:left"><code>channel_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for channel-estimation output.</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to <code>0.0.0.0</code>, not <code>default_out_ip</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>channel_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>12348</code></td>
-<td style="text-align:left">Destination port for channel-estimation output.</td>
+<td style="text-align:left">ZeroMQ PUB bind port for channel-estimation output.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>pdf_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for PDP/PDF output.</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">ZeroMQ PUB listen IP for PDP/PDF output. Empty values also resolve to <code>0.0.0.0</code>, not <code>default_out_ip</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>pdf_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>12349</code></td>
-<td style="text-align:left">Destination port for PDP/PDF output.</td>
+<td style="text-align:left">ZeroMQ PUB bind port for PDP/PDF output.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>constellation_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for constellation output.</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">ZeroMQ PUB listen IP for constellation output. Empty values also resolve to <code>0.0.0.0</code>, not <code>default_out_ip</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>constellation_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>12346</code></td>
-<td style="text-align:left">Destination port for constellation output.</td>
+<td style="text-align:left">ZeroMQ PUB bind port for constellation output.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>vofa_debug_ip</code></td>
@@ -1163,7 +1163,7 @@ Use <code>config/Demodulator_X310.yaml</code> or <code>config/Demodulator_B210.y
 <td style="text-align:left"><code>default_out_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Default output IP used when output IP fields are empty.</td>
+<td style="text-align:left">Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>control_port</code></td>

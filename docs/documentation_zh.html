@@ -99,7 +99,7 @@ cmake ..
 make -j$(nproc)
 </code></pre>
 <blockquote>
-<p>后端↔前端通信（感知数据流 + 控制/参数通道）现已基于 <strong>ZeroMQ</strong>。后端按配置的监听 IP/端口为感知/调试数据流绑定 PUB socket、为控制通道绑定 ROUTER socket；示例 YAML 使用 <code>0.0.0.0</code> 作为感知/控制监听 IP。Python 前端用 SUB/DEALER socket 连接。让某个前端连接远端后端时，使用其 <code>--host &lt;ip&gt;</code> 参数或 Backend IP 输入框（默认 <code>127.0.0.1</code>）。</p>
+<p>后端↔前端通信（感知数据流 + 控制/参数通道）现已基于 <strong>ZeroMQ</strong>。后端按配置的监听 IP/端口为感知/调试数据流绑定 PUB socket、为控制通道绑定 ROUTER socket；示例 YAML 使用 <code>0.0.0.0</code> 作为感知/调试/控制监听 IP。Python 前端用 SUB/DEALER socket 连接。让某个前端连接远端后端时，使用其 <code>--host &lt;ip&gt;</code> 参数或 Backend IP 输入框（默认 <code>127.0.0.1</code>）。</p>
 </blockquote>
 <h4 id="5-系统性能调优">5. 系统性能调优</h4>
 <p>运行提供的脚本以优化您的系统设置，以满足实时处理需求：</p>
@@ -1102,38 +1102,38 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <tr>
 <td style="text-align:left"><code>channel_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">信道估计输出 IP。</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">信道估计输出的 ZeroMQ PUB 监听 IP。留空会解析为 <code>0.0.0.0</code>，不会使用 <code>default_out_ip</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>channel_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>12348</code></td>
-<td style="text-align:left">信道估计输出端口。</td>
+<td style="text-align:left">信道估计输出的 ZeroMQ PUB 绑定端口。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>pdf_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">PDP/PDF 输出 IP。</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">PDP/PDF 输出的 ZeroMQ PUB 监听 IP。留空会解析为 <code>0.0.0.0</code>，不会使用 <code>default_out_ip</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>pdf_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>12349</code></td>
-<td style="text-align:left">PDP/PDF 输出端口。</td>
+<td style="text-align:left">PDP/PDF 输出的 ZeroMQ PUB 绑定端口。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>constellation_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">星座图输出 IP。</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">星座图输出的 ZeroMQ PUB 监听 IP。留空会解析为 <code>0.0.0.0</code>，不会使用 <code>default_out_ip</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>constellation_port</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>12346</code></td>
-<td style="text-align:left">星座图输出端口。</td>
+<td style="text-align:left">星座图输出的 ZeroMQ PUB 绑定端口。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>vofa_debug_ip</code></td>
@@ -1163,7 +1163,7 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
 <td style="text-align:left"><code>default_out_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">默认输出 IP；其他输出 IP 留空时使用该值。</td>
+<td style="text-align:left">UDP 业务数据和 VOFA+ 调试输出的默认目标 IP；对应 IP 字段留空时使用该值。ZeroMQ PUB 监听 IP 不继承该值。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>control_port</code></td>

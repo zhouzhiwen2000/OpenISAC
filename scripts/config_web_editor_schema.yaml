@@ -39,6 +39,21 @@ common:
           kind: float
           default: -100.0
           optional: true
+        - key: snr_control_enable
+          comment: Scale the clean simulated signal before AWGN to maintain target_snr_db
+          kind: bool
+          default: false
+          optional: true
+        - key: target_snr_db
+          comment: Initial target SNR in dB when snr_control_enable is true
+          kind: float
+          default: 40.0
+          optional: true
+        - key: control_port
+          comment: ChannelSimulator ZMQ control port for runtime SNR commands
+          kind: int
+          default: 10002
+          optional: true
         - key: cfo_hz
           comment: Initial carrier offset before demodulator RX correction in Hz
           kind: float
@@ -1421,8 +1436,8 @@ demodulator:
       type: scalar
       key: channel_ip
       kind: string
-      comment: Channel-estimate output IP (empty = use default_out_ip)
-      default: ""
+      comment: Channel-estimate ZMQ listen IP
+      default: "0.0.0.0"
       optional: true
   channel_port:
     title: Network Output
@@ -1439,8 +1454,8 @@ demodulator:
       type: scalar
       key: pdf_ip
       kind: string
-      comment: Delay-spectrum output IP (empty = use default_out_ip)
-      default: ""
+      comment: Delay-spectrum ZMQ listen IP
+      default: "0.0.0.0"
       optional: true
   pdf_port:
     title: Network Output
@@ -1457,8 +1472,8 @@ demodulator:
       type: scalar
       key: constellation_ip
       kind: string
-      comment: Constellation output IP (empty = use default_out_ip)
-      default: ""
+      comment: Constellation ZMQ listen IP
+      default: "0.0.0.0"
       optional: true
   constellation_port:
     title: Network Output
@@ -1493,7 +1508,7 @@ demodulator:
       type: scalar
       key: default_out_ip
       kind: string
-      comment: Default output IP when per-output IP is empty
+      comment: Default destination IP for UDP payload and VOFA+ debug outputs
       default: 127.0.0.1
       optional: true
   vofa_debug_ip:

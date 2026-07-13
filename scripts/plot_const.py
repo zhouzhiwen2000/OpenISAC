@@ -3,16 +3,13 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 import zmq
-from sensing_runtime_protocol import make_debug_sub_conflate, make_tcp_endpoint
+from debug_zmq_viewer import DebugZmqConnector
 
 # Receiver configuration
 HOST = "127.0.0.1"  # Backend host (PUB-binds this debug stream port)
 UDP_PORT = 12346    # Port number
 FFT_SIZE = 1024     # OFDM symbol FFT size (number of subcarriers)
 SHOW_GUARD_BAND = False  # Macro switch: whether to display guard band constellation points
-
-# Create ZeroMQ SUB socket (CONFLATE: only the latest frame is kept).
-sock = make_debug_sub_conflate(make_tcp_endpoint(HOST, UDP_PORT))
 
 # Define subcarrier indices:
 # - pilot_indices: Pilot subcarrier indices
@@ -25,6 +22,8 @@ guard_band_indices = np.arange(490, 534)
 
 # Create figure and axes
 fig, ax = plt.subplots()
+fig.subplots_adjust(bottom=0.16)
+connector = DebugZmqConnector(fig, UDP_PORT, HOST)
 ax.grid(True)
 ax.set_title("OFDM Constellation")
 ax.set_xlabel("Real (I)")
@@ -57,7 +56,7 @@ def update(frame):
     # Try to receive new data
     try:
         # Receive latest ZMQ message
-        data = sock.recv(flags=zmq.NOBLOCK)
+        data = connector.recv(flags=zmq.NOBLOCK)
 
         # Check if packet size is valid (FFT_SIZE * 8 bytes)
         if len(data) != FFT_SIZE * 8:
@@ -103,5 +102,5 @@ ani = FuncAnimation(
     cache_frame_data=False  # Don't cache frame data to save memory
 )
 
-plt.tight_layout()  # Adjust layout
+plt.tight_layout(rect=[0, 0.10, 1, 1])  # Adjust layout
 plt.show()  # Display figure

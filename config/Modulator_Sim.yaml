@@ -15,6 +15,9 @@ simulation:
   enable_comm_rx: true           # produce the communication RX path (set false to run sensing-only, no OFDMDemodulator)
   enable_sensing_rx: true        # produce the monostatic sensing RX paths (set false to run comm-only)
   noise_power_dbfs: -70          # AWGN power per RX channel (dBFS); lower = cleaner. <= -200 disables
+  snr_control_enable: true       # Scale clean signal before AWGN to hit target_snr_db; ZMQ control can change it live
+  target_snr_db: 40              # Initial target SNR in dB when snr_control_enable=true
+  control_port: 10002            # ChannelSimulator ZMQ control port (separate from Modulator/Demodulator)
   cfo_hz: 5000                   # Initial carrier offset before demodulator RX correction (Hz)
   timing_offset_samples: 0       # Constant sample delay injected on RX
   array_spacing_m: 0.04283       # Physical ULA element spacing (m); d/lambda scales with center_freq
