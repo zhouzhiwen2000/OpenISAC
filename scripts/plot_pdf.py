@@ -12,7 +12,7 @@ FFT_SIZE = 1024
 
 # Create plotting window
 fig, ax = plt.subplots()
-fig.subplots_adjust(bottom=0.16)
+fig.subplots_adjust(bottom=0.18)
 connector = DebugZmqConnector(fig, UDP_PORT, HOST)
 x = np.arange(FFT_SIZE)
 line, = ax.plot(x, np.zeros(FFT_SIZE))

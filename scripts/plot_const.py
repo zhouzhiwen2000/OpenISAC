@@ -22,7 +22,7 @@ guard_band_indices = np.arange(490, 534)
 
 # Create figure and axes
 fig, ax = plt.subplots()
-fig.subplots_adjust(bottom=0.16)
+fig.subplots_adjust(bottom=0.18)
 connector = DebugZmqConnector(fig, UDP_PORT, HOST)
 ax.grid(True)
 ax.set_title("OFDM Constellation")
@@ -102,5 +102,5 @@ ani = FuncAnimation(
     cache_frame_data=False  # Don't cache frame data to save memory
 )
 
-plt.tight_layout(rect=[0, 0.10, 1, 1])  # Adjust layout
+plt.tight_layout(rect=[0, 0.12, 1, 1])  # Adjust layout
 plt.show()  # Display figure

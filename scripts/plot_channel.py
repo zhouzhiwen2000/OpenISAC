@@ -13,7 +13,7 @@ FFT_SIZE = 1024
 
 # Create plotting window with three subplots
 fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 13))
-fig.subplots_adjust(bottom=0.12, hspace=0.45)
+fig.subplots_adjust(bottom=0.15, hspace=0.45)
 connector = DebugZmqConnector(fig, UDP_PORT, HOST)
 x = np.arange(FFT_SIZE)
 
