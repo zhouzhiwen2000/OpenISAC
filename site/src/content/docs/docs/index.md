@@ -35,5 +35,5 @@ Start with [hardware setup](/docs/getting-started/hardware/) and [installation](
 | :--- | :--- | :--- | :--- |
 | Run the BS side | `BS` | `config/BS_X310.yaml` or `config/BS_B210.yaml` | `plot_sensing_fast.py` |
 | Run the UE side | `UE` | `config/UE_X310.yaml` or `config/UE_B210.yaml` | `plot_bi_sensing_fast.py` |
-| Run without USRPs | `ChannelSimulator`, `BS`, `UE` | `config/BS_Sim.yaml` and `config/UE_Sim.yaml` | See [Channel Simulator](docs/CHANNEL_SIMULATOR.md) |
+| Run without USRPs | `ChannelSimulator`, `BS`, `UE` | `config/BS_Sim.yaml` and `config/UE_Sim.yaml` | See [Channel Simulator](./tools-workflows/channel-simulator/) |
 | Tune parameters from a browser | `scripts/config_web_editor.py` | Reads `build/BS.yaml` and `build/UE.yaml` | Browser at `http://<host>:8765` |

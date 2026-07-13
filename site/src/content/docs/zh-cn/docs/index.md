@@ -35,5 +35,5 @@ OpenISAC 不是 Wi-Fi、LTE 或 5G NR 协议栈，也不以商用设备互通为
 | :--- | :--- | :--- | :--- |
 | 运行 BS 端 | `BS` | `config/BS_X310.yaml` 或 `config/BS_B210.yaml` | `plot_sensing_fast.py` |
 | 运行 UE 端 | `UE` | `config/UE_X310.yaml` 或 `config/UE_B210.yaml` | `plot_bi_sensing_fast.py` |
-| 不使用 USRP 运行 | `ChannelSimulator`、`BS`、`UE` | `config/BS_Sim.yaml` 和 `config/UE_Sim.yaml` | 见[信道仿真器](docs/CHANNEL_SIMULATOR.zh-CN.md) |
+| 不使用 USRP 运行 | `ChannelSimulator`、`BS`、`UE` | `config/BS_Sim.yaml` 和 `config/UE_Sim.yaml` | 见[信道仿真器](./tools-workflows/channel-simulator/) |
 | 用浏览器调参数 | `scripts/config_web_editor.py` | 读取 `build/BS.yaml` 和 `build/UE.yaml` | 浏览器访问 `http://<host>:8765` |

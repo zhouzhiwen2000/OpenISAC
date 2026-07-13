@@ -9,7 +9,7 @@ description: Software dependencies needed to build and operate OpenISAC.
 *   **Ubuntu 24.04 LTS**
     *   Download: [http://www.ubuntu.com/download/desktop](http://www.ubuntu.com/download/desktop)
 *   **macOS (Apple Silicon, local development / demo only)**
-    *   Guide: [Separate macOS build guide](https://github.com/zhouzhiwen2000/OpenISAC/blob/main/docs/macos_build.md)
+    *   Guide: [Separate macOS build guide](../../tools-workflows/macos-development/)
 
 ### Dependencies & Installation
 

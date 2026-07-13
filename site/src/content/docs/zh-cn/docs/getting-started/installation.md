@@ -9,7 +9,7 @@ description: 编译和运行 OpenISAC 所需的软件依赖。
 *   **Ubuntu 24.04 LTS**
     *   下载: [http://www.ubuntu.com/download/desktop](http://www.ubuntu.com/download/desktop)
 *   **macOS (Apple Silicon，仅建议用于本地开发 / 演示)**
-    *   教程: [独立 macOS 构建教程](https://github.com/zhouzhiwen2000/OpenISAC/blob/main/docs/macos_build_zh.md)
+    *   教程: [独立 macOS 构建教程](../../tools-workflows/macos-development/)
 
 ### 依赖项和安装
 
