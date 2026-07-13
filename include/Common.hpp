@@ -1072,6 +1072,7 @@ struct UplinkConfig {
     int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
     std::string idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     bool debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
+    bool debug_self_scan_spectrum = false; // Publish a full-frame self-ZC matched-filter spectrum (needs debug_self_channel) to expose large TX-vs-RX window offsets
     bool ertm_to_enable = false;      // Enable eRTM timing-offset estimation payloads/logs
     size_t ertm_delay_oversample_factor = 10; // UE eRTM delay-spectrum IFFT oversampling factor
     bool ertm_debug_output_enabled = false; // Publish UE-side eRTM debug spectra over ZMQ
@@ -1141,6 +1142,8 @@ struct NetworkOutputConfig {
     int uplink_self_channel_port = 12360;
     std::string uplink_self_pdf_ip = "0.0.0.0";
     int uplink_self_pdf_port = 12361;
+    std::string uplink_self_scan_ip = "0.0.0.0";
+    int uplink_self_scan_port = 12362;
     std::string channel_ip = "0.0.0.0";
     int channel_port = 12348;
     std::string pdf_ip = "0.0.0.0";
@@ -1181,7 +1184,7 @@ struct CpuCoresConfig {
 };
 
 struct RuntimeConfig {
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, arq, demodulation, cfo, agc, align, snr, uplink, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, arq, demodulation, cfo, agc, align, snr, uplink, ertm, udp_egress, ue_recovery, or "all"
 };
 
 struct MeasurementConfig {
@@ -1278,6 +1281,13 @@ struct Config {
 
 inline bool uplink_self_channel_debug_enabled(const Config& cfg) {
     return cfg.uplink.debug_self_channel && cfg.uplink.duplex.mode != DuplexMode::FDD;
+}
+
+// The full-frame self-ZC scan spectrum is an add-on to self-channel debug: it
+// reuses the same RX frames but runs a whole-frame matched filter to locate the
+// UE's own uplink ZC, so it requires self-channel debug to be enabled too.
+inline bool uplink_self_scan_spectrum_enabled(const Config& cfg) {
+    return cfg.uplink.debug_self_scan_spectrum && uplink_self_channel_debug_enabled(cfg);
 }
 
 inline bool sec_sync_symbol_enabled(const Config& cfg) {
@@ -2619,6 +2629,7 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
             cfg.uplink.duplex.ul_center_freq = ul["center_freq"].as<double>();
         }
         if (ul["debug_self_channel"]) cfg.uplink.debug_self_channel = ul["debug_self_channel"].as<bool>();
+        if (ul["debug_self_scan_spectrum"]) cfg.uplink.debug_self_scan_spectrum = ul["debug_self_scan_spectrum"].as<bool>();
         if (ul["ertm_to_enable"]) cfg.uplink.ertm_to_enable = ul["ertm_to_enable"].as<bool>();
         if (ul["ertm_debug_output_enabled"]) {
             cfg.uplink.ertm_debug_output_enabled = ul["ertm_debug_output_enabled"].as<bool>();
@@ -2661,6 +2672,12 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
     }
     if (net["self_pdf_port"]) {
         cfg.network_output.uplink_self_pdf_port = net["self_pdf_port"].as<int>();
+    }
+    if (net["self_scan_ip"]) {
+        cfg.network_output.uplink_self_scan_ip = net["self_scan_ip"].as<std::string>();
+    }
+    if (net["self_scan_port"]) {
+        cfg.network_output.uplink_self_scan_port = net["self_scan_port"].as<int>();
     }
 }
 
@@ -3827,6 +3844,8 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "self_channel_port", cfg.network_output.uplink_self_channel_port);
         config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
         config_detail::load_value(network, "self_pdf_port", cfg.network_output.uplink_self_pdf_port);
+        config_detail::load_value(network, "self_scan_ip", cfg.network_output.uplink_self_scan_ip);
+        config_detail::load_value(network, "self_scan_port", cfg.network_output.uplink_self_scan_port);
         config_detail::load_value(network, "ertm_debug_ip", cfg.network_output.ertm_debug_ip);
         config_detail::load_value(network, "ertm_debug_port", cfg.network_output.ertm_debug_port);
 
@@ -4021,6 +4040,7 @@ inline void log_ue_agc_mode(const Config& cfg) {
 struct SyncBatch {
     AlignedVector data;
     int64_t usrp_time_ns = -1;
+    uint64_t generation = 0;
 };
 
 inline int64_t time_spec_to_ns(const radio::TimeSpec& time_spec) {
@@ -4978,9 +4998,14 @@ class UdpSender : public UdpBaseSender {
 public:
     UdpSender(const std::string& ip, uint16_t port) : UdpBaseSender(ip, port) {}
 
-    UdpSender(const std::string& ip, uint16_t port, const UdpEgressPacerConfig& pacer_cfg)
+    UdpSender(
+        const std::string& ip,
+        uint16_t port,
+        const UdpEgressPacerConfig& pacer_cfg,
+        bool pacer_stats_enabled = false)
         : UdpBaseSender(ip, port)
-        , pacer_cfg_(pacer_cfg) {
+        , pacer_cfg_(pacer_cfg)
+        , pacer_stats_enabled_(pacer_stats_enabled) {
         if (pacer_cfg_.enabled) {
             pacer_running_ = true;
             pacer_thread_ = std::thread(&UdpSender::pacer_loop, this);
@@ -5023,6 +5048,7 @@ private:
     };
 
     UdpEgressPacerConfig pacer_cfg_;
+    bool pacer_stats_enabled_ = false;
     std::mutex pacer_mutex_;
     std::condition_variable pacer_cv_;
     std::deque<PacerPacket> pacer_queue_;
@@ -5155,6 +5181,9 @@ private:
     }
 
     void log_pacer_stats(SteadyClock::time_point now) {
+        if (!pacer_stats_enabled_) {
+            return;
+        }
         if (pacer_stats_last_log_time_ == SteadyClock::time_point{}) {
             std::lock_guard<std::mutex> lock(pacer_mutex_);
             pacer_stats_last_log_time_ = now;

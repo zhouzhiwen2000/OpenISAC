@@ -71,6 +71,7 @@ public:
     void join();
     void start_bistatic();
     void stop_bistatic();
+    void request_reacquire(const radio::TimeSpec& start_time, uint64_t frame_seq);
 
     bool enqueue_tx_symbols(
         const std::shared_ptr<const SymbolVector>& symbols,
@@ -115,11 +116,13 @@ private:
         std::shared_ptr<const SymbolVector> symbols;
         uint64_t frame_start_symbol_index = 0;
         uint64_t frame_seq = 0;
+        uint64_t generation = 1;
     };
 
     struct RxSymbolsFrame {
         AlignedVector samples;
         uint64_t frame_seq = 0;
+        uint64_t generation = 1;
     };
 
     struct SystemResponseCalibrationState {
@@ -168,9 +171,16 @@ private:
         double rx_tick_rate = 0.0;
         ObjectPool<AlignedVector> rx_frame_pool;
         std::unique_ptr<PairedFrameQueue> paired_queue;
+        std::mutex restart_mutex;
+        radio::TimeSpec pending_restart_time{0.0};
+        uint64_t pending_restart_frame_seq = 0;
+        std::atomic<bool> restart_requested{false};
+        std::atomic<uint64_t> pairing_generation{1};
+        std::atomic<bool> compute_reset_requested{false};
         std::atomic<RxState> rx_state{RxState::ALIGNMENT};
         std::atomic<int32_t> target_alignment{0};
         std::atomic<int32_t> discard_samples{0};
+        uint64_t rx_frame_seq_base = 0;
         uint64_t next_rx_frame_seq = 0;
         std::thread rx_thread;
 
@@ -267,6 +277,7 @@ private:
     void _handle_alignment();
     void _handle_normal_rx();
     void _sensing_loop();
+    void _reset_monostatic_accumulators();
     void _send_heartbeat_if_due(const std::chrono::steady_clock::time_point& now);
     void _estimate_system_delay(const AlignedVector& rx_frame_data, uint64_t frame_seq);
     void _process_compact_monostatic_frame(const AlignedVector& rx_frame_data, const TxSymbolsFrame& tx_frame);

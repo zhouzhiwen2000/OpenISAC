@@ -1639,6 +1639,7 @@ ue:
       guard_symbols: 1
       center_freq: 2500000000
       debug_self_channel: false
+      debug_self_scan_spectrum: false
     optional: true
     scalar_fields:
     - key: symbol_start
@@ -1663,6 +1664,11 @@ ue:
       optional: true
     - key: debug_self_channel
       comment: Estimate UE self-TX leakage channel from the RX window using current TADV
+      kind: bool
+      default: false
+      optional: true
+    - key: debug_self_scan_spectrum
+      comment: Also publish a full-frame self-ZC matched-filter spectrum (needs debug_self_channel); view with scripts/plot_uplink_self_scan.py
       kind: bool
       default: false
       optional: true
@@ -2075,6 +2081,18 @@ ue:
     default: 12351
     optional: true
   - type: scalar
+    key: self_scan_ip
+    kind: string
+    comment: UE self-ZC scan-spectrum ZMQ listen IP
+    default: 0.0.0.0
+    optional: true
+  - type: scalar
+    key: self_scan_port
+    kind: int
+    comment: UE self-ZC scan-spectrum output port
+    default: 12352
+    optional: true
+  - type: scalar
     key: bi_sensing_output_enabled
     kind: bool
     comment: Enable bistatic sensing ZMQ output
@@ -2234,6 +2252,6 @@ ue:
   - type: scalar
     key: profiling_modules
     kind: string
-    comment: Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm), or "all"
+    comment: Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm, udp_egress, ue_recovery), or "all"
     default: agc
     optional: true

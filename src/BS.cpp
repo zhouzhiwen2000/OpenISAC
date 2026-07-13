@@ -2690,16 +2690,24 @@ private:
             handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
             next_frame_starts_burst = true;
 
-            // The TX frame anchor jumped; the uplink RX (anchored to the shared
-            // radio clock on real hardware) must re-lock to the new framing.
+            const radio::TimeSpec restart_time =
+                radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate);
+            const uint64_t restart_frame_seq =
+                _next_tx_frame_seq.load(std::memory_order_relaxed);
+
+            // The TX frame anchor jumped; RX paths anchored to the shared radio
+            // clock must re-lock to the new framing instead of waiting for their
+            // old frame sequence to naturally catch up to the skipped TX slots.
             if (_uplink_rx) {
-                _uplink_rx->request_reacquire(
-                    radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate));
+                _uplink_rx->request_reacquire(restart_time);
+            }
+            for (auto& ch : _sensing_channels) {
+                ch->request_reacquire(restart_time, restart_frame_seq);
             }
 
             LOG_RT_WARN() << std::fixed << std::setprecision(6)
                           << "[TX] " << reason << " restart scheduled at "
-                          << radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate).get_real_secs()
+                          << restart_time.get_real_secs()
                           << " s, skipped " << frames_to_skip
                           << " frame slots and dropped " << dropped_frames
                           << " queued frames" << std::defaultfloat;

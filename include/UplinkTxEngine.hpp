@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -105,19 +106,39 @@ public:
         _tick_rate = tick_rate;
         _tx_sample_rate = tx_sample_rate > 0.0 ? tx_sample_rate : _link_cfg.rf_sampling.sample_rate;
         _use_timed_tx = (tick_rate > 0.0);
+        _scheduled_restart_epoch.store(0, std::memory_order_relaxed);
         _restart_requested.store(false, std::memory_order_release);
     }
 
-    void reschedule_timed_tx(radio::TimeSpec start_time) {
+    void reschedule_timed_tx(radio::TimeSpec start_time, uint64_t restart_epoch = 0) {
         {
             std::lock_guard<std::mutex> lock(_timing_mutex);
             _start_time = start_time;
         }
+        _scheduled_restart_epoch.store(restart_epoch, std::memory_order_release);
         _restart_requested.store(true, std::memory_order_release);
     }
 
     void request_restart() {
         _restart_requested.store(true, std::memory_order_release);
+    }
+
+    bool wait_for_restart_submitted(
+        uint64_t restart_epoch,
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(750)) const
+    {
+        if (restart_epoch == 0) {
+            return true;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (_running.load(std::memory_order_relaxed) &&
+               std::chrono::steady_clock::now() < deadline) {
+            if (_submitted_restart_epoch.load(std::memory_order_acquire) >= restart_epoch) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        return _submitted_restart_epoch.load(std::memory_order_acquire) >= restart_epoch;
     }
 
     // Runtime-adjustable Timing Advance (samples). Pulls the uplink TX window
@@ -126,6 +147,20 @@ public:
     // Relative shift tracking the UE RX alignment (Phase 5).
     std::atomic<int32_t>& rx_alignment_shift() { return _rx_alignment_shift; }
     std::atomic<uint64_t>& tx_error_count() { return _tx_error_count; }
+
+    void store_rx_alignment_shift(
+        int32_t shift_samples,
+        uint64_t alignment_id,
+        uint64_t restart_epoch)
+    {
+        _rx_alignment_update_id.store(alignment_id, std::memory_order_relaxed);
+        _rx_alignment_restart_epoch.store(restart_epoch, std::memory_order_relaxed);
+        _rx_alignment_shift.store(shift_samples, std::memory_order_release);
+    }
+
+    void reset_rx_alignment_shift(uint64_t restart_epoch = 0) {
+        store_rx_alignment_shift(0, 0, restart_epoch);
+    }
 
     bool set_waveform_enabled(bool enabled) {
         return _waveform_enabled.exchange(enabled, std::memory_order_acq_rel) != enabled;
@@ -575,6 +610,11 @@ private:
         long long next_ticks = 0;
         int64_t applied_shift_samples = 0;
         bool first = true;
+        uint64_t tx_period_seq = 0;
+        uint64_t active_restart_epoch = 0;
+        uint32_t recovery_log_periods_remaining = 0;
+        int64_t last_logged_target_shift = std::numeric_limits<int64_t>::min();
+        uint64_t last_logged_alignment_id = 0;
         if (_use_timed_tx) {
             const double exact = static_cast<double>(_period_samples) * _tick_rate / _tx_sample_rate;
             period_ticks = std::llround(exact);
@@ -603,10 +643,27 @@ private:
                 applied_shift_samples = 0;
                 first = true;
                 _period_queue.clear();
+                active_restart_epoch =
+                    _scheduled_restart_epoch.load(std::memory_order_acquire);
+                recovery_log_periods_remaining = 8;
                 if (_link_cfg.should_profile("uplink")) {
                     LOG_RT_WARN() << "[UL-TX] timed TX restart scheduled at "
                                   << radio::TimeSpec::from_ticks(next_ticks, _tick_rate).get_real_secs()
                                   << " s";
+                }
+                if (_link_cfg.should_profile("ue_recovery")) {
+                    LOG_RT_WARN() << "[UL-TX recovery] restart_seen restart_epoch="
+                                  << active_restart_epoch
+                                  << ", next_tx_time="
+                                  << radio::TimeSpec::from_ticks(next_ticks, _tick_rate).get_real_secs()
+                                  << ", rx_alignment_shift="
+                                  << _rx_alignment_shift.load(std::memory_order_acquire)
+                                  << ", rx_alignment_id="
+                                  << _rx_alignment_update_id.load(std::memory_order_relaxed)
+                                  << ", rx_alignment_restart_epoch="
+                                  << _rx_alignment_restart_epoch.load(std::memory_order_relaxed)
+                                  << ", waveform_enabled="
+                                  << _waveform_enabled.load(std::memory_order_acquire);
                 }
             }
 
@@ -617,7 +674,19 @@ private:
             }
             frame_backoff.reset();
 
-            const int64_t target_shift_samples = _target_shift_samples();
+            const int32_t timing_advance_samples =
+                _timing_advance.load(std::memory_order_relaxed);
+            const int32_t rx_alignment_shift_samples =
+                _rx_alignment_shift.load(std::memory_order_acquire);
+            const uint64_t rx_alignment_id =
+                _rx_alignment_update_id.load(std::memory_order_relaxed);
+            const uint64_t rx_alignment_restart_epoch =
+                _rx_alignment_restart_epoch.load(std::memory_order_relaxed);
+            const int64_t target_shift_samples =
+                static_cast<int64_t>(timing_advance_samples) +
+                static_cast<int64_t>(rx_alignment_shift_samples);
+            const int64_t applied_shift_before = applied_shift_samples;
+            const uint64_t period_seq = ++tx_period_seq;
             if (_use_timed_tx) {
                 if (first) {
                     // A new burst can use timed metadata for the initial alignment.
@@ -642,6 +711,39 @@ private:
                 md,
                 target_shift_samples,
                 applied_shift_samples);
+            if (_link_cfg.should_profile("ue_recovery")) {
+                const bool log_period =
+                    first ||
+                    recovery_log_periods_remaining > 0 ||
+                    target_shift_samples != last_logged_target_shift ||
+                    rx_alignment_id != last_logged_alignment_id ||
+                    !result.complete;
+                if (log_period) {
+                    LOG_RT_WARN() << "[UL-TX recovery] period period_seq=" << period_seq
+                                  << ", restart_epoch=" << active_restart_epoch
+                                  << ", first=" << first
+                                  << ", md_time="
+                                  << (md.has_time_spec ? md.time_spec.get_real_secs() : -1.0)
+                                  << ", target_shift=" << target_shift_samples
+                                  << ", applied_before=" << applied_shift_before
+                                  << ", applied_after=" << applied_shift_samples
+                                  << ", timing_advance=" << timing_advance_samples
+                                  << ", rx_alignment_shift=" << rx_alignment_shift_samples
+                                  << ", rx_alignment_id=" << rx_alignment_id
+                                  << ", rx_alignment_restart_epoch="
+                                  << rx_alignment_restart_epoch
+                                  << ", sent=" << result.sent_samples
+                                  << "/" << result.expected_samples
+                                  << ", complete=" << result.complete
+                                  << ", waveform_enabled="
+                                  << _waveform_enabled.load(std::memory_order_acquire);
+                    last_logged_target_shift = target_shift_samples;
+                    last_logged_alignment_id = rx_alignment_id;
+                }
+                if (recovery_log_periods_remaining > 0) {
+                    --recovery_log_periods_remaining;
+                }
+            }
             if (!result.complete && _running.load(std::memory_order_relaxed)) {
                 _tx_error_count.fetch_add(1, std::memory_order_relaxed);
                 if (_link_cfg.should_profile("uplink")) {
@@ -649,6 +751,9 @@ private:
                                   << (result.expected_samples - result.sent_samples)
                                   << " samples not sent";
                 }
+            }
+            if (first && active_restart_epoch != 0 && result.sent_samples > 0) {
+                _submitted_restart_epoch.store(active_restart_epoch, std::memory_order_release);
             }
             if (result.sent_samples > 0) {
                 first = false;
@@ -781,6 +886,7 @@ private:
                 return result;
             }
             applied_shift_samples = target_shift_samples;
+            return result;
         } else if (delta > 0) {
             const size_t skip_samples = std::min<size_t>(
                 static_cast<size_t>(delta),
@@ -876,6 +982,10 @@ private:
     double _tx_sample_rate = 0.0;
     std::atomic<int32_t> _timing_advance{0};
     std::atomic<int32_t> _rx_alignment_shift{0};
+    std::atomic<uint64_t> _rx_alignment_update_id{0};
+    std::atomic<uint64_t> _rx_alignment_restart_epoch{0};
+    std::atomic<uint64_t> _scheduled_restart_epoch{0};
+    std::atomic<uint64_t> _submitted_restart_epoch{0};
     std::atomic<bool> _waveform_enabled{false};
     std::atomic<bool> _restart_requested{false};
     std::atomic<uint64_t> _tx_error_count{0};

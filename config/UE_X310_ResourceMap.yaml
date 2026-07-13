@@ -209,4 +209,4 @@ runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
-  profiling_modules: ""  # Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm), or "all"
+  profiling_modules: ""  # Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm, udp_egress, ue_recovery), or "all"

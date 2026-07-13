@@ -1865,6 +1865,21 @@ public:
         avg_corr /= static_cast<float>(sample_count);
     }
 
+    // Diagnostic: copy the per-window matched-filter output produced by the most
+    // recent find_sync_position[_in_range]() call into `out`, one complex value
+    // per candidate ZC-symbol start position i in [0, n_windows). Callers can
+    // take std::norm() for a power spectrum. `data_size` is the length of the
+    // buffer that was passed to the correlation call.
+    void copy_last_correlation(size_t data_size, AlignedVector& out) const {
+        const size_t n_windows = data_size >= _symbol_len
+            ? (data_size - _symbol_len + 1)
+            : 0;
+        out.resize(n_windows);
+        for (size_t i = 0; i < n_windows; ++i) {
+            out[i] = _corr_result[i + _symbol_len - 1];
+        }
+    }
+
     static SecSyncCoarseSyncResult detect_sec_sync_symbol(
         const AlignedVector& data,
         size_t fft_size,

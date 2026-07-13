@@ -125,7 +125,8 @@ public:
         _udp_out = std::make_unique<UdpSender>(
             link_cfg.network_output.ul_udp_output_ip,
             static_cast<uint16_t>(link_cfg.network_output.ul_udp_output_port),
-            link_cfg.network_output.udp_egress_pacer);
+            link_cfg.network_output.udp_egress_pacer,
+            link_cfg.should_profile("udp_egress"));
         _rx_frame_queue.reset(4, [this]() {
             UplinkRxFrame frame;
             frame.samples.resize(_period_samples);

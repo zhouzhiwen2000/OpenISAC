@@ -71,6 +71,7 @@ uplink:
   ertm_debug_output_enabled: false  # Enable UE-side eRTM debug ZMQ output
   ertm_report_interval_frames: 32  # BS eRTM payload/report cadence in downlink frames
   debug_self_channel: true  # Estimate UE self-TX leakage channel from the RX window using current TADV
+  debug_self_scan_spectrum: false  # Also publish a full-frame self-ZC matched-filter spectrum (needs debug_self_channel); see scripts/plot_uplink_self_scan.py
   tx_gain: 30  # Uplink TX gain (dB)
   tx_channel: 0  # Uplink TX channel index on USRP
   wire_format_tx: sc16  # Uplink TX wire format; sc16/sc8
@@ -141,6 +142,8 @@ network_output:
   self_channel_port: 12350  # UE self-channel output port
   self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP
   self_pdf_port: 12351  # UE self delay-spectrum output port
+  self_scan_ip: 0.0.0.0  # UE self-ZC scan-spectrum ZMQ listen IP
+  self_scan_port: 12352  # UE self-ZC scan-spectrum output port
   bi_sensing_output_enabled: false  # Enable bistatic sensing ZMQ output
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
@@ -167,4 +170,4 @@ runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
-  profiling_modules: ""  # Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm), or "all"
+  profiling_modules: ""  # Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm, udp_egress, ue_recovery), or "all"

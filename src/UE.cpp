@@ -233,6 +233,7 @@ public:
               SyncBatch batch;
               batch.data.resize(cfg.sync_samples());
               batch.usrp_time_ns = -1;
+              batch.generation = 0;
               return batch;
           }),
           _channel_estimator(cfg.ofdm.fft_size),
@@ -255,6 +256,9 @@ public:
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           uplink_self_pdf_sender_(2, [this](const auto& data) {
               uplink_self_pdf_pub_->send_container(data);
+          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+          uplink_self_scan_sender_(2, [this](const auto& data) {
+              uplink_self_scan_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           // Initialize object pools for memory reuse
           _rx_frame_pool(32, [&cfg]() {
@@ -384,6 +388,9 @@ public:
         if (uplink_self_channel_debug_enabled(cfg_) && _uplink_tx) {
             uplink_self_channel_sender_.start();
             uplink_self_pdf_sender_.start();
+            if (uplink_self_scan_spectrum_enabled(cfg_)) {
+                uplink_self_scan_sender_.start();
+            }
         }
 
         if (cfg_.uplink.ertm_to_enable) {
@@ -422,6 +429,7 @@ public:
         constellation_sender_.stop();
         uplink_self_channel_sender_.stop();
         uplink_self_pdf_sender_.stop();
+        uplink_self_scan_sender_.stop();
         _control_handler.stop();
     }
 
@@ -474,6 +482,15 @@ private:
     std::atomic<bool> _tx_async_exit_requested{false};
     std::atomic<bool> _stream_restart_requested{false};
     std::atomic<uint64_t> _stream_restart_count{0};
+    std::atomic<uint64_t> _stream_restart_pending_epoch{0};
+    // Last timed stream-start (seconds) handed out by _next_timed_stream_start().
+    // Used to keep consecutive restart start times strictly increasing so two
+    // restarts inside the same lead window can't collide on the same timestamp.
+    double _last_scheduled_stream_start_s = -1.0;
+    // Host-time of the last restart request triggered by a TX async
+    // timing/sequence error, to rate-limit the storm a single stale/colliding
+    // burst produces (thousands of TIME_ERRORs microseconds apart).
+    std::atomic<int64_t> _last_async_restart_request_ns{-1};
     std::atomic<uint64_t> _rx_overflow_count{0};
     std::atomic<uint64_t> _tx_async_error_count{0};
     std::atomic<uint64_t> _handled_ul_tx_error_count{0};
@@ -489,37 +506,90 @@ private:
         return dev_->time_now();
     }
 
-    radio::TimeSpec _next_timed_stream_start() const {
+    radio::TimeSpec _next_timed_stream_start() {
         if (!dev_->supports(radio::Capability::TimedTx)) {
             return radio::TimeSpec(0.0);
         }
         constexpr double kStartLeadTimeSec = 1.0;
-        const double scheduled_start_s =
+        double scheduled_start_s =
             std::ceil(dev_->time_now().get_real_secs() + kStartLeadTimeSec);
+        // Serialize restart start times. The start is quantized to whole
+        // seconds, so several restarts landing in the same lead window (e.g.
+        // back-to-back underflows) would otherwise all pick the same timestamp;
+        // the later burst then collides with the earlier one on the radio and
+        // the USRP rejects it with a TIME_ERROR, which triggers yet another
+        // restart -- a self-sustaining storm. Force each start strictly after
+        // the previous one so restarts serialize cleanly instead.
+        if (_last_scheduled_stream_start_s > 0.0 &&
+            scheduled_start_s <= _last_scheduled_stream_start_s) {
+            scheduled_start_s = _last_scheduled_stream_start_s + kStartLeadTimeSec;
+        }
+        _last_scheduled_stream_start_s = scheduled_start_s;
         return radio::TimeSpec(scheduled_start_s);
     }
 
     void _request_stream_restart(const char* reason) {
         if (!dev_->supports(radio::Capability::StreamRestart) || !_uplink_tx) {
+            if (cfg_.should_profile("ue_recovery")) {
+                LOG_G_WARN() << "[UE recovery] restart_request_ignored reason=" << reason
+                             << ", stream_restart_supported="
+                             << dev_->supports(radio::Capability::StreamRestart)
+                             << ", has_uplink_tx=" << static_cast<bool>(_uplink_tx);
+            }
             return;
         }
+        const uint64_t restart_count =
+            _stream_restart_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        _stream_restart_pending_epoch.store(restart_count, std::memory_order_release);
         _stream_restart_requested.store(true, std::memory_order_release);
-        _stream_restart_count.fetch_add(1, std::memory_order_relaxed);
         LOG_G_WARN() << "[UE] requested shared RX/UL-TX stream restart: " << reason;
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_G_WARN() << "[UE recovery] restart_requested reason=" << reason
+                         << ", restart_epoch=" << restart_count
+                         << ", state=" << static_cast<int>(state_.load(std::memory_order_relaxed))
+                         << ", sync_generation=" << _sync_generation.load(std::memory_order_relaxed)
+                         << ", pending_alignment_id="
+                         << _pending_alignment_id.load(std::memory_order_relaxed)
+                         << ", discard_samples=" << discard_samples_.load(std::memory_order_relaxed)
+                         << ", sync_offset=" << sync_offset_.load(std::memory_order_relaxed)
+                         << ", ul_tx_rx_shift="
+                         << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed)
+                         << ", ul_tx_errors="
+                         << (_uplink_tx ? _uplink_tx->tx_error_count().load(std::memory_order_relaxed) : 0)
+                         << ", tx_async_errors="
+                         << _tx_async_error_count.load(std::memory_order_relaxed)
+                         << ", rx_overflows="
+                         << _rx_overflow_count.load(std::memory_order_relaxed);
+        }
     }
 
-    void _reset_receive_state_after_stream_restart() {
-        _sync_generation.fetch_add(1, std::memory_order_acq_rel);
+    void _reset_receive_state_after_stream_restart(uint64_t restart_epoch) {
+        const uint64_t next_generation =
+            _sync_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+        _recovery_queue_clear_requested.store(true, std::memory_order_release);
         _sync_in_progress = false;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
         _reset_count = 0;
         sync_offset_.store(0, std::memory_order_relaxed);
         discard_samples_.store(0, std::memory_order_relaxed);
-        _reset_uplink_tx_rx_alignment_shift();
+        _reset_uplink_tx_rx_alignment_shift(restart_epoch);
+        _pending_alignment_id.store(0, std::memory_order_relaxed);
+        _pending_alignment_restart_epoch.store(restart_epoch, std::memory_order_relaxed);
         _set_uplink_waveform_enabled(false);
         sfo_estimator.reset();
         state_ = RxState::SYNC_SEARCH;
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_G_WARN() << "[UE recovery] reset_receive_state generation="
+                         << next_generation
+                         << ", restart_epoch=" << restart_epoch
+                         << ", pending_ertm_alignment="
+                         << _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed)
+                         << ", ul_tx_rx_shift="
+                         << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed)
+                         << ", waveform_enabled="
+                         << (_uplink_tx ? _uplink_tx->waveform_enabled() : false);
+        }
     }
 
     void _tx_async_event_proc() {
@@ -568,7 +638,24 @@ private:
             case radio::AsyncEvent::TimeError:
                 _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
                 log_event(LOG_G_ERROR());
-                _request_stream_restart("UL-TX async timing/sequence error");
+                {
+                    // Coalesce async timing/sequence errors: a single stale or
+                    // colliding burst emits thousands of these microseconds
+                    // apart, and each restart tears down a burst that emits yet
+                    // more. Rate-limit restart requests from this source so one
+                    // burst-worth of errors triggers one recovery instead of a
+                    // self-sustaining storm. Underflow/overflow paths are
+                    // unaffected.
+                    constexpr int64_t kAsyncRestartCooldownNs = 200'000'000;  // 200 ms
+                    const int64_t now_ns = host_now_ns();
+                    const int64_t last = _last_async_restart_request_ns.load(
+                        std::memory_order_relaxed);
+                    if (last < 0 || now_ns - last >= kAsyncRestartCooldownNs) {
+                        _last_async_restart_request_ns.store(
+                            now_ns, std::memory_order_relaxed);
+                        _request_stream_restart("UL-TX async timing/sequence error");
+                    }
+                }
                 break;
             default:
                 log_event(LOG_G_INFO());
@@ -625,6 +712,12 @@ private:
     std::atomic<RxState> state_{RxState::SYNC_SEARCH};
     std::atomic<int> discard_samples_{0};
     std::atomic<uint64_t> _sync_generation{0};
+    std::atomic<bool> _recovery_queue_clear_requested{false};
+    std::atomic<int64_t> _rx_stream_start_time_ns{-1};
+    std::atomic<uint64_t> _rx_stream_start_restart_epoch{0};
+    std::atomic<uint32_t> _rx_boundary_log_remaining{0};
+    std::atomic<int64_t> _last_rx_boundary_offset_samples{
+        std::numeric_limits<int64_t>::min()};
     SPSCRingBuffer<RxFrame> frame_queue_;
 
     SPSCRingBuffer<SyncBatch> sync_queue_;
@@ -668,6 +761,15 @@ private:
     AlignedVector _uplink_self_h_est;
     AlignedVector _uplink_self_delay_spectrum;
     uint64_t _uplink_self_debug_frame_counter = 0;
+    // Diagnostic: full-frame matched filter for the UE's own uplink ZC. Unlike
+    // _uplink_self_debug_estimator (which reads a FIXED window and silently
+    // returns garbage when the TX/RX self-loopback is misaligned), this scans
+    // the whole RX frame and reports where the self-ZC actually landed, so an
+    // arbitrarily large TX-vs-RX window offset is still measurable. Only built
+    // when self-channel debug is enabled; only run behind profiling + a stride.
+    std::unique_ptr<SyncProcessor> _uplink_self_scan_processor;
+    uint64_t _uplink_self_scan_frame_counter = 0;
+    AlignedVector _uplink_self_scan_spectrum;
     
     std::unique_ptr<FIRFilter> freq_offset_filter_;
     radio::TuneResult current_rx_tune_;
@@ -684,6 +786,7 @@ private:
     std::unique_ptr<ZmqByteSender> constellation_pub_;
     std::unique_ptr<ZmqByteSender> uplink_self_channel_pub_;
     std::unique_ptr<ZmqByteSender> uplink_self_pdf_pub_;
+    std::unique_ptr<ZmqByteSender> uplink_self_scan_pub_;
     std::unique_ptr<ZmqByteSender> ertm_debug_pub_;
     std::unique_ptr<VofaPlusDebugSender> vofa_debug_sender_;
     // Control handler
@@ -694,6 +797,7 @@ private:
     DataSender<std::complex<float>, AlignedAlloc> constellation_sender_;
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_channel_sender_;
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_pdf_sender_;
+    DataSender<std::complex<float>, AlignedAlloc> uplink_self_scan_sender_;
     uint32_t _reset_count = 0;
     // Debug publish stride: constellation / channel / PDF snapshots are copied
     // out of the demod path once every N frames (senders pace at 50 ms anyway).
@@ -721,24 +825,62 @@ private:
     std::atomic<int32_t> _ue_timing_advance{0};  // Timing Advance (samples)
     std::atomic<int64_t> _last_tadv_ns{0};       // rate-limit guard for TADV
     std::atomic<int32_t> _uplink_tx_rx_alignment_shift{0};
+    std::atomic<uint64_t> _alignment_schedule_count{0};
+    std::atomic<uint64_t> _pending_alignment_id{0};
+    std::atomic<uint64_t> _pending_alignment_restart_epoch{0};
+    std::atomic<uint64_t> _pending_alignment_generation{0};
+    // True while the pending alignment came from a fresh SYNC_SEARCH acquisition,
+    // so handle_alignment() re-anchors the UL-TX window absolutely to the newly
+    // committed RX frame's grid boundary phase (see _schedule_receive_alignment).
+    std::atomic<bool> _pending_alignment_fresh{false};
 
-    void _reset_uplink_tx_rx_alignment_shift() {
+    void _reset_uplink_tx_rx_alignment_shift(uint64_t restart_epoch = 0) {
         _uplink_tx_rx_alignment_shift.store(0, std::memory_order_relaxed);
         if (_uplink_tx) {
-            _uplink_tx->rx_alignment_shift().store(0, std::memory_order_relaxed);
+            _uplink_tx->reset_rx_alignment_shift(restart_epoch);
         }
     }
 
+    int32_t _canonical_uplink_tx_alignment_delta(int32_t rx_alignment_delta_samples) const {
+        const int64_t frame_samples = static_cast<int64_t>(cfg_.samples_per_frame());
+        if (frame_samples <= 0) {
+            return rx_alignment_delta_samples;
+        }
+        int64_t delta = static_cast<int64_t>(rx_alignment_delta_samples) % frame_samples;
+        const int64_t half_frame = frame_samples / 2;
+        if (delta > half_frame) {
+            delta -= frame_samples;
+        } else if (delta < -half_frame) {
+            delta += frame_samples;
+        }
+        return static_cast<int32_t>(std::clamp<int64_t>(
+            delta,
+            static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
+            static_cast<int64_t>(std::numeric_limits<int32_t>::max())));
+    }
+
     // Keep the UL-TX frame anchor tied to the currently aligned UE RX/downlink
-    // frame anchor. UplinkTxEngine applies this target by shortening or
-    // lengthening the continuous TX stream.
-    void _apply_uplink_tx_rx_alignment_delta(int32_t rx_alignment_delta_samples) {
-        if (rx_alignment_delta_samples == 0) {
+    // frame anchor modulo one frame. RX may need to consume almost a whole frame
+    // during reacquire; UL-TX only needs the equivalent window-phase residual.
+    void _apply_uplink_tx_rx_alignment_delta(
+        int32_t rx_alignment_delta_samples,
+        uint64_t alignment_id,
+        uint64_t restart_epoch)
+    {
+        const int32_t ul_tx_rx_alignment_delta_samples =
+            _canonical_uplink_tx_alignment_delta(rx_alignment_delta_samples);
+        if (ul_tx_rx_alignment_delta_samples == 0) {
+            if (_uplink_tx) {
+                _uplink_tx->store_rx_alignment_shift(
+                    _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed),
+                    alignment_id,
+                    restart_epoch);
+            }
             return;
         }
 
         const int64_t tx_delta64 = std::clamp<int64_t>(
-            -static_cast<int64_t>(rx_alignment_delta_samples),
+            -static_cast<int64_t>(ul_tx_rx_alignment_delta_samples),
             static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
             static_cast<int64_t>(std::numeric_limits<int32_t>::max()));
         const int32_t tx_alignment_delta_samples = static_cast<int32_t>(tx_delta64);
@@ -757,18 +899,106 @@ private:
             std::memory_order_relaxed));
 
         if (_uplink_tx) {
-            _uplink_tx->rx_alignment_shift().store(next, std::memory_order_relaxed);
+            _uplink_tx->store_rx_alignment_shift(next, alignment_id, restart_epoch);
         }
-        if (cfg_.should_profile("uplink")) {
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_RT_WARN() << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
+                          << " samples, ul_tx_effective_rx_delta="
+                          << ul_tx_rx_alignment_delta_samples
+                          << " samples, alignment_id=" << alignment_id
+                          << ", restart_epoch=" << restart_epoch
+                          << " -> TX timing delta=" << tx_alignment_delta_samples
+                          << " samples, cumulative RX-alignment target=" << next;
+        } else if (cfg_.should_profile("uplink")) {
             LOG_RT_WARN_HZ(2) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
                               << " samples -> TX timing delta=" << tx_alignment_delta_samples
                               << " samples, cumulative RX-alignment target=" << next;
         }
     }
 
+    // Fresh-acquisition absolute reconstruction of the UL-TX window shift.
+    // grid_phase_samples is the RX frame boundary offset modulo one frame,
+    // measured against the timed RX stream anchor (sync-read timestamp +
+    // discard), so it is independent of where the sync search happened to start
+    // reading. The relative-delta path instead folds the sync-read-relative
+    // discard amount, which equals the true grid phase only when the sync read
+    // starts on a frame boundary (nearest_boundary_error==0). After a stream
+    // restart that read is not grid-aligned, so the leftover misalignment leaks
+    // straight into the TX window and breaks the self-loopback even though the
+    // downlink RX (which only discards to its own boundary) stays fine.
+    // Anchoring the TX shift to -grid_phase keeps the UE's own uplink ZC landing
+    // at the uplink window inside its own RX frame across restarts.
+    void _reconstruct_uplink_tx_rx_alignment_absolute(
+        int64_t grid_phase_samples,
+        uint64_t alignment_id,
+        uint64_t restart_epoch)
+    {
+        const int64_t frame_samples = static_cast<int64_t>(cfg_.samples_per_frame());
+        int64_t phase = grid_phase_samples;
+        if (frame_samples > 0) {
+            phase = _positive_mod_i64(grid_phase_samples, frame_samples);
+        }
+        // Fold to the nearest-zero representative so the physical TX shift stays
+        // within +/- half a frame (the shorter insert/skip direction).
+        const int32_t canonical_phase =
+            _canonical_uplink_tx_alignment_delta(static_cast<int32_t>(phase));
+        const int32_t shift = -canonical_phase;
+        _uplink_tx_rx_alignment_shift.store(shift, std::memory_order_relaxed);
+        if (_uplink_tx) {
+            _uplink_tx->store_rx_alignment_shift(shift, alignment_id, restart_epoch);
+        }
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_RT_WARN() << "[UL-TX] absolute reacquire: grid_phase="
+                          << grid_phase_samples
+                          << " samples, canonical_phase=" << canonical_phase
+                          << " -> ul_tx_rx_shift=" << shift
+                          << ", alignment_id=" << alignment_id
+                          << ", restart_epoch=" << restart_epoch;
+        }
+    }
+
     void _schedule_receive_alignment(int32_t alignment_samples) {
+        const RxState state_before = state_.load(std::memory_order_relaxed);
+        const uint64_t alignment_id =
+            _alignment_schedule_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint64_t sync_generation =
+            _sync_generation.load(std::memory_order_relaxed);
+        const uint64_t restart_epoch =
+            _stream_restart_count.load(std::memory_order_relaxed);
+        const bool restart_pending =
+            _stream_restart_requested.load(std::memory_order_acquire);
+        const int32_t before_shift =
+            _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed);
+        _pending_alignment_id.store(alignment_id, std::memory_order_relaxed);
+        _pending_alignment_restart_epoch.store(restart_epoch, std::memory_order_relaxed);
+        _pending_alignment_generation.store(sync_generation, std::memory_order_relaxed);
         discard_samples_.store(static_cast<int>(alignment_samples), std::memory_order_relaxed);
-        _apply_uplink_tx_rx_alignment_delta(alignment_samples);
+        // Fresh acquisition (SYNC_SEARCH -> ALIGNMENT): defer the UL-TX window
+        // phase to handle_alignment(), which rebuilds it absolutely from the
+        // committed RX frame's own grid boundary phase (authoritative: that
+        // frame's RX timestamp + applied discard). The sync-read timestamp does
+        // not give the boundary phase reliably. Continuous-tracking corrections
+        // keep the relative-delta accumulation here.
+        const bool fresh_acquisition = (state_before == RxState::SYNC_SEARCH);
+        _pending_alignment_fresh.store(fresh_acquisition, std::memory_order_relaxed);
+        if (!fresh_acquisition) {
+            _apply_uplink_tx_rx_alignment_delta(
+                alignment_samples, alignment_id, restart_epoch);
+        }
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_RT_WARN() << "[UE recovery] schedule_receive_alignment alignment_id="
+                          << alignment_id
+                          << ", alignment="
+                          << alignment_samples
+                          << ", previous_ul_tx_rx_shift=" << before_shift
+                          << ", next_ul_tx_rx_shift="
+                          << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed)
+                          << ", state_before="
+                          << static_cast<int>(state_before)
+                          << ", sync_generation=" << sync_generation
+                          << ", restart_epoch=" << restart_epoch
+                          << ", restart_pending=" << restart_pending;
+        }
         _restore_uplink_tx_gain_after_sync();
         state_ = RxState::ALIGNMENT;
     }
@@ -1534,14 +1764,16 @@ private:
             if (had_previous_to_ue) {
                 const double to_ue_diff = to_ue_samples - previous_to_ue;
                 if (std::abs(to_ue_diff) > 0.1) {
-                    LOG_G_INFO() << "[eRTM] TO_UE diff"
-                                 << " seq=" << bs_payload.seq
-                                 << ", previous_to_ue=" << previous_to_ue
-                                 << " samples, current_to_ue=" << to_ue_samples
-                                 << " samples, to_ue_diff=" << to_ue_diff
-                                 << " samples, pending_alignment="
-                                 << _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed)
-                                 << " samples";
+                    if (cfg_.should_profile("ertm")) {
+                        LOG_G_INFO() << "[eRTM] TO_UE diff"
+                                     << " seq=" << bs_payload.seq
+                                     << ", previous_to_ue=" << previous_to_ue
+                                     << " samples, current_to_ue=" << to_ue_samples
+                                     << " samples, to_ue_diff=" << to_ue_diff
+                                     << " samples, pending_alignment="
+                                     << _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed)
+                                     << " samples";
+                    }
                 }
                 _update_ertm_absolute_pending_alignment(to_ue_diff);
             }
@@ -1615,10 +1847,12 @@ private:
             pending_alignment,
             std::memory_order_relaxed);
 
-        LOG_G_INFO() << "[eRTM] pending sensing alignment compensation updated"
-                     << " alignment=" << alignment_samples
-                     << " samples, pending_alignment=" << pending_alignment
-                     << " samples";
+        if (cfg_.should_profile("ertm")) {
+            LOG_G_INFO() << "[eRTM] pending sensing alignment compensation updated"
+                         << " alignment=" << alignment_samples
+                         << " samples, pending_alignment=" << pending_alignment
+                         << " samples";
+        }
     }
 
     void _update_ertm_absolute_pending_alignment(double to_ue_diff) {
@@ -1641,18 +1875,22 @@ private:
                 std::memory_order_relaxed,
                 std::memory_order_relaxed)) {
             if (stored_pending == 0.0) {
-                LOG_G_INFO() << "[eRTM] cleared pending sensing alignment compensation after TO_UE jump"
-                             << " pending_alignment=" << pending
-                             << " samples, to_ue_diff=" << to_ue_diff
-                             << " samples, rounded_jump=" << rounded_jump
-                             << " samples";
+                if (cfg_.should_profile("ertm")) {
+                    LOG_G_INFO() << "[eRTM] cleared pending sensing alignment compensation after TO_UE jump"
+                                 << " pending_alignment=" << pending
+                                 << " samples, to_ue_diff=" << to_ue_diff
+                                 << " samples, rounded_jump=" << rounded_jump
+                                 << " samples";
+                }
             } else {
-                LOG_G_INFO() << "[eRTM] updated pending sensing alignment compensation after TO_UE jump"
-                             << " previous_pending_alignment=" << pending
-                             << " samples, to_ue_diff=" << to_ue_diff
-                             << " samples, rounded_jump=" << rounded_jump
-                             << " samples, pending_alignment=" << stored_pending
-                             << " samples";
+                if (cfg_.should_profile("ertm")) {
+                    LOG_G_INFO() << "[eRTM] updated pending sensing alignment compensation after TO_UE jump"
+                                 << " previous_pending_alignment=" << pending
+                                 << " samples, to_ue_diff=" << to_ue_diff
+                                 << " samples, rounded_jump=" << rounded_jump
+                                 << " samples, pending_alignment=" << stored_pending
+                                 << " samples";
+                }
             }
         }
     }
@@ -2732,7 +2970,8 @@ private:
         _udp_output_sender = std::make_unique<UdpSender>(
             cfg_.network_output.udp_output_ip,
             static_cast<uint16_t>(cfg_.network_output.udp_output_port),
-            cfg_.network_output.udp_egress_pacer);
+            cfg_.network_output.udp_egress_pacer,
+            cfg_.should_profile("udp_egress"));
 
         // ARQ: configure DL RX window if enabled
         _arq_enabled = cfg_.network_output.arq_enabled;
@@ -2863,6 +3102,20 @@ private:
                          << cfg_.network_output.uplink_self_channel_ip << ':' << cfg_.network_output.uplink_self_channel_port
                          << ", pdf=" << cfg_.network_output.uplink_self_pdf_ip << ':'
                          << cfg_.network_output.uplink_self_pdf_port;
+            // Full-frame self-ZC matched filter (diagnostic; see member comment).
+            _uplink_self_scan_processor = std::make_unique<SyncProcessor>(
+                cfg_.samples_per_frame(),
+                cfg_.ofdm.fft_size,
+                cfg_.ofdm.cp_length,
+                _uplink_self_zc_freq);
+            if (uplink_self_scan_spectrum_enabled(cfg_)) {
+                uplink_self_scan_pub_ = std::make_unique<ZmqByteSender>(
+                    cfg_.network_output.uplink_self_scan_ip,
+                    static_cast<uint16_t>(cfg_.network_output.uplink_self_scan_port));
+                LOG_G_INFO() << "[UL-TX] self-scan spectrum stream: "
+                             << cfg_.network_output.uplink_self_scan_ip << ':'
+                             << cfg_.network_output.uplink_self_scan_port;
+            }
         }
         if (cfg_.uplink.ertm_debug_output_enabled) {
             ertm_debug_pub_ = std::make_unique<ZmqByteSender>(
@@ -2882,6 +3135,99 @@ private:
         while (frame_queue_.try_pop(frame)) {
             _rx_frame_pool.release(std::move(frame));
         }
+    }
+
+    void _clear_recovery_queues_from_process_thread() {
+        _clear_frame_queue();
+        sync_queue_.clear();
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_RT_WARN() << "[UE recovery] cleared queued RX/sync batches for generation="
+                          << _sync_generation.load(std::memory_order_acquire);
+        }
+    }
+
+    static int64_t _positive_mod_i64(int64_t value, int64_t mod) {
+        if (mod <= 0) {
+            return 0;
+        }
+        int64_t out = value % mod;
+        if (out < 0) {
+            out += mod;
+        }
+        return out;
+    }
+
+    void _log_rx_timestamp_boundary(
+        const char* context,
+        int64_t timestamp_ns,
+        int64_t sample_adjust,
+        bool update_previous_delta)
+    {
+        if (!cfg_.should_profile("ue_recovery")) {
+            return;
+        }
+        const int64_t start_ns =
+            _rx_stream_start_time_ns.load(std::memory_order_acquire);
+        const int64_t frame_samples =
+            static_cast<int64_t>(cfg_.samples_per_frame());
+        if (timestamp_ns < 0 || start_ns < 0 || frame_samples <= 0 ||
+            !(cfg_.rf_sampling.sample_rate > 0.0)) {
+            LOG_RT_WARN() << "[UE recovery] rx_timestamp_boundary context=" << context
+                          << ", valid=0"
+                          << ", timestamp_ns=" << timestamp_ns
+                          << ", stream_start_ns=" << start_ns
+                          << ", sample_adjust=" << sample_adjust
+                          << ", frame_samples=" << frame_samples;
+            return;
+        }
+
+        const double raw_offset =
+            static_cast<double>(timestamp_ns - start_ns) *
+            cfg_.rf_sampling.sample_rate * 1.0e-9;
+        const int64_t raw_offset_samples =
+            static_cast<int64_t>(std::llround(raw_offset));
+        const int64_t adjusted_offset_samples = raw_offset_samples + sample_adjust;
+        const int64_t phase_samples =
+            _positive_mod_i64(adjusted_offset_samples, frame_samples);
+        int64_t nearest_boundary_error = phase_samples;
+        if (nearest_boundary_error > frame_samples / 2) {
+            nearest_boundary_error -= frame_samples;
+        }
+
+        int64_t delta_from_previous = std::numeric_limits<int64_t>::min();
+        if (update_previous_delta) {
+            const int64_t previous =
+                _last_rx_boundary_offset_samples.exchange(
+                    adjusted_offset_samples,
+                    std::memory_order_acq_rel);
+            if (previous != std::numeric_limits<int64_t>::min()) {
+                delta_from_previous = adjusted_offset_samples - previous;
+            }
+        }
+
+        LOG_RT_WARN() << "[UE recovery] rx_timestamp_boundary context=" << context
+                      << ", valid=1"
+                      << ", restart_epoch="
+                      << _rx_stream_start_restart_epoch.load(std::memory_order_acquire)
+                      << ", generation="
+                      << _sync_generation.load(std::memory_order_acquire)
+                      << ", timestamp_ns=" << timestamp_ns
+                      << ", stream_start_ns=" << start_ns
+                      << ", raw_offset_samples=" << raw_offset_samples
+                      << ", sample_adjust=" << sample_adjust
+                      << ", adjusted_offset_samples=" << adjusted_offset_samples
+                      << ", frame_index_floor="
+                      << (adjusted_offset_samples / frame_samples)
+                      << ", phase_samples=" << phase_samples
+                      << ", nearest_boundary_error=" << nearest_boundary_error
+                      << ", delta_from_previous="
+                      << (delta_from_previous == std::numeric_limits<int64_t>::min()
+                              ? 0
+                              : delta_from_previous)
+                      << ", has_previous="
+                      << (delta_from_previous == std::numeric_limits<int64_t>::min()
+                              ? 0
+                              : 1);
     }
 
     void _enter_sync_search_state() {
@@ -2937,10 +3283,32 @@ private:
             cmd.stream_now = !timed_start;
             if (timed_start) {
                 cmd.time_spec = start_time;
+                const int64_t start_time_ns = time_spec_to_ns(start_time);
+                const uint64_t restart_epoch =
+                    _stream_restart_count.load(std::memory_order_acquire);
+                _rx_stream_start_time_ns.store(start_time_ns, std::memory_order_release);
+                _rx_stream_start_restart_epoch.store(restart_epoch, std::memory_order_release);
+                _rx_boundary_log_remaining.store(16, std::memory_order_release);
+                _last_rx_boundary_offset_samples.store(
+                    std::numeric_limits<int64_t>::min(),
+                    std::memory_order_release);
                 LOG_G_INFO() << "[UE] timed RX stream start at "
                              << start_time.get_real_secs()
                              << " s, shared with UL-TX";
+                if (cfg_.should_profile("ue_recovery")) {
+                    LOG_RT_WARN() << "[UE recovery] rx_stream_anchor start_time="
+                                  << start_time.get_real_secs()
+                                  << ", start_time_ns=" << start_time_ns
+                                  << ", restart_epoch=" << restart_epoch
+                                  << ", generation="
+                                  << _sync_generation.load(std::memory_order_acquire)
+                                  << ", frame_samples=" << cfg_.samples_per_frame();
+                }
             } else {
+                _rx_stream_start_time_ns.store(-1, std::memory_order_release);
+                _rx_stream_start_restart_epoch.store(
+                    _stream_restart_count.load(std::memory_order_acquire),
+                    std::memory_order_release);
                 LOG_G_INFO() << "[UE] immediate RX stream start";
             }
             rx_stream_->issue_stream_cmd(cmd);
@@ -2960,8 +3328,33 @@ private:
                 _uplink_tx &&
                 (_uplink_tx->tx_error_count().load(std::memory_order_relaxed) !=
                  _handled_ul_tx_error_count.load(std::memory_order_relaxed));
-            if (_stream_restart_requested.exchange(false, std::memory_order_acq_rel) ||
-                tx_requested_restart) {
+            const bool stream_restart_requested =
+                _stream_restart_requested.exchange(false, std::memory_order_acq_rel);
+            if (stream_restart_requested || tx_requested_restart) {
+                uint64_t restart_epoch = 0;
+                if (stream_restart_requested) {
+                    restart_epoch =
+                        _stream_restart_pending_epoch.exchange(0, std::memory_order_acq_rel);
+                }
+                if (restart_epoch == 0) {
+                    restart_epoch =
+                        _stream_restart_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                }
+                if (cfg_.should_profile("ue_recovery")) {
+                    LOG_RT_WARN() << "[UE recovery] shared_restart_begin restart_epoch="
+                                  << restart_epoch
+                                  << ", stream_restart_requested="
+                                  << stream_restart_requested
+                                  << ", tx_requested_restart=" << tx_requested_restart
+                                  << ", state_before="
+                                  << static_cast<int>(state_.load(std::memory_order_relaxed))
+                                  << ", sync_generation_before="
+                                  << _sync_generation.load(std::memory_order_relaxed)
+                                  << ", pending_alignment_id="
+                                  << _pending_alignment_id.load(std::memory_order_relaxed)
+                                  << ", ul_tx_rx_shift_before="
+                                  << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed);
+                }
                 if (_uplink_tx) {
                     _handled_ul_tx_error_count.store(
                         _uplink_tx->tx_error_count().load(std::memory_order_relaxed),
@@ -2969,13 +3362,40 @@ private:
                 }
                 issue_stop();
                 stream_start_time = _next_timed_stream_start();
+                _reset_receive_state_after_stream_restart(restart_epoch);
                 if (_uplink_tx && stream_start_time.get_real_secs() > 0.0) {
-                    _uplink_tx->reschedule_timed_tx(stream_start_time);
+                    _uplink_tx->reschedule_timed_tx(stream_start_time, restart_epoch);
+                    const bool tx_restart_submitted =
+                        _uplink_tx->wait_for_restart_submitted(restart_epoch);
+                    if (!tx_restart_submitted) {
+                        LOG_RT_WARN() << "[UE recovery] timed UL-TX restart was not submitted "
+                                      << "before RX restart; restart_epoch=" << restart_epoch
+                                      << ", start_time=" << stream_start_time.get_real_secs();
+                    } else if (cfg_.should_profile("ue_recovery")) {
+                        LOG_RT_WARN() << "[UE recovery] timed UL-TX restart submitted before RX start"
+                                      << ", restart_epoch=" << restart_epoch
+                                      << ", start_time=" << stream_start_time.get_real_secs();
+                    }
                 }
-                _reset_receive_state_after_stream_restart();
                 issue_start(stream_start_time);
                 LOG_RT_WARN() << "[UE] shared RX/UL-TX restart at "
                               << stream_start_time.get_real_secs() << " s";
+                if (cfg_.should_profile("ue_recovery")) {
+                    LOG_RT_WARN() << "[UE recovery] shared_restart_applied start_time="
+                                  << stream_start_time.get_real_secs()
+                                  << ", restart_epoch=" << restart_epoch
+                                  << ", stream_restart_requested="
+                                  << stream_restart_requested
+                                  << ", tx_requested_restart=" << tx_requested_restart
+                                  << ", handled_ul_tx_errors="
+                                  << _handled_ul_tx_error_count.load(std::memory_order_relaxed)
+                                  << ", stream_restart_count="
+                                  << _stream_restart_count.load(std::memory_order_relaxed)
+                                  << ", next_state="
+                                  << static_cast<int>(state_.load(std::memory_order_relaxed))
+                                  << ", sync_generation="
+                                  << _sync_generation.load(std::memory_order_relaxed);
+                }
                 continue;
             }
 
@@ -3005,6 +3425,8 @@ private:
         SyncBatch* sync_batch = sync_queue_.producer_slot();
         AlignedVector& target_buffer =
             (sync_batch != nullptr) ? sync_batch->data : _sync_scratch_buffer;
+        const uint64_t batch_generation =
+            _sync_generation.load(std::memory_order_acquire);
 
         int64_t first_time_ns = -1;
         size_t received = 0;
@@ -3027,7 +3449,12 @@ private:
         if (sync_batch == nullptr || received < cfg_.sync_samples()) {
             return;
         }
+        if (batch_generation != _sync_generation.load(std::memory_order_acquire) ||
+            _stream_restart_requested.load(std::memory_order_acquire)) {
+            return;
+        }
         sync_batch->usrp_time_ns = first_time_ns;
+        sync_batch->generation = batch_generation;
         sync_queue_.producer_commit();
     }
 
@@ -3042,6 +3469,12 @@ private:
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         const int alignment_samples = discard_samples_.load(std::memory_order_relaxed);
+        const uint64_t alignment_id =
+            _pending_alignment_id.load(std::memory_order_relaxed);
+        const uint64_t alignment_restart_epoch =
+            _pending_alignment_restart_epoch.load(std::memory_order_relaxed);
+        const uint64_t alignment_generation =
+            _pending_alignment_generation.load(std::memory_order_relaxed);
         const size_t frame_samples = cfg_.samples_per_frame();
         const size_t negative_shift = (alignment_samples < 0)
             ? std::min<size_t>(static_cast<size_t>(-alignment_samples), frame_samples)
@@ -3065,6 +3498,19 @@ private:
             received += got;
         }
         if (received < total_read) {
+            if (cfg_.should_profile("ue_recovery")) {
+                LOG_RT_WARN() << "[UE recovery] alignment_rx_abort alignment_id="
+                              << alignment_id
+                              << ", alignment=" << alignment_samples
+                              << ", restart_epoch=" << alignment_restart_epoch
+                              << ", scheduled_generation=" << alignment_generation
+                              << ", current_generation="
+                              << _sync_generation.load(std::memory_order_acquire)
+                              << ", received=" << received
+                              << "/" << total_read
+                              << ", restart_pending="
+                              << _stream_restart_requested.load(std::memory_order_acquire);
+            }
             return;
         }
         // Acquire pre-allocated RX frame from pool
@@ -3073,6 +3519,32 @@ private:
         frame.usrp_time_ns = frame_time_ns;
         frame.host_enqueue_time_ns = do_latency_profile ? host_now_ns() : 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
+        // Fresh acquisition: re-anchor the UL-TX window to this committed RX
+        // frame's boundary phase on the timed grid. Uses the same reference as
+        // the alignment_output_frame_start boundary log (this frame's own RX
+        // timestamp plus the applied discard), which is the authoritative
+        // boundary position -- the sync-read timestamp is not. This keeps the
+        // UE's own uplink ZC landing at the uplink window inside its own RX
+        // frame across restarts, instead of drifting by the sync read's grid
+        // misalignment.
+        if (_pending_alignment_fresh.exchange(false, std::memory_order_relaxed) &&
+            frame_time_ns >= 0) {
+            const int64_t start_ns =
+                _rx_stream_start_time_ns.load(std::memory_order_acquire);
+            const int64_t fs = static_cast<int64_t>(frame_samples);
+            if (start_ns >= 0 && fs > 0 && cfg_.rf_sampling.sample_rate > 0.0) {
+                const int64_t raw_offset_samples =
+                    static_cast<int64_t>(std::llround(
+                        static_cast<double>(frame_time_ns - start_ns) *
+                        cfg_.rf_sampling.sample_rate * 1.0e-9));
+                const int64_t boundary_offset_samples =
+                    raw_offset_samples + static_cast<int64_t>(alignment_samples);
+                const int64_t grid_phase_samples =
+                    _positive_mod_i64(boundary_offset_samples, fs);
+                _reconstruct_uplink_tx_rx_alignment_absolute(
+                    grid_phase_samples, alignment_id, alignment_restart_epoch);
+            }
+        }
         if (positive_shift > 0) {
             std::copy(temp_buf.begin() + positive_shift,
                     temp_buf.begin() + positive_shift + frame_samples,
@@ -3092,6 +3564,31 @@ private:
         if (!frame_queue_.try_push(std::move(frame))) {
             LOG_RT_WARN_HZ(5) << "RX frame queue full during alignment, dropping newest frame";
             _rx_frame_pool.release(std::move(frame));
+        }
+        if (cfg_.should_profile("ue_recovery")) {
+            LOG_RT_WARN() << "[UE recovery] alignment_rx_commit alignment_id="
+                          << alignment_id
+                          << ", alignment=" << alignment_samples
+                          << ", restart_epoch=" << alignment_restart_epoch
+                          << ", scheduled_generation=" << alignment_generation
+                          << ", frame_generation="
+                          << _sync_generation.load(std::memory_order_acquire)
+                          << ", frame_time_ns=" << frame_time_ns
+                          << ", total_read=" << total_read
+                          << ", positive_shift=" << positive_shift
+                          << ", negative_shift=" << negative_shift
+                          << ", restart_pending="
+                          << _stream_restart_requested.load(std::memory_order_acquire);
+            _log_rx_timestamp_boundary(
+                "alignment_raw_first",
+                frame_time_ns,
+                0,
+                false);
+            _log_rx_timestamp_boundary(
+                "alignment_output_frame_start",
+                frame_time_ns,
+                static_cast<int64_t>(alignment_samples),
+                true);
         }
 //        LOG_G_INFO() << "Alignment done, moving "<< discard_samples_<< " samples" << std::endl;
 //        LOG_G_INFO() <<  discard_samples_<< std::endl;
@@ -3133,6 +3630,22 @@ private:
         }
 
         if (received == cfg_.samples_per_frame()) {
+            uint32_t remaining =
+                _rx_boundary_log_remaining.load(std::memory_order_acquire);
+            while (remaining > 0 &&
+                   !_rx_boundary_log_remaining.compare_exchange_weak(
+                       remaining,
+                       remaining - 1,
+                       std::memory_order_acq_rel,
+                       std::memory_order_acquire)) {
+            }
+            if (remaining > 0) {
+                _log_rx_timestamp_boundary(
+                    "normal_frame_start",
+                    frame.usrp_time_ns,
+                    0,
+                    true);
+            }
             if (do_latency_profile) {
                 frame.host_enqueue_time_ns = host_now_ns();
             }
@@ -3388,6 +3901,23 @@ private:
                 if (sync_offset_ > 0) {
                     sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
                 }
+                if (cfg_.should_profile("ue_recovery")) {
+                    LOG_RT_WARN() << "[UE recovery] sync_alignment_candidate max_pos="
+                                  << max_pos
+                                  << ", sync_pos_samples="
+                                  << (cfg_.ofdm.sync_pos * symbol_len)
+                                  << ", desired_peak_pos="
+                                  << cfg_.sync_tracking.desired_peak_pos
+                                  << ", predictive_delay_samples="
+                                  << predictive_delay_samples
+                                  << ", scheduled_alignment="
+                                  << sync_offset_.load(std::memory_order_relaxed)
+                                  << ", frame_samples=" << cfg_.samples_per_frame()
+                                  << ", ul_tx_rx_shift_before="
+                                  << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed)
+                                  << ", generation="
+                                  << _sync_generation.load(std::memory_order_relaxed);
+                }
                 _clear_frame_queue();
                 _schedule_receive_alignment(static_cast<int32_t>(sync_offset_));
                 issued_alignment = true;
@@ -3446,6 +3976,13 @@ private:
 
         auto log_process_load = [&]() {
             if (frame_count < REPORT_INTERVAL) {
+                return;
+            }
+            if (!cfg_.should_profile("demodulation")) {
+                total_collect_wall_ms = 0.0;
+                total_launch_wait_ms = 0.0;
+                total_worker_dsp_ms = 0.0;
+                frame_count = 0;
                 return;
             }
             const double n = static_cast<double>(frame_count);
@@ -3545,6 +4082,9 @@ private:
 
         while (running_.load()) {
             collect_ready_slots(false);
+            if (_recovery_queue_clear_requested.exchange(false, std::memory_order_acq_rel)) {
+                _clear_recovery_queues_from_process_thread();
+            }
             if (state_ == RxState::SYNC_SEARCH) {
                 SyncBatch* sync_batch = sync_queue_.consumer_slot();
                 if (sync_batch == nullptr) {
@@ -3552,6 +4092,17 @@ private:
                     continue;
                 }
                 sync_backoff.reset();
+                if (sync_batch->generation !=
+                    _sync_generation.load(std::memory_order_acquire)) {
+                    if (cfg_.should_profile("ue_recovery")) {
+                        LOG_RT_WARN() << "[UE recovery] dropped stale sync batch generation="
+                                      << sync_batch->generation
+                                      << ", current_generation="
+                                      << _sync_generation.load(std::memory_order_acquire);
+                    }
+                    sync_queue_.consumer_pop();
+                    continue;
+                }
                 process_sync_data(sync_batch->data, sync_batch->usrp_time_ns);
                 sync_queue_.consumer_pop();
             } else {
@@ -3645,6 +4196,58 @@ private:
         const size_t sym_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         const size_t local_tx_zc_start =
             _duplex_layout.ul_sample_offset(cfg_) + ul_cfg.ofdm.sync_pos * sym_len;
+
+        // Diagnostic scan: find the UE's own uplink ZC anywhere in the RX frame
+        // and report its displacement from the assumed window. This exposes a
+        // large post-underflow/post-resync TX-vs-RX offset that the fixed-window
+        // estimator below cannot (it would silently emit a flat, peakless
+        // h_est). Gated behind ue_recovery/uplink profiling + a stride so a
+        // normal run pays nothing.
+        constexpr uint64_t kUplinkSelfScanStride = 128;
+        const bool scan_log =
+            cfg_.should_profile("ue_recovery") || cfg_.should_profile("uplink");
+        const bool scan_publish =
+            uplink_self_scan_spectrum_enabled(cfg_) && uplink_self_scan_pub_;
+        if (_uplink_self_scan_processor && (scan_log || scan_publish) &&
+            (_uplink_self_scan_frame_counter++ % kUplinkSelfScanStride) == 0 &&
+            frame.frame_data.size() >= sym_len) {
+            int scan_pos = 0;
+            float scan_peak = 0.0f;
+            float scan_avg = 0.0f;
+            _uplink_self_scan_processor->find_sync_position(
+                frame.frame_data, scan_pos, scan_peak, scan_avg);
+            const int64_t frame_samples = static_cast<int64_t>(frame.frame_data.size());
+            int64_t offset = static_cast<int64_t>(scan_pos) -
+                             static_cast<int64_t>(local_tx_zc_start);
+            offset %= frame_samples;  // fold to (-frame/2, frame/2] to show lead/lag sign
+            if (offset > frame_samples / 2) offset -= frame_samples;
+            else if (offset < -frame_samples / 2) offset += frame_samples;
+            const float peak_avg_db = (scan_avg > 0.0f)
+                ? 10.0f * std::log10(scan_peak / scan_avg)
+                : 0.0f;
+            const int32_t ul_tx_rx_shift =
+                _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed);
+            const int32_t timing_advance =
+                _uplink_tx->timing_advance().load(std::memory_order_relaxed);
+            if (scan_log) {
+                LOG_G_WARN() << "[UL-TX self-scan] measured_zc_pos=" << scan_pos
+                             << ", expected_zc_pos=" << local_tx_zc_start
+                             << ", offset=" << offset
+                             << " samples, peak/avg=" << peak_avg_db
+                             << " dB, rx_alignment=" << frame.Alignment
+                             << ", ul_tx_rx_shift=" << ul_tx_rx_shift
+                             << ", timing_advance=" << timing_advance
+                             << ", target_shift=" << (ul_tx_rx_shift + timing_advance)
+                             << ", generation=" << frame.generation;
+            }
+            if (scan_publish) {
+                _uplink_self_scan_processor->copy_last_correlation(
+                    frame.frame_data.size(), _uplink_self_scan_spectrum);
+                uplink_self_scan_sender_.add_data(
+                    AlignedVector(_uplink_self_scan_spectrum.begin(),
+                                  _uplink_self_scan_spectrum.end()));
+            }
+        }
 
         if (!_uplink_self_debug_estimator.estimate(
                 frame.frame_data,
@@ -4648,7 +5251,9 @@ private:
             if (!LdpcPacketFraming::decode_mini_header_llrs(
                     llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
                     mini_header)) {
-                LOG_G_WARN() << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
+                if (cfg_.should_profile("demodulation")) {
+                    LOG_G_WARN() << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
+                }
                 break;
             }
 

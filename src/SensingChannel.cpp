@@ -594,18 +594,29 @@ public:
         return _tx_q.try_push(std::move(frame));
     }
 
-    bool pop_pair(AlignedVector& rx_out, TxSymbolsFrame& tx_out) {
+    bool pop_pair(
+        AlignedVector& rx_out,
+        TxSymbolsFrame& tx_out,
+        const std::atomic<uint64_t>& generation_ref)
+    {
         RxSymbolsFrame rx_item;
         TxSymbolsFrame tx_item;
         bool have_rx = false;
         bool have_tx = false;
 
         while (true) {
+            const uint64_t current_generation =
+                generation_ref.load(std::memory_order_acquire);
             if (!have_rx) {
                 if (!_pop_next_rx(rx_item)) {
                     return false;
                 }
                 have_rx = true;
+            }
+            if (rx_item.generation != current_generation) {
+                _recycle_one(std::move(rx_item.samples));
+                have_rx = false;
+                continue;
             }
 
             if (!have_tx) {
@@ -614,6 +625,10 @@ public:
                     return false;
                 }
                 have_tx = true;
+            }
+            if (tx_item.generation != current_generation) {
+                have_tx = false;
+                continue;
             }
 
             if (rx_item.frame_seq == tx_item.frame_seq) {
@@ -1041,7 +1056,11 @@ void SensingChannel::start(const radio::TimeSpec& start_time) {
     _compute.bistatic_active = false;
     _compute.next_delay_estimation_frame_seq = 0;
     _rx_io.stream_start_time = start_time;
+    _rx_io.rx_frame_seq_base = 0;
     _rx_io.next_rx_frame_seq = 0;
+    _rx_io.restart_requested.store(false, std::memory_order_relaxed);
+    _rx_io.pairing_generation.store(1, std::memory_order_release);
+    _rx_io.compute_reset_requested.store(false, std::memory_order_relaxed);
     _compute.sensing_sender.start();
     _rx_io.rx_thread = std::thread(&SensingChannel::_rx_loop, this, start_time);
     _compute.sensing_thread = std::thread(&SensingChannel::_sensing_loop, this);
@@ -1073,6 +1092,22 @@ void SensingChannel::stop_bistatic() {
     _compute.sensing_sender.stop();
 }
 
+void SensingChannel::request_reacquire(const radio::TimeSpec& start_time, uint64_t frame_seq) {
+    const uint64_t generation =
+        _rx_io.pairing_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    _rx_io.compute_reset_requested.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(_rx_io.restart_mutex);
+        _rx_io.pending_restart_time = start_time;
+        _rx_io.pending_restart_frame_seq = frame_seq;
+    }
+    _rx_io.restart_requested.store(true, std::memory_order_release);
+    LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+                  << "] requested RX restart at " << start_time.get_real_secs()
+                  << " s, frame_seq_base=" << frame_seq
+                  << ", generation=" << generation;
+}
+
 bool SensingChannel::enqueue_tx_symbols(
     const std::shared_ptr<const SymbolVector>& symbols,
     uint64_t frame_start_symbol_index,
@@ -1082,6 +1117,7 @@ bool SensingChannel::enqueue_tx_symbols(
     tx_frame.symbols = symbols;
     tx_frame.frame_start_symbol_index = frame_start_symbol_index;
     tx_frame.frame_seq = frame_seq;
+    tx_frame.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     const bool pushed = _rx_io.paired_queue->push_tx(std::move(tx_frame));
     if (!pushed) {
         LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
@@ -1828,13 +1864,56 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
     bind_current_thread_to_core(configured_core_to_optional(_rx_io.channel_cfg.rx_cpu_core));
     prefault_thread_stack();
 
-    radio::StreamCmd stream_cmd(radio::StreamMode::StartContinuous);
-    stream_cmd.stream_now = false;
-    stream_cmd.time_spec = start_time;
-    _rx_io.stream_start_time = start_time;
-    _rx_io.rx_stream->issue_stream_cmd(stream_cmd);
+    auto issue_start = [&](const radio::TimeSpec& stream_start_time) {
+        radio::StreamCmd stream_cmd(radio::StreamMode::StartContinuous);
+        const bool timed_start = stream_start_time.get_real_secs() > 0.0;
+        stream_cmd.stream_now = !timed_start;
+        if (timed_start) {
+            stream_cmd.time_spec = stream_start_time;
+        }
+        _rx_io.stream_start_time = stream_start_time;
+        _rx_io.rx_stream->issue_stream_cmd(stream_cmd);
+    };
+    auto issue_stop = [&]() {
+        try {
+            _rx_io.rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
+        } catch (const std::exception& e) {
+            LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+                          << "] failed to stop RX stream before restart: " << e.what();
+        }
+    };
+    auto apply_pending_restart = [&]() {
+        if (!_rx_io.restart_requested.exchange(false, std::memory_order_acq_rel)) {
+            return false;
+        }
+        radio::TimeSpec restart_time(0.0);
+        uint64_t restart_frame_seq = 0;
+        {
+            std::lock_guard<std::mutex> lock(_rx_io.restart_mutex);
+            restart_time = _rx_io.pending_restart_time;
+            restart_frame_seq = _rx_io.pending_restart_frame_seq;
+            _rx_io.pending_restart_time = radio::TimeSpec(0.0);
+        }
+        issue_stop();
+        _rx_io.rx_frame_seq_base = restart_frame_seq;
+        _rx_io.next_rx_frame_seq = restart_frame_seq;
+        _rx_io.rx_state.store(RxState::ALIGNMENT, std::memory_order_release);
+        const uint64_t generation =
+            _rx_io.pairing_generation.load(std::memory_order_acquire);
+        issue_start(restart_time);
+        LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+                      << "] RX stream generation " << generation
+                      << " restarted at " << restart_time.get_real_secs()
+                      << " s, frame_seq_base=" << restart_frame_seq;
+        return true;
+    };
+
+    issue_start(start_time);
 
     while (_running_ref.load(std::memory_order_relaxed)) {
+        if (apply_pending_restart()) {
+            continue;
+        }
         switch (_rx_io.rx_state.load()) {
         case RxState::ALIGNMENT:
             _handle_alignment();
@@ -1845,7 +1924,7 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
         }
     }
 
-    _rx_io.rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
+    issue_stop();
 }
 
 void SensingChannel::_handle_alignment() {
@@ -1895,9 +1974,13 @@ void SensingChannel::_handle_alignment() {
             have_first_time = true;
         }
         received += num_rx;
+        if (_rx_io.restart_requested.load(std::memory_order_acquire)) {
+            return;
+        }
     }
 
-    if (!_running_ref.load(std::memory_order_relaxed)) return;
+    if (!_running_ref.load(std::memory_order_relaxed) ||
+        _rx_io.restart_requested.load(std::memory_order_acquire)) return;
 
     AlignedVector aligned_frame = _rx_io.rx_frame_pool.acquire();
     if (discard >= 0) {
@@ -1918,7 +2001,7 @@ void SensingChannel::_handle_alignment() {
     }
 
     const uint64_t frame_seq = have_first_time
-        ? compute_rx_frame_seq_from_time(
+        ? (_rx_io.rx_frame_seq_base + compute_rx_frame_seq_from_time(
             first_time_spec,
             _rx_io.stream_start_time,
             discard,
@@ -1926,11 +2009,12 @@ void SensingChannel::_handle_alignment() {
             _cfg,
             _rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.rf_sampling.sample_rate,
             _rx_io.rx_tick_rate > 0.0 ? _rx_io.rx_tick_rate :
-                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.rf_sampling.sample_rate))
+                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.rf_sampling.sample_rate)))
         : _rx_io.next_rx_frame_seq;
     RxSymbolsFrame rx_item;
     rx_item.samples = std::move(aligned_frame);
     rx_item.frame_seq = frame_seq;
+    rx_item.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     if (!_rx_io.paired_queue->push_rx(std::move(rx_item))) {
         LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
                           << "] paired RX queue full during alignment, dropping newest RX frame";
@@ -1975,9 +2059,14 @@ void SensingChannel::_handle_normal_rx() {
             have_first_time = true;
         }
         received += num_rx;
+        if (_rx_io.restart_requested.load(std::memory_order_acquire)) {
+            _rx_io.rx_frame_pool.release(std::move(rx_frame));
+            return;
+        }
     }
 
-    if (!_running_ref.load(std::memory_order_relaxed)) {
+    if (!_running_ref.load(std::memory_order_relaxed) ||
+        _rx_io.restart_requested.load(std::memory_order_acquire)) {
         _rx_io.rx_frame_pool.release(std::move(rx_frame));
         return;
     }
@@ -2009,7 +2098,7 @@ void SensingChannel::_handle_normal_rx() {
     }
 
     const uint64_t frame_seq = have_first_time
-        ? compute_rx_frame_seq_from_time(
+        ? (_rx_io.rx_frame_seq_base + compute_rx_frame_seq_from_time(
             first_time_spec,
             _rx_io.stream_start_time,
             0,
@@ -2017,11 +2106,12 @@ void SensingChannel::_handle_normal_rx() {
             _cfg,
             _rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.rf_sampling.sample_rate,
             _rx_io.rx_tick_rate > 0.0 ? _rx_io.rx_tick_rate :
-                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.rf_sampling.sample_rate))
+                (_rx_io.rx_sample_rate > 0.0 ? _rx_io.rx_sample_rate : _cfg.rf_sampling.sample_rate)))
         : _rx_io.next_rx_frame_seq;
     RxSymbolsFrame rx_item;
     rx_item.samples = std::move(rx_frame);
     rx_item.frame_seq = frame_seq;
+    rx_item.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     if (!_rx_io.paired_queue->push_rx(std::move(rx_item))) {
         LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
                           << "] paired RX queue full, dropping newest RX frame";
@@ -2030,6 +2120,15 @@ void SensingChannel::_handle_normal_rx() {
         return;
     }
     _rx_io.next_rx_frame_seq = frame_seq + 1;
+}
+
+void SensingChannel::_reset_monostatic_accumulators() {
+    _compute.accumulated_rx_symbols.clear();
+    _compute.accumulated_tx_symbols.clear();
+    _compute.next_symbol_to_sample = 0;
+    _compute.current_batch_first_symbol = 0;
+    _compute.batch_has_first_symbol = false;
+    _compute.pending_batch_gather_us = 0.0;
 }
 
 void SensingChannel::_sensing_loop() {
@@ -2041,8 +2140,12 @@ void SensingChannel::_sensing_loop() {
     while (_running_ref.load(std::memory_order_relaxed)) {
         AlignedVector rx_frame_data;
         TxSymbolsFrame tx_frame;
-        if (!_rx_io.paired_queue->pop_pair(rx_frame_data, tx_frame)) {
+        if (!_rx_io.paired_queue->pop_pair(
+                rx_frame_data, tx_frame, _rx_io.pairing_generation)) {
             break;
+        }
+        if (_rx_io.compute_reset_requested.exchange(false, std::memory_order_acq_rel)) {
+            _reset_monostatic_accumulators();
         }
 
         _apply_batch_reset_if_due(tx_frame.frame_start_symbol_index);

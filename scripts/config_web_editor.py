@@ -26,8 +26,8 @@ JS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.js")
 SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
-    "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc", "agc", "arq"),
-    "ue": ("all", "demodulation", "cfo", "agc", "align", "uplink", "arq"),
+    "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc", "agc", "arq", "ertm", "udp_egress"),
+    "ue": ("all", "demodulation", "cfo", "agc", "align", "uplink", "arq", "ertm", "udp_egress", "ue_recovery"),
 }
 
 PROFILING_DESCRIPTIONS: dict[str, str] = {
@@ -42,6 +42,9 @@ PROFILING_DESCRIPTIONS: dict[str, str] = {
     "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",
     "align": "Enable runtime alignment diagnostics, including ALGN logs.",
     "uplink": "Enable UE uplink TX runtime diagnostics, including UL-TX timing and waveform logs.",
+    "ertm": "Enable eRTM timing report and pending-alignment diagnostics.",
+    "udp_egress": "Show UDP egress pacer throughput, queue, and drop statistics.",
+    "ue_recovery": "Show UE RX/UL-TX shared restart and alignment-coupling diagnostics.",
 }
 
 def field_data_key(field: dict[str, Any]) -> str:
