@@ -16,6 +16,7 @@
 // HardwareRxAgc helper. No sensing.
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -45,6 +46,11 @@ private:
         AlignedVector samples;
         uint64_t generation = 0;
         uint64_t frame_index = 0;
+    };
+
+    struct ReadResult {
+        size_t samples = 0;
+        bool metadata_error = false;
     };
 
     struct UplinkLlrFrame {
@@ -92,6 +98,8 @@ public:
           _window_offset(_duplex.ul_sample_offset(link_cfg)),
           _window_samples(_duplex.ul_sample_count(link_cfg)),
           _link_sample_rate(link_cfg.rf_sampling.sample_rate > 0.0 ? link_cfg.rf_sampling.sample_rate : 1.0),
+          _rx_sample_rate(_link_sample_rate),
+          _rx_tick_rate(_link_sample_rate),
           _rx_agc(link_cfg) {
         if (_cfg.ofdm.num_symbols < 2) {
             throw std::runtime_error("UplinkRxEngine: uplink needs >= 2 OFDM symbols.");
@@ -150,6 +158,15 @@ public:
     UplinkRxEngine& operator=(const UplinkRxEngine&) = delete;
 
     void set_rx_stream(radio::IRxStreamPtr stream) { _rx_stream = std::move(stream); }
+
+    void configure_rx_timing(double sample_rate, double tick_rate) {
+        if (sample_rate > 0.0) {
+            _rx_sample_rate = sample_rate;
+        }
+        if (tick_rate > 0.0) {
+            _rx_tick_rate = tick_rate;
+        }
+    }
 
     // AGC plumbing: host supplies a gain setter and the HW gain limits. If unset,
     // AGC is a no-op even when rx_agc_enable is true.
@@ -338,9 +355,9 @@ public:
     }
 
     // Read exactly `count` samples from the RX stream into out (blocking).
-    // If `first_idx` is non-null, it receives the absolute sample index (shared
-    // radio clock) of the first returned sample.
-    size_t _read_exact(
+    // If `first_idx` is non-null, it receives the RX sample offset of the first
+    // returned sample relative to stream_start_time.
+    ReadResult _read_exact(
         std::complex<float>* out,
         size_t count,
         int64_t* first_idx = nullptr,
@@ -349,39 +366,56 @@ public:
         size_t got = 0;
         radio::RxMetadata md;
         bool got_idx = false;
+        bool metadata_error = false;
+        if (first_idx) {
+            *first_idx = std::numeric_limits<int64_t>::min();
+        }
         while (got < count && _running.load(std::memory_order_relaxed)) {
             const size_t n = _rx_stream->recv(out + got, count - got, md, 1.0, false);
             if (md.error_code != radio::RxError::None &&
                 md.error_code != radio::RxError::Timeout) {
                 _rx_error_count.fetch_add(1, std::memory_order_relaxed);
                 LOG_RT_WARN() << "[UL-RX] RX metadata error: " << md.strerror();
-                if (md.has_time_spec && stream_start_time != nullptr &&
-                    stream_start_time->get_real_secs() > 0.0) {
-                    _request_restart_at(
-                        _next_frame_boundary_after(md.time_spec, *stream_start_time),
-                        "RX metadata error");
-                } else {
-                    {
-                        std::lock_guard<std::mutex> lock(_restart_mutex);
-                        _pending_restart_time = radio::TimeSpec(0.0);
-                        _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
-                    }
-                    _restart_requested.store(true, std::memory_order_release);
+                // Match the sensing RX behavior: never stitch samples across an
+                // overflow/metadata gap into one frame. Drop any partial read and
+                // let the next successful metadata timestamp drive realignment.
+                metadata_error = true;
+                got = 0;
+                got_idx = false;
+                if (first_idx) {
+                    *first_idx = std::numeric_limits<int64_t>::min();
                 }
-                break;
+                continue;
             }
             if (first_idx && !got_idx && n > 0 && md.has_time_spec) {
-                *first_idx = md.time_spec.to_ticks(_tick_rate_for_idx());
+                *first_idx = stream_start_time
+                    ? _elapsed_rx_samples_from_time(md.time_spec, *stream_start_time)
+                    : md.time_spec.to_ticks(_rx_sample_rate);
                 got_idx = true;
             }
             got += n;
         }
-        return got;
+        return {got, metadata_error};
     }
 
-    // The sim RX timestamps each sample with the shared sample clock (tick_rate ==
-    // sample_rate), so to_ticks(sample_rate) recovers the absolute sample index.
-    double _tick_rate_for_idx() const { return _link_sample_rate; }
+    int64_t _elapsed_rx_samples_from_time(
+        const radio::TimeSpec& raw_start_time,
+        const radio::TimeSpec& stream_start_time) const
+    {
+        const double sample_rate = _rx_sample_rate > 0.0 ? _rx_sample_rate : _link_sample_rate;
+        const double tick_rate = _rx_tick_rate > 0.0 ? _rx_tick_rate : sample_rate;
+        if (sample_rate <= 0.0 || tick_rate <= 0.0) {
+            return 0;
+        }
+
+        const int64_t raw_ticks = raw_start_time.to_ticks(tick_rate);
+        const int64_t stream_start_ticks = stream_start_time.to_ticks(tick_rate);
+        const int64_t delta_ticks = raw_ticks - stream_start_ticks;
+        const long double elapsed_samples =
+            static_cast<long double>(delta_ticks) * static_cast<long double>(sample_rate) /
+            static_cast<long double>(tick_rate);
+        return static_cast<int64_t>(std::llround(elapsed_samples));
+    }
 
     int64_t _normalize_frame_offset(int64_t samples) const {
         const int64_t period = static_cast<int64_t>(_period_samples);
@@ -391,23 +425,36 @@ public:
         return samples;
     }
 
+    int64_t _normalize_alignment_samples(int64_t samples) const {
+        const int64_t period = static_cast<int64_t>(_period_samples);
+        if (period <= 0) return 0;
+        int64_t normalized = samples % period;
+        if (normalized > period / 2) {
+            normalized -= period;
+        } else if (normalized < -(period / 2)) {
+            normalized += period;
+        }
+        return std::clamp<int64_t>(
+            normalized,
+            static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
+            static_cast<int64_t>(std::numeric_limits<int32_t>::max()));
+    }
+
     bool _frame_offset_from_first_sample(
-        int64_t first_sample_idx,
+        int64_t first_sample_offset,
         const radio::TimeSpec& stream_start_time,
         int64_t applied_diff,
         uint64_t& frame_offset,
         int64_t& residual_samples) const
     {
         const int64_t period = static_cast<int64_t>(_period_samples);
-        const double tick_rate = _tick_rate_for_idx();
-        if (first_sample_idx == std::numeric_limits<int64_t>::min() ||
-            period <= 0 || tick_rate <= 0.0) {
+        if (first_sample_offset == std::numeric_limits<int64_t>::min() ||
+            period <= 0) {
             return false;
         }
 
-        const int64_t stream_start_idx = stream_start_time.to_ticks(tick_rate);
-        const int64_t pairing_samples =
-            (first_sample_idx - stream_start_idx) - applied_diff;
+        (void)stream_start_time;
+        const int64_t pairing_samples = first_sample_offset - applied_diff;
         const int64_t abs_pairing = std::llabs(pairing_samples);
         int64_t rounded_frame = (abs_pairing + period / 2) / period;
         if (pairing_samples < 0) {
@@ -425,9 +472,12 @@ public:
         const radio::TimeSpec& event_time,
         const radio::TimeSpec& stream_start_time) const
     {
-        const double tick_rate = _tick_rate_for_idx();
-        const int64_t period_ticks = static_cast<int64_t>(_period_samples);
-        if (tick_rate <= 0.0 || period_ticks <= 0) {
+        const double sample_rate = _rx_sample_rate > 0.0 ? _rx_sample_rate : _link_sample_rate;
+        const double tick_rate = _rx_tick_rate > 0.0 ? _rx_tick_rate : sample_rate;
+        const int64_t period_ticks = static_cast<int64_t>(std::llround(
+            static_cast<long double>(_period_samples) * static_cast<long double>(tick_rate) /
+            static_cast<long double>(sample_rate)));
+        if (sample_rate <= 0.0 || tick_rate <= 0.0 || period_ticks <= 0) {
             return radio::TimeSpec(0.0);
         }
         const int64_t start_ticks = stream_start_time.to_ticks(tick_rate);
@@ -452,6 +502,61 @@ public:
         _restart_requested.store(true, std::memory_order_release);
         LOG_RT_WARN() << "[UL-RX] requested restart after " << reason
                       << " at " << start_time.get_real_secs() << " s";
+    }
+
+    bool _consume_alignment_frame(
+        std::complex<float>* out,
+        int64_t correction,
+        int64_t* aligned_first_idx,
+        const radio::TimeSpec& stream_start_time)
+    {
+        const int64_t frame_samples = static_cast<int64_t>(_period_samples);
+        if (frame_samples <= 0) {
+            return false;
+        }
+        correction = _normalize_alignment_samples(correction);
+        const size_t negative_shift = correction < 0
+            ? std::min<size_t>(static_cast<size_t>(-correction), _period_samples)
+            : 0;
+        const size_t positive_shift = correction > 0
+            ? static_cast<size_t>(correction)
+            : 0;
+        const size_t total_read = _period_samples + positive_shift - negative_shift;
+        if (total_read == 0) {
+            return false;
+        }
+
+        AlignedVector temp_buf(total_read);
+        int64_t raw_first_idx = std::numeric_limits<int64_t>::min();
+        const ReadResult read = _read_exact(
+            temp_buf.data(), total_read, &raw_first_idx, &stream_start_time);
+        if (read.samples != total_read || read.metadata_error ||
+            !_running.load(std::memory_order_relaxed)) {
+            return false;
+        }
+
+        if (positive_shift > 0) {
+            std::copy(
+                temp_buf.begin() + positive_shift,
+                temp_buf.begin() + positive_shift + _period_samples,
+                out);
+        } else if (negative_shift > 0) {
+            std::fill(out, out + _period_samples, std::complex<float>(0.0f, 0.0f));
+            std::copy(temp_buf.begin(), temp_buf.end(), out + negative_shift);
+        } else {
+            std::copy(temp_buf.begin(), temp_buf.begin() + _period_samples, out);
+        }
+
+        if (aligned_first_idx) {
+            if (raw_first_idx == std::numeric_limits<int64_t>::min()) {
+                *aligned_first_idx = raw_first_idx;
+            } else if (positive_shift > 0) {
+                *aligned_first_idx = raw_first_idx + static_cast<int64_t>(positive_shift);
+            } else {
+                *aligned_first_idx = raw_first_idx - static_cast<int64_t>(negative_shift);
+            }
+        }
+        return true;
     }
 
     void _rx_ingest_proc(radio::TimeSpec start_time) {
@@ -565,12 +670,12 @@ public:
             const uint64_t frame_generation =
                 _stream_generation.load(std::memory_order_acquire);
             int64_t first_sample_idx = std::numeric_limits<int64_t>::min();
-            const size_t got = _read_exact(
+            const ReadResult read = _read_exact(
                 frame->samples.data(),
                 _period_samples,
                 &first_sample_idx,
                 &start_time);
-            if (got != _period_samples ||
+            if (read.samples != _period_samples ||
                 _restart_requested.load(std::memory_order_acquire)) {
                 if (!_running.load(std::memory_order_relaxed)) break;
                 continue;
@@ -580,15 +685,49 @@ public:
             if (_frame_offset_from_first_sample(
                     first_sample_idx, start_time, applied_diff,
                     frame_offset, residual_samples)) {
+                constexpr int64_t kMetadataJitterToleranceSamples = 1;
+                const bool needs_recovery_alignment =
+                    read.metadata_error &&
+                    std::llabs(residual_samples) > kMetadataJitterToleranceSamples;
+                if (needs_recovery_alignment) {
+                    const int64_t correction = _normalize_alignment_samples(-residual_samples);
+                    LOG_RT_WARN() << "[UL-RX] RX frame boundary mismatch after "
+                                  << (read.metadata_error ? "metadata error" : "metadata indexing")
+                                  << ": residual=" << residual_samples
+                                  << " samples, correction=" << correction
+                                  << " samples; dropping recovery frame";
+                    int64_t aligned_first_idx = std::numeric_limits<int64_t>::min();
+                    if (_consume_alignment_frame(
+                            frame->samples.data(), correction, &aligned_first_idx, start_time)) {
+                        uint64_t aligned_frame_offset = 0;
+                        int64_t aligned_residual = 0;
+                        if (_frame_offset_from_first_sample(
+                                aligned_first_idx, start_time, applied_diff,
+                                aligned_frame_offset, aligned_residual)) {
+                            fallback_frame_offset = aligned_frame_offset + 1;
+                            if (aligned_residual != 0) {
+                                LOG_RT_WARN_HZ(5)
+                                    << "[UL-RX] residual after alignment frame: "
+                                    << aligned_residual << " samples";
+                            }
+                        }
+                    }
+                    continue;
+                }
                 frame->frame_index = base_frame_index + frame_offset;
                 fallback_frame_offset = frame_offset + 1;
-                if (std::llabs(residual_samples) > static_cast<int64_t>(_period_samples / 8)) {
+                if (std::llabs(residual_samples) > kMetadataJitterToleranceSamples) {
                     LOG_RT_WARN_HZ(5) << "[UL-RX] frame boundary residual after "
                                       << "metadata indexing: residual="
                                       << residual_samples << " samples"
                                       << ", frame_index=" << frame->frame_index;
                 }
             } else {
+                if (read.metadata_error) {
+                    LOG_RT_WARN_HZ(5) << "[UL-RX] dropping post-error RX frame without "
+                                      << "metadata timestamp; cannot verify frame boundary";
+                    continue;
+                }
                 if (first_sample_idx != std::numeric_limits<int64_t>::min()) {
                     LOG_RT_WARN_HZ(5) << "[UL-RX] dropping stale RX frame before current "
                                       << "stream anchor: first_sample_idx="
@@ -1131,6 +1270,8 @@ public:
     const size_t _window_offset;
     const size_t _window_samples;
     const double _link_sample_rate;
+    double _rx_sample_rate;
+    double _rx_tick_rate;
     SPSCRingBuffer<UplinkRxFrame> _rx_frame_queue;
     SPSCRingBuffer<UplinkLlrFrame> _llr_queue;
     SPSCRingBuffer<UplinkLlrFrameI16> _llr_queue_i16;     // used when _ldpc_fixed_point

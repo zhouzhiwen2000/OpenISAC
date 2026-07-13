@@ -1977,7 +1977,10 @@ void SensingChannel::_handle_normal_rx() {
         received += num_rx;
     }
 
-    if (!_running_ref.load(std::memory_order_relaxed)) return;
+    if (!_running_ref.load(std::memory_order_relaxed)) {
+        _rx_io.rx_frame_pool.release(std::move(rx_frame));
+        return;
+    }
 
     if (have_first_time) {
         const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());

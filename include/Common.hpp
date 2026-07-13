@@ -605,8 +605,8 @@ public:
      * @param initial_size Number of objects to pre-allocate
      * @param factory Function that creates a new properly-initialized object
      */
-    ObjectPool(size_t initial_size, FactoryFunc factory)
-        : _factory(std::move(factory))
+    ObjectPool(size_t initial_size, FactoryFunc factory, size_t max_available = 0)
+        : _factory(std::move(factory)), _max_available(max_available)
     {
         _pool.reserve(initial_size);
         for (size_t i = 0; i < initial_size; ++i) {
@@ -643,6 +643,9 @@ public:
      */
     void release(T&& obj) {
         std::lock_guard<std::mutex> lock(_mutex);
+        if (_max_available > 0 && _pool.size() >= _max_available) {
+            return;
+        }
         _pool.push_back(std::move(obj));
     }
     
@@ -671,6 +674,7 @@ public:
 
 private:
     FactoryFunc _factory;
+    size_t _max_available = 0;
     std::vector<T> _pool;
     mutable std::mutex _mutex;
 };
@@ -1160,7 +1164,7 @@ struct NetworkOutputConfig {
     // ARQ link-layer retransmission
     bool arq_enabled = false;
     bool arq_ordered_delivery = false;
-    int arq_window_packets = 32767;      // [1, 32767]; must stay below half the 16-bit seq space
+    int arq_window_packets = 256;        // [1, 256]; bounded to keep ARQ retransmit memory finite
     int arq_ack_bitmap_bits = 64;        // fixed 64 for first pass
     int arq_retransmit_timeout_ms = 100; // RTO in ms; 0 => default RTO
     int arq_max_retries = 5;             // 0 = unlimited within window
@@ -3166,13 +3170,13 @@ inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
 }
 
 inline void normalize_arq_config(NetworkOutputConfig& net) {
-    constexpr int kMaxArqWindowPackets = 32767;
+    constexpr int kMaxArqWindowPackets = 256;
     if (net.arq_window_packets < 1) {
         LOG_G_WARN() << "arq_window_packets < 1, clamping to 1.";
         net.arq_window_packets = 1;
     }
     if (net.arq_window_packets > kMaxArqWindowPackets) {
-        LOG_G_WARN() << "arq_window_packets exceeds the 16-bit sequence half-space; clamping to "
+        LOG_G_WARN() << "arq_window_packets exceeds the bounded ARQ runtime maximum; clamping to "
                      << kMaxArqWindowPackets << ".";
         net.arq_window_packets = kMaxArqWindowPackets;
     }

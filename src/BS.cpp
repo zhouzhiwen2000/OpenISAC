@@ -158,7 +158,10 @@ public:
         }),
         _data_packet_pool(64, []() {
             return AlignedIntVector();
-        }),
+        }, std::max<size_t>(
+            64,
+            cfg.downlink_pipeline.data_packet_buffer_size +
+                cfg.network_output.arq_window_packets + 64)),
         _circular_buffer(cfg.downlink_pipeline.tx_circular_buffer_size),
         _data_packet_buffer(cfg.downlink_pipeline.data_packet_buffer_size),
         _data_packet_ingest_ts(cfg.downlink_pipeline.data_packet_buffer_size),
@@ -449,6 +452,9 @@ private:
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
     LDPCCodec::AlignedIntVector _interleaver_bits_scratch;
+    LDPCCodec::AlignedByteVector _ldpc_input_bytes;
+    LDPCCodec::AlignedIntVector _ldpc_encoded_bits_scratch;
+    LDPCCodec::AlignedIntVector _ldpc_qpsk_scratch;
     Scrambler scrambler{201600, 0x5A};
     
     // MTI Filter
@@ -1483,6 +1489,9 @@ private:
         ul_rx_args.channels = {ul_rx_ch};
         _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
         _uplink_rx->set_rx_stream(ul_rx_dev->get_rx_stream(ul_rx_args));
+        _uplink_rx->configure_rx_timing(
+            ul_rx_dev->get_rx_rate(ul_rx_ch),
+            ul_rx_dev->master_clock_rate());
         _uplink_rx->dl_ul_timing_diff().store(_cfg.uplink.bs_dl_ul_timing_diff,
                                               std::memory_order_relaxed);
         _uplink_rx->set_bs_frame_provider([this]() {
@@ -1839,26 +1848,31 @@ private:
         profile.header_encode_us =
             std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
-        LDPCCodec::AlignedByteVector input_bytes(padded_len, 0x00);
+        _ldpc_input_bytes.resize(padded_len);
+        if (padded_len > 0) {
+            std::fill(_ldpc_input_bytes.begin(), _ldpc_input_bytes.end(), 0x00);
+        }
         if (payload_len > 0 && payload_data != nullptr) {
-            std::memcpy(input_bytes.data(), payload_data, payload_len);
+            std::memcpy(_ldpc_input_bytes.data(), payload_data, payload_len);
         }
 
         prof_step_start = ProfileClock::now();
-        LDPCCodec::AlignedIntVector encoded_bits_all;
-        LDPCCodec::AlignedIntVector qpsk_ints_all;
+        _ldpc_encoded_bits_scratch.clear();
+        _ldpc_qpsk_scratch.clear();
         if (payload_blocks > 0) {
-            _ldpc.encode_frame(input_bytes, encoded_bits_all);
-            scrambler.scramble(encoded_bits_all);
-            _bit_interleaver->interleave_inplace(encoded_bits_all, _interleaver_bits_scratch);
-            LDPCCodec::pack_bits_qpsk(encoded_bits_all, qpsk_ints_all);
+            _ldpc.encode_frame(_ldpc_input_bytes, _ldpc_encoded_bits_scratch);
+            scrambler.scramble(_ldpc_encoded_bits_scratch);
+            _bit_interleaver->interleave_inplace(
+                _ldpc_encoded_bits_scratch,
+                _interleaver_bits_scratch);
+            LDPCCodec::pack_bits_qpsk(_ldpc_encoded_bits_scratch, _ldpc_qpsk_scratch);
         }
         prof_step_end = ProfileClock::now();
         profile.payload_encode_us =
             std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
 
         packet.reserve(packet_qpsk_symbols);
-        packet.insert(packet.end(), qpsk_ints_all.begin(), qpsk_ints_all.end());
+        packet.insert(packet.end(), _ldpc_qpsk_scratch.begin(), _ldpc_qpsk_scratch.end());
         if (packet.size() != packet_qpsk_symbols) {
             _data_packet_pool.release(std::move(packet));
             throw std::runtime_error("Unified LDPC packet symbol count mismatch.");
@@ -2213,9 +2227,11 @@ private:
                     }
                     if (!entry.encoded_qpsk.empty()) {
                         // Cheap retransmit: push pre-encoded QPSK directly
-                        AlignedIntVector retrans(entry.encoded_qpsk);
+                        AlignedIntVector retrans = _data_packet_pool.acquire();
+                        retrans.assign(entry.encoded_qpsk.begin(), entry.encoded_qpsk.end());
                         const size_t queued_packets_ahead = _data_packet_buffer.size();
                         if (!_data_packet_buffer.try_push(std::move(retrans))) {
+                            _data_packet_pool.release(std::move(retrans));
                             _arq_encoded_queue_full_events.fetch_add(1, std::memory_order_relaxed);
                             _log_arq_profile_if_due("retx_encoded_queue_full", arq_now_ms());
                             break;
@@ -2270,14 +2286,14 @@ private:
             }
             // ARQ: check window room before encoding new data
             if (_arq_enabled && !_dl_arq_tx.has_room()) {
-                const uint64_t stalls =
-                    _arq_dl_window_stalls.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (stalls <= 20 || (stalls % 100) == 0) {
-                    LOG_G_WARN() << "[BS ARQ DL] TX window full, pausing UDP intake: stalls="
-                                 << stalls;
+                const uint64_t drops =
+                    _arq_dl_window_drops.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (drops <= 20 || (drops % 100) == 0) {
+                    LOG_G_WARN() << "[BS ARQ DL] TX window full, dropping new packet: dropped="
+                                 << drops;
                 }
-                _log_arq_profile_if_due("window_full_stall", arq_now_ms());
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                _log_arq_profile_if_due("window_full_drop", arq_now_ms());
+                _raw_udp_buffer.consumer_pop();
                 continue;
             }
             EncodePacketProfile profile;
@@ -2338,6 +2354,8 @@ private:
                 : std::numeric_limits<size_t>::max();
         AlignedVector modulated_data_pool;
         modulated_data_pool.reserve(max_data_syms_per_frame);
+        AlignedIntVector data_pool;
+        data_pool.reserve(max_data_syms_per_frame);
 
         while (_running.load()) {
             frame_start = Clock::now(); // Record frame start time
@@ -2349,8 +2367,7 @@ private:
 
             // Pool of real data symbols available for this frame
             prof_step_start = ProfileClock::now();
-            AlignedIntVector data_pool;
-            data_pool.reserve(max_data_syms_per_frame);
+            data_pool.clear();
             int64_t frame_ingest_ns = 0;  // T1: UDP recv time of first real packet
             int64_t frame_encoded_ns = 0; // T2: LDPC encode done time of first real packet
             size_t packets_pulled = 0;

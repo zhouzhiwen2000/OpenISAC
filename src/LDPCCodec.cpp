@@ -13,6 +13,11 @@ struct LDPCCodec::Impl {
     // register at int16 (vs 16 at float), so its n_frames is doubled.
     std::unique_ptr<aff3ct::tools::Codec_LDPC<short, short>> codec_q16;
     std::unique_ptr<LDPC5041008SIMD> custom_encoder;
+    LDPC5041008SIMD::ByteVec custom_input_bytes;
+    LDPC5041008SIMD::IntVec custom_encoded_bits;
+    AlignedIntVector unpacked_bits;
+    AlignedIntVector tmp_in;
+    AlignedIntVector tmp_out;
 
     explicit Impl(const LDPCConfig& config)
         : cfg(config) {
@@ -108,39 +113,53 @@ void LDPCCodec::encode_frame(const AlignedByteVector& input, AlignedIntVector& e
     }
 
     if (impl_->custom_encoder) {
-        LDPC5041008SIMD::ByteVec input_bytes(input.size());
-        std::copy(input.begin(), input.end(), input_bytes.begin());
+        impl_->custom_input_bytes.resize(input.size());
+        std::copy(input.begin(), input.end(), impl_->custom_input_bytes.begin());
 
-        LDPC5041008SIMD::IntVec encoded_bits_mipp;
-        impl_->custom_encoder->encode_bytes(input_bytes, encoded_bits_mipp);
+        impl_->custom_encoder->encode_bytes(
+            impl_->custom_input_bytes,
+            impl_->custom_encoded_bits);
 
-        encoded_bits.resize(encoded_bits_mipp.size());
-        std::copy(encoded_bits_mipp.begin(), encoded_bits_mipp.end(), encoded_bits.begin());
+        encoded_bits.resize(impl_->custom_encoded_bits.size());
+        std::copy(
+            impl_->custom_encoded_bits.begin(),
+            impl_->custom_encoded_bits.end(),
+            encoded_bits.begin());
         return;
     }
 
     auto& encoder = impl_->codec->get_encoder();
-    AlignedIntVector unpacked_bits(input.size() * 8);
-    unpack_bits(input, unpacked_bits);
+    impl_->unpacked_bits.resize(input.size() * 8);
+    unpack_bits(input, impl_->unpacked_bits);
     const size_t N = encoder.get_N();
     const size_t K = encoder.get_K();
     const size_t batch = encoder.get_n_frames();
-    const size_t total_frames = unpacked_bits.size() / K;
+    const size_t total_frames = impl_->unpacked_bits.size() / K;
 
     encoded_bits.resize(total_frames * N);
 
     size_t i = 0;
     for (; i + batch <= total_frames; i += batch) {
-        encoder.encode(unpacked_bits.data() + i * K, encoded_bits.data() + i * N, -1, false);
+        encoder.encode(
+            impl_->unpacked_bits.data() + i * K,
+            encoded_bits.data() + i * N,
+            -1,
+            false);
     }
 
     const size_t remaining = total_frames - i;
     if (remaining > 0) {
-        AlignedIntVector tmp_in(batch * K, 0);
-        AlignedIntVector tmp_out(batch * N, 0);
-        std::memcpy(tmp_in.data(), unpacked_bits.data() + i * K, remaining * K * sizeof(int32_t));
-        encoder.encode(tmp_in.data(), tmp_out.data(), -1, false);
-        std::memcpy(encoded_bits.data() + i * N, tmp_out.data(), remaining * N * sizeof(int32_t));
+        impl_->tmp_in.assign(batch * K, 0);
+        impl_->tmp_out.assign(batch * N, 0);
+        std::memcpy(
+            impl_->tmp_in.data(),
+            impl_->unpacked_bits.data() + i * K,
+            remaining * K * sizeof(int32_t));
+        encoder.encode(impl_->tmp_in.data(), impl_->tmp_out.data(), -1, false);
+        std::memcpy(
+            encoded_bits.data() + i * N,
+            impl_->tmp_out.data(),
+            remaining * N * sizeof(int32_t));
     }
 }
 
