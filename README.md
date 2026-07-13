@@ -38,7 +38,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - Setup and installation: [Hardware](https://openisac.zzw123app.top/docs/getting-started/hardware/), [Installation](https://openisac.zzw123app.top/docs/getting-started/installation/), [Build](https://openisac.zzw123app.top/docs/getting-started/build/)
 - First end-to-end run: [First OTA Run](https://openisac.zzw123app.top/docs/getting-started/first-ota-run/)
 - Runtime configuration: [BS YAML Reference](https://openisac.zzw123app.top/docs/reference/bs-yaml/) and [UE YAML Reference](https://openisac.zzw123app.top/docs/reference/ue-yaml/)
-- USRP-free simulation: [Channel Simulator](docs/CHANNEL_SIMULATOR.md) and [Starlight notes](https://openisac.zzw123app.top/docs/tools-workflows/channel-simulator/)
+- USRP-free simulation: [Channel Simulator](https://openisac.zzw123app.top/docs/tools-workflows/channel-simulator/)
 - Web control UI: [Web Config Console](https://openisac.zzw123app.top/docs/tools-workflows/web-config-console/)
 - Recent updates: [Changelog](CHANGELOG.md)
 
