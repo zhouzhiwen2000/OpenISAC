@@ -124,7 +124,7 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `uplink.symbol_start` | `int` | `90` | TDD-only first uplink symbol in the downlink frame. |
 | `uplink.symbol_count` | `int` | `10` | TDD-only uplink window length; `0` disables TDD uplink. |
 | `uplink.guard_symbols` | `int` | `1` | TDD-only leading guard symbols inside the uplink window. |
-| `uplink.bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side uplink RX window offset relative to the downlink TX frame anchor. |
+| `uplink.bs_dl_ul_timing_diff` | `int` / samples | `50` | BS-side uplink RX window offset relative to the downlink TX frame anchor. |
 | `uplink.debug_self_channel` | `bool` | `false` | Estimate local TX leakage/self channel from uplink RX windows for `DUTI` debugging. |
 | `uplink.ertm_to_enable` | `bool` | `false` | Enable eRTM timing-offset payloads and UE-side TO logs. |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames. |

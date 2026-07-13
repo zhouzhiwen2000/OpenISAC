@@ -76,7 +76,7 @@ uplink:
   arq_ordered_delivery: false  # Buffer uplink packets for in-order UDP delivery
   arq_window_packets: 32767  # Uplink ARQ receive/reorder window [1, 32767]
   arq_feedback_interval_ms: 10  # Uplink ARQ ACK feedback interval in ms
-  bs_dl_ul_timing_diff: 0  # BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
+  bs_dl_ul_timing_diff: 50  # BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
 
 # ===== Sensing =====
 sensing:

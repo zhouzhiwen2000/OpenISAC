@@ -558,14 +558,14 @@ bs:
     data_key: sensing.view_range_bins
     kind: int
     comment: Backend RD view width in range bins; 0 uses full range_fft_size
-    default: 63
+    default: 50
     optional: true
   - type: scalar
     key: view_doppler_bins
     data_key: sensing.view_doppler_bins
     kind: int
     comment: Backend RD view height in Doppler bins; 0 uses full doppler_fft_size
-    default: 0
+    default: 50
     optional: true
   - type: scalar
     key: symbol_stride
@@ -651,7 +651,7 @@ bs:
     key: tx_channel
     kind: int
     comment: TX channel index on USRP
-    default: 0
+    default: 67.0
     optional: true
   - type: scalar
     key: tx_device_args
@@ -837,7 +837,7 @@ bs:
     data_key: uplink.rx_channel
     kind: int
     comment: Uplink RX channel index on USRP
-    default: 0
+    default: 67.0
     optional: true
   - type: scalar
     key: rx_wire_format
@@ -1754,10 +1754,10 @@ ue:
       - key: uplink.ertm_to_enable
         value: true
   - type: scalar
-    key: ertm_dl_rf_delay_ns
-    data_key: uplink.ertm_dl_rf_delay_ns
+    key: ertm_dl_rf_delay_samples
+    data_key: uplink.ertm_dl_rf_delay_samples
     kind: float
-    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (nanoseconds)
+    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (samples)
     default: 0
     optional: true
     enabled_if:
@@ -1767,10 +1767,10 @@ ue:
       - key: uplink.ertm_to_enable
         value: true
   - type: scalar
-    key: ertm_ul_rf_delay_ns
-    data_key: uplink.ertm_ul_rf_delay_ns
+    key: ertm_ul_rf_delay_samples
+    data_key: uplink.ertm_ul_rf_delay_samples
     kind: float
-    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (nanoseconds)
+    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (samples)
     default: 0
     optional: true
     enabled_if:

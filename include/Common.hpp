@@ -1071,8 +1071,8 @@ struct UplinkConfig {
     bool ertm_to_enable = false;      // Enable eRTM timing-offset estimation payloads/logs
     size_t ertm_delay_oversample_factor = 10; // UE eRTM delay-spectrum IFFT oversampling factor
     bool ertm_debug_output_enabled = false; // Publish UE-side eRTM debug spectra over ZMQ
-    double ertm_dl_rf_delay_ns = 0.0;  // Calibrated downlink RF-chain delay in ns
-    double ertm_ul_rf_delay_ns = 0.0;  // Calibrated uplink RF-chain delay in ns
+    double ertm_dl_rf_delay_samples = 0.0;  // Calibrated downlink RF-chain delay in samples
+    double ertm_ul_rf_delay_samples = 0.0;  // Calibrated uplink RF-chain delay in samples
     size_t ertm_report_interval_frames = 32; // BS eRTM payload cadence in TX frames
     double rx_gain = 0.0;              // BS uplink RX gain
     size_t rx_channel = 0;             // BS uplink RX channel index
@@ -2619,8 +2619,12 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
         if (ul["ertm_debug_output_enabled"]) {
             cfg.uplink.ertm_debug_output_enabled = ul["ertm_debug_output_enabled"].as<bool>();
         }
-        if (ul["ertm_dl_rf_delay_ns"]) cfg.uplink.ertm_dl_rf_delay_ns = ul["ertm_dl_rf_delay_ns"].as<double>();
-        if (ul["ertm_ul_rf_delay_ns"]) cfg.uplink.ertm_ul_rf_delay_ns = ul["ertm_ul_rf_delay_ns"].as<double>();
+        if (ul["ertm_dl_rf_delay_samples"]) {
+            cfg.uplink.ertm_dl_rf_delay_samples = ul["ertm_dl_rf_delay_samples"].as<double>();
+        }
+        if (ul["ertm_ul_rf_delay_samples"]) {
+            cfg.uplink.ertm_ul_rf_delay_samples = ul["ertm_ul_rf_delay_samples"].as<double>();
+        }
         if (ul["ertm_report_interval_frames"]) {
             cfg.uplink.ertm_report_interval_frames = std::max<size_t>(
                 1, ul["ertm_report_interval_frames"].as<size_t>());

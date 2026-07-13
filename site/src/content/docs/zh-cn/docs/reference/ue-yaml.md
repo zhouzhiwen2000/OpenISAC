@@ -126,12 +126,12 @@ description: UE 运行时配置的分组参考。
 | `uplink.tx_gain` | `float` / dB | `0` | UE 上行 TX 增益。 |
 | `uplink.tx_channel` | `int` | `0` | UE 上行 TX 通道索引。 |
 | `uplink.wire_format_tx` | `string` | `sc16` | UE 上行 TX wire format。 |
-| `uplink.ue_timing_advance` | `int` / samples | `63` | UE 上行发送 timing advance。 |
+| `uplink.ue_timing_advance` | `int` / samples | `50` | UE 上行发送 timing advance。 |
 | `uplink.debug_self_channel` | `bool` | `false` | 从 RX 窗口估计 UE self-TX 泄漏信道，用于 `TADV` 调试。 |
 | `uplink.ertm_to_enable` | `bool` | `false` | 开启 eRTM TO payload 消费和 TO 日志。 |
 | `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT 过采样倍数。 |
-| `uplink.ertm_dl_rf_delay_ns` | `float` / ns | `0` | eRTM 方程中的下行 RF 链路校准延迟。 |
-| `uplink.ertm_ul_rf_delay_ns` | `float` / ns | `0` | eRTM 方程中的上行 RF 链路校准延迟。 |
+| `uplink.ertm_dl_rf_delay_samples` | `float` / samples | `67.0` | eRTM 方程中的下行 RF 链路校准延迟。 |
+| `uplink.ertm_ul_rf_delay_samples` | `float` / samples | `67.0` | eRTM 方程中的上行 RF 链路校准延迟。 |
 | `uplink.ertm_debug_output_enabled` | `bool` | `false` | 开启 UE 侧 eRTM debug ZMQ 频谱输出。 |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM report 间隔；对比日志时应与 BS 保持一致。 |
 | `uplink.arq_enabled` | `bool` | `false` | 在 UE 发射端开启上行 ARQ。 |

@@ -126,12 +126,12 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `uplink.tx_gain` | `float` / dB | `0` | UE uplink TX gain. |
 | `uplink.tx_channel` | `int` | `0` | UE uplink TX channel index. |
 | `uplink.wire_format_tx` | `string` | `sc16` | UE uplink TX wire format. |
-| `uplink.ue_timing_advance` | `int` / samples | `63` | UE uplink transmit timing advance. |
+| `uplink.ue_timing_advance` | `int` / samples | `50` | UE uplink transmit timing advance. |
 | `uplink.debug_self_channel` | `bool` | `false` | Estimate UE self-TX leakage channel from RX windows for `TADV` debugging. |
 | `uplink.ertm_to_enable` | `bool` | `false` | Enable eRTM TO payload consumption and TO logs. |
 | `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT oversampling factor. |
-| `uplink.ertm_dl_rf_delay_ns` | `float` / ns | `0` | Calibrated downlink RF-chain delay for eRTM equations. |
-| `uplink.ertm_ul_rf_delay_ns` | `float` / ns | `0` | Calibrated uplink RF-chain delay for eRTM equations. |
+| `uplink.ertm_dl_rf_delay_samples` | `float` / samples | `67.0` | Calibrated downlink RF-chain delay for eRTM equations. |
+| `uplink.ertm_ul_rf_delay_samples` | `float` / samples | `67.0` | Calibrated uplink RF-chain delay for eRTM equations. |
 | `uplink.ertm_debug_output_enabled` | `bool` | `false` | Enable UE-side eRTM debug ZMQ spectra. |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM report cadence; keep matched with BS. |
 | `uplink.arq_enabled` | `bool` | `false` | Enable uplink ARQ on the UE transmitter. |

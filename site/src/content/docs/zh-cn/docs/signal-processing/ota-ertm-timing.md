@@ -32,7 +32,7 @@ $$
 \frac{\tau_c+\tau_\mathrm{TO,BS-UE}}{2}
 $$
 
-实现上，RF 链路项应来自 YAML，而 DUTI/TADV 类运行时项应来自实时控制或时序状态。原始显示值、语义 timing-offset 变量和实际 correction 值应保持分离。
+实现上，RF 链路项来自 `uplink.ertm_dl_rf_delay_samples` 和 `uplink.ertm_ul_rf_delay_samples`，DUTI/TADV 类运行时项来自实时控制或时序状态。当前运行时 eRTM 相关量统一使用 samples，包括小数 RF 链路延迟样本。原始显示值、语义 timing-offset 变量和实际 correction 值应保持分离。
 
 ## 为什么 OTA 补偿会改善 MTI
 

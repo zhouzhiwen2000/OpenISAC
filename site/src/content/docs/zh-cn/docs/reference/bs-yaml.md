@@ -124,7 +124,7 @@ description: BS 运行时配置的分组参考。
 | `uplink.symbol_start` | `int` | `90` | TDD 下上行窗口起始符号。 |
 | `uplink.symbol_count` | `int` | `10` | TDD 下上行窗口长度；`0` 关闭 TDD 上行。 |
 | `uplink.guard_symbols` | `int` | `1` | TDD 上行窗口内的前置 guard 符号数。 |
-| `uplink.bs_dl_ul_timing_diff` | `int` / samples | `63` | BS 上行 RX 窗口相对下行 TX 帧锚点的偏移。 |
+| `uplink.bs_dl_ul_timing_diff` | `int` / samples | `50` | BS 上行 RX 窗口相对下行 TX 帧锚点的偏移。 |
 | `uplink.debug_self_channel` | `bool` | `false` | 从上行 RX 窗口估计本机 TX 泄漏/self channel，用于 `DUTI` 调试。 |
 | `uplink.ertm_to_enable` | `bool` | `false` | 开启 eRTM timing-offset payload 和 UE 侧 TO 日志。 |
 | `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report 的下行 TX 帧间隔。 |

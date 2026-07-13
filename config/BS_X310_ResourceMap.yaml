@@ -50,6 +50,7 @@ uplink:
   symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
   symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
   guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
+  bs_dl_ul_timing_diff: 50  # BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
   ertm_to_enable: false  # Enable eRTM TO estimation payloads and UE-side TO logs
   ertm_report_interval_frames: 32  # BS eRTM payload/report cadence in downlink frames
   rx_channel: 0  # Uplink RX channel index on USRP
@@ -81,7 +82,7 @@ sensing:
       time_source: ""  # Per-channel time source override (optional)
       wire_format: ""  # Per-channel wire format override (optional)
       rx_gain: 30  # Per-channel RX gain (dB)
-      alignment: 63  # Per-channel timing alignment offset (samples)
+      alignment: 67  # Per-channel timing alignment offset (samples)
       rx_antenna: RX2  # RX antenna port (e.g. RX1/RX2/TX/RX)
       enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
       rx_cpu_core: 4  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)

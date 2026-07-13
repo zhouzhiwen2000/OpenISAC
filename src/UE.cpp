@@ -1509,11 +1509,9 @@ private:
             return;
         }
 
-        const double sample_rate = bs_payload.sample_rate;
         const int32_t tadv_samples = _ue_timing_advance.load(std::memory_order_relaxed);
         const double rf_delay_samples =
-            (cfg_.uplink.ertm_dl_rf_delay_ns + cfg_.uplink.ertm_ul_rf_delay_ns) *
-            1e-9 * sample_rate;
+            cfg_.uplink.ertm_dl_rf_delay_samples + cfg_.uplink.ertm_ul_rf_delay_samples;
         const double tau_c_samples =
             rf_delay_samples -
             static_cast<double>(bs_payload.duti_samples) -
@@ -1524,6 +1522,8 @@ private:
             shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
         const double to_ue_samples = 0.5 * (tau_c_samples - to_bs_ue_samples);
         const double to_bs_samples = 0.5 * (tau_c_samples + to_bs_ue_samples);
+        // Delay-spectrum debug correction shifts spectra in delay domain, so it
+        // uses the opposite sign of the estimated timing offset.
         const double correction_to_ue_samples = -to_ue_samples;
         const double correction_to_bs_samples = -to_bs_samples;
         if (std::isfinite(to_ue_samples)) {
@@ -1568,8 +1568,8 @@ private:
                 << ", TO_BS_UE_samples=" << to_bs_ue_samples
                 << ", TO_UE_samples=" << to_ue_samples
                 << ", TO_BS_samples=" << to_bs_samples
-                << ", rf_delay_ns=(" << cfg_.uplink.ertm_dl_rf_delay_ns
-                << "+" << cfg_.uplink.ertm_ul_rf_delay_ns << ")";
+                << ", rf_delay_samples_cfg=(" << cfg_.uplink.ertm_dl_rf_delay_samples
+                << "+" << cfg_.uplink.ertm_ul_rf_delay_samples << ")";
             LOG_G_INFO() << oss.str();
         }
         if (publish_debug) {
@@ -1633,7 +1633,7 @@ private:
         }
 
         const double rounded_jump = std::round(to_ue_diff);
-        const double updated_pending = pending + rounded_jump;
+        const double updated_pending = pending - rounded_jump;
         const double stored_pending = (std::abs(updated_pending) < 0.5) ? 0.0 : updated_pending;
         if (_ertm_absolute_pending_alignment_samples.compare_exchange_strong(
                 pending,
@@ -1663,10 +1663,11 @@ private:
             if (_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
                 const double to_ue_samples =
                     _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
-                const double correction_to_ue_samples = -to_ue_samples;
                 const double pending_alignment =
                     _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
-                base_delay_offset = static_cast<float>(correction_to_ue_samples + pending_alignment);
+                // SensingChannel::delay_offset is a frequency-domain inverse
+                // phase correction, so positive TO_UE removes positive UE delay.
+                base_delay_offset = static_cast<float>(to_ue_samples + pending_alignment);
             } else {
                 LOG_RT_WARN_HZ(1)
                     << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "

@@ -67,7 +67,7 @@ $$
 - `τ_DL^RF`：BS 发射链路与 UE 接收链路引入的下行固定延迟；
 - `τ_UL^RF`：UE 发射链路与 BS 接收链路引入的上行固定延迟。
 
-这两个 RF 延迟由硬件和射频链路决定，工程上应通过校准得到，然后放入配置文件中。
+这两个 RF 延迟由硬件和射频链路决定，工程上应通过校准得到，然后放入配置文件中。当前实现中，UE YAML 使用 `uplink.ertm_dl_rf_delay_samples` 和 `uplink.ertm_ul_rf_delay_samples`，单位为 samples，支持小数样本。
 
 UE 侧根据自身本地 timing 测得的路径延迟为：
 
@@ -775,10 +775,10 @@ $$
 
 | 项 | 来源 | 说明 |
 |---|---|---|
-| `τ_DL^RF` | 配置文件 | 下行 RF 链路校准延迟，单位建议统一为秒 |
-| `τ_UL^RF` | 配置文件 | 上行 RF 链路校准延迟，单位建议统一为秒 |
-| `t_DL-UL^BS` | 运行时 DUTI | BS 侧 DL-UL timing difference，需要按系统单位换算为秒 |
-| `t_TA^UE` | 运行时 TADV | UE timing advance，需要按系统单位换算为秒 |
+| `τ_DL^RF` | `uplink.ertm_dl_rf_delay_samples` | 下行 RF 链路校准延迟，当前实现单位为 samples，支持小数 |
+| `τ_UL^RF` | `uplink.ertm_ul_rf_delay_samples` | 上行 RF 链路校准延迟，当前实现单位为 samples，支持小数 |
+| `t_DL-UL^BS` | 运行时 DUTI / `uplink.bs_dl_ul_timing_diff` | BS 侧 DL-UL timing difference，当前实现单位为 samples |
+| `t_TA^UE` | 运行时 TADV / `uplink.ue_timing_advance` | UE timing advance，当前实现单位为 samples |
 
 UE 侧 TO 估计：
 
@@ -998,11 +998,12 @@ def estimate_to_ertm(
     H_ue,              # shape: [N, M]
     eta_f,
     subcarrier_spacing,
+    sample_rate,
     p_fft,
-    tau_rf_dl,
-    tau_rf_ul,
-    duti_seconds,
-    tadv_seconds,
+    tau_rf_dl_samples,
+    tau_rf_ul_samples,
+    duti_samples,
+    tadv_samples,
     ue_ref_symbol=0,
 ):
     N = len(h_bs)
@@ -1011,6 +1012,7 @@ def estimate_to_ertm(
     tau_max = 1.0 / (eta_f * subcarrier_spacing)
     epsilon = 1.0 / (N * eta_f * subcarrier_spacing)
     delay_bin = tau_max / P
+    delay_bin_samples = delay_bin * sample_rate
 
     # Frequency-domain CSI -> delay spectrum.
     r_bs = ifft_zero_padded(h_bs, P)
@@ -1034,25 +1036,32 @@ def estimate_to_ertm(
     else:
         delta_bs_ue = delta_max - P
 
-    tau_to_bs_ue = delta_bs_ue * delay_bin
+    tau_to_bs_ue_samples = delta_bs_ue * delay_bin_samples
 
     # Constant term from RF calibration and runtime DUTI/TADV.
-    tau_c = tau_rf_dl + tau_rf_ul - duti_seconds - tadv_seconds
+    # Current implementation keeps these terms in samples.
+    tau_c_samples = (
+        tau_rf_dl_samples
+        + tau_rf_ul_samples
+        - duti_samples
+        - tadv_samples
+    )
 
-    tau_to_ue = 0.5 * (tau_c - tau_to_bs_ue)
-    tau_to_bs = 0.5 * (tau_c + tau_to_bs_ue)
+    tau_to_ue_samples = 0.5 * (tau_c_samples - tau_to_bs_ue_samples)
+    tau_to_bs_samples = 0.5 * (tau_c_samples + tau_to_bs_ue_samples)
 
-    delta_to = round(tau_to_ue / delay_bin)
+    delta_to = round(tau_to_ue_samples / delay_bin_samples)
 
     return {
         "tau_max": tau_max,
         "epsilon": epsilon,
         "delay_bin": delay_bin,
+        "delay_bin_samples": delay_bin_samples,
         "delta_bs_ue": delta_bs_ue,
-        "tau_to_bs_ue": tau_to_bs_ue,
-        "tau_c": tau_c,
-        "tau_to_ue": tau_to_ue,
-        "tau_to_bs": tau_to_bs,
+        "tau_to_bs_ue_samples": tau_to_bs_ue_samples,
+        "tau_c_samples": tau_c_samples,
+        "tau_to_ue_samples": tau_to_ue_samples,
+        "tau_to_bs_samples": tau_to_bs_samples,
         "delta_to": delta_to,
         "corr_peak": abs(x[delta_max]),
     }
@@ -1145,18 +1154,18 @@ ADD 或其他算法继续处理 TD/CFO/random phase
 
 ## 21. 实现时的单位约定
 
-建议所有时间量在内部统一使用秒：
+理论推导可以使用秒作为统一时间单位；当前工程实现为了避免纳秒和采样率换算误差，将 eRTM TO 相关量统一使用 samples：
 
 | 参数 | 建议内部单位 |
 |---|---|
-| `τ_DL^RF` | second |
-| `τ_UL^RF` | second |
-| `t_DL-UL^BS` / DUTI | second |
-| `t_TA^UE` / TADV | second |
-| `τ_c` | second |
-| `τ_TO^{BS-UE}` | second |
-| `τ_TO^{UE}` | second |
-| `τ_TO^{BS}` | second |
+| `τ_DL^RF` | samples |
+| `τ_UL^RF` | samples |
+| `t_DL-UL^BS` / DUTI | samples |
+| `t_TA^UE` / TADV | samples |
+| `τ_c` | samples |
+| `τ_TO^{BS-UE}` | samples |
+| `τ_TO^{UE}` | samples |
+| `τ_TO^{BS}` | samples |
 | `τ_max` | second |
 | `epsilon` | second |
 | `delay_bin` | second |

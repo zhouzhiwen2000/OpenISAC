@@ -32,7 +32,7 @@ $$
 \frac{\tau_c+\tau_\mathrm{TO,BS-UE}}{2}
 $$
 
-In implementation terms, RF-chain terms should come from YAML, while DUTI/TADV-style runtime terms should come from live control or timing state. Keep raw display values separate from semantic timing-offset variables and correction values.
+In implementation terms, RF-chain terms come from `uplink.ertm_dl_rf_delay_samples` and `uplink.ertm_ul_rf_delay_samples`, while DUTI/TADV-style runtime terms come from live control or timing state. The current runtime keeps these eRTM terms in samples, including fractional RF-chain delay samples. Keep raw display values separate from semantic timing-offset variables and correction values.
 
 ## Why OTA Compensation Improves MTI
 
