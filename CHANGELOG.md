@@ -8,6 +8,56 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-21 - BS 上行调试输出
+
+### Summary
+
+本次更新为 BS 侧 UE->BS uplink 接收链路增加信道估计、delay profile 和星座图 ZeroMQ 调试输出。
+
+### Changes
+
+- `UplinkRxEngine` 在完成上行同步符号信道估计和均衡后，会输出上行 `H_est`、由 `H_est` 生成的 delay profile，以及抽样后的均衡星座符号。
+  影响：调试 UE 上行链路时，可以像观察 UE 下行接收一样查看 BS 侧上行信道、PDP/PDF 和星座质量。
+
+- BS 配置、Web 配置编辑器 schema 和配置模板新增 `uplink_channel_ip` / `uplink_channel_port`、`uplink_pdf_ip` / `uplink_pdf_port`、`uplink_constellation_ip` / `uplink_constellation_port`，默认端口分别为 `12358`、`12359` 和 `12356`。
+  影响：BS 上行调试流默认避开 UE 下行调试流的 `12348` / `12349` / `12346`，便于 BS/UE 在同一机器上同时运行。
+
+- `scripts/plot_channel.py`、`scripts/plot_pdf.py` 和 `scripts/plot_const.py` 底部连接输入框支持 `host:port` / `tcp://host:port`，例如 `127.0.0.1:12358`。
+  影响：查看 BS 上行信道、delay profile 和星座图时，可以直接在窗口输入框里切到 `12358` / `12359` / `12356`，不需要重启脚本或使用额外命令行参数。
+
+- 新增 `scripts/uplink_timing_control.py` PyQt6 调参面板，可分别连接 BS 和 UE 的控制 IP/端口，并用 `-10` / `-1` / `+1` / `+10` 按钮微调 `DUTI` 和 `TADV`。
+  影响：BS 与 UE 位于不同主机时，可以在同一个窗口里分别向两端发送上行定时调整命令。
+
+- BS 侧 `UplinkRxEngine` 的 RX stream 启动改为使用 BS 统一 `_start_time` 的 timed start，而不是 `stream_now=true`。
+  影响：UL-RX 的帧 0 与 BS TX 的帧 0 共用同一个 radio-clock 锚点，`DUTI` 只负责在该锚点基础上微调窗口偏移，避免启动线程时刻决定上行接收窗口。
+
+- UE 侧启用 uplink 时，RX stream 和 UL-TX timed TX 改为使用同一个未来整秒 radio-clock 启动锚点。
+  影响：UE 的下行接收与上行发射在启动时共享同一个硬件时钟起点，避免 RX immediate start 与 TX `now+1s` 各自启动导致帧边界初始偏移。
+
+- UE 侧增加共享 RX/UL-TX stream 重启恢复：RX overflow / metadata error 或 UL-TX underflow / async timing error 发生时，重新调度同一个未来整秒启动锚点，并将接收状态回到 sync search。
+  影响：异常恢复时 UE 的下行 RX 与上行 TX 不会各自独立重启导致帧边界再次错开。
+
+- UE 侧 UL-TX 的 `TADV + RX alignment` 调整改为通过连续发送流里的样本数变化生效：提前时缩短当前 period，推迟时补零延长当前 period；每帧 `md.time_spec` 也按目标发送窗口同步移动。
+  影响：连续发送时不只依赖 USRP 对每帧 metadata time 的重新定时，后续上行帧边界会同时通过实际样本流移动。
+
+- 上行子帧改用独立 ZC root，并在 UE UL-TX / BS UL-RX 启动日志中打印实际 `zc_root`。
+  影响：上行同步符号不再和下行同步 root 或 sensing-pilot alternate root 重复，避免 UE 下行同步搜索误锁到自己的上行信号。
+
+- BS 侧 TX underflow / time-error 触发 burst restart 时，会把新的 BS TX frame anchor 传给 `UplinkRxEngine`；UL-RX 自身遇到 RX metadata/overflow error 时也会按下一帧边界重启。
+  影响：UL-RX 会 stop/start RX stream，并按 timed anchor + DUTI 重新对齐，避免 BS TX 与 UL-RX 在异常恢复后停留在不同帧边界。
+
+- UE 侧 UL-TX 在下行同步完成前会把整个上行 waveform 置零，完成初始 alignment 进入正常接收后才恢复发送；如果后续 reset 回到 sync search，会再次静音上行。
+  影响：打开 uplink 时，UE 下行同步搜索和初始 CFO 估计不会在未锁定阶段先看到自己的上行泄漏，降低自发射导致的误锁、CFO 偏移和 `No valid delay found` reset。
+
+- UE 侧 TDD 下行 CFO/SFO 估计只使用实际相邻且不贴近 guard/uplink 边界的下行 pilot symbol pair。
+  影响：打开 uplink 后，跨过 TDD 上行窗口的符号间隔不会被误当作一个 OFDM symbol 的相位差来调 RX 频率，降低 UL-TX 泄漏对 CFO tracking 的干扰。
+
+- UE 侧调度 RX alignment 时同步更新 UL-TX 的连续发送边界，并将 RX stream-read delta 反号映射到 UL-TX timing target。
+  影响：初始对齐和 NORMAL 状态下的小步残余时延调整都会提前通知 UL-TX 在后续 period 中补零/截短，减少 TX 因等待 RX alignment 完成而晚一帧生效的概率；推迟方向也会在日志中显示 `lengthening` 调整。
+
+- UE 侧软件 CFO 校正更新 RX DSP tune 时，同步把对应目标频率 correction 应用到 UL-TX tune；由于 UHD 的 TX DSP 符号与 RX 相反，UL-TX 写入的 `dsp_freq` 使用反号。
+  影响：TDD 下 UE 上行发射会跟随下行接收的 CFO 校正保持同载频参考；FDD 下按 UL/DL 载频比例缩放目标 correction，避免上行仍停留在未校正频点。
+
 ## 2026-06-21 - Duplex uplink 总开关语义修正
 
 ### Summary
@@ -32,6 +82,20 @@
 
 - UE YAML 读写、配置模板、benchmark 模板、Web 配置编辑器 schema 和 README 参数表新增 `wire_format_tx`，默认值为 `sc16`，可选 `sc16` / `sc8`。
   影响：启用 duplex/uplink 时，UE 侧 TX wire format 可以与 RX wire format 分别配置，不再只能依赖代码默认值。
+
+## 2026-06-21 - UE 上行 idle 随机 QPSK 波形
+
+### Summary
+
+本次更新为 UE->BS uplink 增加可配置 idle 波形。UE 没有上行 UDP payload 时，默认仍发送合法 zero-length mini-header，并用确定性随机 QPSK 填充剩余 payload RE。
+
+### Changes
+
+- 新增 `uplink_idle_waveform` 配置，默认 `random_qpsk`，可选 `random_qpsk` / `zero`，并接入 Web 配置编辑器 schema、README 和默认 YAML；`zero` 模式发送 zero-length header，剩余 payload RE 保持为 0。
+  影响：没有上行业务数据时，UE uplink 可保持接近真实数据的 QPSK 占用，同时 BS 通过 zero-length header 不会输出 UDP payload。
+
+- `UplinkTxEngine` 复用现有 `splitmix32()` deterministic random helper 生成 idle QPSK，不新增独立随机生成器。
+  影响：idle 填充可重复、轻量，并保持与现有 OFDM 随机参考序列实现风格一致。
 
 ## 2026-06-21 - Web 配置编辑器 TDD uplink 资源保护
 
@@ -70,7 +134,7 @@
 - 新增 UE 侧 `UplinkTxEngine` 和 BS 侧 `UplinkRxEngine`。UE 从 `uplink.udp_input_ip` / `uplink.udp_input_port` 接收上行业务，完成 LDPC/QPSK/OFDM 调制并发送；BS 提取上行窗口，完成同步符号信道估计、均衡、LLR、LDPC 解码，并从 `uplink.udp_output_ip` / `uplink.udp_output_port` 输出解码 payload。
   影响：平台新增真正的 UE->BS 数据路径，而不是只在下行链路上做回环或配置占位。
 
-- 上行子帧复用下行 numerology、ZC root 和 comb pilot 设置，但去掉第二同步符号、CFO training field、mid-frame pilot、sensing pilot 和自定义下行资源块。
+- 上行子帧复用下行 numerology 和 comb pilot 设置，使用不同于下行同步 root 的独立 ZC root，并去掉第二同步符号、CFO training field、mid-frame pilot、sensing pilot 和自定义下行资源块。
   影响：上行解调可以复用现有 OFDM/LDPC 基础设施，同时避免把下行专用字段误带入上行子帧。
 
 - 新增 BS 侧 `bs_dl_ul_timing_diff` / `DUTI` 和 UE 侧 `ue_timing_advance` / `TADV` 控制，用于在共享无线时钟下调整 BS 上行接收窗口和 UE 上行发送窗口。

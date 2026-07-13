@@ -551,10 +551,17 @@ Use `config/BS_X310.yaml` or `config/BS_B210.yaml` as a starting template.
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | Bind IP for incoming payload UDP packets. |
 | `udp_input_port` | `int` | `50000` | Bind port for incoming payload UDP packets. |
 | `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
+| `uplink_idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
 | `uplink` | `object` | omitted | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols. In FDD, `center_freq` defines the UE->BS carrier. `udp_output_ip` / `udp_output_port` select where BS sends decoded uplink payloads. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
 | `bs_dl_ul_timing_diff` | `int` / samples | `0` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the monostatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `mono_sensing_port` | `int` | `8888` | ZeroMQ PUB bind port for the monostatic sensing stream. |
+| `uplink_channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink channel-estimation debug stream. |
+| `uplink_channel_port` | `int` | `12358` | ZeroMQ PUB bind port for the BS uplink channel-estimation debug stream. |
+| `uplink_pdf_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink delay-profile debug stream. |
+| `uplink_pdf_port` | `int` | `12359` | ZeroMQ PUB bind port for the BS uplink delay-profile debug stream. |
+| `uplink_constellation_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink constellation debug stream. |
+| `uplink_constellation_port` | `int` | `12356` | ZeroMQ PUB bind port for the BS uplink constellation debug stream. |
 | `sensing_rx_channel_count` | `int` | `1` | Number of sensing RX channels (`0` disables sensing RX). |
 | `sensing_rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
 | `tx_circular_buffer_size` | `int` | `32` | Capacity of the modulated-frame queue feeding TX. |
@@ -637,6 +644,7 @@ Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 | `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
 | `sensing_output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
 | `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink carrier and sends only in the configured uplink symbol window; `fdd` transmits continuously on `uplink.center_freq`. |
+| `uplink_idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
 | `uplink` | `object` | omitted | UE uplink settings. `udp_input_ip` / `udp_input_port` bind the UE-side UDP source for uplink payloads. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
 | `ue_timing_advance` | `int` / samples | `0` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
 | `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |

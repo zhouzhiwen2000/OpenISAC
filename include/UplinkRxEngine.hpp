@@ -21,6 +21,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -28,6 +29,7 @@
 
 #include <fftw3.h>
 #include <uhd/stream.hpp>
+#include <uhd/types/time_spec.hpp>
 
 #include "Common.hpp"
 #include "OFDMCore.hpp"
@@ -35,13 +37,17 @@
 
 class UplinkRxEngine {
 private:
+    using DebugVectorCallback = std::function<void(AlignedVector&&)>;
+
     struct UplinkRxFrame {
         AlignedVector samples;
+        uint64_t generation = 0;
     };
 
     struct UplinkLlrFrame {
         LDPCCodec::AlignedFloatVector llr;
         uint64_t frame_index = 0;
+        uint64_t generation = 0;
         double noise_var = 0.0;
     };
 
@@ -114,20 +120,44 @@ public:
     std::atomic<int32_t>& dl_ul_timing_diff() { return _dl_ul_timing_diff; }
     const Config& uplink_config() const { return _cfg; }
 
-    // No-op: framing is anchored deterministically to the BS<->UE sync link, so a
-    // BS TX burst restart does not move where UE frames land in the clock-aligned
-    // RX stream — there is nothing to re-acquire. Kept for call-site compatibility;
-    // any residual offset is corrected by the operator via DUTI.
-    void request_reacquire() {}
+    void request_reacquire(const uhd::time_spec_t& start_time) {
+        {
+            std::lock_guard<std::mutex> lock(_restart_mutex);
+            _pending_restart_time = start_time;
+        }
+        _restart_requested.store(true, std::memory_order_release);
+        LOG_G_WARN() << "[UL-RX] requested shared restart at "
+                     << start_time.get_real_secs()
+                     << " s, aligned to BS TX restart";
+    }
+
+    void request_reacquire() {
+        {
+            std::lock_guard<std::mutex> lock(_restart_mutex);
+            _pending_restart_time = uhd::time_spec_t(0.0);
+        }
+        _restart_requested.store(true, std::memory_order_release);
+        LOG_G_WARN() << "[UL-RX] requested restart without timed anchor";
+    }
 
     // Provider for the BS TX frame index, used by the duplex-invariant health log
     // to compare the BS TX frame anchor against the uplink-RX frame index.
     void set_bs_frame_provider(std::function<uint64_t()> fn) { _bs_frame_fn = std::move(fn); }
 
-    void start() {
+    void set_debug_sinks(
+        DebugVectorCallback channel_sink,
+        DebugVectorCallback delay_sink,
+        DebugVectorCallback constellation_sink)
+    {
+        _channel_debug_sink = std::move(channel_sink);
+        _delay_debug_sink = std::move(delay_sink);
+        _constellation_debug_sink = std::move(constellation_sink);
+    }
+
+    void start(const uhd::time_spec_t& start_time = uhd::time_spec_t(0.0)) {
         if (!_rx_stream) throw std::runtime_error("UplinkRxEngine::start without an RX stream.");
         _running.store(true);
-        _rx_thread = std::thread(&UplinkRxEngine::_rx_ingest_proc, this);
+        _rx_thread = std::thread(&UplinkRxEngine::_rx_ingest_proc, this, start_time);
         _signal_thread = std::thread(&UplinkRxEngine::_signal_proc, this);
         _decode_thread = std::thread(&UplinkRxEngine::_decode_proc, this);
     }
@@ -164,21 +194,40 @@ public:
     // Read exactly `count` samples from the RX stream into out (blocking).
     // If `first_idx` is non-null, it receives the absolute sample index (shared
     // radio clock) of the first returned sample.
-    size_t _read_exact(std::complex<float>* out, size_t count, int64_t* first_idx = nullptr) {
+    size_t _read_exact(
+        std::complex<float>* out,
+        size_t count,
+        int64_t* first_idx = nullptr,
+        const uhd::time_spec_t* stream_start_time = nullptr)
+    {
         size_t got = 0;
         uhd::rx_metadata_t md;
         bool got_idx = false;
         while (got < count && _running.load(std::memory_order_relaxed)) {
             const size_t n = _rx_stream->recv(out + got, count - got, md, 1.0, false);
+            if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE &&
+                md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+                _rx_error_count.fetch_add(1, std::memory_order_relaxed);
+                LOG_RT_WARN() << "[UL-RX] RX metadata error: " << md.strerror();
+                if (md.has_time_spec && stream_start_time != nullptr &&
+                    stream_start_time->get_real_secs() > 0.0) {
+                    _request_restart_at(
+                        _next_frame_boundary_after(md.time_spec, *stream_start_time),
+                        "RX metadata error");
+                } else {
+                    {
+                        std::lock_guard<std::mutex> lock(_restart_mutex);
+                        _pending_restart_time = uhd::time_spec_t(0.0);
+                    }
+                    _restart_requested.store(true, std::memory_order_release);
+                }
+                break;
+            }
             if (first_idx && !got_idx && n > 0) {
                 *first_idx = md.time_spec.to_ticks(_tick_rate_for_idx());
                 got_idx = true;
             }
             got += n;
-            if (n == 0 && md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE &&
-                md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
-                break;
-            }
         }
         return got;
     }
@@ -195,28 +244,108 @@ public:
         return samples;
     }
 
-    void _rx_ingest_proc() {
+    uhd::time_spec_t _next_frame_boundary_after(
+        const uhd::time_spec_t& event_time,
+        const uhd::time_spec_t& stream_start_time) const
+    {
+        const double tick_rate = _tick_rate_for_idx();
+        const int64_t period_ticks = static_cast<int64_t>(_period_samples);
+        if (tick_rate <= 0.0 || period_ticks <= 0) {
+            return uhd::time_spec_t(0.0);
+        }
+        const int64_t start_ticks = stream_start_time.to_ticks(tick_rate);
+        const int64_t event_ticks = event_time.to_ticks(tick_rate);
+        const int64_t lead_ticks = static_cast<int64_t>(std::ceil(tick_rate));
+        const int64_t min_target = event_ticks + std::max<int64_t>(period_ticks, lead_ticks);
+        int64_t frames_ahead = 0;
+        if (min_target > start_ticks) {
+            frames_ahead = (min_target - start_ticks + period_ticks - 1) / period_ticks;
+        }
+        return uhd::time_spec_t::from_ticks(
+            start_ticks + frames_ahead * period_ticks,
+            tick_rate);
+    }
+
+    void _request_restart_at(const uhd::time_spec_t& start_time, const char* reason) {
+        {
+            std::lock_guard<std::mutex> lock(_restart_mutex);
+            _pending_restart_time = start_time;
+        }
+        _restart_requested.store(true, std::memory_order_release);
+        LOG_RT_WARN() << "[UL-RX] requested restart after " << reason
+                      << " at " << start_time.get_real_secs() << " s";
+    }
+
+    void _rx_ingest_proc(uhd::time_spec_t start_time) {
         uhd::set_thread_priority_safe();
         bind_current_thread_from_uplink_hint(_link_cfg, 0);
-        if (_rx_stream) {
+        auto issue_start = [&](const uhd::time_spec_t& stream_start_time) {
+            if (!_rx_stream) return;
             uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
-            cmd.stream_now = true;
+            const bool timed_start = stream_start_time.get_real_secs() > 0.0;
+            cmd.stream_now = !timed_start;
+            if (timed_start) {
+                cmd.time_spec = stream_start_time;
+                LOG_G_INFO() << "[UL-RX] timed RX stream start at "
+                             << stream_start_time.get_real_secs()
+                             << " s, aligned to BS TX frame anchor";
+            } else {
+                LOG_G_INFO() << "[UL-RX] immediate RX stream start (no timed anchor)";
+            }
             _rx_stream->issue_stream_cmd(cmd);
-        }
+        };
+        auto issue_stop = [&]() {
+            if (!_rx_stream) return;
+            try {
+                _rx_stream->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+            } catch (const std::exception& e) {
+                LOG_RT_WARN() << "[UL-RX] failed to stop RX stream before restart: " << e.what();
+            }
+        };
 
         std::vector<std::complex<float>> skip_buf;
         auto discard = [&](int64_t n) {
             if (n <= 0) return;
             skip_buf.resize(static_cast<size_t>(n));
-            _read_exact(skip_buf.data(), static_cast<size_t>(n));
+            _read_exact(skip_buf.data(), static_cast<size_t>(n), nullptr, &start_time);
+        };
+
+        auto start_stream_and_align = [&](const char* reason) {
+            issue_start(start_time);
+            const uint64_t generation =
+                _stream_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+            const int64_t diff = _normalize_frame_offset(
+                _dl_ul_timing_diff.load(std::memory_order_relaxed));
+            discard(diff);
+            LOG_RT_WARN() << "[UL-RX] stream generation " << generation
+                          << " aligned after " << reason
+                          << " with DUTI=" << diff << " samples";
+            return diff;
+        };
+
+        auto apply_pending_restart = [&](int64_t& applied_diff) {
+            if (!_restart_requested.exchange(false, std::memory_order_acq_rel)) {
+                return false;
+            }
+            uhd::time_spec_t restart_time(0.0);
+            {
+                std::lock_guard<std::mutex> lock(_restart_mutex);
+                restart_time = _pending_restart_time;
+                _pending_restart_time = uhd::time_spec_t(0.0);
+            }
+            issue_stop();
+            start_time = restart_time;
+            applied_diff = start_stream_and_align("restart");
+            return true;
         };
 
         // Deterministic frame anchoring — NO uplink-ZC correlation search.
-        int64_t applied_diff = _normalize_frame_offset(
-            _dl_ul_timing_diff.load(std::memory_order_relaxed));
-        discard(applied_diff);
+        int64_t applied_diff = start_stream_and_align("initial start");
 
         while (_running.load(std::memory_order_relaxed)) {
+            if (apply_pending_restart(applied_diff)) {
+                continue;
+            }
             // Runtime DUTI adjustment (operator-driven residual trim). Only positive
             // increments are realizable in a streaming reader (we cannot un-read);
             // a decrease is applied by skipping a near-full frame period so the net
@@ -232,24 +361,39 @@ public:
 
             UplinkRxFrame* frame = nullptr;
             SPSCBackoff queue_backoff;
+            bool restarted = false;
             while (_running.load(std::memory_order_relaxed)) {
                 frame = _rx_frame_queue.producer_slot();
                 if (frame != nullptr) break;
+                if (apply_pending_restart(applied_diff)) {
+                    restarted = true;
+                    break;
+                }
                 queue_backoff.pause();
+            }
+            if (restarted) {
+                continue;
             }
             if (frame == nullptr) {
                 break;
             }
-            if (_read_exact(frame->samples.data(), _period_samples) != _period_samples) {
+            const uint64_t frame_generation =
+                _stream_generation.load(std::memory_order_acquire);
+            const size_t got = _read_exact(
+                frame->samples.data(),
+                _period_samples,
+                nullptr,
+                &start_time);
+            if (got != _period_samples ||
+                _restart_requested.load(std::memory_order_acquire)) {
                 if (!_running.load(std::memory_order_relaxed)) break;
                 continue;
             }
+            frame->generation = frame_generation;
             _rx_frame_queue.producer_commit();
         }
 
-        if (_rx_stream) {
-            _rx_stream->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
-        }
+        issue_stop();
     }
 
     void _signal_proc() {
@@ -263,7 +407,10 @@ public:
                 continue;
             }
             backoff.reset();
-            _process_frame(frame->samples);
+            const uint64_t generation = frame->generation;
+            if (generation == _stream_generation.load(std::memory_order_acquire)) {
+                _process_frame(frame->samples, generation);
+            }
             _rx_frame_queue.consumer_pop();
         }
     }
@@ -279,12 +426,14 @@ public:
                 continue;
             }
             backoff.reset();
-            _decode_llr_stream(frame->llr);
+            if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
+                _decode_llr_stream(frame->llr);
+            }
             _llr_queue.consumer_pop();
         }
     }
 
-    void _process_frame(const AlignedVector& frame) {
+    void _process_frame(const AlignedVector& frame, uint64_t generation) {
         const std::complex<float>* win = frame.data() + _window_offset;
         const size_t sym_len = _cfg.fft_size + _cfg.cp_length;
 
@@ -342,6 +491,7 @@ public:
                 return;
             }
             llr_frame->frame_index = _frame_count;
+            llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
             llr_frame->llr.resize(_layout.payload_re_count * 2);
             float* __restrict__ llr = llr_frame->llr.data();
@@ -358,6 +508,8 @@ public:
             }
             _llr_queue.producer_commit();
         }
+
+        _publish_debug_streams();
 
         // 5) AGC from the channel impulse-response delay peak.
         _run_agc(frame);
@@ -440,6 +592,35 @@ public:
             [this](double g) { if (_apply_gain) _apply_gain(g); });
     }
 
+    void _publish_debug_streams() {
+        if (_channel_debug_sink) {
+            _channel_debug_sink(AlignedVector(_h_est.begin(), _h_est.end()));
+        }
+
+        const bool need_delay = static_cast<bool>(_delay_debug_sink);
+        if (need_delay) {
+            const size_t half = _cfg.fft_size / 2;
+            for (size_t i = 0; i < half; ++i) {
+                _ce_in[i] = _h_est[i + half];
+                _ce_in[i + half] = _h_est[i];
+            }
+            fftwf_execute(_ce_ifft_plan);
+            _delay_spectrum.resize(_cfg.fft_size);
+            const float scale = 1.0f / std::sqrt(static_cast<float>(_cfg.fft_size));
+            for (size_t i = 0; i < _cfg.fft_size; ++i) {
+                _delay_spectrum[i] = _ce_out[i] * scale;
+            }
+            _delay_debug_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
+        }
+
+        constexpr uint32_t kConstellationStride = 8;
+        if (_constellation_debug_sink && !_data_symbols.empty() &&
+            ((_constellation_frame_counter++ % kConstellationStride) == 0)) {
+            const auto& symbol = _data_symbols.back();
+            _constellation_debug_sink(AlignedVector(symbol.begin(), symbol.end()));
+        }
+    }
+
     const Config _link_cfg;
     const Config _cfg;
     const DuplexFrameLayout _duplex;
@@ -448,7 +629,8 @@ public:
 
     AlignedVector _fft_in, _fft_out;
     fftwf_plan _fft_plan = nullptr;
-    AlignedVector _ce_in, _ce_out;       // channel-estimate IFFT for AGC delay peak
+    AlignedVector _ce_in, _ce_out;       // channel-estimate IFFT for AGC/debug delay peak
+    AlignedVector _delay_spectrum;
     fftwf_plan _ce_ifft_plan = nullptr;
 
     AlignedVector _sync_freq_buf, _h_est, _h_inv;
@@ -471,12 +653,21 @@ public:
     HardwareRxAgc _rx_agc;
     DemodControlTimeGates _agc_gates;
     std::function<void(double)> _apply_gain;
+    DebugVectorCallback _channel_debug_sink;
+    DebugVectorCallback _delay_debug_sink;
+    DebugVectorCallback _constellation_debug_sink;
 
     uhd::rx_streamer::sptr _rx_stream;
     std::atomic<int32_t> _dl_ul_timing_diff{0};
+    std::mutex _restart_mutex;
+    uhd::time_spec_t _pending_restart_time{0.0};
+    std::atomic<bool> _restart_requested{false};
+    std::atomic<uint64_t> _stream_generation{0};
+    std::atomic<uint64_t> _rx_error_count{0};
     std::function<uint64_t()> _bs_frame_fn;
     std::atomic<uint64_t> _decoded_count{0};
     uint64_t _frame_count = 0;
+    uint32_t _constellation_frame_counter = 0;
     std::atomic<bool> _running{false};
     std::thread _rx_thread;
     std::thread _signal_thread;

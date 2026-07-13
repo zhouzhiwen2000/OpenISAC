@@ -51,6 +51,9 @@ clock_source: internal
 wire_format_tx: sc16
 wire_format_rx: sc16
 
+# ===== Duplex =====
+uplink_idle_waveform: random_qpsk  # UE idle uplink waveform when no UDP payload is queued: random_qpsk/zero
+
 # ===== Sync / Tracking =====
 software_sync: true
 predictive_delay: true

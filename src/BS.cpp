@@ -164,7 +164,16 @@ public:
         }),
         _circular_buffer(cfg.tx_circular_buffer_size),
         _data_packet_buffer(cfg.data_packet_buffer_size),
-        _data_packet_ingest_ts(cfg.data_packet_buffer_size)
+        _data_packet_ingest_ts(cfg.data_packet_buffer_size),
+        _uplink_channel_sender(2, [this](const auto& data) {
+            _uplink_channel_pub->send_container(data);
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        _uplink_pdf_sender(2, [this](const auto& data) {
+            _uplink_pdf_pub->send_container(data);
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+        _uplink_constellation_sender(10, [this](const auto& data) {
+            _uplink_constellation_pub->send_container(data);
+        }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly)
     {
         _measurement_tx_gain_x10.store(
             static_cast<int32_t>(std::llround(cfg.tx_gain * 10.0)),
@@ -292,7 +301,10 @@ public:
             LOG_G_INFO() << "[BS] FDD downlink remains active over the full frame.";
         }
         if (_uplink_rx) {
-            _uplink_rx->start();
+            _uplink_channel_sender.start();
+            _uplink_pdf_sender.start();
+            _uplink_constellation_sender.start();
+            _uplink_rx->start(_start_time);
         }
     }
 
@@ -306,6 +318,9 @@ public:
 
         if (_uplink_rx) {
             _uplink_rx->stop();
+            _uplink_channel_sender.stop();
+            _uplink_pdf_sender.stop();
+            _uplink_constellation_sender.stop();
         }
 
         for (auto& ch : _sensing_channels) {
@@ -424,6 +439,13 @@ private:
         int count{0};
     };
     SPSCRingBuffer<PktTimestamps> _data_packet_ingest_ts; // Timestamps paired with _data_packet_buffer
+    using AlignedAlloc = AlignedAllocator<std::complex<float>, 64>;
+    std::unique_ptr<ZmqByteSender> _uplink_channel_pub;
+    std::unique_ptr<ZmqByteSender> _uplink_pdf_pub;
+    std::unique_ptr<ZmqByteSender> _uplink_constellation_pub;
+    DataSender<std::complex<float>, AlignedAlloc> _uplink_channel_sender;
+    DataSender<std::complex<float>, AlignedAlloc> _uplink_pdf_sender;
+    DataSender<std::complex<float>, AlignedAlloc> _uplink_constellation_sender;
     LatencyAccumulator _latency_accumulator;
     std::vector<std::unique_ptr<SensingChannel>> _sensing_channels;
     std::shared_ptr<AggregatedSensingDataSender> _aggregated_sensing_sender;
@@ -531,6 +553,37 @@ private:
             channel->apply_shared_cfg(_shared_sensing_cfg);
             _sensing_channels.push_back(std::move(channel));
         }
+    }
+
+    void _init_uplink_debug_publishers() {
+        _uplink_channel_pub = std::make_unique<ZmqByteSender>(
+            _cfg.uplink_channel_ip, static_cast<uint16_t>(_cfg.uplink_channel_port));
+        _uplink_pdf_pub = std::make_unique<ZmqByteSender>(
+            _cfg.uplink_pdf_ip, static_cast<uint16_t>(_cfg.uplink_pdf_port));
+        _uplink_constellation_pub = std::make_unique<ZmqByteSender>(
+            _cfg.uplink_constellation_ip, static_cast<uint16_t>(_cfg.uplink_constellation_port));
+        LOG_G_INFO() << "[UL-RX] debug ZMQ streams: channel="
+                     << _cfg.uplink_channel_ip << ':' << _cfg.uplink_channel_port
+                     << ", pdf=" << _cfg.uplink_pdf_ip << ':' << _cfg.uplink_pdf_port
+                     << ", constellation=" << _cfg.uplink_constellation_ip << ':'
+                     << _cfg.uplink_constellation_port;
+    }
+
+    void _attach_uplink_debug_sinks() {
+        if (!_uplink_rx) return;
+        if (!_uplink_channel_pub || !_uplink_pdf_pub || !_uplink_constellation_pub) {
+            _init_uplink_debug_publishers();
+        }
+        _uplink_rx->set_debug_sinks(
+            [this](AlignedVector&& data) {
+                _uplink_channel_sender.add_data(std::move(data));
+            },
+            [this](AlignedVector&& data) {
+                _uplink_pdf_sender.add_data(std::move(data));
+            },
+            [this](AlignedVector&& data) {
+                _uplink_constellation_sender.add_data(std::move(data));
+            });
     }
 
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
@@ -1030,13 +1083,15 @@ private:
                 const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
                 return _cfg.num_symbols ? (s / _cfg.num_symbols) : s;
             });
+            _attach_uplink_debug_sinks();
             const uhd::gain_range_t gr = _tx_usrp->get_rx_gain_range(ul_rx_ch);
             _uplink_rx->configure_agc(
                 _cfg.rx_gain, gr.start(), gr.stop(),
                 [this, ul_rx_ch](double g) { _tx_usrp->set_rx_gain(g, ul_rx_ch); });
             LOG_G_INFO() << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
                          << " @ " << format_freq_hz(ul_freq) << " Hz, "
-                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame";
+                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_rx->uplink_config().zc_root;
         }
     }
 
@@ -1067,8 +1122,10 @@ private:
                 const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
                 return _cfg.num_symbols ? (s / _cfg.num_symbols) : s;
             });
+            _attach_uplink_debug_sinks();
             LOG_G_INFO() << "[UL-RX] uplink receive enabled (sim rx.ul), "
-                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame";
+                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_rx->uplink_config().zc_root;
         }
     }
 
@@ -1993,7 +2050,8 @@ private:
             // The TX frame anchor jumped; the uplink RX (anchored to the shared
             // radio clock on real hardware) must re-lock to the new framing.
             if (_uplink_rx) {
-                _uplink_rx->request_reacquire();
+                _uplink_rx->request_reacquire(
+                    uhd::time_spec_t::from_ticks(next_frame_ticks, tick_rate));
             }
 
             LOG_RT_WARN() << std::fixed << std::setprecision(6)

@@ -551,10 +551,17 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS 接收下行业务 UDP 的绑定地址。 |
 | `udp_input_port` | `int` | `50000` | BS 接收下行业务 UDP 的端口。 |
 | `duplex_mode` | `string` | `tdd` | 双工方式。`tdd` 将 UE 上行符号按时间复用到 BS 帧内；`fdd` 保持 BS 下行连续发送，同时 UE 上行使用 `uplink.center_freq`。 |
+| `uplink_idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
 | `uplink` | `object` | 缺省 | 上行/双工设置。TDD 下，`symbol_start`、`symbol_count`、`guard_symbols` 以 OFDM 符号为单位定义 DL/UL 边界；FDD 下，`center_freq` 定义 UE->BS 上行载波。`udp_output_ip` / `udp_output_port` 决定 BS 解码上行业务后输出到哪里。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。 |
 | `bs_dl_ul_timing_diff` | `int` / 采样点 | `0` | BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 `DUTI` 调整。 |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | 单站感知数据流和控制通道的 ZMQ 监听 IP。使用 `0.0.0.0` 可接受远端前端连接；使用 `127.0.0.1` 则仅允许本机连接。 |
 | `mono_sensing_port` | `int` | `8888` | 单站感知数据流的 ZeroMQ PUB 绑定端口。 |
+| `uplink_channel_ip` | `string` / IPv4 | `0.0.0.0` | BS 上行信道估计调试流的 ZeroMQ PUB 监听 IP。 |
+| `uplink_channel_port` | `int` | `12358` | BS 上行信道估计调试流的 ZeroMQ PUB 绑定端口。 |
+| `uplink_pdf_ip` | `string` / IPv4 | `0.0.0.0` | BS 上行 delay profile 调试流的 ZeroMQ PUB 监听 IP。 |
+| `uplink_pdf_port` | `int` | `12359` | BS 上行 delay profile 调试流的 ZeroMQ PUB 绑定端口。 |
+| `uplink_constellation_ip` | `string` / IPv4 | `0.0.0.0` | BS 上行星座图调试流的 ZeroMQ PUB 监听 IP。 |
+| `uplink_constellation_port` | `int` | `12356` | BS 上行星座图调试流的 ZeroMQ PUB 绑定端口。 |
 | `sensing_rx_channel_count` | `int` | `1` | 感知 RX 通道数量（`0` 表示关闭感知 RX）。 |
 | `sensing_rx_channels` | `object[]` | `[]` | 感知 RX 每通道详细配置，字段见下表。 |
 | `tx_circular_buffer_size` | `int` | `32` | 向 TX 供帧的已调制帧队列容量。 |
@@ -637,6 +644,7 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `sensing_symbol_num` | `int` | `100` | 参与感知处理的符号数。 |
 | `sensing_output_mode` | `string` | `dense` | 双站感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
 | `duplex_mode` | `string` | `tdd` | 必须与 `BS.yaml` 保持一致。`tdd` 共享下行载波并只在配置的上行符号窗口发送；`fdd` 在 `uplink.center_freq` 上连续发送。 |
+| `uplink_idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
 | `uplink` | `object` | 缺省 | UE 上行设置。`udp_input_ip` / `udp_input_port` 是 UE 侧上行业务 UDP 输入。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。 |
 | `ue_timing_advance` | `int` / 采样点 | `0` | UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 `TADV` 值移动后续上行帧。 |
 | `cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。小于 `1` 时会钳制到 `1`。 |

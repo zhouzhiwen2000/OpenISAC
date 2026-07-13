@@ -72,6 +72,9 @@ time_source: "internal"
 wire_format_tx: sc16
 wire_format_rx: sc16
 
+# ===== Duplex =====
+uplink_idle_waveform: random_qpsk  # UE idle uplink waveform when no UDP payload is queued: random_qpsk/zero
+
 # ===== Measurement mode (internal PRBS — no UDP video source needed) =====
 measurement_enable: false
 measurement_mode: internal_prbs
@@ -82,6 +85,12 @@ udp_input_ip: "0.0.0.0"
 udp_input_port: 50000
 mono_sensing_ip: "0.0.0.0"
 mono_sensing_port: 8888
+uplink_channel_ip: "0.0.0.0"
+uplink_channel_port: 12358
+uplink_pdf_ip: "0.0.0.0"
+uplink_pdf_port: 12359
+uplink_constellation_ip: "0.0.0.0"
+uplink_constellation_port: 12356
 control_port: 9999
 sensing_symbol_stride: 20
 

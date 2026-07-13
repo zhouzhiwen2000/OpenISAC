@@ -1250,7 +1250,7 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
         layout,
         optional_catalog,
         "Duplex",
-        ("enable_uplink", "duplex_mode", "uplink"),
+        ("enable_uplink", "duplex_mode", "uplink_idle_waveform", "uplink", "bs_dl_ul_timing_diff", "ue_timing_advance"),
     )
     layout = enrich_mapping_list_layouts(layout)
     known_keys = {field["key"] for section in layout for field in section["fields"]}

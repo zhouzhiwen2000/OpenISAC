@@ -47,6 +47,9 @@ clock_source: external         # Clock source: internal/external/gpsdo
 wire_format_tx: sc16           # TX wire format: sc16/sc8
 wire_format_rx: sc16           # RX wire format: sc16/sc8
 
+# ===== Duplex =====
+uplink_idle_waveform: random_qpsk  # UE idle uplink waveform when no UDP payload is queued: random_qpsk/zero
+
 # ===== Sync / Tracking =====
 software_sync: true            # Enable software sync tracking
 predictive_delay: true         # Enable CFO-based predictive delay compensation during alignment/tracking

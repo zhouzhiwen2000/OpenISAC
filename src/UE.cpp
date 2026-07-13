@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <functional>
 #include <memory>
+#include <tuple>
 #include <utility>
 #include <filesystem>
 #include <Common.hpp>
@@ -30,6 +31,50 @@ namespace {
 inline int64_t host_now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+}
+
+const char* tx_async_event_code_to_string(uhd::async_metadata_t::event_code_t event_code)
+{
+    switch (event_code) {
+    case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+        return "BURST_ACK";
+    case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
+        return "UNDERFLOW";
+    case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
+        return "SEQ_ERROR";
+    case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+        return "TIME_ERROR";
+    case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET:
+        return "UNDERFLOW_IN_PACKET";
+    case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST:
+        return "SEQ_ERROR_IN_BURST";
+    case uhd::async_metadata_t::EVENT_CODE_USER_PAYLOAD:
+        return "USER_PAYLOAD";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+const char* rx_error_code_to_string(uhd::rx_metadata_t::error_code_t error_code)
+{
+    switch (error_code) {
+    case uhd::rx_metadata_t::ERROR_CODE_NONE:
+        return "NONE";
+    case uhd::rx_metadata_t::ERROR_CODE_TIMEOUT:
+        return "TIMEOUT";
+    case uhd::rx_metadata_t::ERROR_CODE_LATE_COMMAND:
+        return "LATE_COMMAND";
+    case uhd::rx_metadata_t::ERROR_CODE_BROKEN_CHAIN:
+        return "BROKEN_CHAIN";
+    case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW:
+        return "OVERFLOW";
+    case uhd::rx_metadata_t::ERROR_CODE_ALIGNMENT:
+        return "ALIGNMENT";
+    case uhd::rx_metadata_t::ERROR_CODE_BAD_PACKET:
+        return "BAD_PACKET";
+    default:
+        return "UNKNOWN";
+    }
 }
 
 std::string csv_escape(const std::string& value) {
@@ -172,6 +217,7 @@ public:
     explicit UEEngine(const Config& cfg)
         : cfg_(cfg),
           _measurement_enabled(measurement_mode_enabled(cfg)),
+          _duplex_layout(build_duplex_frame_layout(cfg)),
           _data_resource_layout(build_data_resource_grid_layout(cfg)),
           zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
           _cfo_training_seq(make_cfo_training_sequence(cfg)),
@@ -232,6 +278,7 @@ public:
         if (_measurement_enabled && !cfg_.measurement_output_dir.empty()) {
             _measurement_summary_path = cfg_.measurement_output_dir + "/ue_measurement_summary.csv";
         }
+        _build_cfo_symbol_skip_mask();
         _build_compact_payload_indices();
         LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
@@ -278,8 +325,30 @@ public:
 
     void start() {
         _control_handler.start();
+        _ue_timing_advance.store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+        log_duplex_summary(cfg_, "UE");
+
+        uhd::time_spec_t stream_start_time(0.0);
+        if (_uplink_tx && !_sim_radio && usrp_) {
+            stream_start_time = _next_timed_stream_start();
+            _uplink_tx->set_timed_tx(
+                stream_start_time,
+                usrp_->get_master_clock_rate(),
+                usrp_->get_tx_rate(cfg_.tx_channel));
+            LOG_G_INFO() << "[UE] timed RX/UL-TX stream start at "
+                         << stream_start_time.get_real_secs()
+                         << " s on the shared radio clock";
+        }
+
         running_.store(true);
-        rx_thread_ = std::thread(&UEEngine::rx_proc, this);
+        rx_thread_ = std::thread(&UEEngine::rx_proc, this, stream_start_time);
+        if (_uplink_tx) {
+            _uplink_tx->start();
+            if (!_sim_radio) {
+                _tx_async_exit_requested.store(false, std::memory_order_relaxed);
+                _tx_async_thread = std::thread(&UEEngine::_tx_async_event_proc, this);
+            }
+        }
         process_thread_ = std::thread(&UEEngine::process_proc, this);
         
         // Start all senders
@@ -290,16 +359,12 @@ public:
         // Start data processing thread
         _bit_processing_running.store(true);
         _bit_processing_thread = std::thread(&UEEngine::bit_processing_proc, this);
-
-        _ue_timing_advance.store(cfg_.ue_timing_advance, std::memory_order_relaxed);
-        log_duplex_summary(cfg_, "UE");
-        if (_uplink_tx) {
-            _uplink_tx->start();
-        }
     }
 
     void stop() {
         running_.store(false);
+        _tx_async_exit_requested.store(true, std::memory_order_relaxed);
+        if (_tx_async_thread.joinable()) _tx_async_thread.join();
         if (_uplink_tx) {
             _uplink_tx->stop();
         }
@@ -350,16 +415,149 @@ private:
 
     Config cfg_;
     const bool _measurement_enabled;
+    const DuplexFrameLayout _duplex_layout;
     const DataResourceGridLayout _data_resource_layout;
+    std::vector<uint8_t> _cfo_symbol_skip_mask;
     std::vector<int> _payload_subcarrier_indices_flat;
     uhd::usrp::multi_usrp::sptr usrp_;
     uhd::rx_streamer::sptr rx_stream_;
     std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
     std::unique_ptr<UplinkTxEngine> _uplink_tx;  // non-null when duplex uplink enabled
+    std::thread _tx_async_thread;
+    std::atomic<bool> _tx_async_exit_requested{false};
+    std::atomic<bool> _stream_restart_requested{false};
+    std::atomic<uint64_t> _stream_restart_count{0};
+    std::atomic<uint64_t> _rx_overflow_count{0};
+    std::atomic<uint64_t> _tx_async_error_count{0};
+    std::atomic<uint64_t> _handled_ul_tx_error_count{0};
 
     // Current radio time: real USRP clock, or the simulator's shared sample clock.
     uhd::time_spec_t radio_time_now() const {
         return _sim_radio ? _sim_radio->time_now() : usrp_->get_time_now();
+    }
+
+    uhd::time_spec_t _next_timed_stream_start() const {
+        if (!usrp_) {
+            return uhd::time_spec_t(0.0);
+        }
+        constexpr double kStartLeadTimeSec = 1.0;
+        const double scheduled_start_s =
+            std::ceil(usrp_->get_time_now().get_real_secs() + kStartLeadTimeSec);
+        return uhd::time_spec_t(scheduled_start_s);
+    }
+
+    void _request_stream_restart(const char* reason) {
+        if (_sim_radio || !_uplink_tx || !usrp_) {
+            return;
+        }
+        _stream_restart_requested.store(true, std::memory_order_release);
+        _stream_restart_count.fetch_add(1, std::memory_order_relaxed);
+        LOG_G_WARN() << "[UE] requested shared RX/UL-TX stream restart: " << reason;
+    }
+
+    void _reset_receive_state_after_stream_restart() {
+        _sync_generation.fetch_add(1, std::memory_order_acq_rel);
+        _sync_in_progress = false;
+        _delay_adjustment_count = 0;
+        _last_delay_index_err = 0;
+        _reset_count = 0;
+        sync_offset_.store(0, std::memory_order_relaxed);
+        discard_samples_.store(0, std::memory_order_relaxed);
+        _reset_uplink_tx_rx_alignment_shift();
+        _set_uplink_waveform_enabled(false);
+        sfo_estimator.reset();
+        state_ = RxState::SYNC_SEARCH;
+    }
+
+    void _tx_async_event_proc() {
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
+        while (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
+            if (!_uplink_tx || !usrp_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            uhd::async_metadata_t async_md;
+            bool got_event = false;
+            try {
+                got_event = _uplink_tx->tx_stream()->recv_async_msg(async_md, 0.1);
+            } catch (const std::exception& e) {
+                if (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
+                    LOG_G_WARN() << "[UL-TX Async] recv_async_msg failed: " << e.what();
+                }
+                continue;
+            }
+            if (!got_event) {
+                continue;
+            }
+
+            auto log_event = [&](auto&& log_line) {
+                log_line << "[UL-TX Async] " << tx_async_event_code_to_string(async_md.event_code)
+                         << " (code=0x" << std::hex << static_cast<int>(async_md.event_code) << std::dec
+                         << ", channel=" << async_md.channel;
+                if (async_md.has_time_spec) {
+                    log_line << ", event_time=" << std::fixed << std::setprecision(6)
+                             << async_md.time_spec.get_real_secs() << " s" << std::defaultfloat;
+                }
+                log_line << ")";
+            };
+
+            switch (async_md.event_code) {
+            case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+                log_event(LOG_G_INFO());
+                break;
+            case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
+            case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET:
+                _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
+                log_event(LOG_G_WARN());
+                _request_stream_restart("UL-TX underflow");
+                break;
+            case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
+            case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST:
+            case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+                _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
+                log_event(LOG_G_ERROR());
+                _request_stream_restart("UL-TX async timing/sequence error");
+                break;
+            default:
+                log_event(LOG_G_INFO());
+                break;
+            }
+        }
+    }
+
+    bool _handle_rx_metadata_error(
+        const uhd::rx_metadata_t& md,
+        const char* context,
+        bool* restart_current_read = nullptr)
+    {
+        if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_NONE ||
+            md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+            return false;
+        }
+
+        if (restart_current_read) {
+            *restart_current_read = true;
+        }
+
+        LOG_RT_WARN() << "[UE RX] " << context << " metadata error "
+                      << rx_error_code_to_string(md.error_code) << ": "
+                      << md.strerror();
+
+        switch (md.error_code) {
+        case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW:
+            _rx_overflow_count.fetch_add(1, std::memory_order_relaxed);
+            _request_stream_restart("RX overflow");
+            break;
+        case uhd::rx_metadata_t::ERROR_CODE_LATE_COMMAND:
+        case uhd::rx_metadata_t::ERROR_CODE_BROKEN_CHAIN:
+        case uhd::rx_metadata_t::ERROR_CODE_ALIGNMENT:
+        case uhd::rx_metadata_t::ERROR_CODE_BAD_PACKET:
+            _request_stream_restart("RX metadata error");
+            break;
+        default:
+            break;
+        }
+        return true;
     }
 
     AlignedVector zc_freq_;
@@ -416,6 +614,7 @@ private:
     
     std::unique_ptr<FIRFilter> freq_offset_filter_;
     uhd::tune_result_t current_rx_tune_;
+    uhd::tune_result_t current_ul_tx_tune_;
     bool tune_initialized_ = false;
     std::atomic<bool> running_{false};
     std::thread rx_thread_, process_thread_;
@@ -456,12 +655,66 @@ private:
     std::atomic<float> _user_delay_offset = 0.0f;
     std::atomic<int32_t> _ue_timing_advance{0};  // Timing Advance (samples)
     std::atomic<int64_t> _last_tadv_ns{0};       // rate-limit guard for TADV
+    std::atomic<int32_t> _uplink_tx_rx_alignment_shift{0};
 
-    // Mirror the current RX alignment into the uplink TX window so that any RX
-    // timing adjustment shifts the uplink TX by the same relative amount.
-    void _sync_uplink_tx_shift(int32_t rx_alignment_samples) {
+    void _reset_uplink_tx_rx_alignment_shift() {
+        _uplink_tx_rx_alignment_shift.store(0, std::memory_order_relaxed);
         if (_uplink_tx) {
-            _uplink_tx->rx_alignment_shift().store(rx_alignment_samples, std::memory_order_relaxed);
+            _uplink_tx->rx_alignment_shift().store(0, std::memory_order_relaxed);
+        }
+    }
+
+    // UE RX alignment is a pending stream-read delta for handle_alignment().
+    // Publish the matching UL-TX target when the alignment is scheduled so the
+    // TX stream can move its continuous boundary before the RX shift takes effect.
+    // UL-TX target_shift uses positive values as a timing advance, so the RX
+    // delta maps to the opposite TX sign.
+    void _apply_uplink_tx_rx_alignment_delta(int32_t rx_alignment_delta_samples) {
+        if (rx_alignment_delta_samples == 0) {
+            return;
+        }
+
+        const int64_t tx_delta64 = std::clamp<int64_t>(
+            -static_cast<int64_t>(rx_alignment_delta_samples),
+            static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
+            static_cast<int64_t>(std::numeric_limits<int32_t>::max()));
+        const int32_t tx_alignment_delta_samples = static_cast<int32_t>(tx_delta64);
+        int32_t current = _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed);
+        int32_t next = current;
+        do {
+            const int64_t next64 = std::clamp<int64_t>(
+                static_cast<int64_t>(current) + static_cast<int64_t>(tx_alignment_delta_samples),
+                static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
+                static_cast<int64_t>(std::numeric_limits<int32_t>::max()));
+            next = static_cast<int32_t>(next64);
+        } while (!_uplink_tx_rx_alignment_shift.compare_exchange_weak(
+            current,
+            next,
+            std::memory_order_relaxed,
+            std::memory_order_relaxed));
+
+        if (_uplink_tx) {
+            _uplink_tx->rx_alignment_shift().store(next, std::memory_order_relaxed);
+        }
+        LOG_RT_WARN_HZ(2) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
+                          << " samples -> TX timing delta=" << tx_alignment_delta_samples
+                          << " samples, cumulative RX-alignment target=" << next;
+    }
+
+    void _schedule_receive_alignment(int32_t alignment_samples) {
+        discard_samples_.store(static_cast<int>(alignment_samples), std::memory_order_relaxed);
+        _apply_uplink_tx_rx_alignment_delta(alignment_samples);
+        state_ = RxState::ALIGNMENT;
+    }
+
+    void _set_uplink_waveform_enabled(bool enabled) {
+        if (!_uplink_tx) {
+            return;
+        }
+        if (_uplink_tx->set_waveform_enabled(enabled)) {
+            LOG_RT_INFO() << "[UL-TX] "
+                          << (enabled ? "enabled" : "muted")
+                          << " uplink waveform transmission";
         }
     }
     std::unique_ptr<HardwareSyncController> _hw_sync;
@@ -620,6 +873,32 @@ private:
             }
             if (_payload_subcarrier_indices_flat.size() != _data_resource_layout.payload_offsets[sym_idx + 1]) {
                 throw std::runtime_error("Failed to compact payload subcarrier indices for CPU RX.");
+            }
+        }
+    }
+
+    void _build_cfo_symbol_skip_mask() {
+        _cfo_symbol_skip_mask.assign(cfg_.num_symbols, 0);
+        if (_duplex_layout.mode != DuplexMode::TDD ||
+            !_duplex_layout.uplink_enabled ||
+            cfg_.num_symbols == 0) {
+            return;
+        }
+
+        for (size_t sym = 0; sym < cfg_.num_symbols; ++sym) {
+            if (_duplex_layout.is_uplink(sym) || _duplex_layout.is_guard(sym)) {
+                _cfo_symbol_skip_mask[sym] = 1;
+            }
+        }
+        for (size_t sym = 0; sym < cfg_.num_symbols; ++sym) {
+            if (_duplex_layout.is_uplink(sym) || _duplex_layout.is_guard(sym)) {
+                continue;
+            }
+            const size_t prev = (sym == 0) ? (cfg_.num_symbols - 1) : (sym - 1);
+            const size_t next = (sym + 1 == cfg_.num_symbols) ? 0 : (sym + 1);
+            if (_duplex_layout.is_uplink(prev) || _duplex_layout.is_guard(prev) ||
+                _duplex_layout.is_uplink(next) || _duplex_layout.is_guard(next)) {
+                _cfo_symbol_skip_mask[sym] = 1;
             }
         }
     }
@@ -1087,7 +1366,7 @@ private:
                                     cfg_.duplex.ul_center_freq > 0.0)
                 ? cfg_.duplex.ul_center_freq : cfg_.center_freq;
             usrp_->set_tx_rate(cfg_.sample_rate);
-            usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.tx_channel);
+            current_ul_tx_tune_ = usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.tx_channel);
             usrp_->set_tx_gain(cfg_.tx_gain, cfg_.tx_channel);
             usrp_->set_tx_bandwidth(cfg_.bandwidth, cfg_.tx_channel);
             uhd::stream_args_t tx_args("fc32", cfg_.wire_format_tx);
@@ -1095,12 +1374,10 @@ private:
             _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
             _uplink_tx->set_tx_stream(usrp_->get_tx_stream(tx_args));
             _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
-            const double tick = usrp_->get_master_clock_rate();
-            _uplink_tx->set_timed_tx(usrp_->get_time_now() + uhd::time_spec_t(1.0), tick,
-                                     usrp_->get_tx_rate(cfg_.tx_channel));
             LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.tx_channel
                          << " @ " << format_freq_hz(ul_freq) << " Hz, "
-                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame";
+                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_tx->uplink_config().zc_root;
         }
     }
 
@@ -1134,7 +1411,8 @@ private:
             _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
             // sim: continuous send paced by shm backpressure (no timed scheduling).
             LOG_G_INFO() << "[UL-TX] uplink transmit enabled (sim ul.tx), "
-                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame";
+                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_tx->uplink_config().zc_root;
         }
     }
 
@@ -1456,7 +1734,39 @@ private:
             _sim_radio->set_comm_rx_freq_correction_hz(current_rx_tune_.actual_dsp_freq);
         } else {
             current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.rx_channel);
+            _retune_uplink_tx_from_rx_correction(current_rx_tune_.actual_dsp_freq);
         }
+    }
+
+    void _retune_uplink_tx_from_rx_correction(double rx_dsp_correction_hz) {
+        if (!_uplink_tx || _sim_radio || !usrp_) {
+            return;
+        }
+        const double ul_base_freq =
+            (cfg_.duplex.mode == DuplexMode::FDD && cfg_.duplex.ul_center_freq > 0.0)
+                ? cfg_.duplex.ul_center_freq
+                : cfg_.center_freq;
+        double tx_target_correction_hz = rx_dsp_correction_hz;
+        if (cfg_.duplex.mode == DuplexMode::FDD && cfg_.center_freq > 0.0 && ul_base_freq > 0.0) {
+            tx_target_correction_hz *= ul_base_freq / cfg_.center_freq;
+        }
+
+        // UHD applies DSP tune signs differently: RX target = RF + DSP, TX target = RF - DSP.
+        const double tx_dsp_correction_hz = -tx_target_correction_hz;
+        uhd::tune_request_t tx_tune_req;
+        tx_tune_req.target_freq = ul_base_freq + tx_target_correction_hz;
+        tx_tune_req.rf_freq = ul_base_freq;
+        tx_tune_req.dsp_freq = tx_dsp_correction_hz;
+        tx_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
+        tx_tune_req.dsp_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
+        current_ul_tx_tune_ = usrp_->set_tx_freq(tx_tune_req, cfg_.tx_channel);
+        LOG_RT_INFO() << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
+                      << format_freq_hz(ul_base_freq)
+                      << " Hz, target correction=" << format_freq_hz(tx_target_correction_hz)
+                      << " Hz, requested TX DSP=" << format_freq_hz(tx_dsp_correction_hz)
+                      << " Hz, actual RF=" << format_freq_hz(current_ul_tx_tune_.actual_rf_freq)
+                      << " Hz, DSP=" << format_freq_hz(current_ul_tx_tune_.actual_dsp_freq)
+                      << " Hz";
     }
     void prepare_fftw() {
         fft_input_.resize(cfg_.fft_size);
@@ -1519,6 +1829,8 @@ private:
         _sync_in_progress = false;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
+        _reset_uplink_tx_rx_alignment_shift();
+        _set_uplink_waveform_enabled(false);
         _llr_snr_linear_filtered = 1.0;
         _llr_snr_filter_initialized = false;
         const bool log_agc = cfg_.should_profile("agc");
@@ -1549,14 +1861,59 @@ private:
      * Implements a state machine (SYNC_SEARCH -> ALIGNMENT -> NORMAL) to handle
      * frame synchronization and alignment before normal reception.
      */
-    void rx_proc() {
+    void rx_proc(uhd::time_spec_t stream_start_time) {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1.0, true);
         bind_current_thread_from_downlink_hint(cfg_, 0);
         uhd::rx_metadata_t md;
-        rx_stream_->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+        auto issue_start = [&](const uhd::time_spec_t& start_time) {
+            uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+            const bool timed_start = start_time.get_real_secs() > 0.0;
+            cmd.stream_now = !timed_start;
+            if (timed_start) {
+                cmd.time_spec = start_time;
+                LOG_G_INFO() << "[UE] timed RX stream start at "
+                             << start_time.get_real_secs()
+                             << " s, shared with UL-TX";
+            } else {
+                LOG_G_INFO() << "[UE] immediate RX stream start";
+            }
+            rx_stream_->issue_stream_cmd(cmd);
+        };
+        auto issue_stop = [&]() {
+            try {
+                rx_stream_->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+            } catch (const std::exception& e) {
+                LOG_RT_WARN() << "[UE RX] failed to stop stream before restart: " << e.what();
+            }
+        };
+
+        issue_start(stream_start_time);
 
         while (running_.load()) {
+            const bool tx_requested_restart =
+                _uplink_tx &&
+                (_uplink_tx->tx_error_count().load(std::memory_order_relaxed) !=
+                 _handled_ul_tx_error_count.load(std::memory_order_relaxed));
+            if (_stream_restart_requested.exchange(false, std::memory_order_acq_rel) ||
+                tx_requested_restart) {
+                if (_uplink_tx) {
+                    _handled_ul_tx_error_count.store(
+                        _uplink_tx->tx_error_count().load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
+                }
+                issue_stop();
+                stream_start_time = _next_timed_stream_start();
+                if (_uplink_tx && stream_start_time.get_real_secs() > 0.0) {
+                    _uplink_tx->reschedule_timed_tx(stream_start_time);
+                }
+                _reset_receive_state_after_stream_restart();
+                issue_start(stream_start_time);
+                LOG_RT_WARN() << "[UE] shared RX/UL-TX restart at "
+                              << stream_start_time.get_real_secs() << " s";
+                continue;
+            }
+
             switch (state_.load()) {
             case RxState::SYNC_SEARCH:
                 handle_sync_search(md);
@@ -1570,7 +1927,7 @@ private:
             }
         }
 
-        rx_stream_->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+        issue_stop();
     }
 
     /**
@@ -1592,13 +1949,17 @@ private:
                 cfg_.sync_samples() - received,
                 md
             );
+            bool restart_read = false;
+            if (_handle_rx_metadata_error(md, "sync search", &restart_read) && restart_read) {
+                break;
+            }
             if (received == 0 && got > 0) {
                 first_time_ns = metadata_time_to_ns(md);
             }
             received += got;
         }
 
-        if (sync_batch == nullptr) {
+        if (sync_batch == nullptr || received < cfg_.sync_samples()) {
             return;
         }
         sync_batch->usrp_time_ns = first_time_ns;
@@ -1629,10 +1990,17 @@ private:
         int64_t frame_time_ns = -1;
         while (received < total_read && running_.load()) {
             const size_t got = rx_stream_->recv(&temp_buf[received], total_read - received, md);
+            bool restart_read = false;
+            if (_handle_rx_metadata_error(md, "alignment", &restart_read) && restart_read) {
+                break;
+            }
             if (received == 0 && got > 0) {
                 frame_time_ns = metadata_time_to_ns(md);
             }
             received += got;
+        }
+        if (received < total_read) {
+            return;
         }
         // Acquire pre-allocated RX frame from pool
         RxFrame frame = _rx_frame_pool.acquire();
@@ -1662,6 +2030,7 @@ private:
         }
 //        LOG_G_INFO() << "Alignment done, moving "<< discard_samples_<< " samples" << std::endl;
 //        LOG_G_INFO() <<  discard_samples_<< std::endl;
+        _set_uplink_waveform_enabled(true);
         state_ = RxState::NORMAL;
     }
 
@@ -1688,13 +2057,17 @@ private:
                 cfg_.samples_per_frame() - received,
                 md
             );
+            bool restart_read = false;
+            if (_handle_rx_metadata_error(md, "normal", &restart_read) && restart_read) {
+                break;
+            }
             if (received == 0 && got > 0) {
                 frame.usrp_time_ns = metadata_time_to_ns(md);
             }
             received += got;
         }
 
-        if (received > 0) {
+        if (received == cfg_.samples_per_frame()) {
             if (do_latency_profile) {
                 frame.host_enqueue_time_ns = host_now_ns();
             }
@@ -1950,9 +2323,7 @@ private:
                         sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
                     }
                     _clear_frame_queue();
-                    discard_samples_.store(sync_offset_);
-                    _sync_uplink_tx_shift(sync_offset_);
-                    state_ = RxState::ALIGNMENT;
+                    _schedule_receive_alignment(static_cast<int32_t>(sync_offset_));
                     issued_alignment = true;
                 }
             } else {
@@ -2257,14 +2628,25 @@ private:
         std::vector<int>& pilot_indices = _pilot_indices_buf;          // persistent scratch
         std::vector<float>& avg_phase_diff = _avg_phase_diff_buf;      // persistent scratch
         std::vector<float>& weights = _weights_buf;                    // persistent scratch
-        FrequencyOffsetEstimator::compute_pilot_phase_diff(
-            symbols, cfg_.pilot_positions, cfg_.fft_size, cfg_.sync_pos,
-            pilot_indices, avg_phase_diff, weights
-        );
+        bool cfo_sfo_estimate_valid = FrequencyOffsetEstimator::compute_pilot_phase_diff(
+            symbols,
+            cfg_.pilot_positions,
+            cfg_.fft_size,
+            cfg_.sync_pos,
+            pilot_indices,
+            avg_phase_diff,
+            weights,
+            &_data_resource_layout.data_symbol_to_actual_symbol,
+            &_cfo_symbol_skip_mask);
         
         // Phase unwrapping with SIMD optimization
-        unwrap(avg_phase_diff);
-        auto [beta, alpha] = weightedlinearRegression(pilot_indices, avg_phase_diff, weights);
+        float beta = 0.0f;
+        float alpha = 0.0f;
+        if (cfo_sfo_estimate_valid) {
+            unwrap(avg_phase_diff);
+            std::tie(beta, alpha) = weightedlinearRegression(pilot_indices, avg_phase_diff, weights);
+            cfo_sfo_estimate_valid = std::isfinite(beta) && std::isfinite(alpha);
+        }
         prof_step_end = ProfileClock::now();
         prof_cfo_sfo_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         
@@ -2295,7 +2677,7 @@ private:
         bool issued_freq_adjust = false;
         bool issued_rx_gain_adjust = false;
 
-        if (cfg_.hardware_sync) {
+        if (cfg_.hardware_sync && cfo_sfo_estimate_valid) {
             const auto akf_result = _akf.update(raw_error_ppm);
             const double control_error_ppm = cfg_.akf_enable
                 ? akf_result.filtered_error_ppm
@@ -2312,7 +2694,7 @@ private:
         }
 
         // Frequency offset correction
-        {
+        if (cfo_sfo_estimate_valid) {
             _freq_offset_sum += detected_freq_offset;
             _freq_offset_count++;
             if (_freq_offset_count>=434) {
@@ -2328,6 +2710,8 @@ private:
                     }
                 }
             }
+        } else {
+            LOG_RT_WARN_HZ(2) << "Skipping CFO/SFO update: no clean adjacent downlink pilot-symbol pairs";
         }
         if (issued_freq_adjust) {
             _control_time_gates.mark_freq_adjust_now(radio_time_now());
@@ -2651,9 +3035,8 @@ private:
         {   
             if (_delay_adjustment_count++ >= 1) {
                 _delay_adjustment_count = 0;
-                discard_samples_.store(delay_index_err);
-                _sync_uplink_tx_shift(delay_index_err);
-                state_ = RxState::ALIGNMENT; // Send sync command. May have delay due to FIFO
+                // Residual timing trim while already locked: keep UL waveform enabled.
+                _schedule_receive_alignment(static_cast<int32_t>(delay_index_err)); // Send sync command. May have delay due to FIFO
                 _sync_in_progress = true;
                 issued_alignment = true;
             }

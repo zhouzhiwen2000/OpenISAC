@@ -2158,29 +2158,91 @@ public:
      * @param pilot_indices Output: actual frequency indices of pilots
      * @param avg_phase_diff Output: average phase difference at each pilot
      * @param weights Output: weights for regression
+     * @param actual_symbol_indices Optional actual frame symbol index for each
+     *        entry in symbols. When present, only physically adjacent symbol
+     *        pairs are accumulated.
+     * @param skip_actual_symbol_mask Optional per-actual-symbol mask. When
+     *        present, pairs touching masked symbols are ignored.
+     * @return true if at least one valid symbol pair and pilot were used.
      */
-    static void compute_pilot_phase_diff(
+    static bool compute_pilot_phase_diff(
         const std::vector<AlignedVector>& symbols,
         const std::vector<size_t>& pilot_positions,
         size_t fft_size,
         size_t sync_pos,
         std::vector<int>& pilot_indices,
         std::vector<float>& avg_phase_diff,
-        std::vector<float>& weights
+        std::vector<float>& weights,
+        const std::vector<int>* actual_symbol_indices = nullptr,
+        const std::vector<uint8_t>* skip_actual_symbol_mask = nullptr
     ) {
         const size_t num_pilots = pilot_positions.size();
         pilot_indices.resize(num_pilots);
         avg_phase_diff.resize(num_pilots);
-        weights.resize(num_pilots, 0.0f);
+        weights.assign(num_pilots, 0.0f);
+
+        if (symbols.empty() || num_pilots == 0) {
+            return false;
+        }
+        if (actual_symbol_indices != nullptr &&
+            actual_symbol_indices->size() != symbols.size()) {
+            return false;
+        }
+
+        const bool use_actual_symbols = (actual_symbol_indices != nullptr);
+        const size_t first_pair =
+            use_actual_symbols ? 0 : std::min(sync_pos, symbols.size());
+        auto pair_allowed = [&](size_t current_idx, size_t next_idx) {
+            if (!use_actual_symbols) {
+                return true;
+            }
+            const int current_actual = (*actual_symbol_indices)[current_idx];
+            const int next_actual = (*actual_symbol_indices)[next_idx];
+            if (current_actual < 0 || next_actual != current_actual + 1) {
+                return false;
+            }
+            if (skip_actual_symbol_mask == nullptr) {
+                return true;
+            }
+            const size_t current_sym = static_cast<size_t>(current_actual);
+            const size_t next_sym = static_cast<size_t>(next_actual);
+            if (current_sym >= skip_actual_symbol_mask->size() ||
+                next_sym >= skip_actual_symbol_mask->size()) {
+                return false;
+            }
+            return (*skip_actual_symbol_mask)[current_sym] == 0 &&
+                   (*skip_actual_symbol_mask)[next_sym] == 0;
+        };
+
+        size_t pair_count = 0;
+        for (size_t i = first_pair; i + 1 < symbols.size(); ++i) {
+            if (pair_allowed(i, i + 1)) {
+                ++pair_count;
+            }
+        }
+        if (pair_count == 0) {
+            return false;
+        }
+
+        bool used_pilot = false;
         
         for (size_t j = 0; j < num_pilots; ++j) {
             auto pilot_index = pilot_positions[j];
             std::complex<double> next_current_sum(0.0, 0.0);
+            if (pilot_index >= fft_size) {
+                pilot_indices[j] = 0;
+                avg_phase_diff[j] = 0.0f;
+                continue;
+            }
+            used_pilot = true;
 
             // NOTE: no omp simd here — the body reduces into a complex<double>
             // accumulator via conj()*mul, which the vectorizer cannot lane-split
             // anyway. The annotation was a no-op and is intentionally omitted.
-            for (size_t i = sync_pos; i < symbols.size() - 1; ++i) {
+            for (size_t i = first_pair; i + 1 < symbols.size(); ++i) {
+                if (!pair_allowed(i, i + 1)) {
+                    continue;
+                }
                 std::complex<float> current_pilot = symbols[i][pilot_index];
                 std::complex<float> next_pilot = symbols[i+1][pilot_index];
                 next_current_sum += std::conj(current_pilot) * next_pilot;
@@ -2196,6 +2258,7 @@ public:
             pilot_indices[j] = freq_index;
             weights[j] = static_cast<float>(std::norm(next_current_sum));
         }
+        return used_pilot;
     }
 
     /**

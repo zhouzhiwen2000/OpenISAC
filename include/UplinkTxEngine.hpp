@@ -6,7 +6,8 @@
 // This is the matched TX half of the duplex uplink. It builds a self-contained
 // compact OFDM frame (ZC sync at symbol 0, comb pilots, LDPC/QPSK payload) using
 // the uplink config derived by make_uplink_config(), then places that frame at
-// the uplink symbol window of the downlink frame period and streams it.
+// the uplink symbol window of the downlink frame period and streams it. The UE
+// can gate the whole uplink waveform to zero until downlink synchronization is locked.
 //
 // It deliberately reuses only the pure DSP primitives from OFDMCore.hpp
 // (QPSKModulator, generate_zc_freq, LdpcPacketFraming, Scrambler,
@@ -16,9 +17,12 @@
 //
 // Payload source: a UDP input socket (mirrors the BS udp_input_* path).
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -67,6 +71,7 @@ public:
             frame.resize(_period_samples);
             return frame;
         });
+        _timing_pad_buffer.assign(_period_samples, std::complex<float>(0.0f, 0.0f));
     }
 
     ~UplinkTxEngine() {
@@ -81,14 +86,29 @@ public:
     UplinkTxEngine& operator=(const UplinkTxEngine&) = delete;
 
     void set_tx_stream(uhd::tx_streamer::sptr stream) { _tx_stream = std::move(stream); }
+    uhd::tx_streamer::sptr tx_stream() const { return _tx_stream; }
 
     // Enable timed (real-USRP) transmission scheduled on the radio clock. When
     // not enabled (sim), frames are streamed back-to-back, paced by the shm ring.
     void set_timed_tx(uhd::time_spec_t start_time, double tick_rate, double tx_sample_rate) {
+        std::lock_guard<std::mutex> lock(_timing_mutex);
         _start_time = start_time;
         _tick_rate = tick_rate;
         _tx_sample_rate = tx_sample_rate > 0.0 ? tx_sample_rate : _link_cfg.sample_rate;
         _use_timed_tx = (tick_rate > 0.0);
+        _restart_requested.store(false, std::memory_order_release);
+    }
+
+    void reschedule_timed_tx(uhd::time_spec_t start_time) {
+        {
+            std::lock_guard<std::mutex> lock(_timing_mutex);
+            _start_time = start_time;
+        }
+        _restart_requested.store(true, std::memory_order_release);
+    }
+
+    void request_restart() {
+        _restart_requested.store(true, std::memory_order_release);
     }
 
     // Runtime-adjustable Timing Advance (samples). Pulls the uplink TX window
@@ -96,6 +116,14 @@ public:
     std::atomic<int32_t>& timing_advance() { return _timing_advance; }
     // Relative shift tracking the UE RX alignment (Phase 5).
     std::atomic<int32_t>& rx_alignment_shift() { return _rx_alignment_shift; }
+    std::atomic<uint64_t>& tx_error_count() { return _tx_error_count; }
+
+    bool set_waveform_enabled(bool enabled) {
+        return _waveform_enabled.exchange(enabled, std::memory_order_acq_rel) != enabled;
+    }
+    bool waveform_enabled() const {
+        return _waveform_enabled.load(std::memory_order_acquire);
+    }
 
     const Config& uplink_config() const { return _cfg; }
 
@@ -103,6 +131,7 @@ public:
         if (!_tx_stream) {
             throw std::runtime_error("UplinkTxEngine::start without a TX stream.");
         }
+        _waveform_enabled.store(false, std::memory_order_release);
         _running.store(true);
         if (AlignedVector* first_frame = _period_queue.producer_slot()) {
             _build_period_buffer(*first_frame);
@@ -167,6 +196,31 @@ private:
         const int idx = (sym & 3) * 2;
         return std::complex<float>(QPSKModulator::QPSK_TABLE_FLAT[idx],
                                    QPSKModulator::QPSK_TABLE_FLAT[idx + 1]);
+    }
+
+    void _append_idle_symbols(AlignedIntVector& data_pool) {
+        if (_layout.payload_re_count < LdpcPacketFraming::kControlSymbols) {
+            return;
+        }
+        const uint32_t idle_seq = _idle_seq.fetch_add(1, std::memory_order_relaxed);
+        const LdpcMiniHeader hdr{
+            LdpcPacketFraming::kVersion,
+            LdpcPacketFraming::kFlags,
+            0,
+            0,
+            static_cast<uint16_t>(idle_seq & 0xFFFFu),
+        };
+        data_pool.resize(LdpcPacketFraming::kControlSymbols);
+        LdpcPacketFraming::write_control_qpsk(hdr, data_pool.data());
+
+        if (_link_cfg.uplink_idle_waveform != kUplinkIdleWaveformRandomQpsk) {
+            return;
+        }
+        data_pool.reserve(_layout.payload_re_count);
+        while (data_pool.size() < _layout.payload_re_count) {
+            const uint32_t rnd = splitmix32(0x554C4944u ^ idle_seq ^ static_cast<uint32_t>(data_pool.size()));
+            data_pool.push_back(static_cast<int>(rnd & 0x3u));
+        }
     }
 
     // ---- UDP payload ingest: recv -> LDPC encode/frame -> packet queue ----
@@ -274,6 +328,9 @@ private:
             data_pool.insert(data_pool.end(), slot->begin(), slot->end());
             _packet_buffer.consumer_pop();
         }
+        if (data_pool.empty()) {
+            _append_idle_symbols(data_pool);
+        }
 
         _mod_pool.resize(data_pool.size());
         for (size_t i = 0; i < data_pool.size(); ++i) _mod_pool[i] = _qpsk_from_int(data_pool[i]);
@@ -331,15 +388,39 @@ private:
 
         long long period_ticks = 0;
         long long next_ticks = 0;
+        int64_t applied_shift_samples = 0;
+        bool first = true;
         if (_use_timed_tx) {
             const double exact = static_cast<double>(_period_samples) * _tick_rate / _tx_sample_rate;
             period_ticks = std::llround(exact);
+            std::lock_guard<std::mutex> lock(_timing_mutex);
             next_ticks = _start_time.to_ticks(_tick_rate);
         }
 
-        bool first = true;
         SPSCBackoff frame_backoff;
         while (_running.load(std::memory_order_relaxed)) {
+            if (_use_timed_tx && _restart_requested.exchange(false, std::memory_order_acq_rel)) {
+                uhd::tx_metadata_t eob_md;
+                eob_md.start_of_burst = false;
+                eob_md.end_of_burst = true;
+                eob_md.has_time_spec = false;
+                try {
+                    _tx_stream->send(&_eob_sample, 0, eob_md, 0.1);
+                } catch (const std::exception& e) {
+                    LOG_RT_WARN() << "[UL-TX] failed to terminate burst before restart: " << e.what();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(_timing_mutex);
+                    next_ticks = _start_time.to_ticks(_tick_rate);
+                }
+                applied_shift_samples = 0;
+                first = true;
+                _period_queue.clear();
+                LOG_RT_WARN() << "[UL-TX] timed TX restart scheduled at "
+                              << uhd::time_spec_t::from_ticks(next_ticks, _tick_rate).get_real_secs()
+                              << " s";
+            }
+
             AlignedVector* frame = _period_queue.consumer_slot();
             if (frame == nullptr) {
                 frame_backoff.pause();
@@ -347,38 +428,80 @@ private:
             }
             frame_backoff.reset();
 
+            const int64_t target_shift_samples = _target_shift_samples();
             if (_use_timed_tx) {
-                // Timing advance + RX-alignment shift pull the uplink window
-                // earlier/later on the shared clock (passive alignment).
-                const long long shift =
-                    static_cast<long long>(_timing_advance.load(std::memory_order_relaxed)) +
-                    static_cast<long long>(_rx_alignment_shift.load(std::memory_order_relaxed));
+                if (first) {
+                    // A new burst can use timed metadata for the initial alignment.
+                    // Later in the same continuous burst, metadata follows the
+                    // target and the sample count change moves the real boundary.
+                    applied_shift_samples = target_shift_samples;
+                }
                 md.has_time_spec = true;
                 md.start_of_burst = first;
                 md.end_of_burst = false;
-                md.time_spec = uhd::time_spec_t::from_ticks(next_ticks - shift, _tick_rate);
+                md.time_spec = uhd::time_spec_t::from_ticks(
+                    next_ticks - _samples_to_ticks(target_shift_samples),
+                    _tick_rate);
                 next_ticks += period_ticks;
-                first = false;
             } else {
                 md.has_time_spec = false;
-                md.start_of_burst = false;
+                md.start_of_burst = first;
             }
 
-            _send_period(*frame, md);
+            const SendResult result = _send_period_with_stream_shift(
+                *frame,
+                md,
+                target_shift_samples,
+                applied_shift_samples);
+            if (!result.complete && _running.load(std::memory_order_relaxed)) {
+                _tx_error_count.fetch_add(1, std::memory_order_relaxed);
+                LOG_RT_WARN() << "[UL-TX] short send/underflow: "
+                              << (result.expected_samples - result.sent_samples)
+                              << " samples not sent";
+            }
+            if (result.sent_samples > 0) {
+                first = false;
+            }
             _period_queue.consumer_pop();
         }
-        md.end_of_burst = true;
-        _tx_stream->send(&_eob_sample, 0, md, 0.1);
+        uhd::tx_metadata_t eob_md;
+        eob_md.start_of_burst = false;
+        eob_md.end_of_burst = true;
+        eob_md.has_time_spec = false;
+        _tx_stream->send(&_eob_sample, 0, eob_md, 0.1);
     }
 
-    void _send_period(const AlignedVector& frame, const uhd::tx_metadata_t& first_md) {
+    struct SendResult {
+        size_t sent_samples = 0;
+        size_t expected_samples = 0;
+        bool complete = true;
+    };
+
+    int64_t _target_shift_samples() const {
+        return static_cast<int64_t>(_timing_advance.load(std::memory_order_relaxed)) +
+               static_cast<int64_t>(_rx_alignment_shift.load(std::memory_order_relaxed));
+    }
+
+    long long _samples_to_ticks(int64_t samples) const {
+        if (!_use_timed_tx || _tick_rate <= 0.0 || _tx_sample_rate <= 0.0) {
+            return samples;
+        }
+        return static_cast<long long>(std::llround(
+            static_cast<double>(samples) * _tick_rate / _tx_sample_rate));
+    }
+
+    size_t _send_samples(
+        const std::complex<float>* data,
+        size_t sample_count,
+        const uhd::tx_metadata_t& first_md)
+    {
         size_t sent_total = 0;
         uhd::tx_metadata_t md = first_md;
         SPSCBackoff backoff;
-        while (sent_total < _period_samples && _running.load(std::memory_order_relaxed)) {
+        while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
             const size_t sent = _tx_stream->send(
-                frame.data() + sent_total,
-                _period_samples - sent_total,
+                data + sent_total,
+                sample_count - sent_total,
                 md,
                 1.0);
             if (sent == 0) {
@@ -390,6 +513,114 @@ private:
             md.has_time_spec = false;
             md.start_of_burst = false;
         }
+        return sent_total;
+    }
+
+    size_t _send_zeros(size_t sample_count, const uhd::tx_metadata_t& first_md) {
+        size_t sent_total = 0;
+        uhd::tx_metadata_t md = first_md;
+        while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
+            const size_t chunk = std::min(_timing_pad_buffer.size(), sample_count - sent_total);
+            const size_t sent = _send_samples(_timing_pad_buffer.data(), chunk, md);
+            sent_total += sent;
+            md.has_time_spec = false;
+            md.start_of_burst = false;
+            if (sent < chunk) {
+                break;
+            }
+        }
+        return sent_total;
+    }
+
+    size_t _send_period_samples(
+        const AlignedVector& frame,
+        size_t sample_offset,
+        size_t sample_count,
+        const uhd::tx_metadata_t& first_md)
+    {
+        if (sample_offset >= frame.size() || sample_count == 0) {
+            return 0;
+        }
+        const size_t frame_end = sample_count >= (frame.size() - sample_offset)
+            ? frame.size()
+            : (sample_offset + sample_count);
+        const size_t bounded_count = frame_end - sample_offset;
+        if (_waveform_enabled.load(std::memory_order_acquire)) {
+            return _send_samples(frame.data() + sample_offset, bounded_count, first_md);
+        }
+        return _send_zeros(bounded_count, first_md);
+    }
+
+    SendResult _send_period_with_stream_shift(
+        const AlignedVector& frame,
+        const uhd::tx_metadata_t& first_md,
+        int64_t target_shift_samples,
+        int64_t& applied_shift_samples)
+    {
+        SendResult result{};
+        result.expected_samples = _period_samples;
+        result.complete = true;
+
+        int64_t delta = target_shift_samples - applied_shift_samples;
+        uhd::tx_metadata_t frame_md = first_md;
+
+        if (delta < 0) {
+            const size_t insert_samples = static_cast<size_t>(-delta);
+            result.expected_samples += insert_samples;
+            if (insert_samples > 0) {
+                LOG_RT_WARN_HZ(2) << "[UL-TX] delaying stream by lengthening this period by "
+                                  << insert_samples << " samples (target_shift="
+                                  << target_shift_samples << ", applied_shift="
+                                  << target_shift_samples << ")";
+            }
+            const size_t sent = _send_period_samples(frame, 0, frame.size(), frame_md);
+            result.sent_samples += sent;
+            if (sent < frame.size()) {
+                result.complete = false;
+                return result;
+            }
+            frame_md.has_time_spec = false;
+            frame_md.start_of_burst = false;
+            const size_t inserted = _send_zeros(insert_samples, frame_md);
+            result.sent_samples += inserted;
+            if (inserted < insert_samples) {
+                result.complete = false;
+                return result;
+            }
+            applied_shift_samples = target_shift_samples;
+        } else if (delta > 0) {
+            const size_t skip_samples = std::min<size_t>(
+                static_cast<size_t>(delta),
+                frame.size());
+            result.expected_samples -= skip_samples;
+            if (skip_samples > 0) {
+                LOG_RT_WARN_HZ(2) << "[UL-TX] advancing stream by shortening this period by "
+                                  << skip_samples << " samples (target_shift="
+                                  << target_shift_samples << ", applied_shift="
+                                  << (applied_shift_samples + static_cast<int64_t>(skip_samples))
+                                  << ")";
+            }
+            if (skip_samples >= frame.size()) {
+                applied_shift_samples += static_cast<int64_t>(skip_samples);
+                return result;
+            }
+            const size_t sent = _send_period_samples(
+                frame,
+                0,
+                frame.size() - skip_samples,
+                frame_md);
+            result.sent_samples += sent;
+            result.complete = (sent == frame.size() - skip_samples);
+            if (result.complete) {
+                applied_shift_samples += static_cast<int64_t>(skip_samples);
+            }
+            return result;
+        }
+
+        const size_t sent = _send_period_samples(frame, 0, frame.size(), frame_md);
+        result.sent_samples += sent;
+        result.complete = (sent == frame.size());
+        return result;
     }
 
     const Config _link_cfg;
@@ -411,21 +642,27 @@ private:
     const size_t _window_samples;
     SPSCRingBuffer<AlignedVector> _period_queue;
     std::complex<float> _eob_sample{0.0f, 0.0f};
+    AlignedVector _timing_pad_buffer;
 
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
     LDPCCodec::AlignedIntVector _interleaver_scratch;
     Scrambler _scrambler{201600, 0x5A};
     std::atomic<uint32_t> _packet_seq{0};
+    std::atomic<uint32_t> _idle_seq{0};
     SPSCRingBuffer<AlignedIntVector> _packet_buffer{32};
 
     uhd::tx_streamer::sptr _tx_stream;
     bool _use_timed_tx = false;
+    std::mutex _timing_mutex;
     uhd::time_spec_t _start_time{0.0};
     double _tick_rate = 0.0;
     double _tx_sample_rate = 0.0;
     std::atomic<int32_t> _timing_advance{0};
     std::atomic<int32_t> _rx_alignment_shift{0};
+    std::atomic<bool> _waveform_enabled{false};
+    std::atomic<bool> _restart_requested{false};
+    std::atomic<uint64_t> _tx_error_count{0};
 
     std::atomic<bool> _running{false};
     std::thread _ingest_thread;

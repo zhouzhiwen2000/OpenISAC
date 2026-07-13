@@ -77,6 +77,10 @@ akf_r_max: 1.0e3               # Upper bound of observation noise variance R
 desired_peak_pos: 20           # Target delay-peak index for alignment
 sensing_symbol_stride: 20      # Default STRD applied at startup before runtime commands
 
+# ===== Duplex =====
+uplink_idle_waveform: random_qpsk  # UE idle uplink waveform when no UDP payload is queued: random_qpsk/zero
+ue_timing_advance: 0           # Default UE TADV for uplink TX window advance (samples)
+
 # ===== Network Output =====
 enable_bi_sensing: true        # Enable bistatic sensing pipeline and ZMQ output
 bi_sensing_ip: "0.0.0.0"     # Bistatic sensing ZMQ listen IP

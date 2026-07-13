@@ -260,6 +260,8 @@ enum class DuplexMode : uint8_t {
 
 inline constexpr const char* kDuplexModeTdd = "tdd";
 inline constexpr const char* kDuplexModeFdd = "fdd";
+inline constexpr const char* kUplinkIdleWaveformZero = "zero";
+inline constexpr const char* kUplinkIdleWaveformRandomQpsk = "random_qpsk";
 
 inline const char* duplex_mode_to_string(DuplexMode mode) {
     switch (mode) {
@@ -286,6 +288,19 @@ inline bool parse_duplex_mode_string(const std::string& raw_mode, DuplexMode& ou
         return true;
     }
     return false;
+}
+
+inline std::string normalize_uplink_idle_waveform_string(std::string waveform) {
+    std::transform(waveform.begin(), waveform.end(), waveform.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (waveform == kUplinkIdleWaveformZero ||
+        waveform == kUplinkIdleWaveformRandomQpsk) {
+        return waveform;
+    }
+    throw std::runtime_error(
+        "Invalid uplink_idle_waveform='" + waveform +
+        "'. Expected 'zero' or 'random_qpsk'.");
 }
 
 /**
@@ -916,6 +931,7 @@ struct Config {
     // default, mirrored into atomics by the engines.
     int32_t bs_dl_ul_timing_diff = 0;  // BS: uplink-RX window offset relative to the TX frame anchor (samples)
     int32_t ue_timing_advance = 0;     // UE: uplink-TX window advance relative to the RX frame anchor (samples)
+    std::string uplink_idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     // UE uplink payload UDP input (mirrors udp_input_* on the BS downlink).
     std::string ul_udp_input_ip = "0.0.0.0";
     int ul_udp_input_port = 50002;
@@ -930,6 +946,12 @@ struct Config {
     std::string bi_sensing_ip = "0.0.0.0";
     int bi_sensing_port = 8889;
     int control_port = 9999;
+    std::string uplink_channel_ip = "0.0.0.0";
+    int uplink_channel_port = 12358;
+    std::string uplink_pdf_ip = "0.0.0.0";
+    int uplink_pdf_port = 12359;
+    std::string uplink_constellation_ip = "0.0.0.0";
+    int uplink_constellation_port = 12356;
     std::string channel_ip = "0.0.0.0";
     int channel_port = 12348;
     std::string pdf_ip = "0.0.0.0";
@@ -1187,12 +1209,67 @@ inline DuplexFrameLayout build_duplex_frame_layout(const Config& cfg) {
     return layout;
 }
 
+inline int normalize_config_zc_root(int zc_root, size_t fft_size) {
+    if (fft_size == 0) {
+        return zc_root;
+    }
+    const int n = static_cast<int>(fft_size);
+    int normalized = zc_root % n;
+    if (normalized < 0) {
+        normalized += n;
+    }
+    return normalized;
+}
+
+inline int select_distinct_zc_root(
+    size_t fft_size,
+    int base_root,
+    const std::vector<int>& additional_avoid_roots = {})
+{
+    if (fft_size <= 1) {
+        return base_root + 1;
+    }
+
+    const int n = static_cast<int>(fft_size);
+    std::vector<int> avoid_roots;
+    avoid_roots.reserve(additional_avoid_roots.size() + 1);
+    avoid_roots.push_back(normalize_config_zc_root(base_root, fft_size));
+    for (const int root : additional_avoid_roots) {
+        avoid_roots.push_back(normalize_config_zc_root(root, fft_size));
+    }
+
+    auto is_avoided = [&](int candidate) {
+        const int normalized = normalize_config_zc_root(candidate, fft_size);
+        return std::find(avoid_roots.begin(), avoid_roots.end(), normalized) != avoid_roots.end();
+    };
+
+    const int normalized_base_root = normalize_config_zc_root(base_root, fft_size);
+    for (int step = 1; step < n; ++step) {
+        const int candidate = (normalized_base_root + step) % n;
+        if (candidate == 0 || is_avoided(candidate)) {
+            continue;
+        }
+        if (std::gcd(candidate, n) == 1) {
+            return candidate;
+        }
+    }
+
+    for (int candidate = 1; candidate < n; ++candidate) {
+        if (!is_avoided(candidate)) {
+            return candidate;
+        }
+    }
+
+    return base_root + 1;
+}
+
 // Derive the self-contained uplink OFDM (sub)frame configuration from the link
 // config. The uplink is its own compact frame (ZC sync at symbol 0, comb pilots,
 // payload on the remaining REs) that occupies the uplink symbol window of the DL
-// frame period. It reuses the DL numerology (fft_size/cp_length/zc_root/pilots)
-// but drops DL-only features the uplink does not use (sec-sync, CFO training,
-// midframe pilots, sensing pilots, custom data-resource blocks).
+// frame period. It reuses the DL numerology (fft_size/cp_length/pilots), chooses
+// a distinct uplink ZC root, and drops DL-only features the uplink does not use
+// (sec-sync, CFO training, midframe pilots, sensing pilots, custom data-resource
+// blocks).
 //
 // TDD: num_symbols = ul_symbol_count - ul_guard_symbols (the data-bearing part of
 //      the uplink window). FDD: num_symbols = cfg.num_symbols (continuous uplink).
@@ -1206,6 +1283,11 @@ inline Config make_uplink_config(const Config& cfg) {
             : ((dl.ul_count > dl.ul_guard) ? (dl.ul_count - dl.ul_guard) : 0));
     ul.num_symbols = ul_syms;
     ul.sync_pos = 0;
+    const int sensing_pilot_root = select_distinct_zc_root(cfg.fft_size, cfg.zc_root);
+    ul.zc_root = select_distinct_zc_root(
+        cfg.fft_size,
+        cfg.zc_root,
+        std::vector<int>{sensing_pilot_root});
     ul.enable_sec_sync_symbol = false;
     ul.enable_cfo_training_sequence = false;
     ul.midframe_pilot_symbols.clear();
@@ -2241,6 +2323,7 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
 //     center_freq: <double>      # FDD: uplink carrier (Hz)
 //   bs_dl_ul_timing_diff: <int>  # BS startup default (samples)
 //   ue_timing_advance: <int>     # UE startup default (samples)
+//   uplink_idle_waveform: zero | random_qpsk
 inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
     if (config["enable_uplink"]) {
         cfg.enable_uplink = config["enable_uplink"].as<bool>();
@@ -2268,6 +2351,10 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
     }
     if (config["ue_timing_advance"]) {
         cfg.ue_timing_advance = config["ue_timing_advance"].as<int32_t>();
+    }
+    if (config["uplink_idle_waveform"]) {
+        cfg.uplink_idle_waveform = normalize_uplink_idle_waveform_string(
+            config["uplink_idle_waveform"].as<std::string>());
     }
 }
 
@@ -2648,6 +2735,12 @@ inline Config make_default_bs_config() {
     cfg.mono_sensing_ip = "";
     cfg.mono_sensing_port = 8888;
     cfg.control_port = 9999;
+    cfg.uplink_channel_ip = "0.0.0.0";
+    cfg.uplink_channel_port = 12358;
+    cfg.uplink_pdf_ip = "0.0.0.0";
+    cfg.uplink_pdf_port = 12359;
+    cfg.uplink_constellation_ip = "0.0.0.0";
+    cfg.uplink_constellation_port = 12356;
     cfg.sensing_rx_channel_count = 1;
     cfg.sensing_symbol_stride = 20;
     cfg.tx_circular_buffer_size = 8;
@@ -2716,6 +2809,12 @@ inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepat
     out << YAML::Key << "mono_sensing_output_enabled" << YAML::Value << cfg.mono_sensing_output_enabled;
     out << YAML::Key << "mono_sensing_ip" << YAML::Value << cfg.mono_sensing_ip;
     out << YAML::Key << "mono_sensing_port" << YAML::Value << cfg.mono_sensing_port;
+    out << YAML::Key << "uplink_channel_ip" << YAML::Value << cfg.uplink_channel_ip;
+    out << YAML::Key << "uplink_channel_port" << YAML::Value << cfg.uplink_channel_port;
+    out << YAML::Key << "uplink_pdf_ip" << YAML::Value << cfg.uplink_pdf_ip;
+    out << YAML::Key << "uplink_pdf_port" << YAML::Value << cfg.uplink_pdf_port;
+    out << YAML::Key << "uplink_constellation_ip" << YAML::Value << cfg.uplink_constellation_ip;
+    out << YAML::Key << "uplink_constellation_port" << YAML::Value << cfg.uplink_constellation_port;
     out << YAML::Key << "sensing_symbol_stride" << YAML::Value << cfg.sensing_symbol_stride;
     out << YAML::Key << "sensing_rx_channel_count" << YAML::Value << cfg.sensing_rx_channel_count;
     out << YAML::Key << "sensing_rx_channels" << YAML::Value << YAML::BeginSeq;
@@ -2738,6 +2837,7 @@ inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepat
     out << YAML::EndSeq;
     emit_simulation_config(out, cfg);
     out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
+    out << YAML::Key << "uplink_idle_waveform" << YAML::Value << cfg.uplink_idle_waveform;
     out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
     out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
     out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
@@ -2848,6 +2948,16 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         }
         if (config["mono_sensing_ip"]) cfg.mono_sensing_ip = config["mono_sensing_ip"].as<std::string>();
         if (config["mono_sensing_port"]) cfg.mono_sensing_port = config["mono_sensing_port"].as<int>();
+        if (config["uplink_channel_ip"]) cfg.uplink_channel_ip = config["uplink_channel_ip"].as<std::string>();
+        if (config["uplink_channel_port"]) cfg.uplink_channel_port = config["uplink_channel_port"].as<int>();
+        if (config["uplink_pdf_ip"]) cfg.uplink_pdf_ip = config["uplink_pdf_ip"].as<std::string>();
+        if (config["uplink_pdf_port"]) cfg.uplink_pdf_port = config["uplink_pdf_port"].as<int>();
+        if (config["uplink_constellation_ip"]) {
+            cfg.uplink_constellation_ip = config["uplink_constellation_ip"].as<std::string>();
+        }
+        if (config["uplink_constellation_port"]) {
+            cfg.uplink_constellation_port = config["uplink_constellation_port"].as<int>();
+        }
         if (config["sensing_symbol_stride"]) {
             cfg.sensing_symbol_stride = config["sensing_symbol_stride"].as<size_t>();
         }
@@ -3011,6 +3121,15 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
 
     if (cfg.mono_sensing_ip.empty()) {
         cfg.mono_sensing_ip = "0.0.0.0";
+    }
+    if (cfg.uplink_channel_ip.empty()) {
+        cfg.uplink_channel_ip = "0.0.0.0";
+    }
+    if (cfg.uplink_pdf_ip.empty()) {
+        cfg.uplink_pdf_ip = "0.0.0.0";
+    }
+    if (cfg.uplink_constellation_ip.empty()) {
+        cfg.uplink_constellation_ip = "0.0.0.0";
     }
     if (cfg.mono_sensing_port <= 0) {
         LOG_G_WARN() << "mono_sensing_port=" << cfg.mono_sensing_port
@@ -3178,6 +3297,7 @@ inline bool save_ue_config_to_yaml(const Config& cfg, const std::string& filepat
     out << YAML::Key << "default_out_ip" << YAML::Value << cfg.default_out_ip;
     emit_simulation_config(out, cfg);
     out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
+    out << YAML::Key << "uplink_idle_waveform" << YAML::Value << cfg.uplink_idle_waveform;
     out << YAML::Key << "ocxo_pi_kp_fast" << YAML::Value << cfg.ocxo_pi_kp_fast;
     out << YAML::Key << "ocxo_pi_ki_fast" << YAML::Value << cfg.ocxo_pi_ki_fast;
     out << YAML::Key << "ocxo_pi_kp_slow" << YAML::Value << cfg.ocxo_pi_kp_slow;

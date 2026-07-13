@@ -50,8 +50,18 @@ udp_input_ip: "0.0.0.0"        # Bind IP for incoming payload UDP packets
 udp_input_port: 50000          # Bind port for incoming payload UDP packets
 mono_sensing_ip: "0.0.0.0"   # Monostatic sensing ZMQ listen IP
 mono_sensing_port: 8888        # Monostatic sensing ZMQ listen port
+uplink_channel_ip: "0.0.0.0"  # Uplink channel-estimate ZMQ listen IP
+uplink_channel_port: 12358     # Uplink channel-estimate output port
+uplink_pdf_ip: "0.0.0.0"      # Uplink delay-spectrum ZMQ listen IP
+uplink_pdf_port: 12359         # Uplink delay-spectrum output port
+uplink_constellation_ip: "0.0.0.0"  # Uplink constellation ZMQ listen IP
+uplink_constellation_port: 12356     # Uplink constellation output port
 control_port: 9999             # ZMQ port for runtime control commands
 sensing_symbol_stride: 20      # Default STRD applied at startup before runtime commands
+
+# ===== Duplex =====
+uplink_idle_waveform: random_qpsk  # UE idle uplink waveform when no UDP payload is queued: random_qpsk/zero
+bs_dl_ul_timing_diff: 63       # Default BS DUTI for uplink RX window (samples)
 
 # ===== Sensing RX Channels =====
 sensing_rx_channel_count: 1    # Number of sensing RX channels (0 disables sensing RX)

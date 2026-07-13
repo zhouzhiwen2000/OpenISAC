@@ -536,6 +536,12 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">双工方式。<code>tdd</code> 将 UE 上行符号按时间复用到 BS 帧内；<code>fdd</code> 保持 BS 下行连续发送，同时 UE 上行使用 <code>uplink.center_freq</code>。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>uplink_idle_waveform</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>random_qpsk</code></td>
+<td style="text-align:left">UE 无上行 UDP 载荷时的 idle 波形。<code>random_qpsk</code> 发送 zero-length mini-header 后接确定性随机 QPSK 填充；<code>zero</code> 发送 zero-length mini-header，剩余 payload RE 保持为 0。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>uplink</code></td>
 <td style="text-align:left"><code>object</code></td>
 <td style="text-align:left">缺省</td>
@@ -558,6 +564,42 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8888</code></td>
 <td style="text-align:left">单站感知数据流的 ZeroMQ PUB 绑定端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 上行信道估计调试流的 ZeroMQ PUB 监听 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12358</code></td>
+<td style="text-align:left">BS 上行信道估计调试流的 ZeroMQ PUB 绑定端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 上行 delay profile 调试流的 ZeroMQ PUB 监听 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12359</code></td>
+<td style="text-align:left">BS 上行 delay profile 调试流的 ZeroMQ PUB 绑定端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_constellation_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 上行星座图调试流的 ZeroMQ PUB 监听 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_constellation_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12356</code></td>
+<td style="text-align:left">BS 上行星座图调试流的 ZeroMQ PUB 绑定端口。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>sensing_rx_channel_count</code></td>
@@ -903,6 +945,12 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
 <td style="text-align:left">必须与 <code>BS.yaml</code> 保持一致。<code>tdd</code> 共享下行载波并只在配置的上行符号窗口发送；<code>fdd</code> 在 <code>uplink.center_freq</code> 上连续发送。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink_idle_waveform</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>random_qpsk</code></td>
+<td style="text-align:left">UE 无上行 UDP 载荷时的 idle 波形。<code>random_qpsk</code> 发送 zero-length mini-header 后接确定性随机 QPSK 填充；<code>zero</code> 发送 zero-length mini-header，剩余 payload RE 保持为 0。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink</code></td>

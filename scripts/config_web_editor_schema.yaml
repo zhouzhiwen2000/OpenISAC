@@ -28,6 +28,16 @@ common:
       comment: Enable UE-to-BS uplink / duplex path
       default: false
       optional: true
+  uplink_idle_waveform:
+    title: Duplex
+    field:
+      type: scalar
+      key: uplink_idle_waveform
+      kind: string
+      comment: UE uplink idle waveform when no UDP payload is queued
+      default: random_qpsk
+      optional: true
+      options: [random_qpsk, zero]
   uplink:
     title: Duplex
     field:
@@ -819,6 +829,60 @@ bs:
       kind: bool
       comment: Enable monostatic sensing ZMQ output
       default: true
+      optional: true
+  uplink_channel_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: uplink_channel_ip
+      kind: string
+      comment: Uplink channel-estimate ZMQ listen IP
+      default: "0.0.0.0"
+      optional: true
+  uplink_channel_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: uplink_channel_port
+      kind: int
+      comment: Uplink channel-estimate output port
+      default: 12358
+      optional: true
+  uplink_pdf_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: uplink_pdf_ip
+      kind: string
+      comment: Uplink delay-spectrum ZMQ listen IP
+      default: "0.0.0.0"
+      optional: true
+  uplink_pdf_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: uplink_pdf_port
+      kind: int
+      comment: Uplink delay-spectrum output port
+      default: 12359
+      optional: true
+  uplink_constellation_ip:
+    title: Network Output
+    field:
+      type: scalar
+      key: uplink_constellation_ip
+      kind: string
+      comment: Uplink constellation ZMQ listen IP
+      default: "0.0.0.0"
+      optional: true
+  uplink_constellation_port:
+    title: Network Output
+    field:
+      type: scalar
+      key: uplink_constellation_port
+      kind: int
+      comment: Uplink constellation output port
+      default: 12356
       optional: true
   control_port:
     title: Network Output
