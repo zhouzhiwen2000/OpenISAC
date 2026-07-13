@@ -1010,7 +1010,7 @@ private:
             const size_t insert_samples = static_cast<size_t>(-delta);
             result.expected_samples += insert_samples;
             if (insert_samples > 0) {
-                LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] delaying stream by lengthening this period by "
+                LOG_RT_INFO_HZ_M(UlTx, 2) << "[UL-TX] delaying stream by lengthening this period by "
                                   << insert_samples << " samples (target_shift="
                                   << target_shift_samples << ", applied_shift="
                                   << target_shift_samples << ")";
@@ -1037,7 +1037,7 @@ private:
                 frame.size());
             result.expected_samples -= skip_samples;
             if (skip_samples > 0) {
-                LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] advancing stream by dropping "
+                LOG_RT_INFO_HZ_M(UlTx, 2) << "[UL-TX] advancing stream by dropping "
                                   << skip_samples << " samples from this period (target_shift="
                                   << target_shift_samples << ", applied_shift="
                                   << (applied_shift_samples + static_cast<int64_t>(skip_samples))

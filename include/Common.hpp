@@ -106,6 +106,8 @@ inline constexpr const char* kChannelTrackingModeOff = "disabled";
 inline constexpr const char* kChannelTrackingModePilotPhase = "pilot_phase";
 inline constexpr const char* kSensingDelayCorrectionModeLosTracking = "los_tracking";
 inline constexpr const char* kSensingDelayCorrectionModeErtmAbsolute = "ertm_absolute";
+inline constexpr const char* kErtmTimingMetricDelayMagnitude = "delay_magnitude";
+inline constexpr const char* kErtmTimingMetricMaximumLikelihood = "maximum_likelihood";
 
 /**
  * @brief Zero-copy view over frequency-domain TX symbols for sensing.
@@ -331,6 +333,19 @@ inline std::string normalize_sensing_delay_correction_mode_string(const std::str
     throw std::runtime_error(
         "Invalid sensing.sensing_delay_correction_mode='" + mode +
         "'. Supported values: los_tracking, ertm_absolute.");
+}
+
+inline std::string normalize_ertm_timing_metric_string(std::string metric) {
+    std::transform(metric.begin(), metric.end(), metric.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (metric == kErtmTimingMetricDelayMagnitude ||
+        metric == kErtmTimingMetricMaximumLikelihood) {
+        return metric;
+    }
+    throw std::runtime_error(
+        "Invalid uplink.ertm_timing_metric='" + metric +
+        "'. Supported values: delay_magnitude, maximum_likelihood.");
 }
 
 /**
@@ -1119,6 +1134,7 @@ struct UplinkConfig {
     bool debug_self_scan_spectrum = false; // Publish a peak-centered self-ZC matched-filter slice + metadata (needs debug_self_channel)
     size_t debug_self_scan_slice_samples = 0; // Correlation samples around the peak; 0 = one OFDM symbol (fft_size + cp_length)
     bool ertm_to_enable = false;      // Enable eRTM timing-offset estimation payloads/logs
+    std::string ertm_timing_metric = kErtmTimingMetricDelayMagnitude; // Differential-TO metric
     size_t ertm_delay_oversample_factor = 10; // UE eRTM delay-spectrum IFFT oversampling factor
     bool ertm_debug_output_enabled = false; // Publish UE-side eRTM debug spectra over ZMQ
     double ertm_dl_rf_delay_samples = 0.0;  // Calibrated downlink RF-chain delay in samples
@@ -2674,6 +2690,10 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
                 ul["debug_self_scan_slice_samples"].as<size_t>();
         }
         if (ul["ertm_to_enable"]) cfg.uplink.ertm_to_enable = ul["ertm_to_enable"].as<bool>();
+        if (ul["ertm_timing_metric"]) {
+            cfg.uplink.ertm_timing_metric = normalize_ertm_timing_metric_string(
+                ul["ertm_timing_metric"].as<std::string>());
+        }
         if (ul["ertm_debug_output_enabled"]) {
             cfg.uplink.ertm_debug_output_enabled = ul["ertm_debug_output_enabled"].as<bool>();
         }

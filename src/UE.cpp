@@ -1449,14 +1449,27 @@ private:
         return std::max(-0.5, std::min(0.5, delta));
     }
 
+    static double _ertm_parabolic_delta(double y_left, double y_center, double y_right) {
+        const double curvature = y_left - 2.0 * y_center + y_right;
+        if (!std::isfinite(curvature) || curvature >= -1e-15) {
+            return 0.0;
+        }
+        const double delta = 0.5 * (y_left - y_right) / curvature;
+        if (!std::isfinite(delta)) {
+            return 0.0;
+        }
+        return std::max(-0.5, std::min(0.5, delta));
+    }
+
     bool _estimate_ertm_delay_shift(
         const AlignedVector& bs_uplink_delay,
         const AlignedVector& ue_downlink_delay,
+        const std::string& timing_metric,
         int64_t& signed_shift_bins,
         double& metric_out,
         std::vector<float>* correlation_out = nullptr,
         size_t* peak_index_out = nullptr,
-        double* centroid3_delta_bins_out = nullptr
+        double* fractional_delta_bins_out = nullptr
     ) {
         const size_t n = bs_uplink_delay.size();
         if (n == 0 || ue_downlink_delay.size() != n ||
@@ -1467,16 +1480,28 @@ private:
         if (correlation_out) {
             correlation_out->assign(n, 0.0f);
         }
+        const bool maximum_likelihood =
+            timing_metric == kErtmTimingMetricMaximumLikelihood;
 
         double bs_energy = 0.0;
         double ue_energy = 0.0;
         for (size_t i = 0; i < n; ++i) {
-            const float bs_mag = std::abs(bs_uplink_delay[i]);
-            const float ue_mag = std::abs(ue_downlink_delay[i]);
-            _ertm_corr_a[i] = std::complex<float>(bs_mag, 0.0f);
-            _ertm_corr_b[i] = std::complex<float>(ue_mag, 0.0f);
-            bs_energy += static_cast<double>(bs_mag) * static_cast<double>(bs_mag);
-            ue_energy += static_cast<double>(ue_mag) * static_cast<double>(ue_mag);
+            const auto bs_value = bs_uplink_delay[i];
+            const auto ue_value = ue_downlink_delay[i];
+            const float bs_power = std::norm(bs_value);
+            const float ue_power = std::norm(ue_value);
+            if (maximum_likelihood) {
+                // By the correlation theorem this complex delay-profile
+                // correlation is exactly the oversampled frequency-domain ML
+                // metric IFFT{H_BS * conj(H_UE)} for white endpoint noise.
+                _ertm_corr_a[i] = bs_value;
+                _ertm_corr_b[i] = ue_value;
+            } else {
+                _ertm_corr_a[i] = std::complex<float>(std::sqrt(bs_power), 0.0f);
+                _ertm_corr_b[i] = std::complex<float>(std::sqrt(ue_power), 0.0f);
+            }
+            bs_energy += static_cast<double>(bs_power);
+            ue_energy += static_cast<double>(ue_power);
         }
         const double denom = std::sqrt(bs_energy * ue_energy);
         if (!(denom > 0.0) || !std::isfinite(denom)) {
@@ -1490,12 +1515,18 @@ private:
         }
         fftwf_execute(_ertm_corr_ifft_plan);
 
+        auto metric_at = [&](size_t shift) {
+            const auto corr = _ertm_corr_out[shift];
+            const double raw_metric = maximum_likelihood
+                ? static_cast<double>(std::abs(corr))
+                : static_cast<double>(corr.real());
+            return raw_metric / (static_cast<double>(n) * denom);
+        };
+
         size_t best_shift = 0;
         double best_metric = -std::numeric_limits<double>::infinity();
         for (size_t shift = 0; shift < n; ++shift) {
-            const double metric =
-                static_cast<double>(_ertm_corr_out[shift].real()) /
-                (static_cast<double>(n) * denom);
+            const double metric = metric_at(shift);
             if (correlation_out) {
                 (*correlation_out)[shift] = static_cast<float>(metric);
             }
@@ -1505,19 +1536,17 @@ private:
             }
         }
 
-        auto metric_at = [&](size_t shift) {
-            return static_cast<double>(_ertm_corr_out[shift].real()) /
-                   (static_cast<double>(n) * denom);
-        };
-        double centroid3_delta_bins = 0.0;
+        double fractional_delta_bins = 0.0;
         if (n >= 3) {
             const double y_left = metric_at((best_shift + n - 1) % n);
             const double y_center = metric_at(best_shift);
             const double y_right = metric_at((best_shift + 1) % n);
-            centroid3_delta_bins = _ertm_centroid3_delta(y_left, y_center, y_right);
+            fractional_delta_bins = maximum_likelihood
+                ? _ertm_parabolic_delta(y_left, y_center, y_right)
+                : _ertm_centroid3_delta(y_left, y_center, y_right);
         }
-        if (centroid3_delta_bins_out) {
-            *centroid3_delta_bins_out = centroid3_delta_bins;
+        if (fractional_delta_bins_out) {
+            *fractional_delta_bins_out = fractional_delta_bins;
         }
         if (peak_index_out) {
             *peak_index_out = best_shift;
@@ -1763,17 +1792,19 @@ private:
         double metric = 0.0;
         std::vector<float> correlation_spectrum;
         size_t peak_index = 0;
-        double centroid3_delta_bins = 0.0;
+        double fractional_delta_bins = 0.0;
         const bool publish_debug = cfg_.uplink.ertm_debug_output_enabled;
         if (!_estimate_ertm_delay_shift(
                 bs_uplink_delay,
                 local_delay,
+                cfg_.uplink.ertm_timing_metric,
                 signed_shift_bins,
                 metric,
                 publish_debug ? &correlation_spectrum : nullptr,
                 &peak_index,
-                &centroid3_delta_bins)) {
-            LOG_G_WARN_M(Ertm) << "[eRTM] failed to correlate delay spectra; dropping report";
+                &fractional_delta_bins)) {
+            LOG_G_WARN_M(Ertm) << "[eRTM] failed to evaluate timing metric; dropping report"
+                         << ": metric=" << cfg_.uplink.ertm_timing_metric;
             return;
         }
 
@@ -1785,7 +1816,7 @@ private:
             static_cast<double>(bs_payload.duti_samples) -
             static_cast<double>(tadv_samples);
         const double shift_frac_os_bins =
-            static_cast<double>(signed_shift_bins) + centroid3_delta_bins;
+            static_cast<double>(signed_shift_bins) + fractional_delta_bins;
         const double to_bs_ue_samples =
             shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
         const double to_ue_samples = 0.5 * (tau_c_samples - to_bs_ue_samples);
@@ -1818,8 +1849,12 @@ private:
             oss << std::fixed << std::setprecision(3)
                 << "[eRTM] TO(samples) seq=" << bs_payload.seq
                 << ", oversample=" << _ertm_delay_oversample_factor
+                << ", timing_metric=" << cfg_.uplink.ertm_timing_metric
+                << ", peak_refinement="
+                << (cfg_.uplink.ertm_timing_metric == kErtmTimingMetricMaximumLikelihood
+                        ? "parabolic3" : "centroid3")
                 << ", shift_os_bins=" << signed_shift_bins
-                << ", shift_centroid3_delta_os_bins=" << centroid3_delta_bins
+                << ", shift_fractional_delta_os_bins=" << fractional_delta_bins
                 << ", shift_frac_os_bins=" << shift_frac_os_bins
                 << ", shift_samples=" << to_bs_ue_samples
                 << ", peak_index=" << peak_index
@@ -3555,12 +3590,12 @@ private:
         frame.host_enqueue_time_ns = do_latency_profile ? host_now_ns() : 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
         if (positive_shift > 0) {
-            LOG_RT_WARN_M(Recovery)
+            LOG_RT_INFO_M(Recovery)
                 << "UE alignment is dropping " << positive_shift
                 << " leading RX samples to advance the frame boundary"
                 << ": alignment_id=" << alignment_id;
         } else if (negative_shift > 0) {
-            LOG_RT_WARN_M(Recovery)
+            LOG_RT_INFO_M(Recovery)
                 << "UE alignment is padding " << negative_shift
                 << " leading samples because the aligned RX frame has no data for them"
                 << ": alignment_id=" << alignment_id;

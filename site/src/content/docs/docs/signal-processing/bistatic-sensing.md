@@ -247,6 +247,8 @@ $$
 
 In FDD, eRTM reliability decreases if the visible path sets or path scattering coefficients differ excessively between the two carriers. The first eRTM step estimates the differential TO $\tau_\mathrm{TO}^{\mathrm{BS-UE}}$ using either a frequency-domain maximum-likelihood metric or a delay-magnitude-spectrum metric.
 
+Select the runtime metric with `uplink.ertm_timing_metric`. `delay_magnitude` is the default and keeps the existing phase-robust delay-magnitude correlation with centroid3 peak refinement. `maximum_likelihood` uses the white-noise, unknown-common-phase ML form below and applies three-point parabolic peak refinement. The CPU and CUDA implementations evaluate the ML metric as a complex circular correlation of the two oversampled delay responses; by the correlation theorem, this is equivalent to the frequency-domain $\operatorname{IFFT}\{\hat H_\mathrm{BS}\hat H_\mathrm{UE}^{*}\}$ expression.
+
 #### Maximum-Likelihood Metric
 
 Let the common unknown channel on the UE's current delay axis be

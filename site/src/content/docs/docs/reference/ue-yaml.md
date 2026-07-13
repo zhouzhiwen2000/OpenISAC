@@ -131,6 +131,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `uplink.ue_timing_advance` | `int` / samples | `50` | UE uplink transmit timing advance. |
 | `uplink.debug_self_channel` | `bool` | `false` | Estimate UE self-TX leakage channel from RX windows for `TADV` debugging. |
 | `uplink.ertm_to_enable` | `bool` | `false` | Enable eRTM TO payload consumption and TO logs. |
+| `uplink.ertm_timing_metric` | `string` | `delay_magnitude` | Differential-TO metric: phase-robust `delay_magnitude` or coherent `maximum_likelihood`. |
 | `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT oversampling factor. |
 | `uplink.ertm_dl_rf_delay_samples` | `float` / samples | `67.0` | Calibrated downlink RF-chain delay for eRTM equations. |
 | `uplink.ertm_ul_rf_delay_samples` | `float` / samples | `67.0` | Calibrated uplink RF-chain delay for eRTM equations. |

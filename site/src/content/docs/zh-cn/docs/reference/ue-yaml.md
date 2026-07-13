@@ -131,6 +131,7 @@ description: UE 运行配置参数、取值和作用说明。
 | `uplink.ue_timing_advance` | `int` / samples | `50` | UE 上行发送 timing advance。 |
 | `uplink.debug_self_channel` | `bool` | `false` | 从接收窗口估计 UE 本机发送泄漏信道，用于 `TADV` 调试。 |
 | `uplink.ertm_to_enable` | `bool` | `false` | 开启 eRTM 时偏测量负载的接收处理和 TO 日志。 |
+| `uplink.ertm_timing_metric` | `string` | `delay_magnitude` | 差分 TO 指标：抗相位失配的 `delay_magnitude`，或相干复信道相关的 `maximum_likelihood`。 |
 | `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM 时延谱 IFFT 过采样倍数。 |
 | `uplink.ertm_dl_rf_delay_samples` | `float` / samples | `67.0` | eRTM 方程中的下行 RF 链路校准延迟。 |
 | `uplink.ertm_ul_rf_delay_samples` | `float` / samples | `67.0` | eRTM 方程中的上行 RF 链路校准延迟。 |

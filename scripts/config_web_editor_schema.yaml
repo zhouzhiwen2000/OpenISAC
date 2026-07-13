@@ -1161,7 +1161,7 @@ bs:
     key: ertm_to_enable
     data_key: uplink.ertm_to_enable
     kind: bool
-    comment: Enable CPU eRTM TO estimation payload injection and UE-side TO logs
+    comment: Enable eRTM TO estimation payload injection and UE-side TO logs
     default: false
     optional: true
     enabled_if:
@@ -1956,12 +1956,28 @@ ue:
     key: ertm_to_enable
     data_key: uplink.ertm_to_enable
     kind: bool
-    comment: Enable CPU eRTM TO estimation payload injection and UE-side TO logs
+    comment: Enable eRTM TO estimation payload injection and UE-side TO logs
     default: false
     optional: true
     enabled_if:
       key: uplink.enabled
       value: true
+  - type: scalar
+    key: ertm_timing_metric
+    data_key: uplink.ertm_timing_metric
+    kind: string
+    comment: Differential-TO metric; delay_magnitude is phase-robust, maximum_likelihood uses coherent complex channel correlation
+    default: delay_magnitude
+    optional: true
+    options:
+    - delay_magnitude
+    - maximum_likelihood
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
   - type: scalar
     key: ertm_delay_oversample_factor
     data_key: uplink.ertm_delay_oversample_factor

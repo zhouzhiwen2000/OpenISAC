@@ -252,6 +252,8 @@ $$
 
 FDD 的上下行位于不同载波；若两个载波的可见路径集合或路径散射系数差异过大，eRTM 算法的可靠性会下降。eRTM 的第一步是估计差分 TO $\tau_\mathrm{TO}^{\mathrm{BS-UE}}$。可以采用频域最大似然指标或者时延幅度谱指标。
 
+运行时通过 `uplink.ertm_timing_metric` 选择指标。默认值 `delay_magnitude` 保留现有的时延幅度谱相关和 centroid3 峰值细化，对上下行公共相位失配更稳健。`maximum_likelihood` 使用下述白噪声、未知公共相位形式的最大似然指标，并采用三点抛物线峰值细化。CPU 与 CUDA 实现通过两个过采样复时延响应的循环相关计算该指标；根据相关定理，它与频域 $\operatorname{IFFT}\{\hat H_\mathrm{BS}\hat H_\mathrm{UE}^{*}\}$ 形式等价。
+
 #### 最大似然指标
 
 令 UE 端当前时延轴上的共同未知信道为

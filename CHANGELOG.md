@@ -22,6 +22,7 @@
 - `ChannelSimulator` 在 UE→BS 上行重采样回 BS 时钟域后施加反向本振失配，并通过共享控制块消费 UE 上行 TX retune，动态更新上行残余 CFO。TDD 直接复用下行 RX 校正量，FDD 的初始失配和 TX 校正都按上下行载频比缩放。
 - 双工仿真模板显式将 BS 上行 RX 窗口偏移和 UE 上行 TX timing advance 设为零，避免继承真实硬件校准默认值而移动仿真直达径。
 - 将 latest-only 调试发送队列的正常丢帧与旧帧替换日志降为 `debug`；真正的发送异常仍保留为 `warning`。
+- eRTM 新增 `uplink.ertm_timing_metric`，可在原有 `delay_magnitude` 指标与复信道相干相关的 `maximum_likelihood` 指标之间切换；CPU/CUDA UE、配置模板、Web Editor 与中英文文档使用一致的选项语义。
 
 ## 2026-07-12 - 信号处理文档定时与同步模型重构
 
