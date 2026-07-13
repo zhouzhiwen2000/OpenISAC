@@ -2176,6 +2176,18 @@ ue:
     - 3
     optional: true
   - type: flow_list
+    key: demod_worker_cpu_cores
+    item_kind: int
+    comment: 'UE CPU demod worker cores; empty = one unbound worker'
+    default: []
+    optional: true
+  - type: flow_list
+    key: ldpc_worker_cpu_cores
+    item_kind: int
+    comment: 'UE CPU LDPC decode worker cores; empty = one unbound worker'
+    default: []
+    optional: true
+  - type: flow_list
     key: sensing_cpu_cores
     item_kind: int
     comment: 'UE bistatic sensing CPU cores: [sensing_process_proc]'

@@ -12,8 +12,8 @@ cd "$BUILD" || exit 1
 
 cp "$ROOT/config/BS_Sim.yaml"   BS.yaml
 cp "$ROOT/config/UE_Sim.yaml" UE.yaml
-sed -i 's/^profiling_modules:.*/profiling_modules: "demodulation"/' UE.yaml
-grep -q '^profiling_modules' UE.yaml || echo 'profiling_modules: "demodulation"' >> UE.yaml
+sed -i 's/^\(\s*\)profiling_modules:.*/\1profiling_modules: "demodulation"/' UE.yaml
+grep -q "profiling_modules" UE.yaml || true
 sed -i 's/^control_port:.*/control_port: 10044/' UE.yaml
 
 ./ChannelSimulator BS.yaml >"$OUT/sim_${TAG}.log" 2>&1 &
@@ -27,5 +27,5 @@ sleep "$DUR"
 kill "$DEMOD" "$MOD" "$SIM" 2>/dev/null; sleep 1
 kill -9 "$DEMOD" "$MOD" "$SIM" 2>/dev/null
 
-echo "=== reports: $(grep -c 'process_ofdm_frame Profiling' "$OUT/demod_${TAG}.log") ==="
-grep -A16 "process_ofdm_frame Profiling" "$OUT/demod_${TAG}.log" | tail -18
+echo "=== reports: $(grep -c 'CPU demod worker profiling' "$OUT/demod_${TAG}.log") ==="
+grep -A16 "CPU demod worker profiling" "$OUT/demod_${TAG}.log" | tail -18

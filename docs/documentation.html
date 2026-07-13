@@ -1541,6 +1541,18 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left">UE downlink CPU cores: indices <code>0..2</code> bind <code>rx_proc</code>, <code>process_proc</code>, and <code>bit_processing_proc</code>.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>demod_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU demod worker cores for frame-level OFDM/LLR processing. Each configured core adds one worker; empty starts one unbound worker (configure dedicated cores for stable real-time performance).</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ldpc_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU LDPC decode worker cores. Each configured core adds one decode worker with its own LDPC decoder instance; empty starts one unbound worker.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>sensing_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>

@@ -1169,6 +1169,8 @@ struct NetworkOutputConfig {
 
 struct CpuCoresConfig {
     std::vector<int> downlink_cpu_cores; // BS: TX/mod/LDPC-encode/UDP-recv; UE: RX/process/bit-processing
+    std::vector<int> demod_worker_cpu_cores; // UE CPU demod worker cores; empty = one unbound worker
+    std::vector<int> ldpc_worker_cpu_cores;  // UE CPU LDPC decode worker cores; empty = one unbound worker
     std::vector<int> sensing_cpu_cores;  // Dedicated sensing processing cores; empty = no explicit sensing binding
     std::vector<int> uplink_cpu_cores;   // Dedicated uplink thread cores; empty = no explicit uplink binding
     int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
@@ -2867,6 +2869,26 @@ inline bool bind_current_thread_from_ue_downlink_role(const Config& cfg, size_t 
     return bind_current_thread_to_core(ue_downlink_core_from_role(cfg, role));
 }
 
+inline bool bind_current_thread_from_ue_demod_worker(const Config& cfg, size_t worker_idx) {
+    if (!cfg.cpu_cores.demod_worker_cpu_cores.empty()) {
+        return bind_current_thread_to_core(core_from_list_index(cfg.cpu_cores.demod_worker_cpu_cores, worker_idx));
+    }
+    // No dedicated worker cores configured: leave the worker unbound. Pinning it
+    // to the process_proc core would place two RT threads (spinning collector +
+    // saturated DSP worker) on one core, which is strictly worse than letting
+    // the scheduler separate them.
+    return false;
+}
+
+inline bool bind_current_thread_from_ue_ldpc_worker(const Config& cfg, size_t worker_idx) {
+    if (!cfg.cpu_cores.ldpc_worker_cpu_cores.empty()) {
+        return bind_current_thread_to_core(core_from_list_index(cfg.cpu_cores.ldpc_worker_cpu_cores, worker_idx));
+    }
+    // Same rationale as the demod workers: unbound beats sharing the
+    // bit_processing collector core.
+    return false;
+}
+
 inline bool bind_current_thread_from_sensing_hint(const Config& cfg, size_t hint) {
     return bind_current_thread_to_core(sensing_core_from_hint(cfg, hint));
 }
@@ -3824,13 +3846,23 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         }
 
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
+        config_detail::load_value(cpu, "demod_worker_cpu_cores", cfg.cpu_cores.demod_worker_cpu_cores);
+        config_detail::load_value(cpu, "ldpc_worker_cpu_cores", cfg.cpu_cores.ldpc_worker_cpu_cores);
         config_detail::load_value(cpu, "sensing_cpu_cores", cfg.cpu_cores.sensing_cpu_cores);
         config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
         config_detail::load_value(cpu, "main_cpu_core", cfg.cpu_cores.main_cpu_core);
+        if (cfg.cpu_cores.downlink_cpu_cores.size() > 3 &&
+            cfg.cpu_cores.demod_worker_cpu_cores.empty()) {
+            cfg.cpu_cores.demod_worker_cpu_cores.assign(
+                cfg.cpu_cores.downlink_cpu_cores.begin() + 3,
+                cfg.cpu_cores.downlink_cpu_cores.end());
+            cfg.cpu_cores.downlink_cpu_cores.resize(3);
+        }
         if (cfg.cpu_cores.downlink_cpu_cores.size() > 3) {
             throw std::runtime_error(
                 "UE downlink_cpu_cores now accepts [rx_proc, process_proc, bit_processing_proc]. "
-                "Move sensing_process_proc to cpu_cores.sensing_cpu_cores.");
+                "Move OFDM demod workers to cpu_cores.demod_worker_cpu_cores and sensing_process_proc "
+                "to cpu_cores.sensing_cpu_cores.");
         }
 
         if (!config_detail::load_data_resource_blocks_from_yaml(

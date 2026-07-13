@@ -288,7 +288,9 @@ public:
           _sync_search_gain_sweep(cfg),
           _reset_hold_frames(reset_hold_frames_from_cfg(cfg)),
           _akf(make_akf_params(cfg), frame_duration_from_cfg(cfg)) {
-        _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc_decoder.get_N(), 21);
+        _init_cpu_ldpc_workers();
+        _bit_interleaver = std::make_unique<BitBlockInterleaver>(
+            _cpu_ldpc_contexts.front()->decoder.get_N(), 21);
         _measurement_active_epoch_id.store(0, std::memory_order_relaxed);
         if (_measurement_enabled && !cfg_.measurement.measurement_output_dir.empty()) {
             _measurement_summary_path = cfg_.measurement.measurement_output_dir + "/ue_measurement_summary.csv";
@@ -308,6 +310,7 @@ public:
         init_radio();
         init_filter();
         prepare_fftw();
+        _init_cpu_demod_workers();
         init_zmq_publishers();
         if (cfg_.sync_tracking.hardware_sync) {
             _hw_sync = std::make_unique<HardwareSyncController>(cfg_.sync_tracking.hardware_sync_tty);
@@ -326,6 +329,7 @@ public:
         init_sensing();
         // Initialize data processing
         init_data_processing();
+        _prefill_pools_for_topology();
         _register_commands();
     }
 
@@ -333,7 +337,6 @@ public:
         stop();
         
         
-        if (fft_plan_) fftwf_destroy_plan(fft_plan_);
         if (_ertm_os_ifft_plan) fftwf_destroy_plan(_ertm_os_ifft_plan);
         if (_ertm_corr_fft_a_plan) fftwf_destroy_plan(_ertm_corr_fft_a_plan);
         if (_ertm_corr_fft_b_plan) fftwf_destroy_plan(_ertm_corr_fft_b_plan);
@@ -368,6 +371,10 @@ public:
                 _tx_async_thread = std::thread(&UEEngine::_tx_async_event_proc, this);
             }
         }
+        // Start data processing thread
+        _bit_processing_running.store(true);
+        _bit_processing_thread = std::thread(&UEEngine::bit_processing_proc, this);
+
         process_thread_ = std::thread(&UEEngine::process_proc, this);
         
         // Start all senders
@@ -378,10 +385,6 @@ public:
             uplink_self_channel_sender_.start();
             uplink_self_pdf_sender_.start();
         }
-        
-        // Start data processing thread
-        _bit_processing_running.store(true);
-        _bit_processing_thread = std::thread(&UEEngine::bit_processing_proc, this);
 
         if (cfg_.uplink.ertm_to_enable) {
             _ertm_thread_running.store(true, std::memory_order_release);
@@ -626,9 +629,6 @@ private:
 
     SPSCRingBuffer<SyncBatch> sync_queue_;
 
-    AlignedVector fft_input_;
-    AlignedVector fft_output_;
-    fftwf_plan fft_plan_ = nullptr;
     size_t _ertm_delay_oversample_factor = 1;
     size_t _ertm_oversampled_fft_size = 0;
     AlignedVector _ertm_os_ifft_in;
@@ -643,31 +643,8 @@ private:
     fftwf_plan _ertm_corr_fft_b_plan = nullptr;
     fftwf_plan _ertm_corr_ifft_plan = nullptr;
 
-    // Persistent per-frame symbol storage (reused across frames to avoid
-    // per-symbol heap allocation in the hot path). Sized once in prepare_fftw().
-    std::vector<AlignedVector> _symbols_buf;     // data symbols (excludes sync)
-    AlignedVector _sync_symbol_freq_buf;         // sync symbol, freq domain
-    std::vector<AlignedVector> _midframe_symbol_freq_bufs; // full-band pilot symbols
-
-    // Persistent scratch for the per-frame demod path. These were previously
-    // re-declared (and thus heap-allocated) inside process_ofdm_frame every
-    // frame; hoisting them to members keeps capacity across frames and removes
-    // per-frame malloc/free, which is what introduces timing jitter on isolated
-    // cores. process_ofdm_frame runs only on the single process thread, so plain
-    // members (no synchronization) are safe.
-    AlignedVector _h_est_buf;                    // channel estimate H_est
-    std::vector<int> _pilot_indices_buf;         // pilot subcarrier indices
-    std::vector<float> _avg_phase_diff_buf;      // per-pilot avg phase diff
-    std::vector<float> _weights_buf;             // per-pilot regression weights
-    std::vector<int> _tracking_pilot_indices_buf; // per-symbol pilot tracking indices
-    std::vector<float> _tracking_phase_buf;      // per-symbol pilot residual phase
-    std::vector<float> _tracking_weights_buf;    // per-symbol pilot residual weights
-    AlignedVector _tracking_h_inv_buf;           // per-symbol tracked inverse
-    AlignedVector _midframe_tmp_h_buf;           // LS estimate from one full-band pilot
-    AlignedVector _midframe_interp_h_buf;        // time-interpolated channel estimate
-    std::vector<AlignedVector> _channel_anchor_h_bufs;
-    std::vector<int> _channel_anchor_symbols_buf;
-    AlignedVector _delay_spectrum_buf;           // delay (time-domain) spectrum
+    // Per-frame demod scratch lives in CpuDemodWorkerContext (one per demod
+    // worker); per-frame outputs live in the CpuDemodResult ring slots.
     SeqlockedChannelEstimate _ertm_latest_dl_channel;
     bool _ertm_missing_delay_warned = false;
     std::atomic<double> _ertm_latest_to_ue_samples{0.0};
@@ -718,6 +695,9 @@ private:
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_channel_sender_;
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_pdf_sender_;
     uint32_t _reset_count = 0;
+    // Debug publish stride: constellation / channel / PDF snapshots are copied
+    // out of the demod path once every N frames (senders pace at 50 ms anyway).
+    static constexpr uint32_t kDebugPublishStride = 8;
     uint32_t _constellation_frame_counter = 0;
     
     // Sensing related variables
@@ -867,17 +847,268 @@ private:
         int64_t e2e_total_ns{0};
         int count{0};
     };
-    SPSCRingBuffer<LlrFrame> _data_llr_buffer{128};  // LLR data buffer (float path)
-    SPSCRingBuffer<LlrFrameI16> _data_llr_buffer_i16{128};  // LLR data buffer (int16 path)
+
+    struct FrameEvmStats {
+        double rms = std::numeric_limits<double>::quiet_NaN();
+        double db = std::numeric_limits<double>::quiet_NaN();
+        double first_db = std::numeric_limits<double>::quiet_NaN();
+        double last_db = std::numeric_limits<double>::quiet_NaN();
+        double max_db = std::numeric_limits<double>::quiet_NaN();
+        double slope_db_per_symbol = std::numeric_limits<double>::quiet_NaN();
+
+        bool valid() const {
+            return std::isfinite(rms) && rms >= 0.0 &&
+                   std::isfinite(db) &&
+                   std::isfinite(first_db) &&
+                   std::isfinite(last_db) &&
+                   std::isfinite(max_db) &&
+                   std::isfinite(slope_db_per_symbol);
+        }
+    };
+
+    struct CpuDemodProfile {
+        double fft_total = 0.0;
+        double channel_est_total = 0.0;
+        double cfo_sfo_est_total = 0.0;
+        double equalization_total = 0.0;
+        double eq_base_inv_total = 0.0;
+        double eq_channel_select_total = 0.0;
+        double eq_symbol_inv_total = 0.0;
+        double eq_pilot_phase_total = 0.0;
+        double eq_apply_total = 0.0;
+        uint64_t eq_data_symbols_total = 0;
+        uint64_t eq_midframe_channel_symbols_total = 0;
+        uint64_t eq_symbol_inv_count_total = 0;
+        uint64_t eq_pilot_phase_attempt_total = 0;
+        uint64_t eq_pilot_phase_success_total = 0;
+        double noise_est_total = 0.0;
+        double remodulate_total = 0.0;
+        double delay_spectrum_total = 0.0;
+        double timing_sync_total = 0.0;
+        double sensing_queue_total = 0.0;
+        double udp_send_total = 0.0;
+        double llr_total = 0.0;
+        int frame_count = 0;
+
+        void reset() {
+            *this = CpuDemodProfile{};
+        }
+    };
+
+    struct CpuDemodWorkerContext {
+        AlignedVector fft_input;
+        AlignedVector fft_output;
+        fftwf_plan fft_plan = nullptr;
+        std::vector<AlignedVector> symbols;
+        AlignedVector sync_symbol_freq;
+        std::vector<AlignedVector> midframe_symbol_freqs;
+        std::vector<int> pilot_indices;
+        std::vector<float> avg_phase_diff;
+        std::vector<float> weights;
+        std::vector<int> tracking_pilot_indices;
+        std::vector<float> tracking_phase;
+        std::vector<float> tracking_weights;
+        AlignedVector tracking_h_inv;
+        AlignedVector midframe_interp_h;
+        // Channel anchors: the symbol set is fixed by the resource layout
+        // (sync + valid full-band mid-frame pilots), so the sorted symbol list
+        // and per-anchor source are precomputed once in
+        // _init_cpu_demod_workers() and only the H buffers are refilled
+        // in place each frame (no per-frame allocation).
+        std::vector<AlignedVector> channel_anchor_h;
+        std::vector<int> channel_anchor_symbols;
+        std::vector<int> channel_anchor_source; // -1 = sync H_est, else midframe pilot rank
+        AlignedVector h_inv;
+        AlignedVector last_anchor_h_inv;
+        ChannelEstimator channel_estimator;
+        DelayProcessor delay_processor;
+
+        explicit CpuDemodWorkerContext(const Config& cfg)
+            : channel_estimator(cfg.ofdm.fft_size),
+              delay_processor(cfg.ofdm.fft_size)
+        {
+            fft_input.resize(cfg.ofdm.fft_size);
+            fft_output.resize(cfg.ofdm.fft_size);
+            fft_plan = fftwf_plan_dft_1d(
+                cfg.ofdm.fft_size,
+                reinterpret_cast<fftwf_complex*>(fft_input.data()),
+                reinterpret_cast<fftwf_complex*>(fft_output.data()),
+                FFTW_FORWARD,
+                FFTW_MEASURE);
+            const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg);
+            symbols.resize(layout.data_symbol_count);
+            for (auto& s : symbols) {
+                s.resize(cfg.ofdm.fft_size);
+            }
+            sync_symbol_freq.resize(cfg.ofdm.fft_size);
+            midframe_symbol_freqs.resize(layout.midframe_pilot_symbol_count);
+            for (auto& s : midframe_symbol_freqs) {
+                s.resize(cfg.ofdm.fft_size);
+            }
+            tracking_h_inv.resize(cfg.ofdm.fft_size);
+            midframe_interp_h.resize(cfg.ofdm.fft_size);
+            h_inv.resize(cfg.ofdm.fft_size);
+            last_anchor_h_inv.resize(cfg.ofdm.fft_size);
+            tracking_pilot_indices.reserve(cfg.ofdm.pilot_positions.size());
+            tracking_phase.reserve(cfg.ofdm.pilot_positions.size());
+            tracking_weights.reserve(cfg.ofdm.pilot_positions.size());
+        }
+
+        ~CpuDemodWorkerContext() {
+            if (fft_plan) {
+                fftwf_destroy_plan(fft_plan);
+            }
+        }
+
+        CpuDemodWorkerContext(const CpuDemodWorkerContext&) = delete;
+        CpuDemodWorkerContext& operator=(const CpuDemodWorkerContext&) = delete;
+    };
+
+    // Result lives inside the SPSC ring slot: the worker fills it in place via
+    // producer_slot()/producer_commit(), the collector reads it in place via
+    // consumer_slot()/consumer_pop(). h_est / delay_spectrum /
+    // constellation_symbol are pre-sized by the slot factory and refilled each
+    // frame; pooled objects (frame, sense_frame, llr) move through.
+    struct CpuDemodResult {
+        RxFrame frame;
+        uint64_t generation = 0;
+        bool dropped = false;   // stale-generation fast-drop token
+        bool debug_frame = false; // strided debug-publish frame
+        int64_t frame_dequeue_time_ns = 0;
+        bool cfo_sfo_estimate_valid = false;
+        float alpha = 0.0f;
+        float beta = 0.0f;
+        float detected_freq_offset = 0.0f;
+        float corrected_impulse_snr_linear_est = 1.0f;
+        size_t delay_max_index = 0;
+        float delay_max_mag = 0.0f;
+        float delay_average_mag = 0.0f;
+        int adjusted_delay_index = 0;
+        float fractional_delay = 0.0f;
+        bool evm_valid = false;
+        FrameEvmStats evm{};
+        AlignedVector h_est;
+        AlignedVector delay_spectrum;
+        bool has_constellation = false;
+        AlignedVector constellation_symbol;
+        SensingFrame sense_frame;
+        bool has_sensing = false;
+        bool has_llr_float = false;
+        bool has_llr_i16 = false;
+        AlignedFloatVector llr;
+        LDPCCodec::AlignedShortVector llr_i16;
+        CpuDemodProfile profile;
+    };
+
+    struct CpuDemodTask {
+        RxFrame frame;
+        int64_t frame_dequeue_time_ns = 0;
+        float llr_scale_snapshot = 2.0f;
+        bool want_debug_copies = false;
+    };
+
+    struct CpuDemodSlot {
+        // Depth 2 double-buffers each worker: it can start the next frame while
+        // the collector is still consuming the previous result, hiding the
+        // control-stage latency that a depth-1 slot exposes as worker idle time.
+        static constexpr size_t kPipelineDepth = 2;
+
+        SPSCRingBuffer<CpuDemodTask> task_queue;
+        SPSCRingBuffer<CpuDemodResult> result_queue;
+        std::thread thread;
+        size_t pending = 0; // control-thread-owned in-flight count (<= kPipelineDepth)
+
+        explicit CpuDemodSlot(const Config& cfg)
+            : task_queue(kPipelineDepth),
+              result_queue(kPipelineDepth, [&cfg]() {
+                  CpuDemodResult r;
+                  r.h_est.resize(cfg.ofdm.fft_size);
+                  r.delay_spectrum.resize(cfg.ofdm.fft_size);
+                  r.constellation_symbol.resize(cfg.ofdm.fft_size);
+                  return r;
+              }) {}
+    };
+
+    // ---- Parallel LDPC decode stage (same ordered round-robin pattern as the
+    // demod stage): the bit-processing thread dispatches LLR frames to N
+    // decode workers and collects decoded packets in frame order; the stateful
+    // packet handling (eRTM / measurement / ARQ / UDP / latency) stays serial
+    // on the collector.
+
+    struct CpuLdpcPacketRef {
+        LdpcMiniHeader mini_header{};
+        size_t payload_offset = 0; // into CpuLdpcResult::payload_bytes
+        size_t payload_len = 0;
+    };
+
+    struct CpuLdpcResult {
+        uint64_t generation = 0;
+        bool dropped = false;
+        int64_t rx_enqueue_time_ns = 0;
+        int64_t process_dequeue_time_ns = 0;
+        int64_t demod_done_time_ns = 0;
+        std::vector<CpuLdpcPacketRef> packets;
+        std::vector<uint8_t> payload_bytes; // flat decoded-payload storage
+    };
+
+    struct CpuLdpcTask {
+        AlignedFloatVector llr;                    // float path (pooled)
+        LDPCCodec::AlignedShortVector llr_i16;     // int16 path (pooled)
+        bool is_i16 = false;
+        uint64_t generation = 0;
+        int64_t rx_enqueue_time_ns = 0;
+        int64_t process_dequeue_time_ns = 0;
+        int64_t demod_done_time_ns = 0;
+    };
+
+    struct CpuLdpcWorkerContext {
+        LDPCCodec decoder; // stateful aff3ct instance: strictly one per worker
+        LDPCCodec::AlignedFloatVector deint_scratch;
+        LDPCCodec::AlignedShortVector deint_scratch_i16;
+        AlignedFloatVector payload_llr;
+        LDPCCodec::AlignedShortVector payload_llr_i16;
+        LDPCCodec::AlignedByteVector decoded_payload;
+
+        explicit CpuLdpcWorkerContext(const LDPCCodec::LDPCConfig& ldpc_cfg)
+            : decoder(ldpc_cfg) {}
+
+        CpuLdpcWorkerContext(const CpuLdpcWorkerContext&) = delete;
+        CpuLdpcWorkerContext& operator=(const CpuLdpcWorkerContext&) = delete;
+    };
+
+    struct CpuLdpcSlot {
+        static constexpr size_t kPipelineDepth = 2;
+
+        SPSCRingBuffer<CpuLdpcTask> task_queue;
+        SPSCRingBuffer<CpuLdpcResult> result_queue;
+        std::thread thread;
+        size_t pending = 0; // collector-thread-owned in-flight count
+
+        CpuLdpcSlot()
+            : task_queue(kPipelineDepth),
+              result_queue(kPipelineDepth, []() {
+                  CpuLdpcResult r;
+                  r.packets.reserve(16);
+                  r.payload_bytes.reserve(16384);
+                  return r;
+              }) {}
+    };
+
+    // LLR hand-off queues (float / int16 path). Deliberately deep (128): LLR
+    // frames feed the non-realtime decode stage, so buffering bursty payload
+    // here is cheap latency-wise, and the pool prefill below covers the full
+    // depth (~100 MB on the float path at full-grid payloads — accepted).
+    SPSCRingBuffer<LlrFrame> _data_llr_buffer{128};
+    SPSCRingBuffer<LlrFrameI16> _data_llr_buffer_i16{128};
     std::thread _bit_processing_thread;
     std::atomic<bool> _bit_processing_running{false};
     LatencyAccumulator _latency_accumulator;
 
     const bool _ldpc_fixed_point{cfg_.ldpc.fixed_point};
-    LDPCCodec _ldpc_decoder{ldpc_cfg_from_config(cfg_)};
+    // Per-worker LDPCCodec instances live in _cpu_ldpc_contexts (aff3ct
+    // decoders are stateful and not shareable); the interleaver/scrambler are
+    // const after construction and shared by all workers.
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
-    LDPCCodec::AlignedFloatVector _deinterleaver_llr_scratch;
-    LDPCCodec::AlignedShortVector _deinterleaver_llr_scratch_i16;
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_output_sender;
 
@@ -1528,6 +1759,7 @@ private:
     // Noise/LLR estimation related
     double _noise_var{0.5};              // Complex noise power E[|n|^2] initial value (assume 0.25 per dimension)
     double _llr_scale{2.0};              // LLR scaling factor (updated based on noise variance)
+    std::atomic<float> _llr_scale_snapshot{2.0f};
     double _snr_linear{1.0};             // Es/N0 Linear value
     double _snr_db{0.0};                 // Es/N0 dB
     double _llr_snr_linear_filtered{1.0};
@@ -1538,6 +1770,10 @@ private:
     ObjectPool<AlignedFloatVector> _llr_pool;     // Pool for LLR data (float path)
     ObjectPool<LDPCCodec::AlignedShortVector> _llr_pool_i16;  // Pool for LLR data (int16 path)
     ObjectPool<SensingFrame> _sensing_frame_pool; // Pool for sensing frames
+    std::vector<std::unique_ptr<CpuDemodSlot>> _cpu_demod_slots;
+    std::vector<std::unique_ptr<CpuDemodWorkerContext>> _cpu_demod_contexts;
+    std::vector<std::unique_ptr<CpuLdpcSlot>> _cpu_ldpc_slots;
+    std::vector<std::unique_ptr<CpuLdpcWorkerContext>> _cpu_ldpc_contexts;
 
     // Core computation classes (hardware-independent)
     HardwareRxAgc _rx_agc;
@@ -1572,24 +1808,6 @@ private:
         snapshot.e2e_total_ns = _latency_accumulator.e2e_total_ns.exchange(0, std::memory_order_acq_rel);
         return snapshot;
     }
-
-    struct FrameEvmStats {
-        double rms = std::numeric_limits<double>::quiet_NaN();
-        double db = std::numeric_limits<double>::quiet_NaN();
-        double first_db = std::numeric_limits<double>::quiet_NaN();
-        double last_db = std::numeric_limits<double>::quiet_NaN();
-        double max_db = std::numeric_limits<double>::quiet_NaN();
-        double slope_db_per_symbol = std::numeric_limits<double>::quiet_NaN();
-
-        bool valid() const {
-            return std::isfinite(rms) && rms >= 0.0 &&
-                   std::isfinite(db) &&
-                   std::isfinite(first_db) &&
-                   std::isfinite(last_db) &&
-                   std::isfinite(max_db) &&
-                   std::isfinite(slope_db_per_symbol);
-        }
-    };
 
     void _record_measurement_frame(const FrameEvmStats& evm) {
         if (!_measurement_enabled) {
@@ -1776,6 +1994,7 @@ private:
     }
 
     double _estimate_equalizer_noise_var_from_pilots(
+        CpuDemodWorkerContext& ctx,
         const std::vector<AlignedVector>& symbols,
         const AlignedVector& H_est,
         float global_alpha,
@@ -1793,7 +2012,7 @@ private:
         for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
             const int actual_symbol = _data_resource_layout.data_symbol_to_actual_symbol[sym_idx];
             const AlignedVector& symbol_H_base =
-                _interpolated_channel_for_symbol(actual_symbol, H_est);
+                _interpolated_channel_for_symbol(ctx, actual_symbol, H_est);
             const bool using_midframe_channel = (&symbol_H_base != &H_est);
             const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.ofdm.sync_pos);
             const float phase_alpha = using_midframe_channel ? 0.0f : (global_alpha * relative_symbol_index);
@@ -1876,49 +2095,53 @@ private:
         }
     }
 
-    const AlignedVector& _interpolated_channel_for_symbol(int actual_symbol, const AlignedVector& fallback_H)
+    const AlignedVector& _interpolated_channel_for_symbol(
+        CpuDemodWorkerContext& ctx,
+        int actual_symbol,
+        const AlignedVector& fallback_H)
     {
-        if (_channel_anchor_symbols_buf.size() < 2) {
+        if (ctx.channel_anchor_symbols.size() < 2) {
             return fallback_H;
         }
         const auto upper = std::upper_bound(
-            _channel_anchor_symbols_buf.begin(),
-            _channel_anchor_symbols_buf.end(),
+            ctx.channel_anchor_symbols.begin(),
+            ctx.channel_anchor_symbols.end(),
             actual_symbol);
-        if (upper == _channel_anchor_symbols_buf.begin()) {
+        if (upper == ctx.channel_anchor_symbols.begin()) {
             return fallback_H;
         }
-        if (upper == _channel_anchor_symbols_buf.end()) {
-            return _channel_anchor_h_bufs.back();
+        if (upper == ctx.channel_anchor_symbols.end()) {
+            return ctx.channel_anchor_h.back();
         }
         const size_t hi = static_cast<size_t>(
-            std::distance(_channel_anchor_symbols_buf.begin(), upper));
+            std::distance(ctx.channel_anchor_symbols.begin(), upper));
         const size_t lo = hi - 1;
-        const int x0 = _channel_anchor_symbols_buf[lo];
-        const int x1 = _channel_anchor_symbols_buf[hi];
+        const int x0 = ctx.channel_anchor_symbols[lo];
+        const int x1 = ctx.channel_anchor_symbols[hi];
         const float denom = static_cast<float>(x1 - x0);
         const float t = (denom > 0.0f)
             ? (static_cast<float>(actual_symbol - x0) / denom)
             : 0.0f;
-        const auto& h0 = _channel_anchor_h_bufs[lo];
-        const auto& h1 = _channel_anchor_h_bufs[hi];
-        _midframe_interp_h_buf.resize(h0.size());
+        const auto& h0 = ctx.channel_anchor_h[lo];
+        const auto& h1 = ctx.channel_anchor_h[hi];
+        ctx.midframe_interp_h.resize(h0.size());
         #pragma omp simd simdlen(16)
         for (size_t j = 0; j < h0.size(); ++j) {
-            _midframe_interp_h_buf[j] = h0[j] * (1.0f - t) + h1[j] * t;
+            ctx.midframe_interp_h[j] = h0[j] * (1.0f - t) + h1[j] * t;
         }
-        return _midframe_interp_h_buf;
+        return ctx.midframe_interp_h;
     }
 
     bool _fit_symbol_pilot_phase(
+        CpuDemodWorkerContext& ctx,
         const AlignedVector& symbol,
         const AlignedVector& H_base,
         float& beta_out,
         float& alpha_out
     ) {
-        _tracking_pilot_indices_buf.clear();
-        _tracking_phase_buf.clear();
-        _tracking_weights_buf.clear();
+        ctx.tracking_pilot_indices.clear();
+        ctx.tracking_phase.clear();
+        ctx.tracking_weights.clear();
 
         const float denom_floor = static_cast<float>(cfg_.downlink.equalizer.equalizer_mag_floor);
         const float min_weight = static_cast<float>(cfg_.downlink.equalizer.channel_tracking_min_pilot_snr);
@@ -1941,20 +2164,20 @@ private:
                 continue;
             }
 
-            _tracking_pilot_indices_buf.push_back(_actual_subcarrier_indices[k]);
-            _tracking_phase_buf.push_back(std::arg(residual));
-            _tracking_weights_buf.push_back(std::max(denom_power, min_weight));
+            ctx.tracking_pilot_indices.push_back(_actual_subcarrier_indices[k]);
+            ctx.tracking_phase.push_back(std::arg(residual));
+            ctx.tracking_weights.push_back(std::max(denom_power, min_weight));
         }
 
-        if (_tracking_pilot_indices_buf.size() < 2) {
+        if (ctx.tracking_pilot_indices.size() < 2) {
             return false;
         }
 
-        unwrap(_tracking_phase_buf);
+        unwrap(ctx.tracking_phase);
         auto [beta, alpha] = weightedlinearRegression(
-            _tracking_pilot_indices_buf,
-            _tracking_phase_buf,
-            _tracking_weights_buf);
+            ctx.tracking_pilot_indices,
+            ctx.tracking_phase,
+            ctx.tracking_weights);
         if (!std::isfinite(alpha) || !std::isfinite(beta)) {
             return false;
         }
@@ -2575,13 +2798,10 @@ private:
                           << " Hz";
         }
     }
+    // eRTM plans only; the per-worker demod FFT plans are created in
+    // _init_cpu_demod_workers(). Both run in the constructor because FFTW
+    // planning is not thread-safe.
     void prepare_fftw() {
-        fft_input_.resize(cfg_.ofdm.fft_size);
-        fft_output_.resize(cfg_.ofdm.fft_size);
-        fft_plan_ = fftwf_plan_dft_1d(cfg_.ofdm.fft_size,
-            reinterpret_cast<fftwf_complex*>(fft_input_.data()),
-            reinterpret_cast<fftwf_complex*>(fft_output_.data()),
-            FFTW_FORWARD, FFTW_MEASURE);
         if (cfg_.uplink.ertm_to_enable) {
             _ertm_latest_dl_channel.resize(cfg_.ofdm.fft_size);
             _ertm_delay_oversample_factor = std::max<size_t>(1, cfg_.uplink.ertm_delay_oversample_factor);
@@ -2625,25 +2845,6 @@ private:
                 FFTW_BACKWARD,
                 FFTW_MEASURE);
         }
-
-        // Pre-size persistent symbol buffers (data symbols exclude sync and
-        // full-band mid-frame pilot symbols).
-        const size_t data_symbol_count = _data_resource_layout.data_symbol_count;
-        _symbols_buf.resize(data_symbol_count);
-        for (auto& s : _symbols_buf) s.resize(cfg_.ofdm.fft_size);
-        _sync_symbol_freq_buf.resize(cfg_.ofdm.fft_size);
-        _midframe_symbol_freq_bufs.resize(_data_resource_layout.midframe_pilot_symbol_count);
-        for (auto& s : _midframe_symbol_freq_bufs) s.resize(cfg_.ofdm.fft_size);
-        _midframe_tmp_h_buf.resize(cfg_.ofdm.fft_size);
-        _midframe_interp_h_buf.resize(cfg_.ofdm.fft_size);
-        _channel_anchor_h_bufs.reserve(1 + _data_resource_layout.midframe_pilot_symbol_count);
-        _channel_anchor_symbols_buf.reserve(1 + _data_resource_layout.midframe_pilot_symbol_count);
-        _tracking_h_inv_buf.resize(cfg_.ofdm.fft_size);
-        _tracking_pilot_indices_buf.reserve(cfg_.ofdm.pilot_positions.size());
-        _tracking_phase_buf.reserve(cfg_.ofdm.pilot_positions.size());
-        _tracking_weights_buf.reserve(cfg_.ofdm.pilot_positions.size());
-
-        // Note: ChannelEstimator and DelayProcessor now manage their own FFT plans internally
     }
 
     void init_zmq_publishers() {
@@ -2682,24 +2883,6 @@ private:
         }
     }
 
-    void _clear_sensing_queue() {
-        SensingFrame frame;
-        while (sensing_queue_.try_pop(frame)) {
-            _sensing_frame_pool.release(std::move(frame));
-        }
-    }
-
-    void _clear_llr_queue() {
-        LlrFrame frame_llr;
-        while (_data_llr_buffer.try_pop(frame_llr)) {
-            _llr_pool.release(std::move(frame_llr.llr));
-        }
-        LlrFrameI16 frame_llr_i16;
-        while (_data_llr_buffer_i16.try_pop(frame_llr_i16)) {
-            _llr_pool_i16.release(std::move(frame_llr_i16.llr));
-        }
-    }
-
     void _enter_sync_search_state() {
         _sync_generation.fetch_add(1, std::memory_order_acq_rel);
         _sync_in_progress = false;
@@ -2722,10 +2905,16 @@ private:
         if (reset_search_gain && log_agc) {
             LOG_RT_INFO() << "Search RX AGC reset gain to default: " << search_gain_db << " dB";
         }
+        // Only the queues consumed by THIS thread may be drained here:
+        // frame_queue_ and sync_queue_ (process_proc is their sole consumer).
+        // sensing_queue_ and the LLR queues belong to the sensing and
+        // bit-processing consumers; popping them from here would make a second
+        // concurrent consumer on an SPSC ring (double-pop, moved-from frames
+        // polluting the pools). Their consumers already drop frames whose
+        // generation predates the bump above, so stale entries drain naturally
+        // within a few frames.
         _clear_frame_queue();
         sync_queue_.clear();
-        _clear_sensing_queue();
-        _clear_llr_queue();
         state_ = RxState::SYNC_SEARCH;
     }
 
@@ -3236,17 +3425,125 @@ private:
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         radio::set_thread_priority(1, true);
         bind_current_thread_from_ue_downlink_role(cfg_, 1);
-        
+
         using Clock = std::chrono::high_resolution_clock;
-        Clock::time_point frame_start, frame_end;
-        double total_processing_time = 0.0;
-        int frame_count = 0;
-        constexpr int REPORT_INTERVAL = 434;
+        double total_collect_wall_ms = 0.0;
+        double total_launch_wait_ms = 0.0;
+        double total_worker_dsp_ms = 0.0;
+        size_t frame_count = 0;
+        constexpr size_t REPORT_INTERVAL = 434;
+        size_t launch_slot_idx = 0;
+        size_t collect_slot_idx = 0;
         SPSCBackoff sync_backoff;
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+        const bool do_eq_breakdown =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("breakdown_eq");
+        CpuDemodProfile demod_profile;
+
+        _start_cpu_demod_workers();
+
+        auto log_process_load = [&]() {
+            if (frame_count < REPORT_INTERVAL) {
+                return;
+            }
+            const double n = static_cast<double>(frame_count);
+            const double avg_collect = total_collect_wall_ms / n;
+            const double avg_launch_wait = total_launch_wait_ms / n;
+            const double avg_worker_dsp = total_worker_dsp_ms / n;
+            const double frame_duration = cfg_.samples_per_frame() / cfg_.rf_sampling.sample_rate * 1000.0;
+            const double worker_count = static_cast<double>(std::max<size_t>(1, _cpu_demod_slots.size()));
+            // Control-thread load counts only the serial collect stage; the
+            // parallel DSP load is reported separately as worker utilization
+            // (avg worker busy time per frame vs. N workers' frame budget).
+            const double load = frame_duration > 0.0 ? (avg_collect / frame_duration) : 0.0;
+            const double worker_util = frame_duration > 0.0
+                ? (avg_worker_dsp / (frame_duration * worker_count))
+                : 0.0;
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(2)
+                << "[UE CPU demod] Collect wall: " << avg_collect
+                << " ms, launch wait: " << avg_launch_wait
+                << " ms, control-thread load: " << load * 100.0
+                << "%, worker DSP: " << avg_worker_dsp
+                << " ms/frame, worker utilization: " << worker_util * 100.0
+                << "% (" << _cpu_demod_slots.size() << " workers); "
+                << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
+                << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
+                << " Hz; Average CFO: " << _avg_freq_offset << " Hz";
+            if (do_latency_profile) {
+                const LatencySnapshot latency = _take_latency_snapshot_and_reset();
+                oss << "\n";
+                if (latency.count > 0) {
+                    const double ln = static_cast<double>(latency.count);
+                    oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
+                        << "RX frame queue wait:         " << (latency.rx_queue_total_ns / ln) * 1e-6 << " ms\n"
+                        << "Dequeue + FFT/EQ/LLR queue:  " << (latency.demod_total_ns / ln) * 1e-6 << " ms\n"
+                        << "Bit queue + LDPC/UDP out:    " << (latency.bit_total_ns / ln) * 1e-6 << " ms\n"
+                        << "TOTAL E2E (excl. RX wait):   " << (latency.e2e_total_ns / ln) * 1e-6 << " ms\n"
+                        << "Latency sample count:        " << latency.count << "\n";
+                } else {
+                    oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
+                        << "No valid latency samples in this interval.\n";
+                }
+            }
+            LOG_RT_INFO() << oss.str();
+            total_collect_wall_ms = 0.0;
+            total_launch_wait_ms = 0.0;
+            total_worker_dsp_ms = 0.0;
+            frame_count = 0;
+        };
+
+        auto collect_ready_slots = [&](bool blocking) {
+            bool collected = false;
+            while (!_cpu_demod_slots.empty()) {
+                auto& slot = *_cpu_demod_slots[collect_slot_idx];
+                if (slot.pending == 0) {
+                    break;
+                }
+                CpuDemodResult* result = slot.result_queue.consumer_slot();
+                if (result == nullptr) {
+                    if (!blocking) {
+                        break;
+                    }
+                    SPSCBackoff result_backoff;
+                    while (running_.load(std::memory_order_acquire) &&
+                           (result = slot.result_queue.consumer_slot()) == nullptr) {
+                        result_backoff.pause();
+                    }
+                    if (result == nullptr) {
+                        break; // shutting down
+                    }
+                }
+                const auto collect_start = Clock::now();
+                // Profile fields are purely worker-side at this point (the
+                // control stage adds its own times inside _collect below).
+                total_worker_dsp_ms += 1e-3 * (
+                    result->profile.fft_total + result->profile.channel_est_total +
+                    result->profile.cfo_sfo_est_total + result->profile.equalization_total +
+                    result->profile.remodulate_total + result->profile.delay_spectrum_total +
+                    result->profile.llr_total);
+                const bool still_normal = _collect_cpu_demod_result(*result, demod_profile);
+                slot.result_queue.consumer_pop();
+                --slot.pending;
+                total_collect_wall_ms += std::chrono::duration<double, std::milli>(
+                    Clock::now() - collect_start).count();
+                ++frame_count;
+                collected = true;
+                _report_cpu_demod_profile_if_needed(demod_profile, do_eq_breakdown);
+                log_process_load();
+                collect_slot_idx = (collect_slot_idx + 1) % _cpu_demod_slots.size();
+                if (!still_normal || !running_.load(std::memory_order_acquire) ||
+                    state_.load(std::memory_order_acquire) != RxState::NORMAL) {
+                    break;
+                }
+                blocking = false;
+            }
+            return collected;
+        };
 
         while (running_.load()) {
+            collect_ready_slots(false);
             if (state_ == RxState::SYNC_SEARCH) {
                 SyncBatch* sync_batch = sync_queue_.consumer_slot();
                 if (sync_batch == nullptr) {
@@ -3257,56 +3554,82 @@ private:
                 process_sync_data(sync_batch->data, sync_batch->usrp_time_ns);
                 sync_queue_.consumer_pop();
             } else {
-                RxFrame frame = wait_for_frame();
-                if (frame.frame_data.empty()) {
+                if (_cpu_demod_slots.empty()) {
+                    continue;
+                }
+                auto& launch_slot = *_cpu_demod_slots[launch_slot_idx];
+                if (launch_slot.pending >= CpuDemodSlot::kPipelineDepth) {
+                    const auto wait_start = Clock::now();
+                    collect_ready_slots(true);
+                    total_launch_wait_ms += std::chrono::duration<double, std::milli>(
+                        Clock::now() - wait_start).count();
+                    if (!running_.load(std::memory_order_acquire)) {
+                        break;
+                    }
+                    if (launch_slot.pending >= CpuDemodSlot::kPipelineDepth) {
+                        continue;
+                    }
+                }
+                // Wait for the next RX frame, draining finished results in the
+                // meantime so in-flight frames are not stranded when the RX
+                // stream stalls.
+                RxFrame frame;
+                bool have_frame = false;
+                SPSCBackoff frame_backoff;
+                while (running_.load(std::memory_order_acquire) &&
+                       state_.load(std::memory_order_acquire) == RxState::NORMAL) {
+                    if (frame_queue_.try_pop(frame)) {
+                        if (frame.generation !=
+                            _sync_generation.load(std::memory_order_acquire)) {
+                            _rx_frame_pool.release(std::move(frame));
+                            continue;
+                        }
+                        have_frame = true;
+                        break;
+                    }
+                    if (collect_ready_slots(false)) {
+                        frame_backoff.reset();
+                        continue;
+                    }
+                    frame_backoff.pause();
+                }
+                if (!have_frame) {
                     if (!running_.load()) {
                         break;
                     }
                     continue;
                 }
-                frame_start = Clock::now();
                 const int64_t frame_dequeue_time_ns = do_latency_profile ? host_now_ns() : 0;
-                process_ofdm_frame(frame, frame_dequeue_time_ns);
-                // Return frame to pool for reuse
-                _rx_frame_pool.release(std::move(frame));
-                frame_end = Clock::now();
-                double frame_time = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
-                total_processing_time += frame_time;
-                frame_count++;
-
-                if (frame_count >= REPORT_INTERVAL) {
-                    double avg_time = total_processing_time / frame_count;
-                    double frame_duration = cfg_.samples_per_frame() / cfg_.rf_sampling.sample_rate * 1000.0;
-                    double load = avg_time / frame_duration;
-                    std::ostringstream oss;
-                    oss << std::fixed << std::setprecision(2)
-                        << "Average processing time: " << avg_time
-                        << " ms, Load: " << load * 100.0 << "%; "
-                        << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
-                        << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
-                        << " Hz; Average CFO: " << _avg_freq_offset << " Hz";
-                    if (do_latency_profile) {
-                        const LatencySnapshot latency = _take_latency_snapshot_and_reset();
-                        oss << "\n";
-                        if (latency.count > 0) {
-                            const double n = static_cast<double>(latency.count);
-                            oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
-                                << "RX frame queue wait:         " << (latency.rx_queue_total_ns / n) * 1e-6 << " ms\n"
-                                << "Dequeue + FFT/EQ/LLR queue:  " << (latency.demod_total_ns / n) * 1e-6 << " ms\n"
-                                << "Bit queue + LDPC/UDP out:    " << (latency.bit_total_ns / n) * 1e-6 << " ms\n"
-                                << "TOTAL E2E (excl. RX wait):   " << (latency.e2e_total_ns / n) * 1e-6 << " ms\n"
-                                << "Latency sample count:        " << latency.count << "\n";
-                        } else {
-                            oss << "\n---------- Latency (avg per valid frame, ms) ----------\n"
-                                << "No valid latency samples in this interval.\n";
-                        }
+                const float llr_scale_snapshot =
+                    _llr_scale_snapshot.load(std::memory_order_acquire);
+                CpuDemodTask task{
+                    std::move(frame),
+                    frame_dequeue_time_ns,
+                    llr_scale_snapshot,
+                    (_constellation_frame_counter++ % kDebugPublishStride) == 0,
+                };
+                if (spsc_wait_push(launch_slot.task_queue, std::move(task), [this]() {
+                        return !running_.load(std::memory_order_acquire);
+                    })) {
+                    ++launch_slot.pending;
+                    launch_slot_idx = (launch_slot_idx + 1) % _cpu_demod_slots.size();
+                } else {
+                    if (!task.frame.frame_data.empty()) {
+                        _rx_frame_pool.release(std::move(task.frame));
                     }
-                    LOG_RT_INFO() << oss.str();
-                    total_processing_time = 0.0;
-                    frame_count = 0;
                 }
+                collect_ready_slots(false);
             }
         }
+        while (!_cpu_demod_slots.empty() && _cpu_demod_slots[collect_slot_idx]->pending > 0) {
+            collect_ready_slots(true);
+            if (!running_.load(std::memory_order_acquire)) {
+                break;
+            }
+        }
+        _stop_cpu_demod_workers();
+        _report_cpu_demod_profile_if_needed(demod_profile, do_eq_breakdown);
+        log_process_load();
     }
 
     void _publish_uplink_self_channel_debug(const RxFrame& frame) {
@@ -3346,133 +3669,64 @@ private:
         }
     }
 
-    RxFrame wait_for_frame() {
-        SPSCBackoff frame_backoff;
-        while (running_.load()) {
-            if (!running_.load()) {
-                return RxFrame{};
-            }
-            if (state_.load() == RxState::SYNC_SEARCH) {
-                return RxFrame{};
-            }
-
-            RxFrame frame;
-            if (!frame_queue_.try_pop(frame)) {
-                frame_backoff.pause();
-                continue;
-            }
-            frame_backoff.reset();
-            if (frame.generation != _sync_generation.load(std::memory_order_acquire)) {
-                _rx_frame_pool.release(std::move(frame));
-                continue;
-            }
-            return frame;
-        }
-        return RxFrame{};
-    }
-
-    /**
-     * @brief Main OFDM Frame Processing Pipeline.
-     * 
-     * Steps:
-     * 1. FFT: Convert time-domain samples to frequency domain.
-     * 2. Channel Estimation: Use pilot symbols to estimate channel response.
-     * 3. SFO/CFO Estimation: Refine offset estimates.
-     * 4. Equalization: Compensate for channel effects (Zero-Forcing).
-     * 5. Sensing: Extract Micro-Doppler signature and valid range/doppler data.
-     * 6. LLR Calculation: Compute Log-Likelihood Ratios for soft decoding.
-     */
-    void process_ofdm_frame(const RxFrame& frame, int64_t frame_dequeue_time_ns) {
-        // ============== Profiling variables ==============
+    void _run_cpu_demod_task(CpuDemodWorkerContext& ctx, CpuDemodTask&& task, CpuDemodResult& result) {
         using ProfileClock = std::chrono::high_resolution_clock;
-        static double prof_fft_total = 0.0;
-        static double prof_channel_est_total = 0.0;
-        static double prof_cfo_sfo_est_total = 0.0;
-        static double prof_equalization_total = 0.0;
-        static double prof_eq_base_inv_total = 0.0;
-        static double prof_eq_channel_select_total = 0.0;
-        static double prof_eq_symbol_inv_total = 0.0;
-        static double prof_eq_pilot_phase_total = 0.0;
-        static double prof_eq_apply_total = 0.0;
-        static uint64_t prof_eq_data_symbols_total = 0;
-        static uint64_t prof_eq_midframe_channel_symbols_total = 0;
-        static uint64_t prof_eq_symbol_inv_count_total = 0;
-        static uint64_t prof_eq_pilot_phase_attempt_total = 0;
-        static uint64_t prof_eq_pilot_phase_success_total = 0;
-        static double prof_noise_est_total = 0.0;
-        static double prof_remodulate_total = 0.0;
-        static double prof_delay_spectrum_total = 0.0;
-        static double prof_timing_sync_total = 0.0;
-        static double prof_sensing_queue_total = 0.0;
-        static double prof_udp_send_total = 0.0;
-        static double prof_llr_total = 0.0;
-        static int prof_frame_count = 0;
-        constexpr int PROF_REPORT_INTERVAL = 434;
-        const bool do_latency_profile =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
-        // Dedicated switch for the per-symbol equalization channel breakdown
-        // (Eq base H_inv / channel select / symbol H_inv / pilot phase / apply).
-        // Kept separate from "latency" so the heavy per-symbol timers can be
-        // toggled independently of end-to-end latency instrumentation.
-        const bool do_eq_breakdown =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("breakdown_eq");
+        result.frame = std::move(task.frame);
+        result.generation = result.frame.generation;
+        result.frame_dequeue_time_ns = task.frame_dequeue_time_ns;
+        result.debug_frame = task.want_debug_copies;
+        result.dropped = false;
+        result.evm_valid = false;
+        result.has_constellation = false;
+        result.cfo_sfo_estimate_valid = false;
+        result.alpha = 0.0f;
+        result.beta = 0.0f;
+        result.profile.reset();
+        result.profile.frame_count = 1;
+
+        // Stale-generation fast drop: a resync already invalidated this frame.
+        // Skip the DSP but still emit the result token so the per-slot pending
+        // accounting stays gapless; the collector releases the frame.
+        if (result.generation != _sync_generation.load(std::memory_order_acquire)) {
+            result.dropped = true;
+            return;
+        }
+
+        const bool sensing_enabled = static_cast<bool>(_bistatic_sensing_channel);
+        if (sensing_enabled) {
+            result.sense_frame = _sensing_frame_pool.acquire();
+            result.sense_frame.rx_symbols.resize(cfg_.ofdm.num_symbols);
+            result.sense_frame.tx_symbols.resize(cfg_.ofdm.num_symbols);
+            result.has_sensing = true;
+        }
 
         auto prof_step_start = ProfileClock::now();
         auto prof_step_end = prof_step_start;
-        // =================================================
-        
-        const bool sensing_enabled = static_cast<bool>(_bistatic_sensing_channel);
-        SensingFrame sense_frame;
-        if (sensing_enabled) {
-            // Acquire the pooled frame only when bistatic sensing is enabled.
-            sense_frame = _sensing_frame_pool.acquire();
-            sense_frame.rx_symbols.resize(cfg_.ofdm.num_symbols);
-            sense_frame.tx_symbols.resize(cfg_.ofdm.num_symbols);
-        }
-
-        // Reuse persistent buffers instead of allocating one AlignedVector per
-        // symbol every frame. _symbols_buf holds the cfg_.ofdm.num_symbols-1 data
-        // symbols; the sync symbol lands in _sync_symbol_freq_buf.
-        std::vector<AlignedVector>& symbols = _symbols_buf;
-        AlignedVector& sync_symbol_freq = _sync_symbol_freq_buf;
         const size_t scale_n = cfg_.ofdm.fft_size;
         const float scale = 1.0f / sqrtf(static_cast<float>(scale_n));
         size_t pos = 0;
-        prof_step_start = ProfileClock::now();
-        // Per-symbol FFT is intentionally kept (vs. a frame-wide
-        // fftwf_plan_many_dft or new-array execute straight from frame_data):
-        // each fft_size-point transform stays L1/L2 resident (copy -> in-cache
-        // FFT -> fused scale/scatter). A frame-wide batch adds ~3x the memory
-        // traffic, and skipping the input copy changed nothing -- both measured
-        // no faster in sim, so this stage is FFT-compute + scatter bound, not
-        // copy bound.
         for (size_t i = 0; i < cfg_.ofdm.num_symbols; ++i) {
             const bool is_sync = (i == cfg_.ofdm.sync_pos);
             const int data_idx_int = is_sync ? -1 : _data_resource_layout.actual_symbol_to_data_symbol[i];
             std::complex<float>* __restrict__ dst = nullptr;
             if (is_sync) {
-                dst = sync_symbol_freq.data();
+                dst = ctx.sync_symbol_freq.data();
             } else if (data_idx_int >= 0) {
-                dst = symbols[static_cast<size_t>(data_idx_int)].data();
+                dst = ctx.symbols[static_cast<size_t>(data_idx_int)].data();
             } else if (i < _data_resource_layout.midframe_pilot_symbol_to_rank.size()) {
                 const int pilot_rank = _data_resource_layout.midframe_pilot_symbol_to_rank[i];
                 if (pilot_rank >= 0) {
-                    dst = _midframe_symbol_freq_bufs[static_cast<size_t>(pilot_rank)].data();
+                    dst = ctx.midframe_symbol_freqs[static_cast<size_t>(pilot_rank)].data();
                 }
             }
 
-            std::copy(frame.frame_data.begin() + pos + cfg_.ofdm.cp_length,
-                     frame.frame_data.begin() + pos + cfg_.ofdm.cp_length + cfg_.ofdm.fft_size,
-                     fft_input_.begin());
-
-            fftwf_execute(fft_plan_);
-
-            const std::complex<float>* __restrict__ src = fft_output_.data();
+            std::copy(result.frame.frame_data.begin() + pos + cfg_.ofdm.cp_length,
+                      result.frame.frame_data.begin() + pos + cfg_.ofdm.cp_length + cfg_.ofdm.fft_size,
+                      ctx.fft_input.begin());
+            fftwf_execute(ctx.fft_plan);
+            const std::complex<float>* __restrict__ src = ctx.fft_output.data();
             if (sensing_enabled) {
-                // Fuse the rx_symbols copy into the scale pass: write the scaled
-                // sample to both the working slot and the sensing buffer in one
-                // sweep, avoiding a separate full-symbol copy afterwards.
-                std::complex<float>* __restrict__ rx = sense_frame.rx_symbols[i].data();
+                std::complex<float>* __restrict__ rx = result.sense_frame.rx_symbols[i].data();
                 #pragma omp simd
                 for (size_t j = 0; j < scale_n; ++j) {
                     const std::complex<float> v = src[j] * scale;
@@ -3490,89 +3744,372 @@ private:
             pos += cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         }
         prof_step_end = ProfileClock::now();
-        prof_fft_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        result.profile.fft_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
-        // Calculate initial channel response H_est using ChannelEstimator
         prof_step_start = ProfileClock::now();
-        AlignedVector& H_est = _h_est_buf;  // persistent; estimate_from_sync_lmmse resizes it
-        float corrected_impulse_snr_linear_est = 1.0f;
-        _channel_estimator.estimate_from_sync_lmmse(
-            sync_symbol_freq,
+        ctx.channel_estimator.estimate_from_sync_lmmse(
+            ctx.sync_symbol_freq,
             zc_freq_,
-            H_est,
+            result.h_est,
             cfg_.ofdm.cp_length,
-            &corrected_impulse_snr_linear_est);
-        //_channel_estimator.estimate_from_sync_ls(sync_symbol_freq, zc_freq_, H_est);
+            &result.corrected_impulse_snr_linear_est);
 
-        _channel_anchor_symbols_buf.clear();
-        _channel_anchor_h_bufs.clear();
-        _channel_anchor_symbols_buf.push_back(static_cast<int>(cfg_.ofdm.sync_pos));
-        _channel_anchor_h_bufs.push_back(H_est);
-        if (!_midframe_pilot_seqs.empty()) {
-            for (size_t p = 0; p < _data_resource_layout.midframe_pilot_symbols.size(); ++p) {
-                const int actual_sym = _data_resource_layout.midframe_pilot_symbols[p];
-                if (actual_sym < 0 || p >= _midframe_pilot_seqs.size() ||
-                    p >= _midframe_symbol_freq_bufs.size()) {
-                    continue;
-                }
+        // Refill the fixed, pre-sized channel anchors in place (anchor symbol
+        // order is precomputed in _init_cpu_demod_workers; no per-frame
+        // allocation).
+        for (size_t a = 0; a < ctx.channel_anchor_symbols.size(); ++a) {
+            const int source = ctx.channel_anchor_source[a];
+            if (source < 0) {
+                std::copy(result.h_est.begin(), result.h_est.end(),
+                          ctx.channel_anchor_h[a].begin());
+            } else {
                 _estimate_midframe_pilot_ls(
-                    _midframe_symbol_freq_bufs[p],
-                    _midframe_pilot_seqs[p],
-                    _midframe_tmp_h_buf);
-                const auto insert_at = std::lower_bound(
-                    _channel_anchor_symbols_buf.begin(),
-                    _channel_anchor_symbols_buf.end(),
-                    actual_sym);
-                const size_t offset = static_cast<size_t>(
-                    std::distance(_channel_anchor_symbols_buf.begin(), insert_at));
-                _channel_anchor_symbols_buf.insert(insert_at, actual_sym);
-                _channel_anchor_h_bufs.insert(
-                    _channel_anchor_h_bufs.begin() + static_cast<std::ptrdiff_t>(offset),
-                    _midframe_tmp_h_buf);
+                    ctx.midframe_symbol_freqs[static_cast<size_t>(source)],
+                    _midframe_pilot_seqs[static_cast<size_t>(source)],
+                    ctx.channel_anchor_h[a]);
             }
         }
-
         prof_step_end = ProfileClock::now();
-        prof_channel_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        result.profile.channel_est_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
-        // Estimate frequency offset using FrequencyOffsetEstimator
         prof_step_start = ProfileClock::now();
-        std::vector<int>& pilot_indices = _pilot_indices_buf;          // persistent scratch
-        std::vector<float>& avg_phase_diff = _avg_phase_diff_buf;      // persistent scratch
-        std::vector<float>& weights = _weights_buf;                    // persistent scratch
-        bool cfo_sfo_estimate_valid = FrequencyOffsetEstimator::compute_pilot_phase_diff(
-            symbols,
+        result.cfo_sfo_estimate_valid = FrequencyOffsetEstimator::compute_pilot_phase_diff(
+            ctx.symbols,
             cfg_.ofdm.pilot_positions,
             cfg_.ofdm.fft_size,
             cfg_.ofdm.sync_pos,
-            pilot_indices,
-            avg_phase_diff,
-            weights,
+            ctx.pilot_indices,
+            ctx.avg_phase_diff,
+            ctx.weights,
             &_data_resource_layout.data_symbol_to_actual_symbol,
             &_cfo_symbol_skip_mask);
-        
-        // Phase unwrapping with SIMD optimization
-        float beta = 0.0f;
-        float alpha = 0.0f;
-        if (cfo_sfo_estimate_valid) {
-            unwrap(avg_phase_diff);
-            std::tie(beta, alpha) = weightedlinearRegression(pilot_indices, avg_phase_diff, weights);
-            cfo_sfo_estimate_valid = std::isfinite(beta) && std::isfinite(alpha);
+        if (result.cfo_sfo_estimate_valid) {
+            unwrap(ctx.avg_phase_diff);
+            std::tie(result.beta, result.alpha) =
+                weightedlinearRegression(ctx.pilot_indices, ctx.avg_phase_diff, ctx.weights);
+            result.cfo_sfo_estimate_valid =
+                std::isfinite(result.beta) && std::isfinite(result.alpha);
+        }
+        result.detected_freq_offset = FrequencyOffsetEstimator::alpha_to_cfo(
+            result.alpha, cfg_.ofdm.fft_size, cfg_.ofdm.cp_length, cfg_.rf_sampling.sample_rate);
+        prof_step_end = ProfileClock::now();
+        result.profile.cfo_sfo_est_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
+
+        prof_step_start = ProfileClock::now();
+        double prof_eq_base_inv_us = 0.0;
+        double prof_eq_channel_select_us = 0.0;
+        double prof_eq_symbol_inv_us = 0.0;
+        double prof_eq_pilot_phase_us = 0.0;
+        double prof_eq_apply_us = 0.0;
+        uint64_t prof_eq_data_symbols = 0;
+        uint64_t prof_eq_midframe_channel_symbols = 0;
+        uint64_t prof_eq_symbol_inv_count = 0;
+        uint64_t prof_eq_pilot_phase_attempt = 0;
+        uint64_t prof_eq_pilot_phase_success = 0;
+        const bool do_eq_breakdown =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("breakdown_eq");
+        const auto eq_tick = [do_eq_breakdown]() {
+            return do_eq_breakdown ? ProfileClock::now() : ProfileClock::time_point{};
+        };
+        const auto eq_accum = [do_eq_breakdown](double& acc,
+                                                 ProfileClock::time_point t0,
+                                                 ProfileClock::time_point t1) {
+            if (do_eq_breakdown) {
+                acc += std::chrono::duration<double, std::micro>(t1 - t0).count();
+            }
+        };
+        const double equalized_noise_var = noise_variance_from_snr_linear(
+            std::max<double>(result.corrected_impulse_snr_linear_est, 1e-6));
+        const double equalizer_noise_var_fallback =
+            equalized_noise_var * _average_channel_power(result.h_est);
+        const double equalizer_noise_var_est = (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse)
+            ? _estimate_equalizer_noise_var_from_pilots(
+                ctx,
+                ctx.symbols,
+                result.h_est,
+                result.alpha,
+                result.beta,
+                equalizer_noise_var_fallback)
+            : 0.0;
+        const float equalizer_noise_var = (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse)
+            ? static_cast<float>(equalizer_noise_var_est)
+            : 0.0f;
+
+        bool last_anchor_H_inv_valid = false;
+        auto prof_eq_sub_start = eq_tick();
+        _compute_channel_inverse(result.h_est, ctx.h_inv, equalizer_noise_var);
+        auto prof_eq_sub_end = eq_tick();
+        eq_accum(prof_eq_base_inv_us, prof_eq_sub_start, prof_eq_sub_end);
+        const bool use_symbol_tracking =
+            cfg_.downlink.equalizer.channel_tracking_mode != kChannelTrackingModeOff &&
+            !cfg_.ofdm.pilot_positions.empty();
+        for (size_t i = 0; i < ctx.symbols.size(); ++i) {
+            ++prof_eq_data_symbols;
+            auto& symbol = ctx.symbols[i];
+            const int actual_symbol = _data_resource_layout.data_symbol_to_actual_symbol[i];
+            prof_eq_sub_start = eq_tick();
+            const AlignedVector& symbol_H_base =
+                _interpolated_channel_for_symbol(ctx, actual_symbol, result.h_est);
+            prof_eq_sub_end = eq_tick();
+            eq_accum(prof_eq_channel_select_us, prof_eq_sub_start, prof_eq_sub_end);
+
+            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.ofdm.sync_pos);
+            const bool using_midframe_channel = (&symbol_H_base != &result.h_est);
+            if (using_midframe_channel) {
+                ++prof_eq_midframe_channel_symbols;
+            }
+            float phase_diff_CFO = using_midframe_channel ? 0.0f : (result.alpha * relative_symbol_index);
+            float beta_rel = using_midframe_channel ? 0.0f : (result.beta * relative_symbol_index);
+            const AlignedVector* symbol_H_inv = &ctx.h_inv;
+            const bool using_last_anchor_channel =
+                using_midframe_channel &&
+                !ctx.channel_anchor_h.empty() &&
+                (&symbol_H_base == &ctx.channel_anchor_h.back());
+            if (&symbol_H_base != &result.h_est) {
+                if (using_last_anchor_channel) {
+                    if (!last_anchor_H_inv_valid) {
+                        ++prof_eq_symbol_inv_count;
+                        prof_eq_sub_start = eq_tick();
+                        _compute_channel_inverse(symbol_H_base, ctx.last_anchor_h_inv, equalizer_noise_var);
+                        prof_eq_sub_end = eq_tick();
+                        eq_accum(prof_eq_symbol_inv_us, prof_eq_sub_start, prof_eq_sub_end);
+                        last_anchor_H_inv_valid = true;
+                    }
+                    symbol_H_inv = &ctx.last_anchor_h_inv;
+                } else {
+                    ++prof_eq_symbol_inv_count;
+                    prof_eq_sub_start = eq_tick();
+                    _compute_channel_inverse(symbol_H_base, ctx.tracking_h_inv, equalizer_noise_var);
+                    prof_eq_sub_end = eq_tick();
+                    eq_accum(prof_eq_symbol_inv_us, prof_eq_sub_start, prof_eq_sub_end);
+                    symbol_H_inv = &ctx.tracking_h_inv;
+                }
+            }
+            if (use_symbol_tracking) {
+                float tracked_beta = 0.0f;
+                float tracked_alpha = 0.0f;
+                ++prof_eq_pilot_phase_attempt;
+                prof_eq_sub_start = eq_tick();
+                if (_fit_symbol_pilot_phase(ctx, symbol, symbol_H_base, tracked_beta, tracked_alpha)) {
+                    ++prof_eq_pilot_phase_success;
+                    phase_diff_CFO = tracked_alpha;
+                    beta_rel = tracked_beta;
+                }
+                prof_eq_sub_end = eq_tick();
+                eq_accum(prof_eq_pilot_phase_us, prof_eq_sub_start, prof_eq_sub_end);
+            }
+            prof_eq_sub_start = eq_tick();
+            ChannelEstimator::equalize_symbol(
+                symbol,
+                *symbol_H_inv,
+                phase_diff_CFO,
+                beta_rel,
+                _actual_subcarrier_indices);
+            prof_eq_sub_end = eq_tick();
+            eq_accum(prof_eq_apply_us, prof_eq_sub_start, prof_eq_sub_end);
         }
         prof_step_end = ProfileClock::now();
-        prof_cfo_sfo_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        
-        // Convert alpha to CFO
-        float detected_freq_offset = FrequencyOffsetEstimator::alpha_to_cfo(
-            alpha, cfg_.ofdm.fft_size, cfg_.ofdm.cp_length, cfg_.rf_sampling.sample_rate
-        );
+        result.profile.equalization_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
+        result.profile.eq_base_inv_total += prof_eq_base_inv_us;
+        result.profile.eq_channel_select_total += prof_eq_channel_select_us;
+        result.profile.eq_symbol_inv_total += prof_eq_symbol_inv_us;
+        result.profile.eq_pilot_phase_total += prof_eq_pilot_phase_us;
+        result.profile.eq_apply_total += prof_eq_apply_us;
+        result.profile.eq_data_symbols_total += prof_eq_data_symbols;
+        result.profile.eq_midframe_channel_symbols_total += prof_eq_midframe_channel_symbols;
+        result.profile.eq_symbol_inv_count_total += prof_eq_symbol_inv_count;
+        result.profile.eq_pilot_phase_attempt_total += prof_eq_pilot_phase_attempt;
+        result.profile.eq_pilot_phase_success_total += prof_eq_pilot_phase_success;
+
+        prof_step_start = ProfileClock::now();
+        if (sensing_enabled) {
+            for (size_t i = 0; i < cfg_.ofdm.num_symbols; ++i) {
+                if (is_zc_sync_symbol(cfg_, i)) {
+                    result.sense_frame.tx_symbols[i] = zc_freq_;
+                } else if (is_cfo_training_symbol(cfg_, i)) {
+                    result.sense_frame.tx_symbols[i] = _cfo_training_seq;
+                } else if (i < _data_resource_layout.midframe_pilot_symbol_to_rank.size() &&
+                           _data_resource_layout.midframe_pilot_symbol_to_rank[i] >= 0) {
+                    const size_t pilot_rank = static_cast<size_t>(
+                        _data_resource_layout.midframe_pilot_symbol_to_rank[i]);
+                    if (pilot_rank < _midframe_pilot_seqs.size()) {
+                        result.sense_frame.tx_symbols[i] = _midframe_pilot_seqs[pilot_rank];
+                    }
+                } else {
+                    const int symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
+                    if (symbol_idx_int < 0) {
+                        continue;
+                    }
+                    const size_t symbol_idx = static_cast<size_t>(symbol_idx_int);
+                    QPSKModulator::remodulate_symbol(
+                        ctx.symbols[symbol_idx],
+                        zc_freq_,
+                        cfg_.ofdm.pilot_positions,
+                        result.sense_frame.tx_symbols[i]);
+                    const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[symbol_idx];
+                    for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
+                        const size_t flat_idx = non_pilot_base + di;
+                        if (_data_resource_layout.sensing_pilot_mask[flat_idx] == 0) {
+                            continue;
+                        }
+                        const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
+                        result.sense_frame.tx_symbols[i][k] = sensing_pilot_freq_[k];
+                    }
+                }
+            }
+        }
+        prof_step_end = ProfileClock::now();
+        result.profile.remodulate_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
+
+        prof_step_start = ProfileClock::now();
+        ctx.delay_processor.compute_delay_spectrum(result.h_est, result.delay_spectrum);
+        DelayProcessor::find_peak(
+            result.delay_spectrum,
+            result.delay_max_index,
+            result.delay_max_mag,
+            result.delay_average_mag,
+            cfg_.ofdm.cp_length);
+        result.adjusted_delay_index =
+            DelayProcessor::adjust_delay_index(result.delay_max_index, cfg_.ofdm.fft_size);
+        result.fractional_delay =
+            DelayProcessor::estimate_fractional_delay(result.delay_spectrum, result.delay_max_index);
+        prof_step_end = ProfileClock::now();
+        result.profile.delay_spectrum_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
+
+        prof_step_start = ProfileClock::now();
+        const float scale_llr = std::min(task.llr_scale_snapshot * static_cast<float>(M_SQRT1_2), 500.0f);
+        if (_measurement_enabled &&
+            _measurement_active_epoch_id.load(std::memory_order_relaxed) != 0) {
+            // Stats only; recording happens on the control thread right after
+            // it updates the matching per-frame SNR (avoids the cross-thread
+            // read of non-atomic _snr_db and keeps SNR/EVM pairing per-frame).
+            result.evm = _compute_frame_evm_stats(ctx.symbols);
+            result.evm_valid = true;
+        }
+        if (_data_resource_layout.payload_re_count > 0) {
+            if (_ldpc_fixed_point) {
+                const float scale_llr_q =
+                    scale_llr * static_cast<float>(cfg_.ldpc.fixed_point_scale);
+                result.llr_i16 = _llr_pool_i16.acquire();
+                int16_t* __restrict__ llr_ptr = result.llr_i16.data();
+                for (size_t sym_idx = 0; sym_idx < ctx.symbols.size(); ++sym_idx) {
+                    const auto* __restrict__ sym_ptr = ctx.symbols[sym_idx].data();
+                    const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
+                    const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+                    size_t llr_offset = payload_begin * 2;
+                    for (size_t idx = payload_begin; idx < payload_end; ++idx) {
+                        const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                        llr_ptr[llr_offset++] = sat16_llr(sym_ptr[k].real() * scale_llr_q);
+                        llr_ptr[llr_offset++] = sat16_llr(sym_ptr[k].imag() * scale_llr_q);
+                    }
+                }
+                result.has_llr_i16 = true;
+            } else {
+                result.llr = _llr_pool.acquire();
+                float* __restrict__ llr_ptr = result.llr.data();
+                for (size_t sym_idx = 0; sym_idx < ctx.symbols.size(); ++sym_idx) {
+                    const auto* __restrict__ sym_ptr = ctx.symbols[sym_idx].data();
+                    const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
+                    const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+                    size_t llr_offset = payload_begin * 2;
+                    for (size_t idx = payload_begin; idx < payload_end; ++idx) {
+                        const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                        llr_ptr[llr_offset++] = sym_ptr[k].real() * scale_llr;
+                        llr_ptr[llr_offset++] = sym_ptr[k].imag() * scale_llr;
+                    }
+                }
+                result.has_llr_float = true;
+            }
+        }
+        prof_step_end = ProfileClock::now();
+        result.profile.llr_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
+
+        if (task.want_debug_copies && !ctx.symbols.empty()) {
+            const AlignedVector& last_symbol = ctx.symbols.back();
+            std::copy(last_symbol.begin(), last_symbol.end(),
+                      result.constellation_symbol.begin());
+            result.has_constellation = true;
+        }
+    }
+
+    // Returns pooled objects held by a result to their pools. The result's
+    // pre-sized slot buffers (h_est / delay_spectrum / constellation_symbol)
+    // are left untouched so the ring slot keeps its capacity.
+    void _release_cpu_demod_result(CpuDemodResult& result) {
+        if (!result.frame.frame_data.empty()) {
+            _rx_frame_pool.release(std::move(result.frame));
+        }
+        if (result.has_sensing) {
+            _sensing_frame_pool.release(std::move(result.sense_frame));
+            result.has_sensing = false;
+        }
+        if (result.has_llr_float) {
+            _llr_pool.release(std::move(result.llr));
+            result.has_llr_float = false;
+        }
+        if (result.has_llr_i16) {
+            _llr_pool_i16.release(std::move(result.llr_i16));
+            result.has_llr_i16 = false;
+        }
+    }
+
+    void _merge_cpu_demod_profile(CpuDemodProfile& acc, const CpuDemodProfile& src) {
+        acc.fft_total += src.fft_total;
+        acc.channel_est_total += src.channel_est_total;
+        acc.cfo_sfo_est_total += src.cfo_sfo_est_total;
+        acc.equalization_total += src.equalization_total;
+        acc.eq_base_inv_total += src.eq_base_inv_total;
+        acc.eq_channel_select_total += src.eq_channel_select_total;
+        acc.eq_symbol_inv_total += src.eq_symbol_inv_total;
+        acc.eq_pilot_phase_total += src.eq_pilot_phase_total;
+        acc.eq_apply_total += src.eq_apply_total;
+        acc.eq_data_symbols_total += src.eq_data_symbols_total;
+        acc.eq_midframe_channel_symbols_total += src.eq_midframe_channel_symbols_total;
+        acc.eq_symbol_inv_count_total += src.eq_symbol_inv_count_total;
+        acc.eq_pilot_phase_attempt_total += src.eq_pilot_phase_attempt_total;
+        acc.eq_pilot_phase_success_total += src.eq_pilot_phase_success_total;
+        acc.noise_est_total += src.noise_est_total;
+        acc.remodulate_total += src.remodulate_total;
+        acc.delay_spectrum_total += src.delay_spectrum_total;
+        acc.timing_sync_total += src.timing_sync_total;
+        acc.sensing_queue_total += src.sensing_queue_total;
+        acc.udp_send_total += src.udp_send_total;
+        acc.llr_total += src.llr_total;
+        acc.frame_count += src.frame_count;
+    }
+
+    bool _collect_cpu_demod_result(CpuDemodResult& result, CpuDemodProfile& prof_acc) {
+        using ProfileClock = std::chrono::high_resolution_clock;
+        if (result.dropped ||
+            result.generation != _sync_generation.load(std::memory_order_acquire)) {
+            _release_cpu_demod_result(result);
+            return true;
+        }
+
+        auto prof_step_start = ProfileClock::now();
+        auto prof_step_end = prof_step_start;
+        const bool do_latency_profile =
+            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+        const RxFrame& frame = result.frame;
+        const bool allow_freq_adjust = _control_time_gates.allow_freq_adjust(frame.usrp_time_ns);
+        bool issued_freq_adjust = false;
+        bool cfo_observation_valid = result.cfo_sfo_estimate_valid;
+        if (cfo_observation_valid && !allow_freq_adjust) {
+            cfo_observation_valid = false;
+        }
         const double tune_system_cfo_hz = rx_tune_system_cfo_hz(
             cfg_.downlink.center_freq,
             current_rx_tune_.actual_rf_freq,
-            current_rx_tune_.actual_dsp_freq
-        );
+            current_rx_tune_.actual_dsp_freq);
         const double clock_error_hz =
-            static_cast<double>(detected_freq_offset) - tune_system_cfo_hz;
+            static_cast<double>(result.detected_freq_offset) - tune_system_cfo_hz;
         const double raw_error_ppm =
             (std::abs(cfg_.downlink.center_freq) > 0.0)
                 ? (clock_error_hz / cfg_.downlink.center_freq * 1e6)
@@ -3580,16 +4117,7 @@ private:
         bool vofa_debug_valid = false;
         float vofa_raw_error_ppm = 0.0f;
         float vofa_filtered_error_ppm = 0.0f;
-        const bool allow_reset = _control_time_gates.allow_reset(frame.usrp_time_ns);
-        const bool allow_alignment = _control_time_gates.allow_alignment(frame.usrp_time_ns);
-        const bool allow_freq_adjust = _control_time_gates.allow_freq_adjust(frame.usrp_time_ns);
-        const bool allow_rx_gain_adjust = _control_time_gates.allow_rx_gain_adjust(frame.usrp_time_ns);
-        const bool log_agc = cfg_.should_profile("agc");
-        bool issued_alignment = false;
-        bool issued_freq_adjust = false;
-        bool issued_rx_gain_adjust = false;
-
-        if (cfg_.sync_tracking.hardware_sync && cfo_sfo_estimate_valid) {
+        if (cfg_.sync_tracking.hardware_sync && cfo_observation_valid) {
             const auto akf_result = _akf.update(raw_error_ppm);
             const double control_error_ppm = cfg_.sync_tracking.akf_enable
                 ? akf_result.filtered_error_ppm
@@ -3600,29 +4128,26 @@ private:
             ++_ocxo_update_counter;
             if (_ocxo_update_counter >= 434) {
                 _ocxo_update_counter = 0;
-                const double applied_delta_ppm = _hw_sync->update_ocxo_pi_with_error_ppm(control_error_ppm);
+                const double applied_delta_ppm =
+                    _hw_sync->update_ocxo_pi_with_error_ppm(control_error_ppm);
                 _akf.notify_control_action(applied_delta_ppm);
             }
         }
-
-        // Frequency offset correction
-        if (cfo_sfo_estimate_valid) {
-            _freq_offset_sum += detected_freq_offset;
+        if (cfo_observation_valid) {
+            _freq_offset_sum += result.detected_freq_offset;
             _freq_offset_count++;
-            if (_freq_offset_count>=434) {
+            if (_freq_offset_count >= 434) {
                 _avg_freq_offset = _freq_offset_sum / _freq_offset_count;
-                _freq_offset_sum = 0.0f;
+                _freq_offset_sum = 0.0;
                 _freq_offset_count = 0;
-                if(abs(_avg_freq_offset) > 2.0f)
-                {
-                    if (cfg_.sync_tracking.software_sync && allow_freq_adjust){
-                        LOG_RT_INFO() << "Adjusting RX frequency by: " << _avg_freq_offset << " Hz";
-                        adjust_rx_freq(-_avg_freq_offset, false);
-                        issued_freq_adjust = true;
-                    }
+                if (std::abs(_avg_freq_offset) > 2.0f &&
+                    cfg_.sync_tracking.software_sync && allow_freq_adjust) {
+                    LOG_RT_INFO() << "Adjusting RX frequency by: " << _avg_freq_offset << " Hz";
+                    adjust_rx_freq(-_avg_freq_offset, false);
+                    issued_freq_adjust = true;
                 }
             }
-        } else {
+        } else if (!result.cfo_sfo_estimate_valid) {
             LOG_RT_WARN_HZ(2) << "Skipping CFO/SFO update: no clean adjacent downlink pilot-symbol pairs";
         }
         if (issued_freq_adjust) {
@@ -3636,229 +4161,36 @@ private:
             };
             vofa_debug_sender_->send_channels(channels);
         }
-
-        prof_step_start = ProfileClock::now();
-        double prof_eq_base_inv_us = 0.0;
-        double prof_eq_channel_select_us = 0.0;
-        double prof_eq_symbol_inv_us = 0.0;
-        double prof_eq_pilot_phase_us = 0.0;
-        double prof_eq_apply_us = 0.0;
-        uint64_t prof_eq_data_symbols = 0;
-        uint64_t prof_eq_midframe_channel_symbols = 0;
-        uint64_t prof_eq_symbol_inv_count = 0;
-        uint64_t prof_eq_pilot_phase_attempt = 0;
-        uint64_t prof_eq_pilot_phase_success = 0;
-        const double equalized_noise_var = noise_variance_from_snr_linear(
-            std::max<double>(corrected_impulse_snr_linear_est, 1e-6));
-        const double equalizer_noise_var_fallback =
-            equalized_noise_var * _average_channel_power(H_est);
-        const double equalizer_noise_var_est = (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse)
-            ? _estimate_equalizer_noise_var_from_pilots(
-                symbols,
-                H_est,
-                alpha,
-                beta,
-                equalizer_noise_var_fallback)
-            : 0.0;
-        const float equalizer_noise_var = (cfg_.downlink.equalizer.equalizer_mode == kEqualizerModeMmse)
-            ? static_cast<float>(equalizer_noise_var_est)
-            : 0.0f;
-
-        // Fine-grained equalization sub-timers add several ProfileClock::now()
-        // calls per data symbol (hundreds per frame) to this hot loop. Gate them
-        // behind the breakdown_eq switch so production runs (profiling off) pay
-        // nothing; the coarse per-stage Equalization timer above still always runs.
-        const auto eq_tick = [do_eq_breakdown]() {
-            return do_eq_breakdown ? ProfileClock::now() : ProfileClock::time_point{};
-        };
-        const auto eq_accum = [do_eq_breakdown](double& acc,
-                                                   ProfileClock::time_point t0,
-                                                   ProfileClock::time_point t1) {
-            if (do_eq_breakdown) {
-                acc += std::chrono::duration<double, std::micro>(t1 - t0).count();
-            }
-        };
-
-        // Pre-compute a fallback channel inverse. Mid-frame full-band pilots
-        // provide additional time anchors and may replace this per symbol.
-        static thread_local AlignedVector H_inv;
-        static thread_local AlignedVector last_anchor_H_inv;
-        bool last_anchor_H_inv_valid = false;
-        auto prof_eq_sub_start = eq_tick();
-        _compute_channel_inverse(H_est, H_inv, equalizer_noise_var);
-        auto prof_eq_sub_end = eq_tick();
-        eq_accum(prof_eq_base_inv_us, prof_eq_sub_start, prof_eq_sub_end);
-        const bool use_symbol_tracking =
-            cfg_.downlink.equalizer.channel_tracking_mode != kChannelTrackingModeOff &&
-            !cfg_.ofdm.pilot_positions.empty();
-
-        for (size_t i = 0; i < symbols.size(); ++i) {
-            ++prof_eq_data_symbols;
-            auto& symbol = symbols[i];
-            const int actual_symbol = _data_resource_layout.data_symbol_to_actual_symbol[i];
-            prof_eq_sub_start = eq_tick();
-            const AlignedVector& symbol_H_base =
-                _interpolated_channel_for_symbol(actual_symbol, H_est);
-            prof_eq_sub_end = eq_tick();
-            eq_accum(prof_eq_channel_select_us, prof_eq_sub_start, prof_eq_sub_end);
-
-            const int relative_symbol_index = actual_symbol - static_cast<int>(cfg_.ofdm.sync_pos);
-            const bool using_midframe_channel = (&symbol_H_base != &H_est);
-            if (using_midframe_channel) {
-                ++prof_eq_midframe_channel_symbols;
-            }
-            float phase_diff_CFO = using_midframe_channel ? 0.0f : (alpha * relative_symbol_index);
-            float beta_rel = using_midframe_channel ? 0.0f : (beta * relative_symbol_index);
-            const AlignedVector* symbol_H_inv = &H_inv;
-            const bool using_last_anchor_channel =
-                using_midframe_channel &&
-                !_channel_anchor_h_bufs.empty() &&
-                (&symbol_H_base == &_channel_anchor_h_bufs.back());
-            if (&symbol_H_base != &H_est) {
-                if (using_last_anchor_channel) {
-                    if (!last_anchor_H_inv_valid) {
-                        ++prof_eq_symbol_inv_count;
-                        prof_eq_sub_start = eq_tick();
-                        _compute_channel_inverse(symbol_H_base, last_anchor_H_inv, equalizer_noise_var);
-                        prof_eq_sub_end = eq_tick();
-                        eq_accum(prof_eq_symbol_inv_us, prof_eq_sub_start, prof_eq_sub_end);
-                        last_anchor_H_inv_valid = true;
-                    }
-                    symbol_H_inv = &last_anchor_H_inv;
-                } else {
-                    ++prof_eq_symbol_inv_count;
-                    prof_eq_sub_start = eq_tick();
-                    _compute_channel_inverse(symbol_H_base, _tracking_h_inv_buf, equalizer_noise_var);
-                    prof_eq_sub_end = eq_tick();
-                    eq_accum(prof_eq_symbol_inv_us, prof_eq_sub_start, prof_eq_sub_end);
-                    symbol_H_inv = &_tracking_h_inv_buf;
-                }
-            }
-
-            if (use_symbol_tracking) {
-                float tracked_beta = 0.0f;
-                float tracked_alpha = 0.0f;
-                ++prof_eq_pilot_phase_attempt;
-                prof_eq_sub_start = eq_tick();
-                if (_fit_symbol_pilot_phase(symbol, symbol_H_base, tracked_beta, tracked_alpha)) {
-                    ++prof_eq_pilot_phase_success;
-                    phase_diff_CFO = tracked_alpha;
-                    beta_rel = tracked_beta;
-                }
-                prof_eq_sub_end = eq_tick();
-                eq_accum(prof_eq_pilot_phase_us, prof_eq_sub_start, prof_eq_sub_end);
-            }
-
-            prof_eq_sub_start = eq_tick();
-            ChannelEstimator::equalize_symbol(
-                symbol,
-                *symbol_H_inv,
-                phase_diff_CFO,
-                beta_rel,
-                _actual_subcarrier_indices);
-            prof_eq_sub_end = eq_tick();
-            eq_accum(prof_eq_apply_us, prof_eq_sub_start, prof_eq_sub_end);
-        }
         prof_step_end = ProfileClock::now();
-        prof_equalization_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        prof_eq_base_inv_total += prof_eq_base_inv_us;
-        prof_eq_channel_select_total += prof_eq_channel_select_us;
-        prof_eq_symbol_inv_total += prof_eq_symbol_inv_us;
-        prof_eq_pilot_phase_total += prof_eq_pilot_phase_us;
-        prof_eq_apply_total += prof_eq_apply_us;
-        prof_eq_data_symbols_total += prof_eq_data_symbols;
-        prof_eq_midframe_channel_symbols_total += prof_eq_midframe_channel_symbols;
-        prof_eq_symbol_inv_count_total += prof_eq_symbol_inv_count;
-        prof_eq_pilot_phase_attempt_total += prof_eq_pilot_phase_attempt;
-        prof_eq_pilot_phase_success_total += prof_eq_pilot_phase_success;
+        result.profile.cfo_sfo_est_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
-        // ================= SNR / LLR Scale Estimation =================
         prof_step_start = ProfileClock::now();
-        _snr_linear = std::max<double>(corrected_impulse_snr_linear_est, 1e-6);
+        _snr_linear = std::max<double>(result.corrected_impulse_snr_linear_est, 1e-6);
         _snr_db = 10.0 * std::log10(_snr_linear);
         const double llr_snr_linear = _update_llr_snr_filter(_snr_linear);
         _noise_var = std::max(noise_variance_from_snr_linear(llr_snr_linear), 1e-6);
         _llr_scale = 4.0 / _noise_var;
-        prof_step_end = ProfileClock::now();
-        prof_noise_est_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        // =====================================================================
-
-        // Remodulate frequency domain symbols using QPSKModulator
-        prof_step_start = ProfileClock::now();
-        
-        if (sensing_enabled) {
-            for (size_t i = 0; i < cfg_.ofdm.num_symbols; ++i) {
-                // Reserved sync symbols always use the original ZC sequence.
-                if (is_zc_sync_symbol(cfg_, i)) {
-                    sense_frame.tx_symbols[i] = zc_freq_;
-                } else if (is_cfo_training_symbol(cfg_, i)) {
-                    sense_frame.tx_symbols[i] = _cfo_training_seq;
-                } else if (i < _data_resource_layout.midframe_pilot_symbol_to_rank.size() &&
-                           _data_resource_layout.midframe_pilot_symbol_to_rank[i] >= 0) {
-                    const size_t pilot_rank = static_cast<size_t>(
-                        _data_resource_layout.midframe_pilot_symbol_to_rank[i]);
-                    if (pilot_rank < _midframe_pilot_seqs.size()) {
-                        sense_frame.tx_symbols[i] = _midframe_pilot_seqs[pilot_rank];
-                    }
-                } else {
-                    // Data symbol remodulation is only needed for bistatic sensing.
-                    const int symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
-                    if (symbol_idx_int < 0) {
-                        continue;
-                    }
-                    const size_t symbol_idx = static_cast<size_t>(symbol_idx_int);
-                    QPSKModulator::remodulate_symbol(
-                        symbols[symbol_idx],
-                        zc_freq_,
-                        cfg_.ofdm.pilot_positions,
-                        sense_frame.tx_symbols[i]
-                    );
-                    const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[symbol_idx];
-                    for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
-                        const size_t flat_idx = non_pilot_base + di;
-                        if (_data_resource_layout.sensing_pilot_mask[flat_idx] == 0) {
-                            continue;
-                        }
-                        const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
-                        sense_frame.tx_symbols[i][k] = sensing_pilot_freq_[k];
-                    }
-                }
-            }
+        _llr_scale_snapshot.store(
+            static_cast<float>(_llr_scale),
+            std::memory_order_release);
+        if (result.evm_valid) {
+            // Recorded here (not in the worker) so the EVM pairs with the SNR
+            // just updated for this same frame and _snr_db stays
+            // control-thread-private.
+            _record_measurement_frame(result.evm);
+            result.evm_valid = false;
         }
         prof_step_end = ProfileClock::now();
-        prof_remodulate_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        
-        // Compute delay spectrum using DelayProcessor
-        prof_step_start = ProfileClock::now();
-        AlignedVector& delay_spectrum = _delay_spectrum_buf;  // persistent; resized inside
-        _delay_processor.compute_delay_spectrum(H_est, delay_spectrum);
-        
-        // Find peak in delay spectrum (search within CP range)
-        size_t max_index = 0;
-        float max_mag = 0.0f;
-        float average_mag = 0.0f;
-        DelayProcessor::find_peak(delay_spectrum, max_index, max_mag, average_mag, cfg_.ofdm.cp_length);
-        
-        // Adjust delay index to signed value
-        int adjusted_index = DelayProcessor::adjust_delay_index(max_index, cfg_.ofdm.fft_size);
+        result.profile.noise_est_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
-        float fractional_delay = DelayProcessor::estimate_fractional_delay(delay_spectrum, max_index);
-        float delay_offset_reading = adjusted_index + fractional_delay;
-        prof_step_end = ProfileClock::now();
-        prof_delay_spectrum_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        
         prof_step_start = ProfileClock::now();
-        sfo_estimator.update(delay_offset_reading, frame.Alignment);
-        auto _sfo_per_frame = sfo_estimator.get_sfo_per_frame();
-
-        // auto sfo_via_estimator = _sfo_per_frame/((cfg_.ofdm.fft_size+cfg_.ofdm.cp_length)*cfg_.ofdm.num_symbols*cfg_.rf_sampling.sample_rate);
-        // auto sfo_via_beta = -beta/((cfg_.ofdm.fft_size+cfg_.ofdm.cp_length)*cfg_.rf_sampling.sample_rate/cfg_.ofdm.fft_size*2*M_PI);
-        // LOG_G_INFO() << "SFO via estimator: " << sfo_via_estimator << std::endl;
-        // LOG_G_INFO() << "SFO via beta: " << sfo_via_beta << std::endl;
-        // LOG_G_INFO() << "ratio:" << sfo_via_beta/sfo_via_estimator <<std::endl;
-        if (_sfo_per_frame != 0.0f) {
-            //LOG_G_INFO() << "SFO Frame: " << _sfo_per_frame << std::endl;
-        }
+        sfo_estimator.update(
+            result.adjusted_delay_index + result.fractional_delay,
+            frame.Alignment);
+        const auto sfo_per_frame = sfo_estimator.get_sfo_per_frame();
+        const float delay_offset = sfo_estimator.get_sensing_delay_offset();
         const size_t sync_symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         const size_t sync_symbol_offset = cfg_.ofdm.sync_pos * sync_symbol_len;
         const std::complex<float>* sync_symbol_td = nullptr;
@@ -3867,25 +4199,31 @@ private:
             sync_symbol_td = frame.frame_data.data() + sync_symbol_offset;
             sync_symbol_td_count = sync_symbol_len;
         }
-        auto delay_offset = sfo_estimator.get_sensing_delay_offset();
+
         int predictive_delay_samples = 0;
         if (cfg_.sync_tracking.predictive_delay) {
             predictive_delay_samples =
                 _predictive_delay_samples_from_cfo(
                     cfg_,
                     frame.usrp_time_ns,
-                    detected_freq_offset,
+                    result.detected_freq_offset,
                     current_rx_tune_.actual_rf_freq,
                     current_rx_tune_.actual_dsp_freq,
                     time_spec_to_ns(radio_time_now()));
         }
-        int delay_index_err =
-            adjusted_index - cfg_.sync_tracking.desired_peak_pos + predictive_delay_samples;
+        const int delay_index_err =
+            result.adjusted_delay_index - cfg_.sync_tracking.desired_peak_pos + predictive_delay_samples;
+        const bool allow_reset = _control_time_gates.allow_reset(frame.usrp_time_ns);
+        const bool allow_alignment = _control_time_gates.allow_alignment(frame.usrp_time_ns);
+        const bool allow_rx_gain_adjust = _control_time_gates.allow_rx_gain_adjust(frame.usrp_time_ns);
+        const bool log_agc = cfg_.should_profile("agc");
+        bool issued_alignment = false;
+        bool issued_rx_gain_adjust = false;
         if (allow_rx_gain_adjust) {
             RxAgcAdjustment agc_adjustment;
             issued_rx_gain_adjust = _rx_agc.maybe_apply_from_delay_peak(
-                max_mag,
-                average_mag,
+                result.delay_max_mag,
+                result.delay_average_mag,
                 sync_symbol_td,
                 sync_symbol_td_count,
                 frame.usrp_time_ns,
@@ -3893,8 +4231,7 @@ private:
                 [this](double gain_db) {
                     dev_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
                 },
-                &agc_adjustment
-            );
+                &agc_adjustment);
             if (issued_rx_gain_adjust && log_agc) {
                 LOG_RT_INFO() << "RX AGC adjusted gain to " << agc_adjustment.next_gain_db
                               << " dB (delta=" << agc_adjustment.delta_db
@@ -3908,257 +4245,332 @@ private:
                               << ", saturation=" << agc_adjustment.saturation_detected << ")";
             }
         }
-        if((max_mag/average_mag < 20.0f || (abs(delay_index_err) > cfg_.sync_tracking.delay_adjust_step+5)) &&
+        if ((result.delay_average_mag > 0.0f) &&
+            (result.delay_max_mag / result.delay_average_mag < 20.0f ||
+             (std::abs(delay_index_err) > cfg_.sync_tracking.delay_adjust_step + 5)) &&
             (cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync) && allow_reset) {
             _reset_count++;
             if (_reset_count >= _reset_hold_frames) {
                 _reset_count = 0;
                 LOG_RT_WARN() << "No valid delay found, resetting state.";
-                adjust_rx_freq(0.0, true); // Reset frequency
-                sfo_estimator.reset(); // Reset SFO estimator
+                adjust_rx_freq(0.0, true);
+                sfo_estimator.reset();
                 _akf.reset();
                 _ocxo_update_counter = 0;
                 if (vofa_debug_sender_) {
                     vofa_debug_sender_->reset_counter();
                 }
                 if (cfg_.sync_tracking.hardware_sync) {
-                    _hw_sync->reset_frequency_control(); // Reset hardware frequency control
+                    _hw_sync->reset_frequency_control();
                     _hw_sync->reset_ocxo_pi_state();
                     LOG_RT_INFO() << "OCXO PI state reset to fast stage after sync reset.";
                 }
                 _enter_sync_search_state();
                 _mute_uplink_tx_gain_for_sync_search();
                 _control_time_gates.mark_reset_now(radio_time_now());
-                return;
+                _release_cpu_demod_result(result);
+                return false;
             }
-        }
-        else
-        {
+        } else {
             _reset_count = 0;
         }
-        if(allow_alignment && _sync_in_progress && frame.Alignment != 0)// Sync command has been executed
-        {
+        if (allow_alignment && _sync_in_progress && frame.Alignment != 0) {
             _sync_in_progress = false;
         }
-        if(abs(delay_index_err) >= cfg_.sync_tracking.delay_adjust_step &&
-            abs(delay_index_err) < cfg_.ofdm.cp_length  &&
-            ( cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync ) &&
+        if (std::abs(delay_index_err) >= cfg_.sync_tracking.delay_adjust_step &&
+            std::abs(delay_index_err) < static_cast<int>(cfg_.ofdm.cp_length) &&
+            (cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync) &&
             !_sync_in_progress &&
-            allow_alignment)
-        {   
+            allow_alignment) {
             if (_delay_adjustment_count++ >= 1) {
                 _delay_adjustment_count = 0;
-                // Residual timing trim while already locked: keep UL waveform enabled.
-                _schedule_receive_alignment(static_cast<int32_t>(delay_index_err)); // Send sync command. May have delay due to FIFO
+                _schedule_receive_alignment(static_cast<int32_t>(delay_index_err));
                 _sync_in_progress = true;
                 issued_alignment = true;
             }
-            if (delay_index_err * _last_delay_index_err < 0){
-                 // If symbol delay direction changes, it indicates jitter, reset counter
+            if (delay_index_err * _last_delay_index_err < 0) {
                 _delay_adjustment_count = 0;
             }
-        }
-        else
-        {
+        } else {
             _delay_adjustment_count = 0;
         }
         _last_delay_index_err = delay_index_err;
-        prof_step_end = ProfileClock::now();
-        prof_timing_sync_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         if (issued_alignment) {
             _control_time_gates.mark_alignment_now(radio_time_now());
         }
         if (issued_rx_gain_adjust) {
             _control_time_gates.mark_rx_gain_adjust_now(radio_time_now());
         }
+        prof_step_end = ProfileClock::now();
+        result.profile.timing_sync_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
         prof_step_start = ProfileClock::now();
-        if (sensing_enabled) {
+        if (result.has_sensing) {
             _record_ertm_absolute_pending_alignment(static_cast<double>(frame.Alignment));
-            sense_frame.CFO = alpha;
-            if (_sfo_per_frame != 0.0f) {
-                sense_frame.SFO = -_sfo_per_frame * (2 * M_PI) / (cfg_.ofdm.fft_size * cfg_.ofdm.num_symbols);
+            result.sense_frame.CFO = result.alpha;
+            if (sfo_per_frame != 0.0f) {
+                result.sense_frame.SFO =
+                    -sfo_per_frame * (2 * M_PI) / (cfg_.ofdm.fft_size * cfg_.ofdm.num_symbols);
             } else {
-                sense_frame.SFO = beta;
+                result.sense_frame.SFO = result.beta;
             }
-            sense_frame.delay_offset = _select_sensing_delay_offset(delay_offset);
-            sense_frame.generation = frame.generation;
-
-            if (!sensing_queue_.try_push(std::move(sense_frame))) {
+            result.sense_frame.delay_offset = _select_sensing_delay_offset(delay_offset);
+            result.sense_frame.generation = frame.generation;
+            if (!sensing_queue_.try_push(std::move(result.sense_frame))) {
                 LOG_RT_WARN_HZ(5) << "Bistatic sensing queue full; dropping newest sensing frame";
-                _sensing_frame_pool.release(std::move(sense_frame));
+                _sensing_frame_pool.release(std::move(result.sense_frame));
             }
+            result.has_sensing = false;
         }
         prof_step_end = ProfileClock::now();
-        prof_sensing_queue_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+        result.profile.sensing_queue_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
-        // Channel response data
         prof_step_start = ProfileClock::now();
-        _store_ertm_downlink_channel_freq(H_est);
-        channel_sender_.add_data(std::move(H_est));
-
-        // PDF data
-        pdf_sender_.add_data(std::move(delay_spectrum));
-
-        // Constellation data. The sender throttles the display to 50ms
-        // (LatestOnly), while frames arrive far faster, so copying the full
-        // last symbol every frame is wasted work. Gate the 8KB copy to every
-        // Nth frame — still well above the display refresh rate.
-        constexpr uint32_t kConstellationStride = 8;
-        if ((_constellation_frame_counter++ % kConstellationStride) == 0) {
-            const size_t last_idx = symbols.size() - 1;
-            auto constellation_copy = symbols[last_idx];
-            constellation_sender_.add_data(std::move(constellation_copy));
+        _store_ertm_downlink_channel_freq(result.h_est);
+        if (result.debug_frame) {
+            // Strided debug publishing (stride chosen at dispatch): the senders
+            // are LatestOnly with a 50 ms pace, so one snapshot every
+            // kDebugPublishStride frames stays well above the display refresh
+            // rate. Copy rather than move so the ring slot's pre-sized buffers
+            // keep their capacity.
+            channel_sender_.add_data(AlignedVector(result.h_est));
+            pdf_sender_.add_data(AlignedVector(result.delay_spectrum));
+            if (result.has_constellation) {
+                constellation_sender_.add_data(AlignedVector(result.constellation_symbol));
+                result.has_constellation = false;
+            }
         }
         _publish_uplink_self_channel_debug(frame);
         prof_step_end = ProfileClock::now();
-        prof_udp_send_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        
-        // Extract selected payload RE to generate compact LLR.
-        prof_step_start = ProfileClock::now();
-        float scale_llr = std::min(static_cast<float>(_llr_scale * M_SQRT1_2), 500.0f);
+        result.profile.udp_send_total += std::chrono::duration<double, std::micro>(
+            prof_step_end - prof_step_start).count();
 
-        if (_measurement_enabled &&
-            _measurement_active_epoch_id.load(std::memory_order_relaxed) != 0) {
-            const FrameEvmStats evm = _compute_frame_evm_stats(symbols);
-            _record_measurement_frame(evm);
-        }
-
-        if (_data_resource_layout.payload_re_count > 0) {
-            if (_ldpc_fixed_point) {
-                // Fused pow2 quantization: write int16 LLRs directly (no extra pass).
-                const float scale_llr_q =
-                    scale_llr * static_cast<float>(cfg_.ldpc.fixed_point_scale);
-                LDPCCodec::AlignedShortVector frame_llr = _llr_pool_i16.acquire();
-                int16_t* __restrict__ llr_ptr = frame_llr.data();
-                for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
-                    const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
-                    const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
-                    const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
-                    size_t llr_offset = payload_begin * 2;
-                    for (size_t idx = payload_begin; idx < payload_end; ++idx) {
-                        const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
-                        llr_ptr[llr_offset++] = sat16_llr(sym_ptr[k].real() * scale_llr_q);
-                        llr_ptr[llr_offset++] = sat16_llr(sym_ptr[k].imag() * scale_llr_q);
-                    }
-                }
-                const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
-                if (!spsc_wait_push(_data_llr_buffer_i16, LlrFrameI16{
-                        std::move(frame_llr),
-                        frame.generation,
-                        frame.host_enqueue_time_ns,
-                        frame_dequeue_time_ns,
-                        demod_done_time_ns,
-                    }, [this]() {
-                        return !_bit_processing_running.load(std::memory_order_acquire);
-                    })) {
-                    _llr_pool_i16.release(std::move(frame_llr));
-                }
-            } else {
-                AlignedFloatVector frame_llr = _llr_pool.acquire();
-                float* __restrict__ llr_ptr = frame_llr.data();
-                for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
-                    const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
-                    const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
-                    const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
-                    size_t llr_offset = payload_begin * 2;
-                    for (size_t idx = payload_begin; idx < payload_end; ++idx) {
-                        const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
-                        llr_ptr[llr_offset++] = sym_ptr[k].real() * scale_llr;
-                        llr_ptr[llr_offset++] = sym_ptr[k].imag() * scale_llr;
-                    }
-                }
-
-                // Put LLR data into circular buffer
-                const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
-                if (!spsc_wait_push(_data_llr_buffer, LlrFrame{
-                        std::move(frame_llr),
-                        frame.generation,
-                        frame.host_enqueue_time_ns,
-                        frame_dequeue_time_ns,
-                        demod_done_time_ns,
-                    }, [this]() {
-                        return !_bit_processing_running.load(std::memory_order_acquire);
-                    })) {
-                    _llr_pool.release(std::move(frame_llr));
-                }
+        const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
+        if (result.has_llr_i16) {
+            if (spsc_wait_push(_data_llr_buffer_i16, LlrFrameI16{
+                    std::move(result.llr_i16),
+                    frame.generation,
+                    frame.host_enqueue_time_ns,
+                    result.frame_dequeue_time_ns,
+                    demod_done_time_ns,
+                }, [this]() {
+                    return !_bit_processing_running.load(std::memory_order_acquire);
+                })) {
+                result.has_llr_i16 = false;
+            }
+        } else if (result.has_llr_float) {
+            if (spsc_wait_push(_data_llr_buffer, LlrFrame{
+                    std::move(result.llr),
+                    frame.generation,
+                    frame.host_enqueue_time_ns,
+                    result.frame_dequeue_time_ns,
+                    demod_done_time_ns,
+                }, [this]() {
+                    return !_bit_processing_running.load(std::memory_order_acquire);
+                })) {
+                result.has_llr_float = false;
             }
         }
-        prof_step_end = ProfileClock::now();
-        prof_llr_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-        
-        // ============== Profiling report ==============
-        prof_frame_count++;
+
         _log_arq_profile_if_due("periodic", arq_now_ms());
-        if (prof_frame_count >= PROF_REPORT_INTERVAL && cfg_.should_profile("demodulation")) {
-            double total = prof_fft_total + prof_channel_est_total + prof_cfo_sfo_est_total + 
-                          prof_equalization_total + prof_noise_est_total + prof_remodulate_total + 
-                          prof_delay_spectrum_total + prof_timing_sync_total + prof_sensing_queue_total + 
-                          prof_udp_send_total + prof_llr_total;
-            const double avg_eq_symbols =
-                static_cast<double>(prof_eq_data_symbols_total) / static_cast<double>(prof_frame_count);
-            const double avg_eq_midframe_symbols =
-                static_cast<double>(prof_eq_midframe_channel_symbols_total) / static_cast<double>(prof_frame_count);
-            const double avg_eq_symbol_inv_count =
-                static_cast<double>(prof_eq_symbol_inv_count_total) / static_cast<double>(prof_frame_count);
-            const double avg_eq_pilot_phase_attempt =
-                static_cast<double>(prof_eq_pilot_phase_attempt_total) / static_cast<double>(prof_frame_count);
-            const double avg_eq_pilot_phase_success =
-                static_cast<double>(prof_eq_pilot_phase_success_total) / static_cast<double>(prof_frame_count);
-            std::ostringstream oss;
-            oss << "\n========== process_ofdm_frame Profiling (avg per frame, us) ==========\n"
-                << "FFT (all symbols):    " << prof_fft_total / prof_frame_count << " us\n"
-                << "Channel Estimation:   " << prof_channel_est_total / prof_frame_count << " us\n"
-                << "CFO/SFO Estimation:   " << prof_cfo_sfo_est_total / prof_frame_count << " us\n"
-                << "Equalization:         " << prof_equalization_total / prof_frame_count << " us\n";
-            // The Eq sub-breakdown is only timed when breakdown_eq is enabled;
-            // skip it otherwise (the per-symbol sub-timers were gated off, so the
-            // buckets would just read 0 us).
-            if (do_eq_breakdown) {
-                oss << "  Eq base H_inv:      " << prof_eq_base_inv_total / prof_frame_count << " us\n"
-                    << "  Eq channel select:  " << prof_eq_channel_select_total / prof_frame_count << " us"
-                    << " (" << avg_eq_midframe_symbols << "/" << avg_eq_symbols << " midframe-H symbols)\n"
-                    << "  Eq symbol H_inv:    " << prof_eq_symbol_inv_total / prof_frame_count << " us"
-                    << " (" << avg_eq_symbol_inv_count << " calls/frame)\n"
-                    << "  Eq pilot phase fit: " << prof_eq_pilot_phase_total / prof_frame_count << " us"
-                    << " (" << avg_eq_pilot_phase_success << "/" << avg_eq_pilot_phase_attempt << " ok/frame)\n"
-                    << "  Eq apply:           " << prof_eq_apply_total / prof_frame_count << " us\n";
+        _merge_cpu_demod_profile(prof_acc, result.profile);
+        // Guard on empty(): a failed push above (bit thread stopping) leaves
+        // the vector moved-from, and releasing that would pollute the pool
+        // with unsized buffers.
+        if (result.has_llr_i16) {
+            if (!result.llr_i16.empty()) {
+                _llr_pool_i16.release(std::move(result.llr_i16));
             }
-            oss << "Noise Estimation:     " << prof_noise_est_total / prof_frame_count << " us\n"
-                << "Remodulation:         " << prof_remodulate_total / prof_frame_count << " us\n"
-                << "Delay Spectrum:       " << prof_delay_spectrum_total / prof_frame_count << " us\n"
-                << "Timing Sync:          " << prof_timing_sync_total / prof_frame_count << " us\n"
-                << "Sensing Queue:        " << prof_sensing_queue_total / prof_frame_count << " us\n"
-                << "UDP Send:             " << prof_udp_send_total / prof_frame_count << " us\n"
-                << "LLR Calculation:      " << prof_llr_total / prof_frame_count << " us\n"
-                << "TOTAL:                " << total / prof_frame_count << " us\n"
-                << "======================================================================\n";
-            LOG_RT_INFO() << oss.str();
-            
-            // Reset counters
-            prof_fft_total = 0.0;
-            prof_channel_est_total = 0.0;
-            prof_cfo_sfo_est_total = 0.0;
-            prof_equalization_total = 0.0;
-            prof_eq_base_inv_total = 0.0;
-            prof_eq_channel_select_total = 0.0;
-            prof_eq_symbol_inv_total = 0.0;
-            prof_eq_pilot_phase_total = 0.0;
-            prof_eq_apply_total = 0.0;
-            prof_eq_data_symbols_total = 0;
-            prof_eq_midframe_channel_symbols_total = 0;
-            prof_eq_symbol_inv_count_total = 0;
-            prof_eq_pilot_phase_attempt_total = 0;
-            prof_eq_pilot_phase_success_total = 0;
-            prof_noise_est_total = 0.0;
-            prof_remodulate_total = 0.0;
-            prof_delay_spectrum_total = 0.0;
-            prof_timing_sync_total = 0.0;
-            prof_sensing_queue_total = 0.0;
-            prof_udp_send_total = 0.0;
-            prof_llr_total = 0.0;
-            prof_frame_count = 0;
+            result.has_llr_i16 = false;
         }
+        if (result.has_llr_float) {
+            if (!result.llr.empty()) {
+                _llr_pool.release(std::move(result.llr));
+            }
+            result.has_llr_float = false;
+        }
+        _rx_frame_pool.release(std::move(result.frame));
+        return true;
+    }
+
+    size_t _cpu_demod_worker_count() const {
+        if (!cfg_.cpu_cores.demod_worker_cpu_cores.empty()) {
+            return cfg_.cpu_cores.demod_worker_cpu_cores.size();
+        }
+        return 1;
+    }
+
+    void _cpu_demod_worker_proc(size_t worker_idx) {
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
+        radio::set_thread_priority(1, true);
+        bind_current_thread_from_ue_demod_worker(cfg_, worker_idx);
+
+        CpuDemodWorkerContext& ctx = *_cpu_demod_contexts[worker_idx];
+        auto& slot = *_cpu_demod_slots[worker_idx];
+        SPSCBackoff backoff;
+        while (running_.load(std::memory_order_acquire)) {
+            CpuDemodTask task;
+            if (!slot.task_queue.try_pop(task)) {
+                backoff.pause();
+                continue;
+            }
+            backoff.reset();
+            if (task.frame.frame_data.empty()) {
+                continue;
+            }
+            // Fill the result directly in the ring slot: the slot's buffers are
+            // pre-sized by the CpuDemodSlot factory, so the steady-state worker
+            // makes no heap allocations. The dispatcher never over-commits a
+            // slot (pending <= kPipelineDepth == ring capacity), so a free
+            // producer slot is guaranteed; the wait below is shutdown-only
+            // belt and braces.
+            CpuDemodResult* result = slot.result_queue.producer_slot();
+            while (result == nullptr) {
+                if (!running_.load(std::memory_order_acquire)) {
+                    _rx_frame_pool.release(std::move(task.frame));
+                    return;
+                }
+                backoff.pause();
+                result = slot.result_queue.producer_slot();
+            }
+            backoff.reset();
+            _run_cpu_demod_task(ctx, std::move(task), *result);
+            slot.result_queue.producer_commit();
+        }
+    }
+
+    // Builds worker slots and contexts. Runs in the UEEngine constructor,
+    // before any thread exists: FFTW planning is not thread-safe, so every
+    // per-worker plan must be created in this single-threaded phase (this also
+    // keeps the N x FFTW_MEASURE cost out of the streaming startup path).
+    void _init_cpu_demod_workers() {
+        const size_t worker_count = std::max<size_t>(1, _cpu_demod_worker_count());
+        _cpu_demod_slots.reserve(worker_count);
+        _cpu_demod_contexts.reserve(worker_count);
+        for (size_t i = 0; i < worker_count; ++i) {
+            _cpu_demod_slots.push_back(std::make_unique<CpuDemodSlot>(cfg_));
+            _cpu_demod_contexts.push_back(std::make_unique<CpuDemodWorkerContext>(cfg_));
+            auto& ctx = *_cpu_demod_contexts.back();
+            // Precompute the fixed channel-anchor layout (sync + valid
+            // full-band mid-frame pilots, sorted by symbol index) so the
+            // per-frame path only refills pre-sized H buffers.
+            ctx.channel_anchor_symbols.push_back(static_cast<int>(cfg_.ofdm.sync_pos));
+            ctx.channel_anchor_source.push_back(-1);
+            if (!_midframe_pilot_seqs.empty()) {
+                for (size_t p = 0; p < _data_resource_layout.midframe_pilot_symbols.size(); ++p) {
+                    const int actual_sym = _data_resource_layout.midframe_pilot_symbols[p];
+                    if (actual_sym < 0 || p >= _midframe_pilot_seqs.size() ||
+                        p >= ctx.midframe_symbol_freqs.size()) {
+                        continue;
+                    }
+                    const auto insert_at = std::lower_bound(
+                        ctx.channel_anchor_symbols.begin(),
+                        ctx.channel_anchor_symbols.end(),
+                        actual_sym);
+                    const size_t offset = static_cast<size_t>(
+                        std::distance(ctx.channel_anchor_symbols.begin(), insert_at));
+                    ctx.channel_anchor_symbols.insert(insert_at, actual_sym);
+                    ctx.channel_anchor_source.insert(
+                        ctx.channel_anchor_source.begin() + static_cast<std::ptrdiff_t>(offset),
+                        static_cast<int>(p));
+                }
+            }
+            ctx.channel_anchor_h.resize(ctx.channel_anchor_symbols.size());
+            for (auto& h : ctx.channel_anchor_h) {
+                h.resize(cfg_.ofdm.fft_size);
+            }
+        }
+    }
+
+    void _start_cpu_demod_workers() {
+        for (size_t i = 0; i < _cpu_demod_slots.size(); ++i) {
+            _cpu_demod_slots[i]->thread = std::thread(&UEEngine::_cpu_demod_worker_proc, this, i);
+        }
+        if (cfg_.cpu_cores.demod_worker_cpu_cores.empty()) {
+            LOG_G_WARN() << "[UE CPU demod] cpu_cores.demod_worker_cpu_cores is empty; "
+                         << "running 1 unbound demod worker. Configure dedicated cores "
+                         << "for stable real-time performance.";
+        }
+        LOG_G_INFO() << "[UE CPU demod] started " << _cpu_demod_slots.size()
+                     << " OFDM/LLR worker thread(s), pipeline depth "
+                     << CpuDemodSlot::kPipelineDepth;
+    }
+
+    void _stop_cpu_demod_workers() {
+        for (auto& slot : _cpu_demod_slots) {
+            if (slot && slot->thread.joinable()) {
+                slot->thread.join();
+            }
+        }
+        for (auto& slot : _cpu_demod_slots) {
+            if (!slot) {
+                continue;
+            }
+            CpuDemodTask task;
+            while (slot->task_queue.try_pop(task)) {
+                if (!task.frame.frame_data.empty()) {
+                    _rx_frame_pool.release(std::move(task.frame));
+                }
+            }
+            CpuDemodResult* result = nullptr;
+            while ((result = slot->result_queue.consumer_slot()) != nullptr) {
+                _release_cpu_demod_result(*result);
+                slot->result_queue.consumer_pop();
+            }
+            slot->pending = 0;
+        }
+        // Slots/contexts stay allocated; the destructor frees them (FFTW plan
+        // destruction shares the planner's single-threaded requirement).
+    }
+
+    void _report_cpu_demod_profile_if_needed(CpuDemodProfile& prof, bool do_eq_breakdown) {
+        constexpr int PROF_REPORT_INTERVAL = 434;
+        if (prof.frame_count < PROF_REPORT_INTERVAL || !cfg_.should_profile("demodulation")) {
+            return;
+        }
+        const double total = prof.fft_total + prof.channel_est_total + prof.cfo_sfo_est_total +
+            prof.equalization_total + prof.noise_est_total + prof.remodulate_total +
+            prof.delay_spectrum_total + prof.timing_sync_total + prof.sensing_queue_total +
+            prof.udp_send_total + prof.llr_total;
+        const double n = static_cast<double>(prof.frame_count);
+        const double avg_eq_symbols = static_cast<double>(prof.eq_data_symbols_total) / n;
+        const double avg_eq_midframe_symbols =
+            static_cast<double>(prof.eq_midframe_channel_symbols_total) / n;
+        const double avg_eq_symbol_inv_count =
+            static_cast<double>(prof.eq_symbol_inv_count_total) / n;
+        const double avg_eq_pilot_phase_attempt =
+            static_cast<double>(prof.eq_pilot_phase_attempt_total) / n;
+        const double avg_eq_pilot_phase_success =
+            static_cast<double>(prof.eq_pilot_phase_success_total) / n;
+        std::ostringstream oss;
+        oss << "\n========== CPU demod worker profiling (avg per frame, us) ==========\n"
+            << "FFT (all symbols):    " << prof.fft_total / n << " us\n"
+            << "Channel Estimation:   " << prof.channel_est_total / n << " us\n"
+            << "CFO/SFO + control:    " << prof.cfo_sfo_est_total / n << " us\n"
+            << "Equalization:         " << prof.equalization_total / n << " us\n";
+        if (do_eq_breakdown) {
+            oss << "  Eq base H_inv:      " << prof.eq_base_inv_total / n << " us\n"
+                << "  Eq channel select:  " << prof.eq_channel_select_total / n << " us"
+                << " (" << avg_eq_midframe_symbols << "/" << avg_eq_symbols << " midframe-H symbols)\n"
+                << "  Eq symbol H_inv:    " << prof.eq_symbol_inv_total / n << " us"
+                << " (" << avg_eq_symbol_inv_count << " calls/frame)\n"
+                << "  Eq pilot phase fit: " << prof.eq_pilot_phase_total / n << " us"
+                << " (" << avg_eq_pilot_phase_success << "/" << avg_eq_pilot_phase_attempt << " ok/frame)\n"
+                << "  Eq apply:           " << prof.eq_apply_total / n << " us\n";
+        }
+        oss << "Noise Estimation:     " << prof.noise_est_total / n << " us\n"
+            << "Remodulation:         " << prof.remodulate_total / n << " us\n"
+            << "Delay Spectrum:       " << prof.delay_spectrum_total / n << " us\n"
+            << "Timing Sync:          " << prof.timing_sync_total / n << " us\n"
+            << "Sensing Queue:        " << prof.sensing_queue_total / n << " us\n"
+            << "Debug Publish:        " << prof.udp_send_total / n << " us\n"
+            << "LLR Calculation:      " << prof.llr_total / n << " us\n"
+            << "TOTAL:                " << total / n << " us\n"
+            << "====================================================================\n";
+        LOG_RT_INFO() << oss.str();
+        prof.reset();
     }
 
     /**
@@ -4203,16 +4615,19 @@ private:
      * 3. Payload Extraction and Validation (Length check, CRC).
      * 4. UDP Output of decoded user data.
      */
-    // Parse and decode all LDPC packets in one demodulated LLR frame. Templated
-    // on the LLR sample type so the float and int16 (Q16) paths share one body;
-    // the decode_frame() overload is selected by the payload vector type.
+    // Parallel half of the old process_payload_llr(): marker/mini-header
+    // parsing, deinterleave, descramble and LDPC decode into a flat decoded
+    // packet list. Runs on a decode worker with a per-worker LDPCCodec; the
+    // interleaver and scrambler are const and shared. Templated on the LLR
+    // sample type so the float and int16 (Q16) paths share one body.
     template <typename LlrVec, typename ScratchVec>
-    void process_payload_llr(const LlrVec& llr, ScratchVec& deint_scratch,
-                             int64_t rx_enqueue_time_ns, int64_t process_dequeue_time_ns,
-                             int64_t demod_done_time_ns, bool do_latency_profile,
-                             std::vector<uint8_t>& expected_measurement_payload) {
-        const size_t bits_per_block = _ldpc_decoder.get_N();
-        const size_t bytes_per_ldpc_block = (_ldpc_decoder.get_K() + 7) / 8;
+    void _decode_llr_frame(const LlrVec& llr,
+                           ScratchVec& deint_scratch,
+                           LlrVec& payload_scratch,
+                           CpuLdpcWorkerContext& ctx,
+                           CpuLdpcResult& result) {
+        const size_t bits_per_block = ctx.decoder.get_N();
+        const size_t bytes_per_ldpc_block = (ctx.decoder.get_K() + 7) / 8;
         if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
             bytes_per_ldpc_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock) {
             LOG_G_WARN() << "[Demod] LDPC codec dimensions do not match unified framing.";
@@ -4220,7 +4635,6 @@ private:
         }
 
         size_t symbol_offset = 0;
-        bool latency_recorded = false;
         while ((symbol_offset + LdpcPacketFraming::kControlSymbols) * 2 <= llr.size()) {
             const size_t control_llr_offset = symbol_offset * 2;
             float marker_metric = 0.0f;
@@ -4256,29 +4670,54 @@ private:
                 continue;
             }
 
-            LlrVec payload_llr(required_llr);
+            payload_scratch.resize(required_llr);
             std::copy(llr.begin() + payload_llr_offset,
                       llr.begin() + payload_llr_offset + required_llr,
-                      payload_llr.begin());
+                      payload_scratch.begin());
 
-            _bit_interleaver->deinterleave_inplace(payload_llr, deint_scratch);
-            _descrambler.soft_descramble(payload_llr);
+            _bit_interleaver->deinterleave_inplace(payload_scratch, deint_scratch);
+            _descrambler.soft_descramble(payload_scratch);
 
-            LDPCCodec::AlignedByteVector decoded_payload;
             try {
-                _ldpc_decoder.decode_frame(payload_llr, decoded_payload);
-                if (decoded_payload.size() < mini_header.payload_len) {
+                ctx.decoder.decode_frame(payload_scratch, ctx.decoded_payload);
+                if (ctx.decoded_payload.size() < mini_header.payload_len) {
                     LOG_G_WARN() << "[Demod] Decoded payload shorter than mini-header length.";
-                    symbol_offset = next_symbol_offset;
-                    continue;
+                } else {
+                    CpuLdpcPacketRef ref;
+                    ref.mini_header = mini_header;
+                    ref.payload_offset = result.payload_bytes.size();
+                    ref.payload_len = mini_header.payload_len;
+                    result.payload_bytes.insert(
+                        result.payload_bytes.end(),
+                        ctx.decoded_payload.begin(),
+                        ctx.decoded_payload.begin() +
+                            static_cast<std::ptrdiff_t>(mini_header.payload_len));
+                    result.packets.push_back(ref);
                 }
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
+            }
+            symbol_offset = next_symbol_offset;
+        }
+    }
 
-                std::vector<uint8_t> udp_data(
-                    decoded_payload.begin(),
-                    decoded_payload.begin() + mini_header.payload_len);
+    // Serial half: stateful packet handling in frame order on the
+    // bit-processing collector thread (eRTM classification, measurement
+    // comparison, ARQ window, UDP output, latency accounting).
+    void _process_decoded_packets(const CpuLdpcResult& result,
+                                  bool do_latency_profile,
+                                  std::vector<uint8_t>& expected_measurement_payload) {
+        const int64_t rx_enqueue_time_ns = result.rx_enqueue_time_ns;
+        const int64_t process_dequeue_time_ns = result.process_dequeue_time_ns;
+        const int64_t demod_done_time_ns = result.demod_done_time_ns;
+        bool latency_recorded = false;
+        for (const CpuLdpcPacketRef& pkt : result.packets) {
+            const uint8_t* payload = result.payload_bytes.data() + pkt.payload_offset;
+            const LdpcMiniHeader& mini_header = pkt.mini_header;
+            std::vector<uint8_t> udp_data(payload, payload + pkt.payload_len);
 
+            {
                 if (_handle_ertm_payload(udp_data, mini_header.flags)) {
-                    symbol_offset = next_symbol_offset;
                     continue;
                 }
 
@@ -4406,10 +4845,168 @@ private:
                     }
                 }
 
-            } catch (const std::exception& e) {
-                LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
             }
-            symbol_offset = next_symbol_offset;
+        }
+    }
+
+    size_t _cpu_ldpc_worker_count() const {
+        if (!cfg_.cpu_cores.ldpc_worker_cpu_cores.empty()) {
+            return cfg_.cpu_cores.ldpc_worker_cpu_cores.size();
+        }
+        return 1;
+    }
+
+    // Runs in the UEEngine constructor: LDPCCodec construction is heavy
+    // (aff3ct factory + .alist loads) and must never happen on the RT path.
+    void _init_cpu_ldpc_workers() {
+        const size_t worker_count = std::max<size_t>(1, _cpu_ldpc_worker_count());
+        _cpu_ldpc_slots.reserve(worker_count);
+        _cpu_ldpc_contexts.reserve(worker_count);
+        for (size_t i = 0; i < worker_count; ++i) {
+            _cpu_ldpc_slots.push_back(std::make_unique<CpuLdpcSlot>());
+            _cpu_ldpc_contexts.push_back(
+                std::make_unique<CpuLdpcWorkerContext>(ldpc_cfg_from_config(cfg_)));
+        }
+    }
+
+    // Sizes the hot-path object pools for the worst-case in-flight count of
+    // the configured worker topology so ObjectPool::acquire() never hits its
+    // allocating fallback inside an RT worker. release() is unbounded, so a
+    // backlogged run would grow to this footprint anyway; prefilling only
+    // moves those allocations to startup. Runs at the end of the constructor
+    // (after worker init and init_sensing, whose outcomes set the targets).
+    void _prefill_pools_for_topology() {
+        const size_t demod_inflight =
+            _cpu_demod_slots.size() * CpuDemodSlot::kPipelineDepth;
+        const size_t ldpc_inflight =
+            _cpu_ldpc_slots.size() * CpuLdpcSlot::kPipelineDepth;
+        constexpr size_t kPoolMargin = 2;
+
+        const auto top_up = [](auto& pool, size_t target, const char* name) {
+            const size_t available = pool.available();
+            if (target > available) {
+                pool.prefill(target - available);
+                LOG_G_INFO() << "[UE pools] prefilled " << name << " to "
+                             << target << " buffers";
+            }
+        };
+
+        // frame_queue_ + one task and one result per pipeline stage per worker
+        // + the frame in the dispatcher's hand.
+        top_up(_rx_frame_pool,
+               cfg_.ofdm.frame_queue_size + demod_inflight + 1 + kPoolMargin,
+               "rx_frame_pool");
+
+        // LLR buffers: hand-off queue + demod results in flight + LDPC tasks
+        // in flight + the one being dispatched. Only the active sample-type
+        // pool sees traffic.
+        const size_t llr_target =
+            _data_llr_buffer.capacity() + demod_inflight + ldpc_inflight + 1 + kPoolMargin;
+        if (_ldpc_fixed_point) {
+            top_up(_llr_pool_i16, llr_target, "llr_pool_i16");
+        } else {
+            top_up(_llr_pool, llr_target, "llr_pool");
+        }
+
+        // Sensing frames flow only when bistatic sensing is enabled.
+        if (_bistatic_sensing_channel) {
+            top_up(_sensing_frame_pool,
+                   sensing_queue_.capacity() + demod_inflight + 1 + kPoolMargin,
+                   "sensing_frame_pool");
+        }
+    }
+
+    void _release_cpu_ldpc_task(CpuLdpcTask& task) {
+        if (task.is_i16) {
+            if (!task.llr_i16.empty()) {
+                _llr_pool_i16.release(std::move(task.llr_i16));
+            }
+        } else if (!task.llr.empty()) {
+            _llr_pool.release(std::move(task.llr));
+        }
+    }
+
+    void _cpu_ldpc_worker_proc(size_t worker_idx) {
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
+        radio::set_thread_priority();
+        bind_current_thread_from_ue_ldpc_worker(cfg_, worker_idx);
+
+        CpuLdpcWorkerContext& ctx = *_cpu_ldpc_contexts[worker_idx];
+        auto& slot = *_cpu_ldpc_slots[worker_idx];
+        SPSCBackoff backoff;
+        while (_bit_processing_running.load(std::memory_order_acquire)) {
+            CpuLdpcTask task;
+            if (!slot.task_queue.try_pop(task)) {
+                backoff.pause();
+                continue;
+            }
+            backoff.reset();
+            // Decode in place into the result ring slot (buffers keep their
+            // capacity across frames). The dispatcher never over-commits a
+            // slot, so a free producer slot is guaranteed; the wait below is
+            // shutdown-only belt and braces.
+            CpuLdpcResult* result = slot.result_queue.producer_slot();
+            while (result == nullptr) {
+                if (!_bit_processing_running.load(std::memory_order_acquire)) {
+                    _release_cpu_ldpc_task(task);
+                    return;
+                }
+                backoff.pause();
+                result = slot.result_queue.producer_slot();
+            }
+            backoff.reset();
+            result->generation = task.generation;
+            result->dropped = false;
+            result->rx_enqueue_time_ns = task.rx_enqueue_time_ns;
+            result->process_dequeue_time_ns = task.process_dequeue_time_ns;
+            result->demod_done_time_ns = task.demod_done_time_ns;
+            result->packets.clear();
+            result->payload_bytes.clear();
+            if (task.generation != _sync_generation.load(std::memory_order_acquire)) {
+                result->dropped = true; // stale after resync; token keeps order
+            } else if (task.is_i16) {
+                _decode_llr_frame(task.llr_i16, ctx.deint_scratch_i16,
+                                  ctx.payload_llr_i16, ctx, *result);
+            } else {
+                _decode_llr_frame(task.llr, ctx.deint_scratch,
+                                  ctx.payload_llr, ctx, *result);
+            }
+            _release_cpu_ldpc_task(task);
+            slot.result_queue.producer_commit();
+        }
+    }
+
+    void _start_cpu_ldpc_workers() {
+        for (size_t i = 0; i < _cpu_ldpc_slots.size(); ++i) {
+            _cpu_ldpc_slots[i]->thread = std::thread(&UEEngine::_cpu_ldpc_worker_proc, this, i);
+        }
+        if (cfg_.cpu_cores.ldpc_worker_cpu_cores.empty()) {
+            LOG_G_INFO() << "[UE CPU LDPC] cpu_cores.ldpc_worker_cpu_cores is empty; "
+                         << "running 1 unbound LDPC decode worker.";
+        }
+        LOG_G_INFO() << "[UE CPU LDPC] started " << _cpu_ldpc_slots.size()
+                     << " LDPC decode worker thread(s), pipeline depth "
+                     << CpuLdpcSlot::kPipelineDepth;
+    }
+
+    void _stop_cpu_ldpc_workers() {
+        for (auto& slot : _cpu_ldpc_slots) {
+            if (slot && slot->thread.joinable()) {
+                slot->thread.join();
+            }
+        }
+        for (auto& slot : _cpu_ldpc_slots) {
+            if (!slot) {
+                continue;
+            }
+            CpuLdpcTask task;
+            while (slot->task_queue.try_pop(task)) {
+                _release_cpu_ldpc_task(task);
+            }
+            while (slot->result_queue.consumer_slot() != nullptr) {
+                slot->result_queue.consumer_pop();
+            }
+            slot->pending = 0;
         }
     }
 
@@ -4434,11 +5031,79 @@ private:
             }
         };
 
+        size_t launch_slot_idx = 0;
+        size_t collect_slot_idx = 0;
+        _start_cpu_ldpc_workers();
+
+        auto collect_ready_ldpc = [&](bool blocking) {
+            bool collected = false;
+            while (!_cpu_ldpc_slots.empty()) {
+                auto& slot = *_cpu_ldpc_slots[collect_slot_idx];
+                if (slot.pending == 0) {
+                    break;
+                }
+                CpuLdpcResult* result = slot.result_queue.consumer_slot();
+                if (result == nullptr) {
+                    if (!blocking) {
+                        break;
+                    }
+                    SPSCBackoff result_backoff;
+                    while (_bit_processing_running.load(std::memory_order_acquire) &&
+                           (result = slot.result_queue.consumer_slot()) == nullptr) {
+                        result_backoff.pause();
+                    }
+                    if (result == nullptr) {
+                        break; // shutting down
+                    }
+                }
+                if (!result->dropped &&
+                    result->generation == _sync_generation.load(std::memory_order_acquire)) {
+                    maybe_log_snr();
+                    _process_decoded_packets(*result, do_latency_profile,
+                                             expected_measurement_payload);
+                }
+                slot.result_queue.consumer_pop();
+                --slot.pending;
+                collect_slot_idx = (collect_slot_idx + 1) % _cpu_ldpc_slots.size();
+                collected = true;
+                blocking = false;
+            }
+            return collected;
+        };
+
+        auto dispatch_ldpc_task = [&](CpuLdpcTask&& task) {
+            auto& launch_slot = *_cpu_ldpc_slots[launch_slot_idx];
+            if (spsc_wait_push(launch_slot.task_queue, std::move(task), [this]() {
+                    return !_bit_processing_running.load(std::memory_order_acquire);
+                })) {
+                ++launch_slot.pending;
+                launch_slot_idx = (launch_slot_idx + 1) % _cpu_ldpc_slots.size();
+            } else {
+                _release_cpu_ldpc_task(task);
+            }
+        };
+
         while (_bit_processing_running.load()) {
+            collect_ready_ldpc(false);
+            if (_cpu_ldpc_slots.empty()) {
+                continue;
+            }
+            auto& launch_slot = *_cpu_ldpc_slots[launch_slot_idx];
+            if (launch_slot.pending >= CpuLdpcSlot::kPipelineDepth) {
+                collect_ready_ldpc(true);
+                if (!_bit_processing_running.load(std::memory_order_acquire)) {
+                    break;
+                }
+                if (launch_slot.pending >= CpuLdpcSlot::kPipelineDepth) {
+                    continue;
+                }
+            }
             if (_ldpc_fixed_point) {
                 LlrFrameI16 frame_llr;
                 if (!_data_llr_buffer_i16.try_pop(frame_llr)) {
-                    llr_backoff.pause();
+                    if (!collect_ready_ldpc(false)) {
+                        llr_backoff.pause();
+                    }
                     continue;
                 }
                 llr_backoff.reset();
@@ -4447,16 +5112,20 @@ private:
                     _llr_pool_i16.release(std::move(frame_llr.llr));
                     continue;
                 }
-                maybe_log_snr();
-                process_payload_llr(frame_llr.llr, _deinterleaver_llr_scratch_i16,
-                                    frame_llr.rx_enqueue_time_ns, frame_llr.process_dequeue_time_ns,
-                                    frame_llr.demod_done_time_ns, do_latency_profile,
-                                    expected_measurement_payload);
-                _llr_pool_i16.release(std::move(frame_llr.llr));
+                CpuLdpcTask task;
+                task.llr_i16 = std::move(frame_llr.llr);
+                task.is_i16 = true;
+                task.generation = frame_llr.generation;
+                task.rx_enqueue_time_ns = frame_llr.rx_enqueue_time_ns;
+                task.process_dequeue_time_ns = frame_llr.process_dequeue_time_ns;
+                task.demod_done_time_ns = frame_llr.demod_done_time_ns;
+                dispatch_ldpc_task(std::move(task));
             } else {
                 LlrFrame frame_llr;
                 if (!_data_llr_buffer.try_pop(frame_llr)) {
-                    llr_backoff.pause();
+                    if (!collect_ready_ldpc(false)) {
+                        llr_backoff.pause();
+                    }
                     continue;
                 }
                 llr_backoff.reset();
@@ -4465,14 +5134,23 @@ private:
                     _llr_pool.release(std::move(frame_llr.llr));
                     continue;
                 }
-                maybe_log_snr();
-                process_payload_llr(frame_llr.llr, _deinterleaver_llr_scratch,
-                                    frame_llr.rx_enqueue_time_ns, frame_llr.process_dequeue_time_ns,
-                                    frame_llr.demod_done_time_ns, do_latency_profile,
-                                    expected_measurement_payload);
-                _llr_pool.release(std::move(frame_llr.llr));
+                CpuLdpcTask task;
+                task.llr = std::move(frame_llr.llr);
+                task.is_i16 = false;
+                task.generation = frame_llr.generation;
+                task.rx_enqueue_time_ns = frame_llr.rx_enqueue_time_ns;
+                task.process_dequeue_time_ns = frame_llr.process_dequeue_time_ns;
+                task.demod_done_time_ns = frame_llr.demod_done_time_ns;
+                dispatch_ldpc_task(std::move(task));
             }
         }
+        while (!_cpu_ldpc_slots.empty() && _cpu_ldpc_slots[collect_slot_idx]->pending > 0) {
+            collect_ready_ldpc(true);
+            if (!_bit_processing_running.load(std::memory_order_acquire)) {
+                break;
+            }
+        }
+        _stop_cpu_ldpc_workers();
     }
 };
 

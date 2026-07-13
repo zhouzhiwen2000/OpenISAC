@@ -1541,6 +1541,18 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">UE 下行 CPU 核列表：索引 <code>0..2</code> 分别绑定 <code>rx_proc</code>、<code>process_proc</code> 和 <code>bit_processing_proc</code>。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>demod_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU 解调 worker 核列表，用于帧级 OFDM/LLR 处理。每个配置的核对应 1 个 worker；留空时启动 1 个不绑核的 worker（建议配置专用核以获得稳定的实时性能）。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ldpc_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU LDPC 解码 worker 核列表。每个配置的核对应 1 个持有独立 LDPC 解码器实例的 worker；留空时启动 1 个不绑核的 worker。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>sensing_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
