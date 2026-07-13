@@ -242,7 +242,7 @@ export const architectureContent = {
 </figure>
 <ul>
   <li><strong>Bit Processing:</strong> Handles UDP payloads, LDPC encoding, and scrambling.</li>
-  <li><strong>OFDM Modulator:</strong> Performs QPSK mapping, comb-pilot insertion, optional mid-frame BPSK pilot insertion, IFFT, and CP insertion. Pads frames with random bits if traffic is low.</li>
+  <li><strong>BS OFDM transmit path:</strong> Performs QPSK mapping, comb-pilot insertion, optional mid-frame BPSK pilot insertion, IFFT, and CP insertion. Pads frames with random bits if traffic is low.</li>
   <li><strong>Radio I/O:</strong> "USRP-TX" sends waveforms; "USRP-RX" captures radar streams.</li>
   <li><strong>Sensing Thread:</strong> Performs real-time monostatic sensing (OFDM demod, division, Range-Doppler map). Supports "stride" processing to balance load.</li>
 </ul>`,
@@ -257,7 +257,7 @@ export const architectureContent = {
 </figure>
 <ul>
   <li><strong>USRP RX:</strong> Acquires downlink baseband stream and performs timing adjustments.</li>
-  <li><strong>OFDM Demodulator:</strong> Operates in two states:
+  <li><strong>UE OFDM receive path:</strong> Operates in two states:
     <ul>
       <li><em>SYNC_SEARCH:</em> Scans for ZC sync symbols to estimate frame boundary and CFO.</li>
       <li><em>NORMAL:</em> Performs FFT, channel estimation, equalization, and LLR computation. Re-enters search if lock is lost.</li>
@@ -294,7 +294,7 @@ export const architectureContent = {
 </figure>
 <ul>
   <li><strong>比特处理：</strong> 处理 UDP 负载、LDPC 编码和加扰。</li>
-  <li><strong>OFDM 调制器：</strong> 执行 QPSK 映射、梳状导频插入、可选帧内 BPSK 导频插入、IFFT 和 CP 插入。如果流量较低，则用随机比特填充。</li>
+  <li><strong>BS OFDM 发射路径：</strong> 执行 QPSK 映射、梳状导频插入、可选帧内 BPSK 导频插入、IFFT 和 CP 插入。如果流量较低，则用随机比特填充。</li>
   <li><strong>无线电 I/O：</strong> “USRP-TX”发送波形；“USRP-RX”接收雷达回波。</li>
   <li><strong>感知线程：</strong> 执行实时单站感知（OFDM 解调、除法、距离-多普勒图）。支持稀疏处理以降低运算负担。</li>
 </ul>`,
@@ -309,7 +309,7 @@ export const architectureContent = {
 </figure>
 <ul>
   <li><strong>USRP RX：</strong> 获取下行基带信号并执行定时调整。</li>
-  <li><strong>OFDM 解调器：</strong> 在两种状态下运行：
+  <li><strong>UE OFDM 接收路径：</strong> 在两种状态下运行：
     <ul>
       <li><em>SYNC_SEARCH：</em> 搜索 ZC 同步符号以估计帧边界和 CFO。</li>
       <li><em>NORMAL：</em> 执行 FFT、信道估计、均衡和 LLR 计算。如果失去锁定，则重新进入搜索状态。</li>

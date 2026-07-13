@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Benchmark demodulator end-to-end latency across configurations.
+"""Benchmark UE end-to-end latency across configurations.
 
 Requires root (for isolate_cpus.bash/systemd-run) and connected TX/RX USRPs.
 
 Usage:
-    sudo python3 scripts/bench_demodulator_latency.py
+    sudo python3 scripts/bench_ue_latency.py
 
 The script sweeps sample_rate × fft_size × num_symbols, injects UDP traffic
-into the modulator, and parses the demodulator latency reports emitted by
+into the BS, and parses the UE latency reports emitted by
 `process_proc`. Results are written to
-measurement/demodulator_latency_bench/latency_summary.csv.
+measurement/debs_latency_bench/latency_summary.csv.
 """
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ from bench_utils import (
     save_yaml,
     write_csv,
 )
-from bench_demodulator_cpu import (
+from bench_ue_cpu import (
     build_isolated_cpu_spec,
     collect_unit_logs,
-    launch_demodulator_with_isolation,
+    launch_ue_with_isolation,
     prepare_isolated_cpus,
     read_unit_status,
     stop_unit,
@@ -43,7 +43,7 @@ from bench_demodulator_cpu import (
 
 
 def _udp_sender(ip: str, port: int, payload_size: int, stop_event: threading.Event) -> None:
-    """Send UDP packets fast enough to keep the modulator producing valid frames."""
+    """Send UDP packets fast enough to keep the BS producing valid frames."""
     payload = bytes(payload_size)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -67,7 +67,7 @@ _LATENCY_BLOCK_RE = re.compile(
 
 
 def parse_latency_from_log(log_bytes: bytes) -> list[dict[str, float]]:
-    """Return per-report latency dicts from the demodulator profiling logs."""
+    """Return per-report latency dicts from the UE profiling logs."""
     text = log_bytes.decode(errors="ignore")
     results: list[dict[str, float]] = []
     for match in _LATENCY_BLOCK_RE.finditer(text):
@@ -81,19 +81,19 @@ def parse_latency_from_log(log_bytes: bytes) -> list[dict[str, float]]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark demodulator E2E latency across configurations.")
+    parser = argparse.ArgumentParser(description="Benchmark UE E2E latency across configurations.")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument(
         "--mod-config",
         type=Path,
-        default=Path("scripts/bench_demodulator_latency_modulator_template.yaml"),
-        help="Base Modulator YAML template used for reproducible demodulator latency runs.",
+        default=Path("scripts/bench_ue_latency_bs_template.yaml"),
+        help="Base BS YAML template used for reproducible UE latency runs.",
     )
     parser.add_argument(
         "--demod-config",
         type=Path,
-        default=Path("scripts/bench_demodulator_latency_demodulator_template.yaml"),
-        help="Base Demodulator YAML template used for reproducible latency runs.",
+        default=Path("scripts/bench_ue_latency_ue_template.yaml"),
+        help="Base UE YAML template used for reproducible latency runs.",
     )
     parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
     parser.add_argument("--sample-rates", default="50e6,100e6,200e6")
@@ -113,7 +113,7 @@ def parse_args() -> argparse.Namespace:
         "--startup-gap",
         type=float,
         default=1.0,
-        help="Seconds to wait after launching modulator before launching demodulator",
+        help="Seconds to wait after launching BS before launching UE",
     )
     parser.add_argument(
         "--warmup",
@@ -131,9 +131,9 @@ def parse_args() -> argparse.Namespace:
         "--crash-retries",
         type=int,
         default=2,
-        help="How many times to retry a point automatically if the demodulator unit crashes.",
+        help="How many times to retry a point automatically if the UE unit crashes.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("measurement/demodulator_latency_bench"))
+    parser.add_argument("--output-dir", type=Path, default=Path("measurement/debs_latency_bench"))
     return parser.parse_args()
 
 
@@ -197,8 +197,8 @@ def main() -> None:
                 mod_cfg["range_fft_size"] = fft_size
                 demod_cfg["range_fft_size"] = fft_size
 
-                save_yaml(run_dir / "Modulator.yaml", mod_cfg)
-                save_yaml(run_dir / "Demodulator.yaml", demod_cfg)
+                save_yaml(run_dir / "BS.yaml", mod_cfg)
+                save_yaml(run_dir / "UE.yaml", demod_cfg)
 
                 udp_port = int(mod_cfg.get("udp_input_port", 50000))
                 isolated_cpu_spec = build_isolated_cpu_spec(mod_cfg, demod_cfg)
@@ -226,7 +226,7 @@ def main() -> None:
                     try:
                         prepare_isolated_cpus(run_dir, args.isolate_script, isolated_cpu_spec)
                         mod_proc = subprocess.Popen(
-                            [str((args.build_dir / "OFDMModulator").resolve())],
+                            [str((args.build_dir / "BS").resolve())],
                             cwd=run_dir,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
@@ -234,7 +234,7 @@ def main() -> None:
                         )
                         sender_thread.start()
                         time.sleep(args.startup_gap)
-                        demod_proc, _demod_pid, log_since = launch_demodulator_with_isolation(
+                        demod_proc, _demod_pid, log_since = launch_ue_with_isolation(
                             args.build_dir,
                             run_dir,
                             isolated_cpu_spec,
@@ -274,15 +274,15 @@ def main() -> None:
                         _ = terminate_process_tree(demod_proc) if demod_proc is not None else b""
 
                         attempt_suffix = f".attempt{attempt_idx}"
-                        (run_dir / f"modulator{attempt_suffix}.log").write_bytes(mod_log)
-                        (run_dir / f"demodulator{attempt_suffix}.log").write_bytes(demod_log)
-                        (run_dir / f"demodulator_unit_status{attempt_suffix}.txt").write_text(
+                        (run_dir / f"BS{attempt_suffix}.log").write_bytes(mod_log)
+                        (run_dir / f"UE{attempt_suffix}.log").write_bytes(demod_log)
+                        (run_dir / f"ue_unit_status{attempt_suffix}.txt").write_text(
                             unit_status_text(demod_status),
                             encoding="utf-8",
                         )
-                        (run_dir / "modulator.log").write_bytes(mod_log)
-                        (run_dir / "demodulator.log").write_bytes(demod_log)
-                        (run_dir / "demodulator_unit_status.txt").write_text(
+                        (run_dir / "BS.log").write_bytes(mod_log)
+                        (run_dir / "UE.log").write_bytes(demod_log)
+                        (run_dir / "ue_unit_status.txt").write_text(
                             unit_status_text(demod_status),
                             encoding="utf-8",
                         )
@@ -293,13 +293,13 @@ def main() -> None:
 
                     if crash_detected:
                         if attempt_idx < max_attempts:
-                            print(f"{run_id}: demodulator crashed on attempt {attempt_idx}/{max_attempts}; retrying")
+                            print(f"{run_id}: UE crashed on attempt {attempt_idx}/{max_attempts}; retrying")
                         else:
-                            print(f"{run_id}: demodulator crashed on final attempt {attempt_idx}/{max_attempts}")
+                            print(f"{run_id}: UE crashed on final attempt {attempt_idx}/{max_attempts}")
                         if attempt_idx < max_attempts:
                             continue
                         raise RuntimeError(
-                            f"OFDMDemodulator crashed for run {run_id} after {max_attempts} attempts.\n"
+                            f"UE crashed for run {run_id} after {max_attempts} attempts.\n"
                             f"{unit_status_text(last_status)}"
                         )
 

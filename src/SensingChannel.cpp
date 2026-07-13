@@ -1835,7 +1835,7 @@ std::optional<size_t> SensingChannel::_resolve_core(size_t hint) const {
 void SensingChannel::_rx_loop(const uhd::time_spec_t& start_time) {
     async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
     uhd::set_thread_priority_safe(1.0f, true);
-    bind_current_thread_to_core(_resolve_core(3 + static_cast<size_t>(_rx_io.logical_id) * 2));
+    bind_current_thread_to_core(configured_core_to_optional(_rx_io.channel_cfg.rx_cpu_core));
     prefault_thread_stack();
 
     uhd::stream_cmd_t stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
@@ -2042,7 +2042,7 @@ void SensingChannel::_handle_normal_rx() {
 void SensingChannel::_sensing_loop() {
     async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
     uhd::set_thread_priority_safe(0.6f, true);
-    bind_current_thread_to_core(_resolve_core(4 + static_cast<size_t>(_rx_io.logical_id) * 2));
+    bind_current_thread_to_core(configured_core_to_optional(_rx_io.channel_cfg.processing_cpu_core));
     prefault_thread_stack();
 
     while (_running_ref.load(std::memory_order_relaxed)) {

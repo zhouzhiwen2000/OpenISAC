@@ -9,6 +9,82 @@ common:
       default: uhd
       optional: true
       options: [uhd, sim]
+  duplex_mode:
+    title: Duplex
+    field:
+      type: scalar
+      key: duplex_mode
+      kind: string
+      comment: Duplexing scheme (tdd = time-multiplexed uplink, fdd = separate uplink carrier)
+      default: tdd
+      optional: true
+      options: [tdd, fdd]
+  enable_uplink:
+    title: Duplex
+    field:
+      type: scalar
+      key: enable_uplink
+      kind: bool
+      comment: Enable UE-to-BS uplink / duplex path
+      default: false
+      optional: true
+  uplink:
+    title: Duplex
+    field:
+      type: uplink_mapping
+      key: uplink
+      comment: UE-to-BS uplink / duplex settings
+      default:
+        symbol_start: 0
+        symbol_count: 0
+        guard_symbols: 0
+        center_freq: 0
+        udp_input_ip: "0.0.0.0"
+        udp_input_port: 50002
+        udp_output_ip: "127.0.0.1"
+        udp_output_port: 50003
+      optional: true
+      scalar_fields:
+        - key: symbol_start
+          comment: TDD first uplink symbol in the downlink frame
+          kind: int
+          default: 0
+          optional: true
+        - key: symbol_count
+          comment: TDD uplink window length in OFDM symbols; 0 disables TDD uplink
+          kind: int
+          default: 0
+          optional: true
+        - key: guard_symbols
+          comment: Leading TDD guard symbols inside the uplink window
+          kind: int
+          default: 0
+          optional: true
+        - key: center_freq
+          comment: FDD uplink carrier. Displayed in GHz, stored in Hz.
+          kind: float
+          default: 0
+          optional: true
+        - key: udp_input_ip
+          comment: UE-side uplink payload UDP bind IP
+          kind: string
+          default: "0.0.0.0"
+          optional: true
+        - key: udp_input_port
+          comment: UE-side uplink payload UDP bind port
+          kind: int
+          default: 50002
+          optional: true
+        - key: udp_output_ip
+          comment: BS-side decoded uplink payload UDP destination IP
+          kind: string
+          default: "127.0.0.1"
+          optional: true
+        - key: udp_output_port
+          comment: BS-side decoded uplink payload UDP destination port
+          kind: int
+          default: 50003
+          optional: true
   simulation:
     title: Channel simulator
     field:
@@ -20,12 +96,12 @@ common:
       optional: true
       scalar_fields:
         - key: session
-          comment: Shared-memory namespace used by Modulator, Demodulator, and ChannelSimulator
+          comment: Shared-memory namespace used by BS, UE, and ChannelSimulator
           kind: string
           default: oisac_sim
           optional: true
         - key: enable_comm_rx
-          comment: Produce the communication RX path for OFDMDemodulator
+          comment: Produce the communication RX path for UE
           kind: bool
           default: true
           optional: true
@@ -33,6 +109,11 @@ common:
           comment: Produce monostatic sensing RX paths for the antenna array
           kind: bool
           default: true
+          optional: true
+        - key: enable_uplink
+          comment: Route the UE->BS uplink stream through the simulator (duplex)
+          kind: bool
+          default: false
           optional: true
         - key: noise_power_dbfs
           comment: AWGN power per RX channel in dBFS; very low disables effectively
@@ -55,7 +136,7 @@ common:
           default: 10002
           optional: true
         - key: cfo_hz
-          comment: Initial carrier offset before demodulator RX correction in Hz
+          comment: Initial carrier offset before UE RX correction in Hz
           kind: float
           default: 0.0
           optional: true
@@ -272,6 +353,14 @@ common:
           comment: If true, this channel runs delay estimation only and disables sensing pipeline
           kind: bool
           default: false
+        - key: rx_cpu_core
+          comment: CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
+          kind: int
+          default: -1
+        - key: processing_cpu_core
+          comment: CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
+          kind: int
+          default: -1
   data_resource_blocks:
     title: Resource Preview
     field:
@@ -334,7 +423,16 @@ common:
           kind: int
           default: 1
 
-modulator:
+bs:
+  bs_dl_ul_timing_diff:
+    title: Duplex
+    field:
+      type: scalar
+      key: bs_dl_ul_timing_diff
+      kind: int
+      comment: "BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI"
+      default: 0
+      optional: true
   fft_size:
     title: OFDM Frame
     field:
@@ -552,6 +650,24 @@ modulator:
       comment: TX channel index on USRP
       default: 0
       optional: true
+  rx_gain:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_gain
+      kind: int
+      comment: Uplink RX gain (dB)
+      default: 10
+      optional: true
+  rx_channel:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: rx_channel
+      kind: int
+      comment: Uplink RX channel index on USRP
+      default: 0
+      optional: true
   device_args:
     title: USRP Device Args
     field:
@@ -732,16 +848,16 @@ modulator:
       default: 1
       optional: true
   tx_circular_buffer_size:
-    title: Runtime / Debug
+    title: Downlink Pipeline
     field:
       type: scalar
       key: tx_circular_buffer_size
       kind: int
-      comment: Modulator frame circular buffer capacity
+      comment: BS frame circular buffer capacity
       default: 32
       optional: true
   data_packet_buffer_size:
-    title: Runtime / Debug
+    title: Downlink Pipeline
     field:
       type: scalar
       key: data_packet_buffer_size
@@ -750,13 +866,40 @@ modulator:
       default: 32
       optional: true
   paired_frame_queue_size:
-    title: Runtime / Debug
+    title: Sensing RX Channels
     field:
       type: scalar
       key: paired_frame_queue_size
       kind: int
       comment: Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
       default: 64
+      optional: true
+  downlink_cpu_cores:
+    title: Downlink Pipeline
+    field:
+      type: flow_list
+      key: downlink_cpu_cores
+      item_kind: int
+      comment: "BS downlink CPU cores: [TX thread, modulation thread, data-ingest thread]"
+      default: [1, 2, 3]
+      optional: true
+  uplink_cpu_cores:
+    title: Duplex
+    field:
+      type: flow_list
+      key: uplink_cpu_cores
+      item_kind: int
+      comment: "BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]"
+      default: []
+      optional: true
+  main_cpu_core:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: main_cpu_core
+      kind: int
+      comment: Main-thread CPU core (-1 disables explicit binding)
+      default: -1
       optional: true
   profiling_modules:
     title: Runtime / Debug
@@ -767,16 +910,17 @@ modulator:
       comment: Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
       default: ""
       optional: true
-  cpu_cores:
-    title: Runtime / Debug
-    field:
-      type: cpu_cores
-      key: cpu_cores
-      comment: Allowed CPU core list
-      default: [1, 2, 3, 4, 5, 6]
-      optional: true
 
-demodulator:
+ue:
+  ue_timing_advance:
+    title: Duplex
+    field:
+      type: scalar
+      key: ue_timing_advance
+      kind: int
+      comment: "UE Timing Advance (samples) — also adjustable at runtime via TADV"
+      default: 0
+      optional: true
   fft_size:
     title: OFDM Frame
     field:
@@ -1113,6 +1257,24 @@ demodulator:
       comment: RX channel index on USRP
       default: 0
       optional: true
+  tx_gain:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: tx_gain
+      kind: int
+      comment: Uplink TX gain (dB)
+      default: 60
+      optional: true
+  tx_channel:
+    title: RF / Sampling
+    field:
+      type: scalar
+      key: tx_channel
+      kind: int
+      comment: Uplink TX channel index on USRP
+      default: 0
+      optional: true
   device_args:
     title: USRP Device / Link
     field:
@@ -1132,6 +1294,16 @@ demodulator:
       default: external
       optional: true
       options: [internal, external, gpsdo]
+  wire_format_tx:
+    title: USRP Device / Link
+    field:
+      type: scalar
+      key: wire_format_tx
+      kind: string
+      comment: TX wire format; sc16/sc8
+      default: sc16
+      optional: true
+      options: [sc16, sc8]
   wire_format_rx:
     title: USRP Device / Link
     field:
@@ -1529,6 +1701,33 @@ demodulator:
       comment: VOFA+ debug output port
       default: 12347
       optional: true
+  downlink_cpu_cores:
+    title: Downlink Receiver
+    field:
+      type: flow_list
+      key: downlink_cpu_cores
+      item_kind: int
+      comment: "UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]"
+      default: [1, 2, 3, 4]
+      optional: true
+  uplink_cpu_cores:
+    title: Duplex
+    field:
+      type: flow_list
+      key: uplink_cpu_cores
+      item_kind: int
+      comment: "UE uplink CPU cores: [UplinkTxEngine UDP ingest, modulation, TX send]"
+      default: []
+      optional: true
+  main_cpu_core:
+    title: Runtime / Debug
+    field:
+      type: scalar
+      key: main_cpu_core
+      kind: int
+      comment: Main-thread CPU core (-1 disables explicit binding)
+      default: -1
+      optional: true
   profiling_modules:
     title: Runtime / Debug
     field:
@@ -1537,12 +1736,4 @@ demodulator:
       kind: string
       comment: Comma-separated modules to profile, or "all"
       default: agc
-      optional: true
-  cpu_cores:
-    title: Runtime / Debug
-    field:
-      type: cpu_cores
-      key: cpu_cores
-      comment: Allowed CPU core list
-      default: [1, 2, 3, 4, 5]
       optional: true

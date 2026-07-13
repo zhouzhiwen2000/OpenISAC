@@ -10,17 +10,17 @@ OUT="$ROOT/measurement/sim_profile"
 mkdir -p "$OUT"
 cd "$BUILD" || exit 1
 
-cp "$ROOT/config/Modulator_Sim.yaml"   Modulator.yaml
-cp "$ROOT/config/Demodulator_Sim.yaml" Demodulator.yaml
-sed -i 's/^profiling_modules:.*/profiling_modules: "demodulation"/' Demodulator.yaml
-grep -q '^profiling_modules' Demodulator.yaml || echo 'profiling_modules: "demodulation"' >> Demodulator.yaml
-sed -i 's/^control_port:.*/control_port: 10044/' Demodulator.yaml
+cp "$ROOT/config/BS_Sim.yaml"   BS.yaml
+cp "$ROOT/config/UE_Sim.yaml" UE.yaml
+sed -i 's/^profiling_modules:.*/profiling_modules: "demodulation"/' UE.yaml
+grep -q '^profiling_modules' UE.yaml || echo 'profiling_modules: "demodulation"' >> UE.yaml
+sed -i 's/^control_port:.*/control_port: 10044/' UE.yaml
 
-./ChannelSimulator Modulator.yaml >"$OUT/sim_${TAG}.log" 2>&1 &
+./ChannelSimulator BS.yaml >"$OUT/sim_${TAG}.log" 2>&1 &
 SIM=$!; sleep 2
-./OFDMDemodulator >"$OUT/demod_${TAG}.log" 2>&1 &
+./UE >"$OUT/demod_${TAG}.log" 2>&1 &
 DEMOD=$!; sleep 1
-./OFDMModulator >"$OUT/mod_${TAG}.log" 2>&1 &
+./BS >"$OUT/mod_${TAG}.log" 2>&1 &
 MOD=$!
 echo "[sim_measure $TAG] sim=$SIM demod=$DEMOD mod=$MOD running ${DUR}s"
 sleep "$DUR"

@@ -3089,7 +3089,7 @@ def send_mti_command(enabled):
 
 def send_tx_gain_command(val):
     if IS_BI_MODE:
-        print("TX gain control is not available for bistatic demodulator sensing.")
+        print("TX gain control is not available for bistatic UE sensing.")
         return
     try:
         gain_db = float(val)
@@ -3102,7 +3102,7 @@ def send_tx_gain_command(val):
 
 def send_rx_gain_command(val):
     if IS_BI_MODE:
-        print("RX gain control is not available for bistatic demodulator sensing.")
+        print("RX gain control is not available for bistatic UE sensing.")
         return
     target = _current_control_channel_id()
     if target is None:
@@ -3110,7 +3110,7 @@ def send_rx_gain_command(val):
     try:
         gain_db = float(val)
         gain_x10 = int(round(gain_db * 10.0))
-        # Select target sensing channel in modulator, then apply RX gain.
+        # Select target sensing channel in BS, then apply RX gain.
         send_control_command(b"ALCH", int(target), target)
         send_control_command(b"RXGN", gain_x10, target)
         print(f"Requested RX gain: {gain_db:.1f} dB (CH{target + 1})")
@@ -4795,12 +4795,12 @@ class MainWindow(QtWidgets.QMainWindow):
         repo_root = Path(__file__).resolve().parent.parent
         candidate_paths = []
         for candidate in [
-            Path.cwd() / "Modulator.yaml",
-            Path.cwd() / "Demodulator.yaml",
-            Path.cwd() / "build" / "Modulator.yaml",
-            Path.cwd() / "build" / "Demodulator.yaml",
-            repo_root / "build" / "Modulator.yaml",
-            repo_root / "build" / "Demodulator.yaml",
+            Path.cwd() / "BS.yaml",
+            Path.cwd() / "UE.yaml",
+            Path.cwd() / "build" / "BS.yaml",
+            Path.cwd() / "build" / "UE.yaml",
+            repo_root / "build" / "BS.yaml",
+            repo_root / "build" / "UE.yaml",
         ]:
             if candidate not in candidate_paths:
                 candidate_paths.append(candidate)

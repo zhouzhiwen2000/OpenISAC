@@ -23,10 +23,10 @@ from bench_utils import (
     terminate_process_tree,
     write_csv,
 )
-from bench_demodulator_cpu import (
+from bench_ue_cpu import (
     build_isolated_cpu_spec,
     collect_unit_logs,
-    launch_demodulator_with_isolation,
+    launch_ue_with_isolation,
     prepare_isolated_cpus,
     read_unit_status,
     stop_unit,
@@ -76,12 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mod-config",
         type=Path,
-        default=Path("scripts/bench_ber_bler_evm_modulator_template.yaml"),
+        default=Path("scripts/bench_ber_bler_evm_bs_template.yaml"),
     )
     parser.add_argument(
         "--demod-config",
         type=Path,
-        default=Path("scripts/bench_ber_bler_evm_demodulator_template.yaml"),
+        default=Path("scripts/bench_ber_bler_evm_ue_template.yaml"),
     )
     parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
     parser.add_argument("--tx-gains", type=str, required=True,
@@ -165,16 +165,16 @@ def main() -> None:
         raise RuntimeError("bench_ber_bler_evm.py must run as root to use isolate_cpus.bash")
 
     mod_cfg["tx_gain"] = float(tx_gains[0])
-    mod_summary_path = run_dir / "modulator_measurement_summary.csv"
-    demod_summary_path = run_dir / "demodulator_measurement_summary.csv"
-    demod_status_path = run_dir / "demodulator_unit_status.txt"
+    mod_summary_path = run_dir / "bs_measurement_summary.csv"
+    demod_summary_path = run_dir / "ue_measurement_summary.csv"
+    demod_status_path = run_dir / "ue_unit_status.txt"
     for stale_path in (
         mod_summary_path,
         demod_summary_path,
         demod_status_path,
         run_dir / "sweep_summary.csv",
-        run_dir / "modulator.log",
-        run_dir / "demodulator.log",
+        run_dir / "BS.log",
+        run_dir / "UE.log",
         run_dir / "sweep_summary.png",
     ):
         if stale_path.exists():
@@ -185,18 +185,18 @@ def main() -> None:
     demod_log_since = 0.0
     demod_unit_name = f"bench-ber-bler-evm-{run_id}".replace("_", "-")
     try:
-        save_yaml(run_dir / "Modulator.yaml", mod_cfg)
-        save_yaml(run_dir / "Demodulator.yaml", demod_cfg)
+        save_yaml(run_dir / "BS.yaml", mod_cfg)
+        save_yaml(run_dir / "UE.yaml", demod_cfg)
         prepare_isolated_cpus(run_dir, args.isolate_script, isolated_cpu_spec)
         mod_proc = subprocess.Popen(
-            [str((args.build_dir / "OFDMModulator").resolve())],
+            [str((args.build_dir / "BS").resolve())],
             cwd=run_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid,
         )
         time.sleep(args.startup_gap)
-        demod_proc, _demod_pid, demod_log_since = launch_demodulator_with_isolation(
+        demod_proc, _demod_pid, demod_log_since = launch_ue_with_isolation(
             args.build_dir,
             run_dir,
             isolated_cpu_spec,
@@ -224,8 +224,8 @@ def main() -> None:
         stop_unit(demod_unit_name)
         demod_log = collect_unit_logs(demod_unit_name, demod_log_since) if demod_proc is not None else b""
         _ = terminate_process_tree(demod_proc) if demod_proc is not None else b""
-        (run_dir / "modulator.log").write_bytes(mod_log)
-        (run_dir / "demodulator.log").write_bytes(demod_log)
+        (run_dir / "BS.log").write_bytes(mod_log)
+        (run_dir / "UE.log").write_bytes(demod_log)
         demod_status_path.write_text(unit_status_text(demod_status), encoding="utf-8")
 
     mod_rows = {int(row["epoch_id"]): row for row in read_csv_rows(mod_summary_path)}

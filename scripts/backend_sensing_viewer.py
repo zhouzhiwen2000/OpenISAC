@@ -1561,12 +1561,12 @@ class MainWindow(QtWidgets.QMainWindow):
         repo_root = Path(__file__).resolve().parent.parent
         candidate_paths = []
         for candidate in [
-            Path.cwd() / "Modulator.yaml",
-            Path.cwd() / "Demodulator.yaml",
-            Path.cwd() / "build" / "Modulator.yaml",
-            Path.cwd() / "build" / "Demodulator.yaml",
-            repo_root / "build" / "Modulator.yaml",
-            repo_root / "build" / "Demodulator.yaml",
+            Path.cwd() / "BS.yaml",
+            Path.cwd() / "UE.yaml",
+            Path.cwd() / "build" / "BS.yaml",
+            Path.cwd() / "build" / "UE.yaml",
+            repo_root / "build" / "BS.yaml",
+            repo_root / "build" / "UE.yaml",
         ]:
             if candidate not in candidate_paths:
                 candidate_paths.append(candidate)

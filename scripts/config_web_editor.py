@@ -25,17 +25,17 @@ HTML_TEMPLATE_PATH = Path(__file__).with_suffix(".html")
 SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
-    "modulator": ("all", "modulation", "latency", "data_ingest", "sensing_proc"),
-    "demodulator": ("all", "demodulation", "agc", "align"),
+    "bs": ("all", "modulation", "latency", "data_ingest", "sensing_proc"),
+    "ue": ("all", "demodulation", "agc", "align"),
 }
 
 PROFILING_DESCRIPTIONS: dict[str, str] = {
     "all": "Enable every profiling and diagnostic module for this tab.",
-    "modulation": "Show modulator frame processing breakdown and load statistics.",
-    "latency": "Enable modulator end-to-end latency tracking. Requires modulation too.",
-    "data_ingest": "Profile UDP ingest, LDPC encode, and enqueue cost in the modulator.",
-    "sensing_proc": "Profile sensing processing in the modulator path, including per-channel sensing work.",
-    "demodulation": "Show demodulator per-frame processing breakdown and load statistics.",
+    "modulation": "Show BS frame processing breakdown and load statistics.",
+    "latency": "Enable BS end-to-end latency tracking. Requires modulation too.",
+    "data_ingest": "Profile UDP ingest, LDPC encode, and enqueue cost in the BS path.",
+    "sensing_proc": "Profile sensing processing in the BS path, including per-channel sensing work.",
+    "demodulation": "Show UE per-frame processing breakdown and load statistics.",
     "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",
     "align": "Enable runtime alignment diagnostics, including ALGN logs.",
 }
@@ -48,7 +48,7 @@ def load_layout_schema() -> dict[str, dict[str, dict[str, Any]]]:
         return {}
 
     schema: dict[str, dict[str, dict[str, Any]]] = {}
-    for scope_name in ("common", "modulator", "demodulator"):
+    for scope_name in ("common", "bs", "ue"):
         scope = raw.get(scope_name, {})
         if not isinstance(scope, dict):
             continue
@@ -324,26 +324,6 @@ def parse_layout(text: str) -> list[dict[str, Any]]:
             i = j
             continue
 
-        if key == "cpu_cores":
-            j = i + 1
-            if not value_part:
-                while j < len(lines):
-                    sub_raw = lines[j]
-                    sub_stripped = sub_raw.strip()
-                    if not sub_stripped:
-                        j += 1
-                        continue
-                    if not sub_raw.startswith(" "):
-                        break
-                    j += 1
-            current["fields"].append({
-                "type": "cpu_cores",
-                "key": key,
-                "comment": comment,
-            })
-            i = j if not value_part else i + 1
-            continue
-
         if not value_part:
             item_fields = []
             seen_item_keys: set[str] = set()
@@ -494,7 +474,12 @@ def simulation_default_item(list_field: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_value: bool) -> dict[str, Any]:
+def build_structured_mapping_payload(
+    value: Any,
+    field: dict[str, Any],
+    has_value: bool,
+    payload_type: str,
+) -> dict[str, Any]:
     value_map = copy.deepcopy(value) if isinstance(value, dict) else {}
     scalar_fields_payload: list[dict[str, Any]] = []
     known_keys: set[str] = set()
@@ -559,7 +544,7 @@ def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_valu
 
     extra_map = {key: copy.deepcopy(val) for key, val in value_map.items() if key not in known_keys}
     return {
-        "type": "simulation_mapping",
+        "type": payload_type,
         "key": field["key"],
         "comment": field.get("comment", ""),
         "display_comment": display_comment_override(field["key"], field.get("comment", "")),
@@ -569,6 +554,10 @@ def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_valu
         "list_fields": list_fields_payload,
         "extra_text": format_mapping_text(extra_map) if extra_map else "",
     }
+
+
+def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_value: bool) -> dict[str, Any]:
+    return build_structured_mapping_payload(value, field, has_value, "simulation_mapping")
 
 
 def normalize_simulation_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
@@ -646,6 +635,14 @@ def normalize_simulation_mapping_payload(raw: Any, field: dict[str, Any]) -> dic
     return result
 
 
+def build_uplink_mapping_payload(value: Any, field: dict[str, Any], has_value: bool) -> dict[str, Any]:
+    return build_structured_mapping_payload(value, field, has_value, "uplink_mapping")
+
+
+def normalize_uplink_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
+    return normalize_simulation_mapping_payload(raw, field)
+
+
 def coerce_scalar(text: str, kind: str) -> Any:
     text = text.strip()
     if kind == "bool":
@@ -661,8 +658,24 @@ def coerce_flow_list(text: str, item_kind: str) -> list[Any]:
     raw = text.strip()
     if not raw:
         return []
+    def coerce_items(items: list[Any]) -> list[Any]:
+        try:
+            return [coerce_scalar(str(item), item_kind) for item in items if str(item).strip()]
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid {item_kind} list value '{raw}'.") from exc
+
+    if raw.startswith("["):
+        try:
+            parsed = yaml.safe_load(raw)
+        except yaml.YAMLError as exc:
+            raise RuntimeError(f"Invalid YAML flow list '{raw}': {exc}") from exc
+        if parsed is None:
+            return []
+        if not isinstance(parsed, list):
+            raise RuntimeError(f"Expected a YAML list, got {type(parsed).__name__}.")
+        return coerce_items(parsed)
     items = [item.strip() for item in raw.split(",")]
-    return [coerce_scalar(item, item_kind) for item in items if item]
+    return coerce_items(items)
 
 
 def quote_string(value: str) -> str:
@@ -688,48 +701,26 @@ def format_flow_list(values: list[Any]) -> str:
     return "[" + ", ".join(format_scalar(v) for v in values) + "]"
 
 
-def cpu_binding_rows(tab_name: str, data: dict[str, Any]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if tab_name == "modulator":
-        rows.extend([
-            {"comment": "idx0 (hint 0): _tx_proc", "label": "_tx_proc"},
-            {"comment": "idx1 (hint 1): _modulation_proc", "label": "_modulation_proc"},
-            {"comment": "idx2 (hint 2): _data_ingest_proc", "label": "_data_ingest_proc"},
-        ])
-        count = max(0, int_or_zero(data.get("sensing_rx_channel_count", 0)))
-        for ch in range(count):
-            hint = len(rows)
-            rows.append({
-                "comment": f"idx{hint} (hint {hint}): SensingChannel::_rx_loop (CH{ch})",
-                "label": f"SensingChannel::_rx_loop (CH{ch})",
-            })
-            hint = len(rows)
-            rows.append({
-                "comment": f"idx{hint} (hint {hint}): SensingChannel::_sensing_loop (CH{ch})",
-                "label": f"SensingChannel::_sensing_loop (CH{ch})",
-            })
-    else:
-        rows.extend([
-            {"comment": "idx0 (hint 0): rx_proc", "label": "rx_proc"},
-            {"comment": "idx1 (hint 1): process_proc", "label": "process_proc"},
-            {"comment": "idx2 (hint 2): sensing_process_proc", "label": "sensing_process_proc"},
-            {"comment": "idx3 (hint 3): bit_processing_proc", "label": "bit_processing_proc"},
-        ])
-    rows.append({"comment": "idx_last: main thread affinity", "label": "main thread affinity"})
-
-    cpu_values = data.get("cpu_cores", []) or []
-    values = [int_or_zero(v) for v in cpu_values]
-    while len(rows) < len(values):
-        slot = len(rows)
-        rows.append({"comment": f"extra[{slot}]", "label": f"extra[{slot}]"})
-    for index, row in enumerate(rows):
-        row["cpu"] = values[index] if index < len(values) else None
-    return rows
-
-
 def unique_cpu_spec(values: list[int]) -> str:
     unique = sorted(set(non_negative_cpu_values(values)))
     return ",".join(str(v) for v in unique)
+
+
+def configured_cpu_values(data: dict[str, Any]) -> list[int]:
+    values: list[int] = []
+    values.extend(int_or_zero(v) for v in (data.get("downlink_cpu_cores", []) or []))
+    values.extend(int_or_zero(v) for v in (data.get("uplink_cpu_cores", []) or []))
+    main_core = data.get("main_cpu_core", -1)
+    if main_core is not None:
+        values.append(int_or_zero(main_core))
+    channels = data.get("sensing_rx_channels", []) or []
+    if isinstance(channels, list):
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            values.append(int_or_zero(channel.get("rx_cpu_core", -1)))
+            values.append(int_or_zero(channel.get("processing_cpu_core", -1)))
+    return values
 
 
 def _sample_field_metadata(sample_value: Any, field: dict[str, Any]) -> dict[str, Any]:
@@ -828,6 +819,49 @@ def append_missing_layout_fields(
     return layout_copy
 
 
+def regroup_layout_fields(
+    layout: list[dict[str, Any]],
+    catalog: dict[str, dict[str, Any]],
+    target_title: str,
+    ordered_keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    key_set = set(ordered_keys)
+    moved_fields: dict[str, dict[str, Any]] = {}
+    layout_copy: list[dict[str, Any]] = []
+    target_index: int | None = None
+
+    for section in layout:
+        section_copy = {"title": section["title"], "fields": []}
+        if section["title"] == target_title and target_index is None:
+            target_index = len(layout_copy)
+        for field in section["fields"]:
+            key = str(field.get("key", ""))
+            if key in key_set:
+                moved_fields[key] = copy.deepcopy(field)
+                continue
+            section_copy["fields"].append(field)
+        if section_copy["fields"] or section["title"] == target_title:
+            layout_copy.append(section_copy)
+
+    for key in ordered_keys:
+        if key in moved_fields:
+            continue
+        catalog_field = catalog.get(key, {}).get("field")
+        if isinstance(catalog_field, dict):
+            moved_fields[key] = copy.deepcopy(catalog_field)
+
+    if target_index is None:
+        layout_copy.append({"title": target_title, "fields": []})
+        target_index = len(layout_copy) - 1
+
+    target_section = layout_copy[target_index]
+    target_section["fields"] = [
+        *[moved_fields[key] for key in ordered_keys if key in moved_fields],
+        *target_section["fields"],
+    ]
+    return layout_copy
+
+
 def merge_layout_field_metadata(
     layout: list[dict[str, Any]],
     catalog: dict[str, dict[str, Any]],
@@ -848,7 +882,7 @@ def merge_layout_field_metadata(
                     field[attr] = bool(metadata[attr])
             if (
                 field.get("type") in {"scalar", "mapping"}
-                and metadata.get("type") in {"mapping", "simulation_mapping"}
+                and metadata.get("type") in {"flow_list", "mapping", "simulation_mapping", "uplink_mapping"}
             ):
                 field["type"] = metadata["type"]
             for attr in ("scalar_fields", "list_fields"):
@@ -998,14 +1032,54 @@ def cfo_training_symbol_for_data(data: dict[str, Any]) -> int | None:
     return None
 
 
-def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] | None:
+def tdd_symbol_sets_for_data(data: dict[str, Any]) -> tuple[set[int], set[int]]:
+    if str(data.get("duplex_mode", "tdd") or "tdd").strip().lower() != "tdd":
+        return set(), set()
+    uplink = data.get("uplink")
+    if not isinstance(uplink, dict):
+        return set(), set()
+    num_symbols = max(1, int_or_default(data.get("num_symbols"), 100))
+    symbol_start = int_or_default(uplink.get("symbol_start"), 0)
+    symbol_count = int_or_default(uplink.get("symbol_count"), 0)
+    guard_symbols = int_or_default(uplink.get("guard_symbols"), 0)
+    if symbol_count <= 0 or symbol_start >= num_symbols:
+        return set(), set()
+    symbol_start = max(0, symbol_start)
+    symbol_end = min(num_symbols, symbol_start + symbol_count)
+    guard_end = min(symbol_end, symbol_start + max(0, guard_symbols))
+    guard = set(range(symbol_start, guard_end))
+    uplink_data = set(range(guard_end, symbol_end))
+    return guard, uplink_data
+
+
+def reserved_tdd_overlap_symbols(data: dict[str, Any]) -> list[tuple[int, str]]:
+    guard, uplink_data = tdd_symbol_sets_for_data(data)
+    tdd_symbols = guard | uplink_data
+    if not tdd_symbols:
+        return []
+    overlaps: list[tuple[int, str]] = []
+    sync_pos = int_or_default(data.get("sync_pos"), 0)
+    if sync_pos in tdd_symbols:
+        overlaps.append((sync_pos, "sync symbol"))
+    if bool_value(data.get("enable_sec_sync_symbol", False)) and sync_pos > 0 and sync_pos - 1 in tdd_symbols:
+        overlaps.append((sync_pos - 1, "second sync symbol"))
     cfo_symbol = cfo_training_symbol_for_data(data)
-    blocks = data.get("sensing_mask_blocks")
-    if cfo_symbol is None or not isinstance(blocks, list) or not blocks:
-        return None
+    if cfo_symbol is not None and cfo_symbol in tdd_symbols:
+        overlaps.append((cfo_symbol, "CFO training field"))
+    return sorted(overlaps)
+
+
+def clip_mapping_blocks_around_symbols(
+    blocks: Any,
+    blocked_symbols: set[int],
+    keep_kind: bool,
+) -> tuple[list[dict[str, Any]], int, list[int]]:
+    if not isinstance(blocks, list) or not blocks or not blocked_symbols:
+        return copy.deepcopy(blocks) if isinstance(blocks, list) else [], 0, []
 
     clipped: list[dict[str, Any]] = []
     removed_re = 0
+    removed_symbols: set[int] = set()
     for block in blocks:
         if not isinstance(block, dict):
             continue
@@ -1014,38 +1088,98 @@ def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] 
         subcarrier_start = int_or_default(block.get("subcarrier_start"), 0)
         subcarrier_count = int_or_default(block.get("subcarrier_count"), 0)
         if symbol_count <= 0 or subcarrier_count <= 0:
-            clipped.append(block)
-            continue
-        symbol_end = symbol_start + symbol_count - 1
-        if cfo_symbol < symbol_start or cfo_symbol > symbol_end:
-            clipped.append(block)
+            clipped.append(copy.deepcopy(block))
             continue
 
-        removed_re += subcarrier_count
-        if symbol_start <= cfo_symbol - 1:
-            clipped.append({
-                "symbol_start": symbol_start,
-                "symbol_count": cfo_symbol - symbol_start,
+        ranges = [(symbol_start, symbol_start + symbol_count - 1)]
+        for blocked_symbol in sorted(blocked_symbols):
+            if blocked_symbol < symbol_start or blocked_symbol >= symbol_start + symbol_count:
+                continue
+            removed_symbols.add(blocked_symbol)
+            removed_re += subcarrier_count
+            next_ranges: list[tuple[int, int]] = []
+            for start, end in ranges:
+                if blocked_symbol < start or blocked_symbol > end:
+                    next_ranges.append((start, end))
+                    continue
+                if start <= blocked_symbol - 1:
+                    next_ranges.append((start, blocked_symbol - 1))
+                if blocked_symbol + 1 <= end:
+                    next_ranges.append((blocked_symbol + 1, end))
+            ranges = next_ranges
+
+        for start, end in ranges:
+            item: dict[str, Any] = {}
+            if keep_kind:
+                item["kind"] = str(block.get("kind", "payload") or "payload")
+            item.update({
+                "symbol_start": start,
+                "symbol_count": end - start + 1,
                 "subcarrier_start": subcarrier_start,
                 "subcarrier_count": subcarrier_count,
             })
-        if cfo_symbol + 1 <= symbol_end:
-            clipped.append({
-                "symbol_start": cfo_symbol + 1,
-                "symbol_count": symbol_end - cfo_symbol,
-                "subcarrier_start": subcarrier_start,
-                "subcarrier_count": subcarrier_count,
-            })
+            clipped.append(item)
+
+    return clipped, removed_re, sorted(removed_symbols)
+
+
+def sanitize_resource_blocks_around_tdd(data: dict[str, Any]) -> list[dict[str, Any]]:
+    guard_symbols, uplink_symbols = tdd_symbol_sets_for_data(data)
+    tdd_symbols = guard_symbols | uplink_symbols
+    warnings: list[dict[str, Any]] = []
+
+    overlaps = reserved_tdd_overlap_symbols(data)
+    if overlaps:
+        detail = ", ".join(f"{label} {symbol}" for symbol, label in overlaps)
+        warnings.append({
+            "kind": "tdd_reserved_overlap",
+            "symbols": [symbol for symbol, _label in overlaps],
+            "message": f"TDD uplink range overlaps reserved downlink fields: {detail}.",
+        })
+
+    if not tdd_symbols:
+        return warnings
+
+    for key, keep_kind, label in (
+        ("data_resource_blocks", True, "Resource Map"),
+        ("sensing_mask_blocks", False, "Sensing Resource Map"),
+    ):
+        blocks = data.get(key)
+        clipped, removed_re, removed_symbols = clip_mapping_blocks_around_symbols(blocks, tdd_symbols, keep_kind)
+        if removed_re <= 0:
+            continue
+        data[key] = clipped
+        warnings.append({
+            "kind": "tdd_resource_clip",
+            "field": key,
+            "symbols": removed_symbols,
+            "removed_re": removed_re,
+            "message": (
+                f"TDD uplink/guard overlap removed from {label} "
+                f"symbol {', '.join(str(sym) for sym in removed_symbols)} ({removed_re} RE)."
+            ),
+        })
+    return warnings
+
+
+def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] | None:
+    cfo_symbol = cfo_training_symbol_for_data(data)
+    blocks = data.get("sensing_mask_blocks")
+    if cfo_symbol is None or not isinstance(blocks, list) or not blocks:
+        return None
+
+    clipped, removed_re, removed_symbols = clip_mapping_blocks_around_symbols(blocks, {cfo_symbol}, False)
 
     if removed_re <= 0:
         return None
     data["sensing_mask_blocks"] = clipped
     return {
         "symbol": cfo_symbol,
+        "symbols": removed_symbols,
         "removed_re": removed_re,
         "message": (
             f"CFO training field overlap removed from Sensing Resource Map "
-            f"symbol {cfo_symbol} ({removed_re} RE)."
+            f"symbol {', '.join(str(sym) for sym in removed_symbols)} ({removed_re} RE)."
         ),
     }
 
@@ -1070,6 +1204,23 @@ def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> 
     return normalized
 
 
+def normalize_layout_section_titles(
+    layout: list[dict[str, Any]],
+    data: dict[str, Any],
+) -> None:
+    radio_backend = str(data.get("radio_backend", "") or "").strip().lower()
+    for section in layout:
+        field_keys = {field.get("key") for field in section.get("fields", [])}
+        if "data_resource_blocks" in field_keys or "sensing_mask_blocks" in field_keys:
+            section["title"] = "Resource Preview"
+        if "sensing_rx_channels" in field_keys or "sensing_rx_channel_count" in field_keys:
+            section["title"] = (
+                "Sensing RX Channels (simulated ULA elements)"
+                if radio_backend == "sim"
+                else "Sensing RX Channels"
+            )
+
+
 def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path, ...]) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Path]:
     exists = path.exists()
     source = path if exists else next((candidate for candidate in fallback_paths if candidate.exists()), path)
@@ -1078,10 +1229,7 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     if not isinstance(data, dict):
         data = {}
     layout = parse_layout(text)
-    for section in layout:
-        field_keys = {field.get("key") for field in section.get("fields", [])}
-        if "data_resource_blocks" in field_keys or "sensing_mask_blocks" in field_keys:
-            section["title"] = "Resource Preview"
+    normalize_layout_section_titles(layout, data)
     if "sensing_rx_channels" in data and not isinstance(data["sensing_rx_channels"], list):
         data["sensing_rx_channels"] = []
     if "data_resource_blocks" in data:
@@ -1091,8 +1239,6 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
             data["data_resource_blocks"] = normalized_data_resource_block_items(data.get("data_resource_blocks", []))
     if "sensing_mask_blocks" in data and not isinstance(data["sensing_mask_blocks"], list):
         data["sensing_mask_blocks"] = []
-    if "cpu_cores" in data and not isinstance(data["cpu_cores"], list):
-        data["cpu_cores"] = []
     optional_catalog = build_optional_field_catalog(
         tab_name=tab_name,
         sample_candidates=fallback_paths,
@@ -1100,6 +1246,12 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     )
     layout = merge_layout_field_metadata(layout, optional_catalog)
     layout = append_missing_layout_fields(layout, optional_catalog)
+    layout = regroup_layout_fields(
+        layout,
+        optional_catalog,
+        "Duplex",
+        ("enable_uplink", "duplex_mode", "uplink"),
+    )
     layout = enrich_mapping_list_layouts(layout)
     known_keys = {field["key"] for section in layout for field in section["fields"]}
     extra_keys = [key for key in data.keys() if key not in known_keys]
@@ -1126,13 +1278,6 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
             key = field["key"]
             has_value = key in data
             value = data.get(key)
-            if field["type"] == "cpu_cores":
-                section_payload["fields"].append({
-                    "type": "cpu_cores",
-                    "key": key,
-                    "comment": field.get("comment", ""),
-                })
-                continue
             if field["type"] == "mapping_list":
                 items = copy.deepcopy(data.get(key, []) or [])
                 if not isinstance(items, list):
@@ -1189,6 +1334,10 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
 
             if field["type"] == "simulation_mapping":
                 section_payload["fields"].append(build_simulation_mapping_payload(value, field, has_value))
+                continue
+
+            if field["type"] == "uplink_mapping":
+                section_payload["fields"].append(build_uplink_mapping_payload(value, field, has_value))
                 continue
 
             if field["type"] == "mapping":
@@ -1277,21 +1426,11 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
             })
         sections.append(section_payload)
 
-    cpu_values = [int_or_zero(v) for v in data.get("cpu_cores", []) or []]
-    return {
-        "sections": sections,
-        "cpu_cores": {
-            "values": cpu_values,
-            "rows": cpu_binding_rows(tab_name, data),
-        },
-    }
+    return {"sections": sections}
 
 
 def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any]) -> str:
     lines: list[str] = []
-    cpu_rows = cpu_binding_rows(tab_name, data)
-    cpu_values = [row.get("cpu") for row in cpu_rows if row.get("cpu") is not None]
-    data["cpu_cores"] = [int(v) for v in cpu_values]
 
     for section in layout:
         lines.append(f"# ===== {section['title']} =====")
@@ -1301,18 +1440,6 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
             suffix = f"  # {comment}" if comment else ""
             if field.get("optional") and key not in data:
                 continue
-            if field["type"] == "cpu_cores":
-                values = data.get("cpu_cores", []) or []
-                if not values:
-                    lines.append(f"{key}: []{suffix}")
-                else:
-                    lines.append(f"{key}:{suffix}")
-                    for row in cpu_binding_rows(tab_name, data):
-                        if row.get("cpu") is None:
-                            continue
-                        lines.append(f"  - {row['cpu']}  # {row['comment']}")
-                continue
-
             if field["type"] == "mapping_list":
                 if field.get("allow_omit") and key not in data:
                     continue
@@ -1334,7 +1461,7 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                         lines.append(f"{prefix}{item_key}: {format_scalar(value)}{item_suffix}")
                 continue
 
-            if field["type"] in {"mapping", "simulation_mapping"}:
+            if field["type"] in {"mapping", "simulation_mapping", "uplink_mapping"}:
                 append_mapping_lines(lines, key, data.get(key, {}), suffix)
                 continue
 
@@ -1355,7 +1482,6 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
     scalars = payload.get("scalars", {})
     mappings = payload.get("mappings", {})
     mapping_lists = payload.get("mapping_lists", {})
-    cpu_values = payload.get("cpu_cores", [])
     if not isinstance(scalars, dict):
         raise RuntimeError("Invalid scalar payload.")
     if not isinstance(mappings, dict):
@@ -1370,7 +1496,7 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
         for field in section["fields"]:
             if field["type"] == "mapping_list":
                 mapping_layouts[field["key"]] = field["item_fields"]
-            elif field["type"] in {"mapping", "simulation_mapping"}:
+            elif field["type"] in {"mapping", "simulation_mapping", "uplink_mapping"}:
                 mapping_optionals[field["key"]] = bool(field.get("optional", False))
             elif field["key"] == "profiling_modules":
                 kind_map[field["key"]] = ("profiling_modules", "", bool(field.get("optional", False)))
@@ -1418,7 +1544,7 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
                 field
                 for section in layout
                 for field in section["fields"]
-                if field.get("key") == key and field.get("type") in {"mapping", "simulation_mapping"}
+                if field.get("key") == key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}
             ),
             {},
         )
@@ -1433,6 +1559,12 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             result.pop(key, None)
         elif mapping_field.get("type") == "simulation_mapping":
             result[key] = normalize_simulation_mapping_payload(raw_mapping_text, mapping_field)
+        elif mapping_field.get("type") == "uplink_mapping":
+            normalized = normalize_uplink_mapping_payload(raw_mapping_text, mapping_field)
+            if optional and not normalized:
+                result.pop(key, None)
+            else:
+                result[key] = normalized
         else:
             result[key] = parse_mapping_text(raw_text)
 
@@ -1478,10 +1610,7 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             continue
         result[key] = normalized_items
 
-    if not isinstance(cpu_values, list):
-        raise RuntimeError("Invalid cpu_cores payload.")
-    result["cpu_cores"] = [int_or_zero(v) for v in cpu_values if str(v).strip() != ""]
-    if tab_name == "modulator":
+    if tab_name == "bs":
         channels = result.get("sensing_rx_channels", []) or []
         if not isinstance(channels, list):
             channels = []
@@ -1689,32 +1818,34 @@ class ConfigEditorApp:
         self.repo_root = repo_root
         self.build_dir = build_dir
         self.tabs: dict[str, TabConfig] = {
-            "modulator": TabConfig(
-                name="modulator",
-                label="Modulator",
-                yaml_path=build_dir / "Modulator.yaml",
+            "bs": TabConfig(
+                name="bs",
+                label="BS",
+                yaml_path=build_dir / "BS.yaml",
                 cwd=build_dir,
-                default_command="./OFDMModulator",
+                default_command="./BS",
                 presets=(
-                    {"label": "CPU Modulator", "command": "./OFDMModulator"},
+                    {"label": "CPU BS", "command": "./BS"},
+                    {"label": "CUDA BS", "command": "./CUDABS"},
                 ),
                 sample_candidates=(
-                    repo_root / "config" / "Modulator_X310.yaml",
-                    repo_root / "config" / "Modulator_B210.yaml",
+                    repo_root / "config" / "BS_X310.yaml",
+                    repo_root / "config" / "BS_B210.yaml",
                 ),
             ),
-            "demodulator": TabConfig(
-                name="demodulator",
-                label="Demodulator",
-                yaml_path=build_dir / "Demodulator.yaml",
+            "ue": TabConfig(
+                name="ue",
+                label="UE",
+                yaml_path=build_dir / "UE.yaml",
                 cwd=build_dir,
-                default_command="./OFDMDemodulator",
+                default_command="./UE",
                 presets=(
-                    {"label": "CPU Demodulator", "command": "./OFDMDemodulator"},
+                    {"label": "CPU UE", "command": "./UE"},
+                    {"label": "CUDA UE", "command": "./CUDAUE"},
                 ),
                 sample_candidates=(
-                    repo_root / "config" / "Demodulator_X310.yaml",
-                    repo_root / "config" / "Demodulator_B210.yaml",
+                    repo_root / "config" / "UE_X310.yaml",
+                    repo_root / "config" / "UE_B210.yaml",
                 ),
             ),
         }
@@ -1751,14 +1882,18 @@ class ConfigEditorApp:
         tab = self.tab_config(name)
         current_data, layout, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         new_data = normalize_payload_data(name, layout, payload, current_data)
-        warning = clip_sensing_mask_blocks_around_cfo(new_data)
+        warnings = sanitize_resource_blocks_around_tdd(new_data)
+        cfo_warning = clip_sensing_mask_blocks_around_cfo(new_data)
+        if cfo_warning is not None:
+            warnings.append(cfo_warning)
         rendered = render_yaml(name, layout, new_data)
         validate_rendered_yaml(rendered)
         tab.yaml_path.parent.mkdir(parents=True, exist_ok=True)
         tab.yaml_path.write_text(rendered, encoding="utf-8")
         result = self.load_config(name)
-        if warning is not None:
-            result["warning"] = warning
+        if warnings:
+            result["warnings"] = warnings
+            result["warning"] = warnings[0]
         return result
 
     def process_snapshot(self, name: str) -> dict[str, Any]:
@@ -1775,7 +1910,7 @@ class ConfigEditorApp:
     ) -> dict[str, Any]:
         tab = self.tab_config(name)
         data, _, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
-        cpu_values = [int_or_zero(v) for v in (data.get("cpu_cores", []) or [])]
+        cpu_values = configured_cpu_values(data)
         return self.processes[name].start(command, cpu_values, isolate_cpu, isolate_cpu_spec, sudo_password)
 
     def process_stop(self, name: str, sudo_password: str = "") -> dict[str, Any]:
@@ -1939,7 +2074,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--build-dir",
         default="build",
-        help="Build directory that contains Modulator.yaml, Demodulator.yaml, and binaries.",
+        help="Build directory that contains BS.yaml, UE.yaml, and binaries.",
     )
     return parser.parse_args()
 

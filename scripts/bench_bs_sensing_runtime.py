@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark monostatic sensing on OFDMModulator with runtime STRD/SKIP/MTI control."""
+"""Benchmark monostatic sensing on BS with runtime STRD/SKIP/MTI control."""
 from __future__ import annotations
 
 import argparse
@@ -10,11 +10,11 @@ import threading
 import time
 from pathlib import Path
 
-from bench_modulator_cpu import (
+from bench_bs_cpu import (
     build_isolated_cpu_spec,
     build_mod_role_map,
     collect_unit_logs,
-    launch_modulator_with_isolation,
+    launch_bs_with_isolation,
     stop_unit,
 )
 from bench_utils import (
@@ -227,13 +227,13 @@ def _std(reports: list[dict[str, float]], key: str) -> float:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark modulator monostatic sensing with runtime control changes.")
+    parser = argparse.ArgumentParser(description="Benchmark BS monostatic sensing with runtime control changes.")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument(
         "--mod-config",
         type=Path,
-        default=Path("scripts/bench_modulator_sensing_runtime_template.yaml"),
-        help="Base Modulator YAML template used for the sensing runtime benchmark.",
+        default=Path("scripts/bench_bs_sensing_runtime_template.yaml"),
+        help="Base BS YAML template used for the sensing runtime benchmark.",
     )
     parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
     parser.add_argument("--sample-rate", type=float, default=100e6)
@@ -259,7 +259,7 @@ def parse_args() -> argparse.Namespace:
         default=0.01,
         help="Delay in seconds between command-triplet retries.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("measurement/modulator_sensing_runtime_bench"))
+    parser.add_argument("--output-dir", type=Path, default=Path("measurement/bs_sensing_runtime_bench"))
     return parser.parse_args()
 
 
@@ -285,7 +285,7 @@ def main() -> None:
     run_id = f"mono_sensing_sr{safe_stem(str(int(args.sample_rate)))}_fft{args.fft_size}"
     run_dir = args.output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    save_yaml(run_dir / "Modulator.yaml", mod_cfg)
+    save_yaml(run_dir / "BS.yaml", mod_cfg)
 
     isolated_cpu_spec = build_isolated_cpu_spec(mod_cfg)
     udp_port = int(mod_cfg.get("udp_input_port", 50000))
@@ -305,7 +305,7 @@ def main() -> None:
     summary_rows: list[dict[str, object]] = []
 
     try:
-        mod_proc, mod_pid, log_since = launch_modulator_with_isolation(
+        mod_proc, mod_pid, log_since = launch_bs_with_isolation(
             args.build_dir,
             run_dir,
             args.isolate_script,
@@ -392,7 +392,7 @@ def main() -> None:
 
                     sensing_avg_cpu, sensing_peak_cpu = _find_role_cpu(
                         role_rows,
-                        "mod:sensing_process_loop_ch0",
+                        "bs:sensing_process_loop_ch0",
                     )
 
                     summary_rows.append({
@@ -445,7 +445,7 @@ def main() -> None:
         stop_unit(unit_name)
         mod_log = collect_unit_logs(unit_name, log_since) if mod_proc is not None else b""
         _ = terminate_process_tree(mod_proc) if mod_proc is not None else b""
-        (run_dir / "modulator.log").write_bytes(mod_log)
+        (run_dir / "BS.log").write_bytes(mod_log)
 
     base_fields = [
         "run_id",
@@ -484,11 +484,11 @@ def main() -> None:
         "sample_log",
     ]
     write_csv(
-        run_dir / "modulator_sensing_runtime_summary.csv",
+        run_dir / "bs_sensing_runtime_summary.csv",
         base_fields,
         summary_rows,
     )
-    print(f"\nSummary written to {run_dir / 'modulator_sensing_runtime_summary.csv'}")
+    print(f"\nSummary written to {run_dir / 'bs_sensing_runtime_summary.csv'}")
 
 
 if __name__ == "__main__":

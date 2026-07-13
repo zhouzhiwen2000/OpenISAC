@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <Common.hpp>
 #include "LDPCCodec.hpp"
+#include "UplinkTxEngine.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
 #include "SimStreamer.hpp"
@@ -166,9 +167,9 @@ AlignedVector make_cfo_training_sequence(const Config& cfg)
  * - sensing_thread: Accumulated channel response for further analysis.
  * - bit_processing_thread: Soft Demodulation, LDPC Decoding, and UDP output.
  */
-class OFDMRxEngine {
+class UEEngine {
 public:
-    explicit OFDMRxEngine(const Config& cfg) 
+    explicit UEEngine(const Config& cfg)
         : cfg_(cfg),
           _measurement_enabled(measurement_mode_enabled(cfg)),
           _data_resource_layout(build_data_resource_grid_layout(cfg)),
@@ -229,7 +230,7 @@ public:
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc_decoder.get_N(), 21);
         _measurement_active_epoch_id.store(0, std::memory_order_relaxed);
         if (_measurement_enabled && !cfg_.measurement_output_dir.empty()) {
-            _measurement_summary_path = cfg_.measurement_output_dir + "/demodulator_measurement_summary.csv";
+            _measurement_summary_path = cfg_.measurement_output_dir + "/ue_measurement_summary.csv";
         }
         _build_compact_payload_indices();
         LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
@@ -266,7 +267,7 @@ public:
         _register_commands();
     }
 
-    ~OFDMRxEngine() {
+    ~UEEngine() {
         stop();
         
         
@@ -278,8 +279,8 @@ public:
     void start() {
         _control_handler.start();
         running_.store(true);
-        rx_thread_ = std::thread(&OFDMRxEngine::rx_proc, this);
-        process_thread_ = std::thread(&OFDMRxEngine::process_proc, this);
+        rx_thread_ = std::thread(&UEEngine::rx_proc, this);
+        process_thread_ = std::thread(&UEEngine::process_proc, this);
         
         // Start all senders
         channel_sender_.start();
@@ -288,11 +289,20 @@ public:
         
         // Start data processing thread
         _bit_processing_running.store(true);
-        _bit_processing_thread = std::thread(&OFDMRxEngine::bit_processing_proc, this);
+        _bit_processing_thread = std::thread(&UEEngine::bit_processing_proc, this);
+
+        _ue_timing_advance.store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+        log_duplex_summary(cfg_, "UE");
+        if (_uplink_tx) {
+            _uplink_tx->start();
+        }
     }
 
     void stop() {
         running_.store(false);
+        if (_uplink_tx) {
+            _uplink_tx->stop();
+        }
         if (rx_thread_.joinable()) rx_thread_.join();
         if (process_thread_.joinable()) process_thread_.join();
         sensing_running_.store(false);
@@ -345,6 +355,7 @@ private:
     uhd::usrp::multi_usrp::sptr usrp_;
     uhd::rx_streamer::sptr rx_stream_;
     std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
+    std::unique_ptr<UplinkTxEngine> _uplink_tx;  // non-null when duplex uplink enabled
 
     // Current radio time: real USRP clock, or the simulator's shared sample clock.
     uhd::time_spec_t radio_time_now() const {
@@ -443,6 +454,16 @@ private:
     int _last_delay_index_err = 0; // Last adjusted index
     uint32_t _delay_adjustment_count = 0;
     std::atomic<float> _user_delay_offset = 0.0f;
+    std::atomic<int32_t> _ue_timing_advance{0};  // Timing Advance (samples)
+    std::atomic<int64_t> _last_tadv_ns{0};       // rate-limit guard for TADV
+
+    // Mirror the current RX alignment into the uplink TX window so that any RX
+    // timing adjustment shifts the uplink TX by the same relative amount.
+    void _sync_uplink_tx_shift(int32_t rx_alignment_samples) {
+        if (_uplink_tx) {
+            _uplink_tx->rx_alignment_shift().store(rx_alignment_samples, std::memory_order_relaxed);
+        }
+    }
     std::unique_ptr<HardwareSyncController> _hw_sync;
 
     // Data processing related member variables
@@ -997,7 +1018,7 @@ private:
             std::to_string(evm_slope_db_per_symbol_mean),
         };
         if (!append_csv_row(_measurement_summary_path, header, row)) {
-            LOG_G_WARN() << "Failed to append demodulator measurement row to "
+            LOG_G_WARN() << "Failed to append UE measurement row to "
                          << _measurement_summary_path;
         }
     }
@@ -1058,13 +1079,36 @@ private:
         args.args["block_id"] = "radio";
         args.channels = {cfg_.rx_channel};
         rx_stream_ = usrp_->get_rx_stream(args);
+
+        if (uplink_enabled(cfg_)) {
+            // Full-duplex uplink TX on the UE device. TDD: same carrier as RX.
+            // FDD: the uplink carrier (duplex.ul_center_freq).
+            const double ul_freq = (cfg_.duplex.mode == DuplexMode::FDD &&
+                                    cfg_.duplex.ul_center_freq > 0.0)
+                ? cfg_.duplex.ul_center_freq : cfg_.center_freq;
+            usrp_->set_tx_rate(cfg_.sample_rate);
+            usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.tx_channel);
+            usrp_->set_tx_gain(cfg_.tx_gain, cfg_.tx_channel);
+            usrp_->set_tx_bandwidth(cfg_.bandwidth, cfg_.tx_channel);
+            uhd::stream_args_t tx_args("fc32", cfg_.wire_format_tx);
+            tx_args.channels = {cfg_.tx_channel};
+            _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
+            _uplink_tx->set_tx_stream(usrp_->get_tx_stream(tx_args));
+            _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+            const double tick = usrp_->get_master_clock_rate();
+            _uplink_tx->set_timed_tx(usrp_->get_time_now() + uhd::time_spec_t(1.0), tick,
+                                     usrp_->get_tx_rate(cfg_.tx_channel));
+            LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.tx_channel
+                         << " @ " << format_freq_hz(ul_freq) << " Hz, "
+                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame";
+        }
     }
 
     // Channel-simulator backend: attach to the hub's "rx.comm" ring instead of a USRP.
     void init_sim_radio() {
         _sim_radio = std::make_unique<SimRadio>();
         if (!_sim_radio->connect(cfg_.simulation)) {
-            throw std::runtime_error("Demodulator: failed to connect to ChannelSimulator session '" +
+            throw std::runtime_error("UE: failed to connect to ChannelSimulator session '" +
                                      cfg_.simulation.session + "'. Start ChannelSimulator first.");
         }
         rx_stream_ = _sim_radio->make_rx_streamer("rx.comm", cfg_.samples_per_frame());
@@ -1082,6 +1126,16 @@ private:
         _sync_search_gain_sweep.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
         LOG_G_INFO() << "RX radio backend: SIMULATION (session='" << cfg_.simulation.session
                      << "', no USRP).";
+
+        if (uplink_enabled(cfg_)) {
+            _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
+            _uplink_tx->set_tx_stream(
+                _sim_radio->make_tx_streamer("ul.tx", cfg_.samples_per_frame()));
+            _uplink_tx->timing_advance().store(cfg_.ue_timing_advance, std::memory_order_relaxed);
+            // sim: continuous send paced by shm backpressure (no timed scheduling).
+            LOG_G_INFO() << "[UL-TX] uplink transmit enabled (sim ul.tx), "
+                         << _uplink_tx->uplink_config().num_symbols << " UL symbols/frame";
+        }
     }
 
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
@@ -1163,6 +1217,29 @@ private:
             const int32_t adjusted_value = static_cast<int32_t>(clamped_value);
             _user_delay_offset = _user_delay_offset - static_cast<float>(adjusted_value);
             LOG_G_INFO() << "Received alignment command: " << adjusted_value << " samples";
+        });
+
+        // Timing Advance — pulls the UE uplink TX window earlier on the shared
+        // clock so it lands aligned at the BS. Runtime-adjustable.
+        _control_handler.register_command("TADV", [this](int32_t value) {
+            // Rate-limit so rapid repeated commands don't thrash the framing.
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (now - _last_tadv_ns.load(std::memory_order_relaxed) < 50'000'000) {
+                LOG_G_WARN() << "TADV rate-limited (<50ms since last); ignored " << value;
+                return;
+            }
+            _last_tadv_ns.store(now, std::memory_order_relaxed);
+            _ue_timing_advance.store(value, std::memory_order_relaxed);
+            if (_uplink_tx) {
+                _uplink_tx->timing_advance().store(value, std::memory_order_relaxed);
+            }
+            LOG_G_INFO() << "TADV (Timing Advance) set to " << value << " samples";
+        });
+        _control_handler.register_request("TADV", [this](
+            int32_t, const ControlCommandHandler::ControlPeer& peer) {
+            _control_handler.send_control_status(
+                peer, "TADV", _ue_timing_advance.load(std::memory_order_relaxed));
         });
 
         _control_handler.register_command("MTI ", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
@@ -1341,15 +1418,15 @@ private:
                     _control_handler.send_heartbeat(ip, port);
                 }
             },
-            [this](size_t hint) {
-                return core_from_hint(cfg_, hint);
+            [](size_t) {
+                return std::nullopt;
             }
         );
         _bistatic_sensing_channel->apply_shared_cfg(_shared_sensing_cfg);
         _bistatic_sensing_channel->start_bistatic();
 
         sensing_running_.store(true);
-        sensing_thread_ = std::thread(&OFDMRxEngine::sensing_process_proc, this);
+        sensing_thread_ = std::thread(&UEEngine::sensing_process_proc, this);
     }
 
     void init_data_processing() {
@@ -1475,7 +1552,7 @@ private:
     void rx_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1.0, true);
-        bind_current_thread_from_hint(cfg_, 0);
+        bind_current_thread_from_downlink_hint(cfg_, 0);
         uhd::rx_metadata_t md;
         rx_stream_->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
 
@@ -1538,7 +1615,15 @@ private:
     void handle_alignment(uhd::rx_metadata_t& md) {
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
-        const size_t total_read = cfg_.samples_per_frame() + discard_samples_;
+        const int alignment_samples = discard_samples_.load(std::memory_order_relaxed);
+        const size_t frame_samples = cfg_.samples_per_frame();
+        const size_t negative_shift = (alignment_samples < 0)
+            ? std::min<size_t>(static_cast<size_t>(-alignment_samples), frame_samples)
+            : 0;
+        const size_t positive_shift = (alignment_samples > 0)
+            ? static_cast<size_t>(alignment_samples)
+            : 0;
+        const size_t total_read = frame_samples + positive_shift - negative_shift;
         AlignedVector temp_buf(total_read);
         size_t received = 0;
         int64_t frame_time_ns = -1;
@@ -1551,21 +1636,24 @@ private:
         }
         // Acquire pre-allocated RX frame from pool
         RxFrame frame = _rx_frame_pool.acquire();
-        frame.Alignment = discard_samples_;
+        frame.Alignment = alignment_samples;
         frame.usrp_time_ns = frame_time_ns;
         frame.host_enqueue_time_ns = do_latency_profile ? host_now_ns() : 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
-        if(discard_samples_ > 0)
-        {
-            std::copy(temp_buf.begin() + discard_samples_,
-                    temp_buf.begin() + discard_samples_ + cfg_.samples_per_frame(),
+        if (positive_shift > 0) {
+            std::copy(temp_buf.begin() + positive_shift,
+                    temp_buf.begin() + positive_shift + frame_samples,
                     frame.frame_data.begin());
-        }
-        else
-        {
+        } else if (negative_shift > 0) {
+            std::fill(frame.frame_data.begin(), frame.frame_data.end(),
+                      std::complex<float>(0.0f, 0.0f));
             std::copy(temp_buf.begin(),
-                    temp_buf.begin() + discard_samples_+cfg_.samples_per_frame(),
-                    frame.frame_data.begin() - discard_samples_);
+                    temp_buf.end(),
+                    frame.frame_data.begin() + negative_shift);
+        } else {
+            std::copy(temp_buf.begin(),
+                    temp_buf.begin() + frame_samples,
+                    frame.frame_data.begin());
         }
 
         if (!frame_queue_.try_push(std::move(frame))) {
@@ -1863,6 +1951,7 @@ private:
                     }
                     _clear_frame_queue();
                     discard_samples_.store(sync_offset_);
+                    _sync_uplink_tx_shift(sync_offset_);
                     state_ = RxState::ALIGNMENT;
                     issued_alignment = true;
                 }
@@ -1900,7 +1989,7 @@ private:
     void process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1, true);
-        bind_current_thread_from_hint(cfg_, 1);
+        bind_current_thread_from_downlink_hint(cfg_, 1);
         
         using Clock = std::chrono::high_resolution_clock;
         Clock::time_point frame_start, frame_end;
@@ -2563,6 +2652,7 @@ private:
             if (_delay_adjustment_count++ >= 1) {
                 _delay_adjustment_count = 0;
                 discard_samples_.store(delay_index_err);
+                _sync_uplink_tx_shift(delay_index_err);
                 state_ = RxState::ALIGNMENT; // Send sync command. May have delay due to FIFO
                 _sync_in_progress = true;
                 issued_alignment = true;
@@ -2749,7 +2839,7 @@ private:
     void sensing_process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1);
-        bind_current_thread_from_hint(cfg_, 2);
+        bind_current_thread_from_downlink_hint(cfg_, 2);
         SPSCBackoff sensing_backoff;
         while (sensing_running_.load()) {
             SensingFrame frame;
@@ -2786,7 +2876,7 @@ private:
     void bit_processing_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe();
-        bind_current_thread_from_hint(cfg_, 3);
+        bind_current_thread_from_downlink_hint(cfg_, 3);
         SPSCBackoff llr_backoff;
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
@@ -2966,11 +3056,11 @@ void signal_handler(int) {
 int UHD_SAFE_MAIN(int argc, char*[]) {
     async_logger::AsyncLoggerGuard async_logger_guard;
     std::signal(SIGINT, &signal_handler);
-    const std::string default_config_file = "Demodulator.yaml";
-    Config cfg = make_default_demodulator_config();
+    const std::string default_config_file = "UE.yaml";
+    Config cfg = make_default_ue_config();
 
     if (argc > 1) {
-        LOG_G_ERROR() << "CLI parameters are no longer supported. Please configure OFDMDemodulator via "
+        LOG_G_ERROR() << "CLI parameters are no longer supported. Please configure UE via "
                       << default_config_file << ".";
         return 1;
     }
@@ -2978,19 +3068,19 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     if (!path_exists(default_config_file)) {
         LOG_G_ERROR() << "Config file '" << default_config_file
                       << "' not found. Copy a sample file from the repository config directory, "
-                      << "such as 'Demodulator_X310.yaml' or 'Demodulator_B210.yaml', to '" << default_config_file
-                      << "' and edit it before starting OFDMDemodulator.";
+                      << "such as 'UE_X310.yaml' or 'UE_B210.yaml', to '" << default_config_file
+                      << "' and edit it before starting UE.";
         return 1;
     }
 
-    if (!load_demodulator_config_from_yaml(cfg, default_config_file)) {
+    if (!load_ue_config_from_yaml(cfg, default_config_file)) {
         return 1;
     }
 
     LOG_G_INFO() << "Loaded config from: " << default_config_file;
-    finalize_demodulator_network_defaults(cfg);
-    log_demodulator_sync_mode(cfg);
-    log_demodulator_agc_mode(cfg);
+    finalize_ue_network_defaults(cfg);
+    log_ue_sync_mode(cfg);
+    log_ue_agc_mode(cfg);
     uhd::set_thread_priority_safe(1, true);
     // Use last available core for main thread
     bind_current_thread_to_main_core(cfg);
@@ -2998,7 +3088,7 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     // Load FFTW wisdom
     FFTWManager::import_wisdom();
 
-    OFDMRxEngine receiver(cfg);
+    UEEngine receiver(cfg);
     receiver.start();
     
     while (!stop_signal.load()) {

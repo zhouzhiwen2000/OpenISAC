@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(OFDM_Modulator CXX)
+project(OpenISAC CXX)
 
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
@@ -13,6 +13,52 @@ if(APPLE)
         /opt/local
         /usr/local
     )
+endif()
+
+# Optional CUDA support for GPU-accelerated builds
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    find_package(CUDAToolkit REQUIRED)
+    # Default: SM 70 (V100) + SM 86 (RTX 3080); override with -DCMAKE_CUDA_ARCHITECTURES=XX
+    if(NOT CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52")
+        set(CMAKE_CUDA_ARCHITECTURES 70 86)
+    endif()
+    if(TARGET CUDA::cufft)
+        set(OPENISAC_CUFFT_TARGET CUDA::cufft)
+    else()
+        find_library(CUFFT_LIBRARY cufft HINTS ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/../lib64 /usr/local/cuda/lib64)
+        set(OPENISAC_CUFFT_TARGET ${CUFFT_LIBRARY})
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES)
+        execute_process(
+            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so
+            OUTPUT_VARIABLE OPENISAC_CXX_STDLIB
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        get_filename_component(OPENISAC_CXX_STDLIB_DIR "${OPENISAC_CXX_STDLIB}" DIRECTORY)
+        if(OPENISAC_CXX_STDLIB_DIR)
+            set(OPENISAC_CUDA_IMPLICIT_LINK_DIRECTORIES "")
+            foreach(OPENISAC_CUDA_LINK_DIR IN LISTS CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES)
+                if(OPENISAC_CUDA_LINK_DIR MATCHES "^/usr/lib/gcc/.+/[0-9]+$"
+                    AND NOT OPENISAC_CUDA_LINK_DIR STREQUAL OPENISAC_CXX_STDLIB_DIR)
+                    continue()
+                endif()
+                list(APPEND OPENISAC_CUDA_IMPLICIT_LINK_DIRECTORIES "${OPENISAC_CUDA_LINK_DIR}")
+            endforeach()
+            list(PREPEND OPENISAC_CUDA_IMPLICIT_LINK_DIRECTORIES "${OPENISAC_CXX_STDLIB_DIR}")
+            list(REMOVE_DUPLICATES OPENISAC_CUDA_IMPLICIT_LINK_DIRECTORIES)
+            set(CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES "${OPENISAC_CUDA_IMPLICIT_LINK_DIRECTORIES}")
+        endif()
+    endif()
+    message(STATUS "CUDA enabled — arch ${CMAKE_CUDA_ARCHITECTURES}, cufft: ${OPENISAC_CUFFT_TARGET}")
+    set(CUDA_AVAILABLE TRUE)
+else()
+    message(STATUS "CUDA not found — GPU targets will not be built")
+    set(CUDA_AVAILABLE FALSE)
 endif()
 
 # Set C++ standard
@@ -282,16 +328,12 @@ endif()
 
 set(OPENISAC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(OPENISAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
-set(OPENISAC_PLATFORM_LIBS "")
-if(UNIX AND NOT APPLE)
-    list(APPEND OPENISAC_PLATFORM_LIBS rt)
-endif()
 
 #===========================================================
-# Modulator Executable
+# BS Executable
 #===========================================================
-add_executable(OFDMModulator
-    ${OPENISAC_SRC_DIR}/OFDMModulator.cpp
+add_executable(BS
+    ${OPENISAC_SRC_DIR}/BS.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
     ${OPENISAC_SRC_DIR}/SimStreamer.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
@@ -299,7 +341,7 @@ add_executable(OFDMModulator
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
 )
 
-target_include_directories(OFDMModulator PRIVATE
+target_include_directories(BS PRIVATE
     ${UHD_INCLUDE_DIRS}
     ${LIBDPDK_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
@@ -310,7 +352,7 @@ target_include_directories(OFDMModulator PRIVATE
     ${Boost_INCLUDE_DIRS}
 )
 
-target_link_libraries(OFDMModulator PRIVATE
+target_link_libraries(BS PRIVATE
     ${UHD_LIBRARIES}
     Threads::Threads
     OpenMP::OpenMP_CXX
@@ -321,18 +363,18 @@ target_link_libraries(OFDMModulator PRIVATE
     ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
     ${OPENISAC_ZMQ_LINK}
-    ${OPENISAC_PLATFORM_LIBS}
+    rt
 )
 
-target_compile_options(OFDMModulator PRIVATE
+target_compile_options(BS PRIVATE
     ${COMMON_COMPILE_OPTIONS}
 )
 
 #===========================================================
-# Demodulator Executable
+# UE Executable
 #===========================================================
-add_executable(OFDMDemodulator
-    ${OPENISAC_SRC_DIR}/OFDMDemodulator.cpp
+add_executable(UE
+    ${OPENISAC_SRC_DIR}/UE.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
     ${OPENISAC_SRC_DIR}/SimStreamer.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
@@ -340,7 +382,7 @@ add_executable(OFDMDemodulator
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
 )
 
-target_include_directories(OFDMDemodulator PRIVATE
+target_include_directories(UE PRIVATE
     ${UHD_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
@@ -350,7 +392,7 @@ target_include_directories(OFDMDemodulator PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(OFDMDemodulator PRIVATE
+target_link_libraries(UE PRIVATE
     ${UHD_LIBRARIES}
     ${FFTW3f_LIBRARIES}
     ${FFTW3f_THREADS_LIBRARY}
@@ -360,12 +402,12 @@ target_link_libraries(OFDMDemodulator PRIVATE
     ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
     ${OPENISAC_ZMQ_LINK}
-    ${OPENISAC_PLATFORM_LIBS}
+    rt
 )
 
-target_compile_options(OFDMDemodulator PRIVATE
+target_compile_options(UE PRIVATE
     ${COMMON_COMPILE_OPTIONS}
-    -ffast-math  # Demodulator specific optimization
+    -ffast-math  # UE specific optimization
 )
 
 #===========================================================
@@ -393,7 +435,7 @@ target_link_libraries(ChannelSimulator PRIVATE
     ${OPENISAC_YAMLCPP_TARGET}
     ${YAMLCPP_LIBRARIES}
     ${OPENISAC_ZMQ_LINK}
-    ${OPENISAC_PLATFORM_LIBS}
+    rt
 )
 
 target_compile_options(ChannelSimulator PRIVATE
@@ -402,9 +444,142 @@ target_compile_options(ChannelSimulator PRIVATE
 )
 
 #===========================================================
+# CUDA BS Executable (optional)
+#===========================================================
+if(CUDA_AVAILABLE)
+    add_executable(CUDABS
+        ${OPENISAC_SRC_DIR}/CUDABS.cu
+        ${OPENISAC_SRC_DIR}/CUDASensingChannel.cu
+        ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+        cuda/cuda_kernels.cu
+        cuda/ldpc_5041008_cuda.cu
+        ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    )
+
+    target_include_directories(CUDABS PRIVATE
+        ${UHD_INCLUDE_DIRS}
+        ${LIBDPDK_INCLUDE_DIRS}
+        ${FFTW3f_INCLUDE_DIRS}
+        ${YAMLCPP_INCLUDE_DIRS}
+        ${OPENISAC_ZMQ_INCLUDE_DIRS}
+        ${OPENISAC_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${Boost_INCLUDE_DIRS}
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    )
+
+    target_link_libraries(CUDABS PRIVATE
+        ${UHD_LIBRARIES}
+        Threads::Threads
+        OpenMP::OpenMP_CXX
+        ${LIBDPDK_LIBRARIES}
+        ${FFTW3f_LIBRARIES}
+        ${FFTW3f_THREADS_LIBRARY}
+        aff3ct::aff3ct-shared-lib
+        ${OPENISAC_YAMLCPP_TARGET}
+        ${YAMLCPP_LIBRARIES}
+        ${OPENISAC_ZMQ_LINK}
+        CUDA::cudart
+        ${OPENISAC_CUFFT_TARGET}
+    )
+
+    target_compile_options(CUDABS PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${COMMON_COMPILE_OPTIONS}>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 --expt-relaxed-constexpr>
+    )
+
+    #===========================================================
+    # CUDA UE Executable (optional)
+    #===========================================================
+    add_executable(CUDAUE
+        ${OPENISAC_SRC_DIR}/CUDAUE.cu
+        cuda/cuda_kernels.cu
+        cuda/ldpc_5041008_cuda.cu
+        ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+        ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+        ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
+        ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
+        ${OPENISAC_SRC_DIR}/CUDASensingChannel.cu
+    )
+
+    target_include_directories(CUDAUE PRIVATE
+        ${UHD_INCLUDE_DIRS}
+        ${Boost_INCLUDE_DIRS}
+        ${FFTW3f_INCLUDE_DIRS}
+        ${YAMLCPP_INCLUDE_DIRS}
+        ${OPENISAC_ZMQ_INCLUDE_DIRS}
+        ${OPENISAC_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    )
+
+    target_link_libraries(CUDAUE PRIVATE
+        ${UHD_LIBRARIES}
+        ${FFTW3f_LIBRARIES}
+        ${FFTW3f_THREADS_LIBRARY}
+        Threads::Threads
+        OpenMP::OpenMP_CXX
+        aff3ct::aff3ct-shared-lib
+        ${OPENISAC_YAMLCPP_TARGET}
+        ${YAMLCPP_LIBRARIES}
+        ${OPENISAC_ZMQ_LINK}
+        CUDA::cudart
+        ${OPENISAC_CUFFT_TARGET}
+    )
+
+    target_compile_options(CUDAUE PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${COMMON_COMPILE_OPTIONS} -ffast-math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 --expt-relaxed-constexpr --use_fast_math>
+    )
+
+    #===========================================================
+    # Standalone CUDA LDPC experiment target (not linked into main modem)
+    #===========================================================
+    add_executable(CUDALDPCBench
+        tools/ldpc_cuda_bench.cpp
+        cuda/ldpc_5041008_cuda.cu
+        ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
+        ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
+    )
+
+    target_include_directories(CUDALDPCBench PRIVATE
+        ${UHD_INCLUDE_DIRS}
+        ${Boost_INCLUDE_DIRS}
+        ${FFTW3f_INCLUDE_DIRS}
+        ${YAMLCPP_INCLUDE_DIRS}
+        ${OPENISAC_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    )
+
+    target_link_libraries(CUDALDPCBench PRIVATE
+        ${UHD_LIBRARIES}
+        ${FFTW3f_LIBRARIES}
+        ${FFTW3f_THREADS_LIBRARY}
+        Threads::Threads
+        OpenMP::OpenMP_CXX
+        aff3ct::aff3ct-shared-lib
+        ${OPENISAC_YAMLCPP_TARGET}
+        ${YAMLCPP_LIBRARIES}
+        CUDA::cudart
+        ${OPENISAC_CUFFT_TARGET}
+    )
+
+    target_compile_options(CUDALDPCBench PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${COMMON_COMPILE_OPTIONS}>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 --expt-relaxed-constexpr --use_fast_math>
+    )
+
+    message(STATUS "CUDA targets: CUDABS, CUDAUE, CUDALDPCBench")
+endif()
+
+#===========================================================
 # Installation Rules
 #===========================================================
-set(INSTALL_TARGETS OFDMModulator OFDMDemodulator)
+set(INSTALL_TARGETS BS UE)
+if(CUDA_AVAILABLE)
+    list(APPEND INSTALL_TARGETS CUDABS CUDAUE CUDALDPCBench)
+endif()
 
 install(TARGETS ${INSTALL_TARGETS}
     RUNTIME DESTINATION bin

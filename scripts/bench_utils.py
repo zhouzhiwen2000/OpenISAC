@@ -59,7 +59,7 @@ def ensure_distinct_control_ports(mod_cfg: dict, demod_cfg: dict) -> None:
 
 
 def estimate_single_frame_payload_limit(cfg: dict) -> int:
-    # Matches the fixed CPU LDPC path in OFDMModulator/OFDMDemodulator:
+    # Matches the fixed CPU LDPC path in BS/UE:
     # make_ldpc_5041008_cfg() => K=504 information bits, N=1008 coded bits.
     ldpc_k_bits = 504
     ldpc_n_bits = 1008
@@ -124,13 +124,13 @@ def launch_openisac_pair(
     run_dir: Path,
     mod_cfg: dict,
     demod_cfg: dict,
-    demod_bin: str = "OFDMDemodulator",
-    mod_bin: str = "OFDMModulator",
+    demod_bin: str = "UE",
+    mod_bin: str = "BS",
     startup_gap_s: float = 1.0,
 ) -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
     run_dir.mkdir(parents=True, exist_ok=True)
-    save_yaml(run_dir / "Modulator.yaml", mod_cfg)
-    save_yaml(run_dir / "Demodulator.yaml", demod_cfg)
+    save_yaml(run_dir / "BS.yaml", mod_cfg)
+    save_yaml(run_dir / "UE.yaml", demod_cfg)
 
     demod_proc = subprocess.Popen(
         [str(build_dir / demod_bin)],
@@ -160,9 +160,9 @@ def launch_openisac_process(
 ) -> subprocess.Popen[bytes]:
     run_dir.mkdir(parents=True, exist_ok=True)
     if mod_cfg is not None:
-        save_yaml(run_dir / "Modulator.yaml", mod_cfg)
+        save_yaml(run_dir / "BS.yaml", mod_cfg)
     if demod_cfg is not None:
-        save_yaml(run_dir / "Demodulator.yaml", demod_cfg)
+        save_yaml(run_dir / "UE.yaml", demod_cfg)
 
     return subprocess.Popen(
         [str(build_dir / binary_name)],

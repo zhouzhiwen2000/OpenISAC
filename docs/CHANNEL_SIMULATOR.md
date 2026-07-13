@@ -17,13 +17,13 @@ Each sensing RX channel is treated as one antenna. The array response can be gen
 from a parametric uniform linear array (ULA, `array_spacing_lambda`) or loaded as a
 custom array manifold matrix from `steering_override_file`. The communication channel
 is a **realistic multipath channel**: a LoS path plus scatterer returns, so the
-demodulator's **bistatic** sensing can also detect range-Doppler targets.
+UE's **bistatic** sensing can also detect range-Doppler targets.
 
 ## How it works
 
 ```
- OFDMModulator ──TX samples──▶ ChannelSimulator ──per-antenna RX──▶ OFDMDemodulator (comm RX)
- (SimTxStreamer)                (the "air" + clock)  └─sens RX×N──▶ OFDMModulator monostatic sensing
+ BS ──TX samples──▶ ChannelSimulator ──per-antenna RX──▶ UE (comm RX)
+ (SimTxStreamer)                (the "air" + clock)  └─sens RX×N──▶ BS monostatic sensing
 ```
 
 All three processes attach to POSIX shared-memory rings named by `simulation.session`.
@@ -35,24 +35,24 @@ keeps the original hardware behaviour.
 ## Build
 
 ```
-cd build && cmake .. && make -j ChannelSimulator OFDMModulator OFDMDemodulator
+cd build && cmake .. && make -j ChannelSimulator BS UE
 ```
 
 ## Run (three terminals, same machine)
 
 ```
 cd build
-cp ../config/Modulator_Sim.yaml   Modulator.yaml
-cp ../config/Demodulator_Sim.yaml Demodulator.yaml
+cp ../config/BS_Sim.yaml   BS.yaml
+cp ../config/UE_Sim.yaml UE.yaml
 
 # 1) start the "air" FIRST (it creates the shared memory and is the sample clock)
-./ChannelSimulator                 # reads Modulator.yaml (+ its simulation: block)
+./ChannelSimulator                 # reads BS.yaml (+ its simulation: block)
 
 # 2) start the transmitter / monostatic sensing
-./OFDMModulator
+./BS
 
 # 3) start the receiver / comm demod
-./OFDMDemodulator
+./UE
 ```
 
 Start `ChannelSimulator` first. By default the hub uses backpressure: if communication
@@ -61,8 +61,8 @@ shared memory, the related ring buffer will fill and the whole simulation will w
 Start every enabled receiver; if you only need one side, disable the unused output in
 the `simulation:` block:
 
-- **Sensing only** — set `enable_comm_rx: false`; the hub does not produce communication RX output, so run only `ChannelSimulator` + `OFDMModulator` and skip `OFDMDemodulator`.
-- **Comm only** — set `enable_sensing_rx: false`; the hub does not produce sensing RX output, but still run `ChannelSimulator` + `OFDMModulator` + `OFDMDemodulator` because the modulator transmits and the demodulator receives the communication stream.
+- **Sensing only** — set `enable_comm_rx: false`; the hub does not produce communication RX output, so run only `ChannelSimulator` + `BS` and skip `UE`.
+- **Comm only** — set `enable_sensing_rx: false`; the hub does not produce sensing RX output, but still run `ChannelSimulator` + `BS` + `UE` because the BS transmits and the UE receives the communication stream.
 
 There are two ways to disable sensing RX: set `enable_sensing_rx: false`, or set
 `sensing_rx_channel_count: 0`.
@@ -70,13 +70,13 @@ There are two ways to disable sensing RX: set `enable_sensing_rx: false`, or set
 To view monostatic sensing results, run `python3 scripts/plot_sensing_fast.py`. As in
 hardware mode, RD streaming starts when the viewer connects.
 
-## Configuring the channel (`simulation:` block in Modulator_Sim.yaml)
+## Configuring the channel (`simulation:` block in BS_Sim.yaml)
 
 ```yaml
 radio_backend: sim
 simulation:
   session: oisac_sim             # must match across all three processes
-  enable_comm_rx: true           # produce the comm RX path (false = sensing-only, no demodulator)
+  enable_comm_rx: true           # produce the comm RX path (false = sensing-only, no UE)
   enable_sensing_rx: true        # produce the sensing RX paths (false = comm-only)
   noise_power_dbfs: -50          # AWGN per RX channel; <= -200 disables
   cfo_hz: 0.0                    # relative CFO on the communication/bistatic RX

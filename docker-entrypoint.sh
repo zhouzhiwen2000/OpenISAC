@@ -7,14 +7,14 @@ run_dir="${OPENISAC_RUN_DIR:-/work/build}"
 usage() {
     cat <<'EOF'
 Usage:
-  openisac-run modulator [x310|b210] [extra args...]
-  openisac-run demodulator [x310|b210] [extra args...]
+  openisac-run BS [x310|b210] [extra args...]
+  openisac-run UE [x310|b210] [extra args...]
   openisac-run bash
 
 Environment:
   OPENISAC_RUN_DIR=/work/build       Directory used as the runtime cwd.
   OPENISAC_CONFIG=/path/to/file.yaml Copy this config instead of a preset.
-  OPENISAC_REFRESH_CONFIG=1          Overwrite existing Modulator.yaml/Demodulator.yaml.
+  OPENISAC_REFRESH_CONFIG=1          Overwrite existing BS.yaml/UE.yaml.
 EOF
 }
 
@@ -27,15 +27,15 @@ target="$1"
 shift || true
 
 case "$target" in
-    modulator|OFDMModulator)
-        binary="${app_home}/bin/OFDMModulator"
-        runtime_yaml="Modulator.yaml"
-        preset_prefix="Modulator"
+    bs|BS)
+        binary="${app_home}/bin/BS"
+        runtime_yaml="BS.yaml"
+        preset_prefix="BS"
         ;;
-    demodulator|OFDMDemodulator)
-        binary="${app_home}/bin/OFDMDemodulator"
-        runtime_yaml="Demodulator.yaml"
-        preset_prefix="Demodulator"
+    ue|UE)
+        binary="${app_home}/bin/UE"
+        runtime_yaml="UE.yaml"
+        preset_prefix="UE"
         ;;
     *)
         exec "$target" "$@"

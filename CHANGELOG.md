@@ -8,6 +8,80 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-21 - Duplex uplink 总开关语义修正
+
+### Summary
+
+本次更新将顶层 `enable_uplink` 接入 BS/UE 的实际上行链路控制，并与 `simulation.enable_uplink` 的仿真通道控制解耦。
+
+### Changes
+
+- 顶层 `enable_uplink` 现在控制 BS/UE 是否创建 uplink TX/RX engine，以及 TDD 模式是否为上行窗口 blank 下行符号；`simulation.enable_uplink` 仅控制 ChannelSimulator 是否创建并转发 `ul.tx` / `rx.ul` 仿真通道。
+  影响：关闭顶层 `enable_uplink` 后，BS/UE 会保持全下行帧，不再打开上行链路或保留 TDD uplink 窗口；仿真 hub 的上行通道仍可独立配置。
+
+- 下行 data-resource layout 会跳过 TDD guard/uplink 符号，并忽略落在上行窗口内的 mid-frame pilot；BS 预生成符号模板时也使用实际下行 data-symbol 映射。
+  影响：TDD 上行窗口不会再被 UE 当作下行星座/LLR 数据或信道跟踪 pilot，避免星座图显示空白上行符号上的噪声。
+
+## 2026-06-21 - UE 上行 TX wire format 配置
+
+### Summary
+
+本次更新为 UE 配置增加 `wire_format_tx`，用于控制可选 UE->BS uplink TX stream 的 UHD on-the-wire 数据格式。
+
+### Changes
+
+- UE YAML 读写、配置模板、benchmark 模板、Web 配置编辑器 schema 和 README 参数表新增 `wire_format_tx`，默认值为 `sc16`，可选 `sc16` / `sc8`。
+  影响：启用 duplex/uplink 时，UE 侧 TX wire format 可以与 RX wire format 分别配置，不再只能依赖代码默认值。
+
+## 2026-06-21 - Web 配置编辑器 TDD uplink 资源保护
+
+### Summary
+
+本次更新改进 Web 配置编辑器的 duplex/uplink 配置和资源图显示，让 TDD uplink 符号与下行同步、CFO training 和感知/通信资源块的关系更清楚。
+
+### Changes
+
+- `enable_uplink`、`duplex_mode` 和 `uplink.*` 统一放入 Web 配置编辑器的 Duplex card，`uplink` 不再作为 raw YAML/JSON 文本编辑，而是直接展开为 `symbol_start`、`symbol_count`、`guard_symbols`、`center_freq` 和 uplink UDP 输入/输出子字段。
+  影响：配置 TDD/FDD uplink 时更容易保持字段类型和单位正确，`center_freq` 继续按 GHz 显示、按 Hz 写入。
+
+- Resource Map 和 Sensing Resource Map 会标出 TDD guard/uplink 符号，并在 TDD 范围覆盖同步符号、第二同步符号或 CFO training field 时给出冲突提示。
+  影响：运行前即可看到会导致 TDD/DL 保留字段冲突的 symbol window。
+
+- 保存配置时，`data_resource_blocks` 和 `sensing_mask_blocks` 会自动裁掉落入 TDD guard/uplink 符号的部分；compact sensing 仍会裁掉 CFO training field。
+  影响：感知 pilot、payload 和 compact sensing mask 不会继续占用 TDD uplink 符号。
+
+- BS 侧 `UplinkRxEngine` 拆分为 RX sample ingest、OFDM/LLR signal processing、LDPC decode + UDP output 三个线程，并对应 `uplink_cpu_cores[0..2]`。
+  影响：上行接收链路可以像 UE 接收链一样分别绑定采样、信号处理和解码/输出线程。
+
+## 2026-06-20 - BS/UE TDD/FDD duplex uplink 支持
+
+### Summary
+
+本次更新把原来的单向 BS->UE OFDM 链路扩展为可选的 UE->BS duplex uplink。TDD 模式在同一载波和帧周期内为上行预留符号窗口；FDD 模式在独立上行载波上连续发送，同时保留下行载波。
+
+### Changes
+
+- 新增 `enable_uplink`、`duplex_mode`、`uplink.symbol_start`、`uplink.symbol_count`、`uplink.guard_symbols` 和 `uplink.center_freq` 等配置，并在 BS/UE 启动时生成一致的 `DuplexFrameLayout`。
+  影响：同一套 YAML 可以描述下行-only、TDD uplink 和 FDD uplink 三种运行方式；TDD 会按符号粒度划分 DL、guard 和 UL 数据窗口。
+
+- TDD 模式下，BS 下行调制会在 guard/uplink 符号内 blank 下行资源，UE 只在配置的上行数据窗口内放置自包含 uplink OFDM 子帧；FDD 模式下，下行持续发送，上行使用 `uplink.center_freq`。
+  影响：TDD 不会在同一符号内同时占用 DL 和 UL；FDD 可在硬件和隔离条件满足时保持双向链路连续。
+
+- 新增 UE 侧 `UplinkTxEngine` 和 BS 侧 `UplinkRxEngine`。UE 从 `uplink.udp_input_ip` / `uplink.udp_input_port` 接收上行业务，完成 LDPC/QPSK/OFDM 调制并发送；BS 提取上行窗口，完成同步符号信道估计、均衡、LLR、LDPC 解码，并从 `uplink.udp_output_ip` / `uplink.udp_output_port` 输出解码 payload。
+  影响：平台新增真正的 UE->BS 数据路径，而不是只在下行链路上做回环或配置占位。
+
+- 上行子帧复用下行 numerology、ZC root 和 comb pilot 设置，但去掉第二同步符号、CFO training field、mid-frame pilot、sensing pilot 和自定义下行资源块。
+  影响：上行解调可以复用现有 OFDM/LDPC 基础设施，同时避免把下行专用字段误带入上行子帧。
+
+- 新增 BS 侧 `bs_dl_ul_timing_diff` / `DUTI` 和 UE 侧 `ue_timing_advance` / `TADV` 控制，用于在共享无线时钟下调整 BS 上行接收窗口和 UE 上行发送窗口。
+  影响：TDD 上行收发切换和硬件/链路延迟补偿可以在运行时微调，不需要重新生成配置文件。
+
+- ChannelSimulator 新增 uplink transport，将 UE `ul.tx` 经过独立 uplink multipath 通道送到 BS `rx.ul`；仿真配置支持 `simulation.enable_uplink` 和 `uplink_multipath_taps`。
+  影响：TDD/FDD duplex uplink 可以先在仿真链路中做双向 packet 验证，再迁移到 USRP 硬件。
+
+- CMake、配置模板、benchmark 脚本、Web 配置编辑器和 README 从 `OFDMModulator` / `OFDMDemodulator` 命名迁移到 `BS` / `UE`，并将运行时 YAML 命名为 `BS.yaml` / `UE.yaml`。
+  影响：配置和工具命名与 duplex 角色一致，后续描述上行/下行路径时不再混用调制器/解调器概念。
+
 ## 2026-06-19 - ZeroMQ debug 监听地址默认值修正
 
 ### Summary

@@ -28,15 +28,15 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 
 | Component | Main entry points | Purpose |
 | :--- | :--- | :--- |
-| BS backend | `OFDMModulator`, `config/Modulator_*.yaml` | Transmit OFDM frames, ingest UDP payloads, and output monostatic sensing data |
-| UE backend | `OFDMDemodulator`, `config/Demodulator_*.yaml` | Receive and decode frames, output payload data, and run bistatic sensing |
+| BS backend | `BS`, `config/BS_*.yaml` | Transmit OFDM frames, ingest UDP payloads, and output monostatic sensing data |
+| UE backend | `UE`, `config/UE_*.yaml` | Receive and decode frames, output payload data, and run bistatic sensing |
 | Frontend tools | `scripts/plot_*.py`, `scripts/config_web_editor.py` | Visualize sensing/channel results and edit runtime configs |
 
 ## Quick Navigation
 
 - Setup and installation: [Hardware Setup](#hardware-setup), [Software Installation](#software-installation)
 - First end-to-end run: [Typical Usage Example](#typical-usage-example)
-- Runtime configuration: [OFDM Modulator](#ofdm-modulator), [OFDM Demodulator](#ofdm-demodulator)
+- Runtime configuration: [BS](#bs), [UE](#ue)
 - Web control UI: [Web Config Console](#8-web-config-console)
 - Recent updates: [Changelog](CHANGELOG.md)
 
@@ -54,15 +54,15 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 
 | Goal | Backend program | Typical config | Typical frontend |
 | :--- | :--- | :--- | :--- |
-| Run the BS side | `OFDMModulator` | `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` | `plot_sensing_fast.py` |
-| Run the UE side | `OFDMDemodulator` | `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` | `plot_bi_sensing_fast.py` |
-| Tune parameters from a browser | `scripts/config_web_editor.py` | Reads `build/Modulator.yaml` and `build/Demodulator.yaml` | Browser at `http://<host>:8765` |
+| Run the BS side | `BS` | `config/BS_X310.yaml` or `config/BS_B210.yaml` | `plot_sensing_fast.py` |
+| Run the UE side | `UE` | `config/UE_X310.yaml` or `config/UE_B210.yaml` | `plot_bi_sensing_fast.py` |
+| Tune parameters from a browser | `scripts/config_web_editor.py` | Reads `build/BS.yaml` and `build/UE.yaml` | Browser at `http://<host>:8765` |
 
 ## Before the First OTA Run
 
-- Prepare two backend nodes: BS uses one TX plus one RX antenna path; UE uses one RX path.
+- Prepare two backend nodes. In downlink-only mode, BS uses one TX plus one sensing RX antenna path and UE uses one RX path. If duplex/uplink is enabled, UE also needs a TX antenna/RF chain and BS needs an RX antenna/RF chain for the uplink; in FDD mode the radios must also support the configured uplink carrier and the required TX/RX isolation.
 - Start from the sample YAML that is closest to your hardware. The repository includes X310/B210 examples, but it is not limited to those USRP models.
-- Copy runtime YAMLs into `build/`, because both binaries read `Modulator.yaml` or `Demodulator.yaml` from their working directory.
+- Copy runtime YAMLs into `build/`, because both binaries read `BS.yaml` or `UE.yaml` from their working directory.
 - If the frontend runs on another machine, point the Python viewer at the backend with `--host <backend-ip>` or the viewer's Backend IP field. `default_out_ip` is only for destination-style output IPs, not UDP/ZMQ listen addresses.
 - If you care about stable real-time behavior, run `scripts/set_performance.bash`, then apply CPU isolation with `sudo ../scripts/isolate_cpus.bash` (or a custom CPU set), and only then launch via `sudo ../scripts/isolate_cpus.bash run ...`.
 
@@ -128,7 +128,7 @@ To set up the complete system, you will need the following hardware:
  
 *   **USRP Devices**: 2 units (e.g., USRP X310, B210, etc.)
 *   **Computers**: 2 units (High performance recommended for signal processing)
-*   **Antennas**: 3
+*   **Antennas**: 3 for downlink-only operation; 4 if duplex/uplink is enabled and the UE TX path uses a separate antenna port
 *   **OCXO/GPSDO**: 2 units (Required for both USRPs)
  
 #### Connection Setup
@@ -137,16 +137,16 @@ The system consists of two main nodes:
  
 1.  **BS Node**
     *   **Hardware**: 1x Computer, 1x USRP.
-    *   **Antennas**: Connect 2 antennas to this USRP (1 for TX, 1 for RX).
+    *   **Antennas**: Connect 2 antennas to this USRP (1 for downlink TX, 1 for sensing/uplink RX).
     *   **Clock**: Connect an OCXO or GPSDO to the REFIN port of the USRP.
     *   **Function**: Transmits the OFDM signal and receives the radar echo.
  
 2.  **UE Node**
     *   **Hardware**: 1x Computer, 1x USRP.
-    *   **Antennas**: Connect 1 antenna to the RX port of this USRP.
+    *   **Antennas**: Connect 1 antenna to the RX port for downlink-only operation. If duplex/uplink is enabled, also connect the UE TX antenna/RF chain; in FDD mode, ensure the configured uplink carrier and RF isolation are supported.
     *   **Clock**: Connect an OCXO or GPSDO to the REFIN port of the USRP.
     *   **High-precision DAC (Optional)**: Use a high-precision DAC to enable finetuning the OCXO.
-    *   **Function**: Receives the OFDM signal for communication and bistatic sensing.
+    *   **Function**: Receives the OFDM signal for communication and bistatic sensing; when duplex/uplink is enabled, also transmits UE->BS uplink payloads.
  
 #### Interface Requirements
 To support high bandwidth and sample rates, ensure the connection between the Computers and USRPs uses:
@@ -290,7 +290,7 @@ In the web CPU-binding editor, this usually means prioritizing `main thread affi
 
 ```bash
 cd build
-sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
+sudo ../scripts/isolate_cpus.bash run ./BS
 ```
 
 - `run` reads saved app CPUs from `/tmp/isolate_cpus_app.conf`.
@@ -310,10 +310,10 @@ This removes the isolation settings and restores system slices to all CPUs.
 The system uses YAML files for runtime configuration.
 
 *   **Config filenames**:
-    `OFDMModulator` reads `Modulator.yaml`, and `OFDMDemodulator` reads `Demodulator.yaml` from the working directory.
+    `BS` reads `BS.yaml`, and `UE` reads `UE.yaml` from the working directory.
 *   **First run**:
-    Template YAML files live in `config/`. Copy `config/Modulator_X310.yaml` / `config/Modulator_B210.yaml` or
-    `config/Demodulator_X310.yaml` / `config/Demodulator_B210.yaml` to `Modulator.yaml` / `Demodulator.yaml`, then edit them in place.
+    Template YAML files live in `config/`. Copy `config/BS_X310.yaml` / `config/BS_B210.yaml` or
+    `config/UE_X310.yaml` / `config/UE_B210.yaml` to `BS.yaml` / `UE.yaml`, then edit them in place.
  
 ### Frontend (Python)
 
@@ -397,14 +397,14 @@ No code modifications are required; the system will automatically select the bes
 sudo -s
 cd build
 # For X310:
-cp ../config/Modulator_X310.yaml Modulator.yaml
+cp ../config/BS_X310.yaml BS.yaml
 sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
+sudo ../scripts/isolate_cpus.bash run ./BS
 
 # For B210:
-cp ../config/Modulator_B210.yaml Modulator.yaml
+cp ../config/BS_B210.yaml BS.yaml
 sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
+sudo ../scripts/isolate_cpus.bash run ./BS
 ```
 *If you are using a separate frontend computer, point the monostatic viewer at the BS backend IP with `--host` or the viewer's Backend IP field.*
 
@@ -413,14 +413,14 @@ sudo ../scripts/isolate_cpus.bash run ./OFDMModulator
 sudo -s
 cd build
 # For X310:
-cp ../config/Demodulator_X310.yaml Demodulator.yaml
+cp ../config/UE_X310.yaml UE.yaml
 sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
+sudo ../scripts/isolate_cpus.bash run ./UE
 
 # For B210:
-cp ../config/Demodulator_B210.yaml Demodulator.yaml
+cp ../config/UE_B210.yaml UE.yaml
 sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./OFDMDemodulator
+sudo ../scripts/isolate_cpus.bash run ./UE
 ```
 *If you are using a separate frontend computer, point the bistatic viewer at the UE backend IP with `--host` or the viewer's Backend IP field. Set `default_out_ip` only for decoded/debug outputs that should be sent to another machine.*
 
@@ -482,22 +482,25 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 Then open `http://<your-host>:8765` in a browser.
 
 What it does:
-* Provides separate Modulator / Demodulator tabs, plus a `Resource Planner` tab for `data_resource_blocks` and a `Sensing Resource Map` tab for `sensing_mask_blocks`.
-* Edits `build/Modulator.yaml` and `build/Demodulator.yaml` as parameter/value forms instead of a raw YAML text area.
-* Provides a dedicated CPU-binding editor for `cpu_cores`, with thread names, generated comments, and per-thread CPU selection.
-* Saves the current form back to YAML and starts/stops modulator and demodulator processes from the `build/` directory.
+* Provides separate BS / UE tabs, plus a `Resource Planner` tab for `data_resource_blocks` and a `Sensing Resource Map` tab for `sensing_mask_blocks`.
+* Edits `build/BS.yaml` and `build/UE.yaml` as parameter/value forms instead of a raw YAML text area.
+* Provides module-local CPU-binding fields for downlink, uplink, sensing real-time loops, and the main thread.
+* Saves the current form back to YAML and starts/stops BS and UE processes from the `build/` directory.
 * Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
-* Includes CPU command presets and a custom command field for each tab.
+* Includes CPU/CUDA command presets and a custom command field for each tab.
 * Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `sensing_mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
-* Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/comb-pilot stripping rules are applied.
+* Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
 Notes:
-* The editor currently targets the runtime YAML files in `build/`, because the binaries read `Modulator.yaml` / `Demodulator.yaml` from their working directory.
+* Default commands are `./BS` and `./UE`; switch to the CUDA preset if needed.
+* The editor currently targets the runtime YAML files in `build/`, because the binaries read `BS.yaml` / `UE.yaml` from their working directory.
 * `Resource Planner` edits `data_resource_blocks`: it decides which RE carry payload and which RE are reserved as `sensing_pilot`.
 * `Sensing Resource Map` edits `sensing_mask_blocks`: it decides which RE are exported on the compact sensing path when `sensing_output_mode=compact_mask`.
 * Both planners can be applied to either side. During experiments TX and RX may differ temporarily, but normal operation still expects matching `data_resource_blocks` on both sides.
 * If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.
-* If `Enable runtime CPU isolation` is on, the console uses the current `cpu_cores` list to derive the default isolated CPU set and calls `scripts/isolate_cpus.bash` before launch.
+* CPU affinity is configured only for real-time pipeline threads and the main thread. Non-real-time service/output/helper threads are intentionally left unbound.
+* Use `-1`, `[]`, or an omitted optional field to leave that module unbound.
+* If `Enable runtime CPU isolation` is on, the console derives the default isolated CPU set from all non-negative real-time CPU fields and calls `scripts/isolate_cpus.bash` before launch.
 * If `Override CPU isolation list` is enabled, the runtime isolation text box is seeded from the default isolate list and you may edit it manually for this launch.
 * If `Enable runtime CPU isolation` is off, the console still launches the selected command through the privileged runtime path, but it does not call `scripts/isolate_cpus.bash`.
 * The runtime panel also provides an optional sudo-password field and a `Reset CPU isolation` action.
@@ -505,12 +508,12 @@ Notes:
 
 ## Parameter Reference
 
-### OFDM Modulator
+### BS
 
-`OFDMModulator` is configured through `Modulator.yaml`.
-Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting template.
+`BS` is configured through `BS.yaml`.
+Use `config/BS_X310.yaml` or `config/BS_B210.yaml` as a starting template.
 
-`Modulator.yaml` parameter reference:
+`BS.yaml` parameter reference:
 
 | Key | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -531,7 +534,7 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `cuda_mod_pipeline_slots` | `int` | `2` | Number of CUDA modulation pipeline slots. Values below `1` are clamped to `1`. |
 | `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
 | `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame, such as `[25,50,75]`. These symbols are excluded from payload mapping; configured comb-pilot RE keep the comb-pilot sequence for phase tracking, while the remaining RE in those symbols use deterministic BPSK. |
-| `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match between `Modulator.yaml` and `Demodulator.yaml`. |
+| `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match between `BS.yaml` and `UE.yaml`. |
 | `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-reserved-sync, non-comb-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-reserved-sync, non-comb-pilot, non-mid-frame-BPSK-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
 | `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `sensing_output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. ZC sync symbols, comb-pilot, and mid-frame BPSK pilot RE are allowed here; the optional CFO training field is rejected because it is not a valid sensing symbol. Overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
@@ -547,6 +550,9 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | Bind IP for incoming payload UDP packets. |
 | `udp_input_port` | `int` | `50000` | Bind port for incoming payload UDP packets. |
+| `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
+| `uplink` | `object` | omitted | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols. In FDD, `center_freq` defines the UE->BS carrier. `udp_output_ip` / `udp_output_port` select where BS sends decoded uplink payloads. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
+| `bs_dl_ul_timing_diff` | `int` / samples | `0` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the monostatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `mono_sensing_port` | `int` | `8888` | ZeroMQ PUB bind port for the monostatic sensing stream. |
 | `sensing_rx_channel_count` | `int` | `1` | Number of sensing RX channels (`0` disables sensing RX). |
@@ -554,22 +560,24 @@ Use `config/Modulator_X310.yaml` or `config/Modulator_B210.yaml` as a starting t
 | `tx_circular_buffer_size` | `int` | `32` | Capacity of the modulated-frame queue feeding TX. |
 | `paired_frame_queue_size` | `int` | `64` | Capacity of each sensing channel's RX/TX frame-pairing queues. Keep this above `tx_circular_buffer_size` so it can retain TX references while RX startup, network buffering, and alignment complete. A continuously full queue after startup indicates insufficient sensing-processing throughput rather than a need for unlimited buffering. |
 | `control_port` | `int` | `9999` | ZeroMQ ROUTER bind port for the bidirectional control channel (commands in, params/heartbeat out). |
-| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. When enabled, `OFDMModulator` generates deterministic PRBS payloads instead of listening on `udp_input_*`, and `OFDMDemodulator` switches decoded measurement payloads into BER/BLER/EVM accounting. The CPU binaries handle this mode locally. |
+| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. When enabled, `BS` generates deterministic PRBS payloads instead of listening on `udp_input_*`, and `UE` switches decoded measurement payloads into BER/BLER/EVM accounting. CUDA binaries ignore this mode. |
 | `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
 | `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
 | `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
 | `measurement_payload_bytes` | `int` | `1024` | Bytes per internally generated measurement payload. Values below the internal header size are clamped up. |
 | `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to derive deterministic PRBS payload contents. |
 | `measurement_packets_per_point` | `int` | `1` | Number of measurement payloads sent for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `data_ingest`, and `sensing_proc`; `all` enables every module. Modulator end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
-| `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. Size this list for the TX thread, modulation thread, data-ingest thread, each enabled sensing channel's RX/sensing threads, and the main thread. If cores are limited, keep one dedicated core for the main thread first, then prioritize the TX and sensing RX threads, and only after that the modulation/data-ingest/sensing-processing threads because the latter stages have deeper buffers. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `data_ingest`, and `sensing_proc`; `all` enables every module. BS end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
+| `downlink_cpu_cores` | `int[]` | `[]` | BS downlink CPU cores: index `0` binds TX, `1` binds modulation, and `2` binds data ingest. |
+| `uplink_cpu_cores` | `int[]` | `[]` | BS uplink CPU cores: indices `0`, `1`, and `2` bind RX sample ingest, OFDM/LLR signal processing, and LDPC decode + UDP output. |
+| `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
 
 Quick mental model:
 * `data_resource_blocks` decides where communication data goes.
 * `sensing_mask_blocks` decides which RE are exported for compact sensing.
 * The first affects payload mapping; the second affects sensing output only.
 
-If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `Demodulator.yaml`. If a block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still take precedence. The optional CFO training field at `sync_pos+1` is reserved for CFO acquisition/deambiguation and is not a valid sensing-pilot or sensing-mask symbol. Priority is always `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
+If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `UE.yaml`. If a block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still take precedence. The optional CFO training field at `sync_pos+1` is reserved for CFO acquisition/deambiguation and is not a valid sensing-pilot or sensing-mask symbol. Priority is always `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
 
 In dense sensing mode, the configured `sensing_symbol_stride` and runtime `STRD` command are rejected if they would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary, so the new stride does not inherit a drifting phase from the old stride. ZC sync symbols remain valid sensing symbols.
 
@@ -588,6 +596,8 @@ When `sensing_output_mode=compact_mask`, sensing sends one compact message per O
 | `alignment` | `int` | `63` | Per-channel alignment offset (samples). |
 | `rx_antenna` | `string` | `""` | RX antenna name, e.g. `TX/RX`, `RX1`. |
 | `enable_system_delay_estimation` | `bool` | `false` | If `true`, this channel performs a ZC-based system delay estimation at startup and then once every 434 frames, while keeping the sensing pipeline disabled and continuing to drain frames. |
+| `rx_cpu_core` | `int` | `-1` | CPU core for this channel's RX loop. |
+| `processing_cpu_core` | `int` | `-1` | CPU core for this channel's sensing-processing loop. |
 
 Notes:
 * If `sensing_rx_channels` is empty and `sensing_rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
@@ -595,12 +605,12 @@ Notes:
 * When `enable_system_delay_estimation=true` for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing output remain disabled.
 * In practice, keep hardware-specific fields such as `device_args`, `wire_format_*`, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.
 
-### OFDM Demodulator
+### UE
 
-`OFDMDemodulator` is configured through `Demodulator.yaml`.
-Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starting template.
+`UE` is configured through `UE.yaml`.
+Use `config/UE_X310.yaml` or `config/UE_B210.yaml` as a starting template.
 
-`Demodulator.yaml` parameter reference:
+`UE.yaml` parameter reference:
 
 | Key | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -621,27 +631,32 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `rx_agc_max_step_db` | `float` / dB | `3.0` | Maximum RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down. |
 | `rx_agc_update_frames` | `int` | `4` | Minimum processed-frame interval between tracking-stage AGC updates. Values below `1` are clamped to `1`. |
 | `rx_channel` | `int` | `0` | RX channel index. |
+| `tx_channel` | `int` | `0` | TX channel index used by UE uplink when duplex/uplink is enabled. Downlink-only UE runs do not require this TX path. |
 | `zc_root` | `int` | `29` | Zadoff-Chu root index. |
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
 | `sensing_output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
+| `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink carrier and sends only in the configured uplink symbol window; `fdd` transmits continuously on `uplink.center_freq`. |
+| `uplink` | `object` | omitted | UE uplink settings. `udp_input_ip` / `udp_input_port` bind the UE-side UDP source for uplink payloads. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
+| `ue_timing_advance` | `int` / samples | `0` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
 | `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
-| `frame_queue_size` | `int` | `8` | Capacity of the demodulator RX frame queue. Values below `1` are clamped to `1`. |
-| `sync_queue_size` | `int` | `8` | Capacity of the demodulator sync-search batch queue. Values below `1` are clamped to `1`. |
-| `reset_hold_s` | `float` / s | `0.5` | How long invalid delay conditions must persist before the demodulator forces a hard reset back to sync search. Internally this is converted to a frame count from `samples_per_frame / sample_rate`. Values below `0` are clamped to `0.5`. |
+| `frame_queue_size` | `int` | `8` | Capacity of the UE RX frame queue. Values below `1` are clamped to `1`. |
+| `sync_queue_size` | `int` | `8` | Capacity of the UE sync-search batch queue. Values below `1` are clamped to `1`. |
+| `reset_hold_s` | `float` / s | `0.5` | How long invalid delay conditions must persist before the UE forces a hard reset back to sync search. Internally this is converted to a frame count from `samples_per_frame / sample_rate`. Values below `0` are clamped to `0.5`. |
 | `range_fft_size` | `int` | `1024` | Range FFT size. |
 | `doppler_fft_size` | `int` | `100` | Doppler FFT size. |
 | `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
 | `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame. The receiver uses the full known symbol as an additional channel-estimation anchor, keeps comb-pilot RE available for phase tracking, and excludes the symbol from payload LLR extraction. |
 | `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match the transmitter. |
 | `equalizer_mode` | `string` | `mmse` | Communication equalizer inverse. `zf` uses a floored channel-power denominator; `mmse` adds `noise_var` to that denominator to reduce noise enhancement on deep fades. |
-| `channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking for communication equalization. `off` keeps the sync-only channel estimate, while `pilot_phase` fits common and linear residual phase from comb pilots on each data symbol. |
+| `channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking for communication equalization on both CPU and CUDA demodulators. `off` keeps the sync-only channel estimate, while `pilot_phase` fits common and linear residual phase from comb pilots on each data symbol. |
 | `equalizer_mag_floor` | `float` | `1e-6` | Lower bound for channel magnitude squared during inversion, used by both `zf` and `mmse`. |
 | `channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual power/weight accepted by per-symbol tracking before falling back to the sync-only correction. |
 | `data_resource_blocks` | `object[]` | omitted | Receiver-side communication resource map. It answers: "which RE should be interpreted as payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set `[]` to extract no payload LLR at all. Use the same rectangles and `kind` values as the transmitter. Blocks with `kind: payload` produce payload LLR; blocks with `kind: sensing_pilot` are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root. |
-| `sensing_mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the modulator side: absolute frame-symbol index, raw FFT-bin index, ZC sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, CFO training field rejected, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
+| `sensing_mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the BS side: absolute frame-symbol index, raw FFT-bin index, ZC sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, CFO training field rejected, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | USRP device args. |
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
+| `wire_format_tx` | `string` | `sc16` | TX wire format for the optional UE uplink path, typically `sc16` or `sc8`. |
 | `wire_format_rx` | `string` | `sc16` | RX wire format, typically `sc16` or `sc8`. |
 | `software_sync` | `bool` | `true` | Enable software synchronization tracking. |
 | `predictive_delay` | `bool` | `true` | Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP. |
@@ -664,7 +679,7 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `akf_r_max` | `float` | `1e3` | Upper bound of observation-noise variance `R`. |
 | `ppm_adjust_factor` | `float` | `0.05` | Frequency offset compensation factor. |
 | `desired_peak_pos` | `int` | `20` | Target delay-peak position used by alignment logic. |
-| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and output. When set to `false`, `OFDMDemodulator` skips bistatic sensing channel startup. |
+| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing pipeline and output. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
 | `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the bistatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `bi_sensing_port` | `int` | `8889` | ZeroMQ PUB bind port for the bistatic sensing stream. |
 | `channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
@@ -679,24 +694,26 @@ Use `config/Demodulator_X310.yaml` or `config/Demodulator_B210.yaml` as a starti
 | `udp_output_port` | `int` | `50001` | Destination port for decoded payload output. |
 | `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value. |
 | `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
-| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. The CPU binaries handle this mode locally. |
+| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. CUDA binaries ignore this mode. |
 | `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
 | `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
 | `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
 | `measurement_payload_bytes` | `int` | `1024` | Expected bytes per measurement payload. Values below the internal header size are clamped up. |
 | `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to rebuild deterministic PRBS measurement payloads. |
 | `measurement_packets_per_point` | `int` | `1` | Expected measurement payload count for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `sync`, `agc`, `align`, and `snr`; `all` enables every module. `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, and `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates from the active demodulator path. |
-| `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | Allowed CPU core list. If cores are limited, keep one dedicated core for the main thread first, then prioritize `rx_proc`, and only after that `process_proc`, `sensing_process_proc`, and `bit_processing_proc`, because those later stages have larger buffers and can better tolerate short scheduling jitter. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `sync`, `agc`, `align`, and `snr`; `all` enables every module. `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, and `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates from the active UE receive path. |
+| `downlink_cpu_cores` | `int[]` | `[]` | UE downlink CPU cores: indices `0..3` bind `rx_proc`, `process_proc`, `sensing_process_proc`, and `bit_processing_proc`. |
+| `uplink_cpu_cores` | `int[]` | `[]` | UE uplink CPU cores: indices `0`, `1`, and `2` bind `UplinkTxEngine::_udp_ingest_proc`, `_mod_proc`, and `_tx_proc`. |
+| `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
 
 Receiver-side note:
 * `data_resource_blocks` should normally match the transmitter exactly, including `kind`.
 * If a resource block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still win. The optional CFO training field at `sync_pos+1` is rejected for sensing-pilot and sensing-mask selection. Priority is `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
 * In dense mode, `sensing_symbol_stride` / runtime `STRD` is rejected if it would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary; ZC sync symbols remain valid sensing symbols.
 * In `compact_mask` mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by `sensing_mask_blocks`; `STRD` is ignored in this mode because the mask already defines the sampling pattern.
-* The compact payload format is the same as on the modulator side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
+* The compact payload format is the same as on the BS side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
 
 Notes:
 * RX AGC has two phases. During `SYNC_SEARCH`, the receiver resets gain to the configured `rx_gain` and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered `delay_spectrum` peak window defined by `rx_agc_low_threshold_db` and `rx_agc_high_threshold_db`.
-* Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the demodulator forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.
+* Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the UE receiver forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.
 * A hard reset clears timing/frequency tracking state, flushes pending queues, resets the tracking AGC state, and returns the receiver to `SYNC_SEARCH`. `reset_hold_s` controls how long bad delay conditions must persist before this happens.

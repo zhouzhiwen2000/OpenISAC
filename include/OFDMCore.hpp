@@ -3488,7 +3488,7 @@ public:
 
     /**
      * @brief Copy frequency-domain symbols directly to internal channel buffer.
-     * Used by OFDMDemodulator where symbols are already in frequency domain.
+     * Used by UE where symbols are already in frequency domain.
      * 
      * @param rx_symbols Vector of frequency-domain symbols to copy
      */
@@ -3503,7 +3503,7 @@ public:
 
     /**
      * @brief Copy a single FFT output to the internal channel buffer at specified index.
-     * Used by OFDMModulator where FFT is executed externally per symbol.
+     * Used by BS where FFT is executed externally per symbol.
      * 
      * @param symbol_idx Index of the symbol in the buffer
      * @param fft_output FFT output data to copy

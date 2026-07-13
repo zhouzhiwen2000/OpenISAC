@@ -36,6 +36,7 @@ rx_channel: 0  # RX channel index on USRP
 # ===== USRP Device / Link =====
 device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # USRP args
 clock_source: external  # Clock source: internal/external/gpsdo
+wire_format_tx: sc16  # TX wire format: sc16/sc8
 wire_format_rx: sc16  # RX wire format: sc16/sc8
 
 # ===== Sync / Tracking =====
@@ -85,12 +86,13 @@ udp_output_port: 50001  # Payload output port
 vofa_debug_ip: ""  # VOFA+ debug output IP
 vofa_debug_port: 12347  # VOFA+ debug output port
 profiling_modules: demodulation,latency  # Enable latency reports in process_proc
-cpu_cores:
-  - 6  # idx0 (hint 0): rx_proc
-  - 10  # idx1 (hint 1): process_proc
-  - 11  # idx2 (hint 2): sensing_process_proc
-  - 12  # idx3 (hint 3): bit_processing_proc
-  - 13  # idx_last: main thread affinity
+downlink_cpu_cores:
+  - 6   # RX thread
+  - 10   # Processing thread
+  - 11   # Bistatic sensing thread
+  - 12   # Bit-processing thread
+uplink_cpu_cores: []      # UE uplink CPU cores: UDP ingest, modulation, TX send
+main_cpu_core: 13          # Main thread CPU core (-1 = no explicit binding)
 
 # ===== Sensing RX Channels =====
 sensing_rx_channels: []

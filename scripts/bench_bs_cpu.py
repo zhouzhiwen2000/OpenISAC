@@ -21,13 +21,13 @@ from bench_utils import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark CPU load for CPU OFDMModulator only.")
+    parser = argparse.ArgumentParser(description="Benchmark CPU load for CPU BS only.")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument(
         "--mod-config",
         type=Path,
-        default=Path("scripts/bench_modulator_cpu_template.yaml"),
-        help="Base Modulator YAML template used for reproducible CPU benchmark runs.",
+        default=Path("scripts/bench_bs_cpu_template.yaml"),
+        help="Base BS YAML template used for reproducible CPU benchmark runs.",
     )
     parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
     parser.add_argument("--sample-rates", type=str, default="50e6,100e6,200e6")
@@ -35,38 +35,63 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--warmup", type=float, default=30.0)
-    parser.add_argument("--output-dir", type=Path, default=Path("measurement/modulator_cpu_bench"))
+    parser.add_argument("--output-dir", type=Path, default=Path("measurement/bs_cpu_bench"))
     return parser.parse_args()
 
 def build_mod_role_map(mod_cfg: dict, pid: int) -> dict[tuple[int, str], str]:
     role_map: dict[tuple[int, str], str] = {}
-    mod_cores = [int(core) for core in mod_cfg.get("cpu_cores", [])]
+    mod_cores = [int(core) for core in mod_cfg.get("downlink_cpu_cores", [])]
     if mod_cores:
-        base_roles = ["mod:_tx_proc", "mod:_modulation_proc", "mod:_data_ingest_proc"]
+        base_roles = ["bs:_tx_proc", "bs:_modulation_proc", "bs:_data_ingest_proc"]
         for idx, role in enumerate(base_roles):
             if idx < len(mod_cores) and mod_cores[idx] >= 0:
                 role_map[(pid, str(mod_cores[idx]))] = role
-        sensing_count = int(mod_cfg.get("sensing_rx_channel_count", len(mod_cfg.get("sensing_rx_channels", [])) or 0))
-        for ch_idx in range(sensing_count):
-            rx_idx = 3 + ch_idx * 2
-            proc_idx = rx_idx + 1
-            if rx_idx < len(mod_cores) and mod_cores[rx_idx] >= 0:
-                role_map[(pid, str(mod_cores[rx_idx]))] = f"mod:sensing_rx_loop_ch{ch_idx}"
-            if proc_idx < len(mod_cores) and mod_cores[proc_idx] >= 0:
-                role_map[(pid, str(mod_cores[proc_idx]))] = f"mod:sensing_process_loop_ch{ch_idx}"
-        if mod_cores[-1] >= 0:
-            role_map[(pid, str(mod_cores[-1]))] = "mod:main"
+    for ch_idx, channel in enumerate(mod_cfg.get("sensing_rx_channels", []) or []):
+        if not isinstance(channel, dict):
+            continue
+        for key, role in [
+            ("rx_cpu_core", f"bs:sensing_rx_loop_ch{ch_idx}"),
+            ("processing_cpu_core", f"bs:sensing_process_loop_ch{ch_idx}"),
+        ]:
+            core = int(channel.get(key, -1))
+            if core >= 0:
+                role_map[(pid, str(core))] = role
+    uplink_cores = [int(core) for core in mod_cfg.get("uplink_cpu_cores", [])]
+    uplink_roles = [
+        "bs:uplink_rx_ingest_proc",
+        "bs:uplink_signal_proc",
+        "bs:uplink_decode_proc",
+    ]
+    for idx, role in enumerate(uplink_roles):
+        if idx < len(uplink_cores) and uplink_cores[idx] >= 0:
+            role_map[(pid, str(uplink_cores[idx]))] = role
+    for key, role in [("main_cpu_core", "bs:main")]:
+        core = int(mod_cfg.get(key, -1))
+        if core >= 0:
+            role_map[(pid, str(core))] = role
     return role_map
 
 
 def build_isolated_cpu_spec(mod_cfg: dict) -> str:
-    cpus = {int(cpu) for cpu in mod_cfg.get("cpu_cores", []) if int(cpu) >= 0}
+    cpus = {int(cpu) for cpu in mod_cfg.get("downlink_cpu_cores", []) if int(cpu) >= 0}
+    cpus.update(int(cpu) for cpu in mod_cfg.get("uplink_cpu_cores", []) if int(cpu) >= 0)
+    for key in ("main_cpu_core",):
+        cpu = int(mod_cfg.get(key, -1))
+        if cpu >= 0:
+            cpus.add(cpu)
+    for channel in mod_cfg.get("sensing_rx_channels", []) or []:
+        if not isinstance(channel, dict):
+            continue
+        for key in ("rx_cpu_core", "processing_cpu_core"):
+            cpu = int(channel.get(key, -1))
+            if cpu >= 0:
+                cpus.add(cpu)
     if not cpus:
-        raise RuntimeError("Modulator config must define at least one non-negative cpu_cores entry for isolate_cpus.bash")
+        raise RuntimeError("BS config must define at least one non-negative module CPU entry for isolate_cpus.bash")
     return ",".join(str(cpu) for cpu in sorted(cpus))
 
 
-def launch_modulator_with_isolation(
+def launch_bs_with_isolation(
     build_dir: Path,
     run_dir: Path,
     isolate_script: Path,
@@ -74,7 +99,7 @@ def launch_modulator_with_isolation(
     unit_name: str,
 ) -> tuple[subprocess.Popen[bytes], int, float]:
     if os.geteuid() != 0:
-        raise RuntimeError("bench_modulator_cpu.py must run as root to use isolate_cpus.bash")
+        raise RuntimeError("bench_bs_cpu.py must run as root to use isolate_cpus.bash")
 
     build_dir = build_dir.resolve()
     run_dir = run_dir.resolve()
@@ -116,7 +141,7 @@ def launch_modulator_with_isolation(
             "-p",
             f"WorkingDirectory={str(run_dir)}",
             *env_args,
-            str((build_dir / "OFDMModulator").resolve()),
+            str((build_dir / "BS").resolve()),
         ],
         cwd=run_dir,
         stdout=subprocess.PIPE,
@@ -207,9 +232,9 @@ def main() -> None:
                 run_dir.mkdir(parents=True, exist_ok=True)
                 from bench_utils import save_yaml
 
-                save_yaml(run_dir / "Modulator.yaml", mod_cfg)
+                save_yaml(run_dir / "BS.yaml", mod_cfg)
                 isolated_cpu_spec = build_isolated_cpu_spec(mod_cfg)
-                mod_proc, mod_pid, log_since = launch_modulator_with_isolation(
+                mod_proc, mod_pid, log_since = launch_bs_with_isolation(
                     args.build_dir,
                     run_dir,
                     args.isolate_script,
@@ -226,10 +251,10 @@ def main() -> None:
                 stop_unit(unit_name)
                 mod_log = collect_unit_logs(unit_name, log_since) if mod_proc is not None else b""
                 _ = terminate_process_tree(mod_proc) if mod_proc is not None else b""
-                (run_dir / "modulator.log").write_bytes(mod_log)
+                (run_dir / "BS.log").write_bytes(mod_log)
 
             if mod_proc is None or mod_pid <= 0:
-                raise RuntimeError(f"Failed to launch OFDMModulator for run {run_id}")
+                raise RuntimeError(f"Failed to launch BS for run {run_id}")
 
             role_map = build_mod_role_map(mod_cfg, mod_pid)
             role_rows = summarize_thread_rows(thread_rows, role_map)
@@ -293,7 +318,7 @@ def main() -> None:
         "isolated_cpu_spec",
         "run_dir",
     ]
-    write_csv(args.output_dir / "modulator_cpu_summary.csv", base_fields + sorted(dynamic_role_fields), summary_rows)
+    write_csv(args.output_dir / "bs_cpu_summary.csv", base_fields + sorted(dynamic_role_fields), summary_rows)
 
 
 if __name__ == "__main__":

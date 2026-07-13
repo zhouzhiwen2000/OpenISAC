@@ -1,4 +1,4 @@
-# OFDM Modulator Configuration (B210 TX + X310 Sensing RX)
+# OFDM BS Configuration (X310 TX/RX)
 
 # ===== OFDM Frame =====
 fft_size: 1024                 # FFT size (subcarrier count)
@@ -45,12 +45,12 @@ tx_channel: 0                  # TX channel index on USRP
 
 # ===== USRP Device Args =====
 device_args: ""                # Shared fallback args
-tx_device_args: "type=b200, num_recv_frames=512, num_send_frames=512, send_frame_size=11520, recv_frame_size=11520"  # TX-specific args
+tx_device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # TX-specific args
 rx_device_args: ""             # Default sensing RX args (empty = use device_args)
 
 # ===== Clock / Time Sources =====
-clock_source: external         # Global clock source: internal/external/gpsdo
-time_source: "external"        # Global time source: empty -> follow clock_source
+clock_source: "internal"       # Global clock source: internal/external/gpsdo
+time_source: "internal"        # Global time source: empty -> follow clock_source
 tx_clock_source: ""            # TX clock source override (optional)
 tx_time_source: ""             # TX time source override (optional)
 rx_clock_source: ""            # Sensing RX clock source override (optional)
@@ -77,30 +77,31 @@ sensing_rx_channels:
     time_source: "internal"    # Per-channel time source override (optional)
     wire_format_rx: "sc16"     # Per-channel wire format override (optional)
     rx_gain: 30                # Per-channel RX gain (dB)
-    alignment: 103             # Per-channel timing alignment offset (samples)
+    alignment: 64              # Per-channel timing alignment offset (samples)
     rx_antenna: "RX2"          # RX antenna port (e.g. RX1/RX2/TX/RX)
     enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
+    rx_cpu_core: 4            # Sensing RX thread CPU core (-1 = no explicit binding)
+    processing_cpu_core: 5  # Sensing processing thread CPU core (-1 = no explicit binding)
   - usrp_channel: 1            # USRP RX channel index for this sensing path
     device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # Per-channel USRP args override
     clock_source: "external"   # Per-channel clock source override (optional)
     time_source: "internal"    # Per-channel time source override (optional)
     wire_format_rx: "sc16"     # Per-channel wire format override (optional)
     rx_gain: 30                # Per-channel RX gain (dB)
-    alignment: 103             # Per-channel timing alignment offset (samples)
+    alignment: 64              # Per-channel timing alignment offset (samples)
     rx_antenna: "RX2"          # RX antenna port (e.g. RX1/RX2/TX/RX)
     enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
+    rx_cpu_core: 6            # Sensing RX thread CPU core (-1 = no explicit binding)
+    processing_cpu_core: 7  # Sensing processing thread CPU core (-1 = no explicit binding)
 
 # ===== Runtime / Debug =====
-tx_circular_buffer_size: 32    # Modulator frame circular buffer capacity
+tx_circular_buffer_size: 32    # BS frame circular buffer capacity
 data_packet_buffer_size: 32    # Encoded packet buffer capacity
 paired_frame_queue_size: 64    # Keep above tx_circular_buffer_size to cover RX startup/alignment delay
 profiling_modules: ""          # Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
-cpu_cores:
+downlink_cpu_cores:
   - 1   # TX thread
   - 2   # Modulation thread
   - 3   # Data-ingest thread
-  - 4   # Sensing RX thread (CH0)
-  - 5   # Sensing processing thread (CH0)
-  - 6   # Sensing RX thread (CH1)
-  - 7   # Sensing processing thread (CH1)
-  - 8   # Main thread affinity
+uplink_cpu_cores: []      # BS uplink CPU cores: RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output
+main_cpu_core: 8          # Main thread CPU core (-1 = no explicit binding)

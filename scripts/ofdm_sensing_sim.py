@@ -77,18 +77,18 @@ def parse_targets(text):
 def default_config_path():
     repo_root = Path(__file__).resolve().parents[1]
     candidates = [
-        repo_root / "config" / "Demodulator_X310.yaml",
-        repo_root / "config" / "Modulator_X310.yaml",
-        repo_root / "config" / "Demodulator_B210.yaml",
-        repo_root / "config" / "Modulator_B210.yaml",
-        Path("config") / "Demodulator_X310.yaml",
-        Path("config") / "Modulator_X310.yaml",
-        Path("config") / "Demodulator_B210.yaml",
-        Path("config") / "Modulator_B210.yaml",
-        Path("Demodulator_X310.yaml"),
-        Path("Modulator_X310.yaml"),
-        Path("Demodulator_B210.yaml"),
-        Path("Modulator_B210.yaml"),
+        repo_root / "config" / "UE_X310.yaml",
+        repo_root / "config" / "BS_X310.yaml",
+        repo_root / "config" / "UE_B210.yaml",
+        repo_root / "config" / "BS_B210.yaml",
+        Path("config") / "UE_X310.yaml",
+        Path("config") / "BS_X310.yaml",
+        Path("config") / "UE_B210.yaml",
+        Path("config") / "BS_B210.yaml",
+        Path("UE_X310.yaml"),
+        Path("BS_X310.yaml"),
+        Path("UE_B210.yaml"),
+        Path("BS_B210.yaml"),
     ]
     for c in candidates:
         if c.exists():
@@ -163,7 +163,7 @@ def add_awgn(rng, Y, snr_db):
 
 def main():
     parser = argparse.ArgumentParser(description="OFDM sensing simulation using system YAML parameters")
-    parser.add_argument("--config", type=str, default=None, help="Path to Modulator/Demodulator YAML")
+    parser.add_argument("--config", type=str, default=None, help="Path to BS/UE YAML")
     parser.add_argument("--snr", type=float, default=30.0, help="SNR in dB")
     parser.add_argument("--targets", type=str, default=None,
                         help='Targets: "range_m,vel_mps,amp,angle_deg;..."')

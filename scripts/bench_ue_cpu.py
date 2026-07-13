@@ -24,19 +24,19 @@ from bench_utils import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark CPU load for CPU OFDMDemodulator.")
+    parser = argparse.ArgumentParser(description="Benchmark CPU load for CPU UE.")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument(
         "--mod-config",
         type=Path,
-        default=Path("scripts/bench_demodulator_cpu_modulator_template.yaml"),
-        help="Base Modulator YAML template used for reproducible CPU benchmark runs.",
+        default=Path("scripts/bench_ue_cpu_bs_template.yaml"),
+        help="Base BS YAML template used for reproducible CPU benchmark runs.",
     )
     parser.add_argument(
         "--demod-config",
         type=Path,
-        default=Path("scripts/bench_demodulator_cpu_demodulator_template.yaml"),
-        help="Base Demodulator YAML template used for reproducible CPU benchmark runs.",
+        default=Path("scripts/bench_ue_cpu_ue_template.yaml"),
+        help="Base UE YAML template used for reproducible CPU benchmark runs.",
     )
     parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
     parser.add_argument("--sample-rates", type=str, default="50e6,100e6,200e6")
@@ -60,36 +60,59 @@ def parse_args() -> argparse.Namespace:
         "--coredump-retries",
         type=int,
         default=1,
-        help="How many times to retry a run automatically if the demodulator unit exits with core-dump.",
+        help="How many times to retry a run automatically if the UE unit exits with core-dump.",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("measurement/demodulator_cpu_bench"))
+    parser.add_argument("--output-dir", type=Path, default=Path("measurement/debs_cpu_bench"))
     return parser.parse_args()
 
 
 def build_demod_role_map(demod_cfg: dict, pid: int) -> dict[tuple[int, str], str]:
     role_map: dict[tuple[int, str], str] = {}
-    demod_cores = [int(core) for core in demod_cfg.get("cpu_cores", [])]
+    demod_cores = [int(core) for core in demod_cfg.get("downlink_cpu_cores", [])]
     if demod_cores:
         base_roles = [
-            "demod:rx_proc",
-            "demod:process_proc",
-            "demod:sensing_process_proc",
-            "demod:bit_processing_proc",
+            "debs:rx_proc",
+            "debs:process_proc",
+            "debs:sensing_process_proc",
+            "debs:bit_processing_proc",
         ]
         for idx, role in enumerate(base_roles):
             if idx < len(demod_cores) and demod_cores[idx] >= 0:
                 role_map[(pid, str(demod_cores[idx]))] = role
-        if demod_cores[-1] >= 0:
-            role_map[(pid, str(demod_cores[-1]))] = "demod:main"
+    uplink_cores = [int(core) for core in demod_cfg.get("uplink_cpu_cores", [])]
+    uplink_roles = [
+        "debs:uplink_udp_ingest_proc",
+        "debs:uplink_mod_proc",
+        "debs:uplink_tx_proc",
+    ]
+    for idx, role in enumerate(uplink_roles):
+        if idx < len(uplink_cores) and uplink_cores[idx] >= 0:
+            role_map[(pid, str(uplink_cores[idx]))] = role
+    for key, role in [("main_cpu_core", "debs:main")]:
+        core = int(demod_cfg.get(key, -1))
+        if core >= 0:
+            role_map[(pid, str(core))] = role
     return role_map
 
 
 def build_isolated_cpu_spec(*cfgs: dict) -> str:
     cpus: set[int] = set()
     for cfg in cfgs:
-        cpus.update(int(cpu) for cpu in cfg.get("cpu_cores", []) if int(cpu) >= 0)
+        cpus.update(int(cpu) for cpu in cfg.get("downlink_cpu_cores", []) if int(cpu) >= 0)
+        cpus.update(int(cpu) for cpu in cfg.get("uplink_cpu_cores", []) if int(cpu) >= 0)
+        for key in ("main_cpu_core",):
+            cpu = int(cfg.get(key, -1))
+            if cpu >= 0:
+                cpus.add(cpu)
+        for channel in cfg.get("sensing_rx_channels", []) or []:
+            if not isinstance(channel, dict):
+                continue
+            for key in ("rx_cpu_core", "processing_cpu_core"):
+                cpu = int(channel.get(key, -1))
+                if cpu >= 0:
+                    cpus.add(cpu)
     if not cpus:
-        raise RuntimeError("Benchmark configs must define at least one non-negative cpu_cores entry for isolate_cpus.bash")
+        raise RuntimeError("Benchmark configs must define at least one non-negative module CPU entry for isolate_cpus.bash")
     return ",".join(str(cpu) for cpu in sorted(cpus))
 
 
@@ -99,7 +122,7 @@ def prepare_isolated_cpus(
     isolated_cpu_spec: str,
 ) -> None:
     if os.geteuid() != 0:
-        raise RuntimeError("bench_demodulator_cpu.py must run as root to use isolate_cpus.bash")
+        raise RuntimeError("bench_ue_cpu.py must run as root to use isolate_cpus.bash")
 
     run_dir = run_dir.resolve()
     isolate_script = isolate_script.resolve()
@@ -142,7 +165,7 @@ def local_core_dump_mode(enabled: bool, core_pattern: str):
         write_core_pattern(original_pattern)
 
 
-def launch_demodulator_with_isolation(
+def launch_ue_with_isolation(
     build_dir: Path,
     run_dir: Path,
     isolated_cpu_spec: str,
@@ -150,7 +173,7 @@ def launch_demodulator_with_isolation(
     save_core_dumps: bool = False,
 ) -> tuple[subprocess.Popen[bytes], int, float]:
     if os.geteuid() != 0:
-        raise RuntimeError("bench_demodulator_cpu.py must run as root to use isolate_cpus.bash")
+        raise RuntimeError("bench_ue_cpu.py must run as root to use isolate_cpus.bash")
 
     build_dir = build_dir.resolve()
     run_dir = run_dir.resolve()
@@ -191,7 +214,7 @@ def launch_demodulator_with_isolation(
             "--collect",
             *unit_props,
             *env_args,
-            str((build_dir / "OFDMDemodulator").resolve()),
+            str((build_dir / "UE").resolve()),
         ],
         cwd=run_dir,
         stdout=subprocess.PIPE,
@@ -340,20 +363,20 @@ def main() -> None:
                 coredump_detected = False
                 try:
                     run_dir.mkdir(parents=True, exist_ok=True)
-                    save_yaml(run_dir / "Modulator.yaml", mod_cfg)
-                    save_yaml(run_dir / "Demodulator.yaml", demod_cfg)
+                    save_yaml(run_dir / "BS.yaml", mod_cfg)
+                    save_yaml(run_dir / "UE.yaml", demod_cfg)
 
                     with local_core_dump_mode(args.save_core_dumps, args.core_pattern):
                         prepare_isolated_cpus(run_dir, args.isolate_script, isolated_cpu_spec)
                         mod_proc = subprocess.Popen(
-                            [str((args.build_dir / "OFDMModulator").resolve())],
+                            [str((args.build_dir / "BS").resolve())],
                             cwd=run_dir,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
                             preexec_fn=setsid_with_unlimited_core if args.save_core_dumps else os.setsid,
                         )
                         time.sleep(args.startup_gap)
-                        demod_proc, demod_pid, log_since = launch_demodulator_with_isolation(
+                        demod_proc, demod_pid, log_since = launch_ue_with_isolation(
                             args.build_dir,
                             run_dir,
                             isolated_cpu_spec,
@@ -374,15 +397,15 @@ def main() -> None:
                     demod_log = collect_unit_logs(unit_name, log_since) if demod_proc is not None else b""
                     _ = terminate_process_tree(demod_proc) if demod_proc is not None else b""
 
-                    mod_attempt_log = run_dir / f"modulator.attempt{attempt_idx}.log"
-                    demod_attempt_log = run_dir / f"demodulator.attempt{attempt_idx}.log"
-                    status_attempt_path = run_dir / f"demodulator_unit_status.attempt{attempt_idx}.txt"
+                    mod_attempt_log = run_dir / f"BS.attempt{attempt_idx}.log"
+                    demod_attempt_log = run_dir / f"UE.attempt{attempt_idx}.log"
+                    status_attempt_path = run_dir / f"ue_unit_status.attempt{attempt_idx}.txt"
                     mod_attempt_log.write_bytes(mod_log)
                     demod_attempt_log.write_bytes(demod_log)
                     status_attempt_path.write_text(unit_status_text(unit_status), encoding="utf-8")
-                    (run_dir / "modulator.log").write_bytes(mod_log)
-                    (run_dir / "demodulator.log").write_bytes(demod_log)
-                    (run_dir / "demodulator_unit_status.txt").write_text(
+                    (run_dir / "BS.log").write_bytes(mod_log)
+                    (run_dir / "UE.log").write_bytes(demod_log)
+                    (run_dir / "ue_unit_status.txt").write_text(
                         unit_status_text(unit_status),
                         encoding="utf-8",
                     )
@@ -396,12 +419,12 @@ def main() -> None:
 
             if coredump_detected:
                 raise RuntimeError(
-                    f"OFDMDemodulator hit core-dump for run {run_id} after {attempt_count} attempts.\n"
+                    f"UE hit core-dump for run {run_id} after {attempt_count} attempts.\n"
                     f"{unit_status_text(last_unit_status)}"
                 )
 
             if demod_pid <= 0:
-                raise RuntimeError(f"Failed to launch OFDMDemodulator for run {run_id}")
+                raise RuntimeError(f"Failed to launch UE for run {run_id}")
 
             role_map = build_demod_role_map(demod_cfg, demod_pid)
             role_rows = summarize_thread_rows(thread_rows, role_map)
@@ -465,7 +488,7 @@ def main() -> None:
         "isolated_cpu_spec",
         "run_dir",
     ]
-    write_csv(args.output_dir / "demodulator_cpu_summary.csv", base_fields + sorted(dynamic_role_fields), summary_rows)
+    write_csv(args.output_dir / "debs_cpu_summary.csv", base_fields + sorted(dynamic_role_fields), summary_rows)
 
 
 if __name__ == "__main__":

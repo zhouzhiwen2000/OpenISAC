@@ -4,7 +4,7 @@
 // Simulated UHD streamers backed by the shared-memory channel simulator.
 //
 // SimTxStreamer / SimRxStreamer implement the abstract uhd::tx_streamer /
-// uhd::rx_streamer interfaces, so the Modulator/Demodulator engines keep their
+// uhd::rx_streamer interfaces, so the BS/UE engines keep their
 // existing uhd::*_streamer::sptr members and their send()/recv() hot loops are
 // unchanged. Only the device-creation paths construct these instead of calling
 // uhd::usrp::multi_usrp::make.
@@ -82,6 +82,10 @@ public:
 
     // Manufacture a TX streamer (producer into "<session>.tx").
     uhd::tx_streamer::sptr make_tx_streamer(size_t max_samps);
+
+    // Manufacture a TX streamer (producer into "<session>.<suffix>"), e.g. the
+    // UE uplink stream "ul.tx".
+    uhd::tx_streamer::sptr make_tx_streamer(const std::string& suffix, size_t max_samps);
 
     // Manufacture an RX streamer (consumer of "<session>.<suffix>").
     uhd::rx_streamer::sptr make_rx_streamer(const std::string& suffix, size_t max_samps);

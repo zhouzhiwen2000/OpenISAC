@@ -1,11 +1,11 @@
-# OFDM Demodulator Configuration (Channel Simulator — no USRP)
+# OFDM UE Configuration (Channel Simulator — no USRP)
 #
-# Must share simulation.session with ChannelSimulator and Modulator_Sim.yaml.
+# Must share simulation.session with ChannelSimulator and BS_Sim.yaml.
 
 # ===== Radio backend =====
 radio_backend: sim
 
-# ===== Channel simulator (only `session` is used by the demodulator) =====
+# ===== Channel simulator (only `session` is used by the UE) =====
 simulation:
   session: oisac_sim
 
@@ -48,6 +48,7 @@ rx_channel: 0
 # ===== Device / clock (ignored in sim) =====
 device_args: ""
 clock_source: internal
+wire_format_tx: sc16
 wire_format_rx: sc16
 
 # ===== Sync / Tracking =====
@@ -57,7 +58,7 @@ hardware_sync: false
 desired_peak_pos: 20
 sensing_symbol_stride: 20
 
-# ===== Measurement mode (must match Modulator_Sim.yaml) =====
+# ===== Measurement mode (must match BS_Sim.yaml) =====
 measurement_enable: false
 measurement_mode: internal_prbs
 measurement_payload_bytes: 1024
@@ -81,12 +82,13 @@ default_out_ip: "127.0.0.1"
 vofa_debug_ip: ""
 vofa_debug_port: 12347
 profiling_modules: ""
-cpu_cores:
-  - 1
-  - 2
-  - 3
-  - 4
-  - 5
+downlink_cpu_cores:
+  - 1   # RX thread
+  - 2   # Processing thread
+  - 3   # Bistatic sensing thread
+  - 4   # Bit-processing thread
+uplink_cpu_cores: []      # UE uplink CPU cores: UDP ingest, modulation, TX send
+main_cpu_core: 5          # Main thread CPU core (-1 = no explicit binding)
 
-# ===== Sensing RX Channels (demodulator side handled via bistatic path) =====
+# ===== Sensing RX Channels (UE side handled via bistatic path) =====
 sensing_rx_channels: []

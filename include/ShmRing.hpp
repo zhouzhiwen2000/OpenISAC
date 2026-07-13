@@ -10,7 +10,7 @@
 //                    sample clock and a global running flag.
 //
 // All segments are named "/<session>.<suffix>" so the ChannelSimulator hub and the
-// Modulator/Demodulator clients attach to the same simulated "air". The hub creates
+// BS/UE clients attach to the same simulated "air". The hub creates
 // the segments; clients open them (polling until the creator has published the magic).
 
 #include <algorithm>

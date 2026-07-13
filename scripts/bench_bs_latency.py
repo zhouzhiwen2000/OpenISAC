@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Benchmark end-to-end modulator latency (UDP ingest → TX send) across configurations.
+"""Benchmark end-to-end BS latency (UDP ingest → TX send) across configurations.
 
 Requires root (for isolate_cpus.bash) and a connected USRP.
 
 Usage:
-    sudo python3 scripts/bench_modulator_latency.py --mod-config scripts/bench_modulator_latency_template.yaml
+    sudo python3 scripts/bench_bs_latency.py --mod-config scripts/bench_bs_latency_template.yaml
 
 The script sweeps fft_size × num_symbols × sample_rate, injects UDP traffic into
-the modulator, and parses the "[Latency]" log lines emitted by _tx_proc.
-Results are written to measurement/modulator_latency_bench/latency_summary.csv.
+the BS, and parses the "[Latency]" log lines emitted by _tx_proc.
+Results are written to measurement/bs_latency_bench/latency_summary.csv.
 """
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ from bench_utils import (
     save_yaml,
     write_csv,
 )
-from bench_modulator_cpu import (
+from bench_bs_cpu import (
     build_isolated_cpu_spec,
     collect_unit_logs,
-    launch_modulator_with_isolation,
+    launch_bs_with_isolation,
     stop_unit,
     terminate_process_tree,
 )
@@ -49,7 +49,7 @@ def _udp_sender(ip: str, port: int, payload_size: int, stop_event: threading.Eve
                 sock.sendto(payload, (ip, port))
             except OSError:
                 pass
-            time.sleep(0.001)  # ~1 kpps — enough to keep the modulator fed
+            time.sleep(0.001)  # ~1 kpps — enough to keep the BS fed
     finally:
         sock.close()
 
@@ -86,13 +86,13 @@ def parse_latency_from_log(log_bytes: bytes) -> list[dict[str, float]]:
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Benchmark modulator E2E latency across configurations.")
+    p = argparse.ArgumentParser(description="Benchmark BS E2E latency across configurations.")
     p.add_argument("--build-dir", type=Path, default=Path("build"))
     p.add_argument(
         "--mod-config",
         type=Path,
-        default=Path("scripts/bench_modulator_latency_template.yaml"),
-        help="Base Modulator YAML template used for reproducible latency benchmark runs.",
+        default=Path("scripts/bench_bs_latency_template.yaml"),
+        help="Base BS YAML template used for reproducible latency benchmark runs.",
     )
     p.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
     p.add_argument("--sample-rates", default="50e6,100e6,200e6")
@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
                    help="Seconds to wait after launch before collecting latency samples")
     p.add_argument("--collect", type=float, default=30.0,
                    help="Seconds to collect latency samples after warmup")
-    p.add_argument("--output-dir", type=Path, default=Path("measurement/modulator_latency_bench"))
+    p.add_argument("--output-dir", type=Path, default=Path("measurement/bs_latency_bench"))
     return p.parse_args()
 
 
@@ -115,17 +115,17 @@ def parse_args() -> argparse.Namespace:
 
 def _find_base_config() -> dict:
     candidates = [
-        Path("scripts/bench_modulator_latency_template.yaml"),
-        Path("build/Modulator.yaml"),
-        Path("config/Modulator_X310.yaml"),
-        Path("config/Modulator_B210.yaml"),
+        Path("scripts/bench_bs_latency_template.yaml"),
+        Path("build/BS.yaml"),
+        Path("config/BS_X310.yaml"),
+        Path("config/BS_B210.yaml"),
     ]
     for p in candidates:
         if p.exists():
             print(f"Using base config: {p}")
             return load_yaml(p)
     raise FileNotFoundError(
-        "No Modulator YAML found. Pass --mod-config explicitly."
+        "No BS YAML found. Pass --mod-config explicitly."
     )
 
 
@@ -152,7 +152,7 @@ def main() -> None:
                 cfg = dict(base_cfg)
                 apply_fft_sample_rate_sweep(cfg, cfg, sample_rate=sample_rate, fft_size=fft_size)
                 cfg["num_symbols"] = num_symbols
-                save_yaml(run_dir / "Modulator.yaml", cfg)
+                save_yaml(run_dir / "BS.yaml", cfg)
 
                 udp_port = int(cfg.get("udp_input_port", 50000))
                 isolated_cpu_spec = build_isolated_cpu_spec(cfg)
@@ -170,7 +170,7 @@ def main() -> None:
                 )
 
                 try:
-                    mod_proc, _pid, log_since = launch_modulator_with_isolation(
+                    mod_proc, _pid, log_since = launch_bs_with_isolation(
                         args.build_dir, run_dir, args.isolate_script,
                         isolated_cpu_spec, unit_name,
                     )
@@ -184,7 +184,7 @@ def main() -> None:
                     log_bytes = collect_unit_logs(unit_name, log_since) if mod_proc else b""
                     if mod_proc:
                         terminate_process_tree(mod_proc)
-                    (run_dir / "modulator.log").write_bytes(log_bytes)
+                    (run_dir / "BS.log").write_bytes(log_bytes)
 
                 # Re-fetch logs from collect_since to exclude warmup period
                 stable_log = collect_unit_logs(unit_name, collect_since) if mod_proc else b""

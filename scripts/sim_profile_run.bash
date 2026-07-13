@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Run the full Modulator<->Demodulator pipeline in simulation mode (no USRP)
-# and capture the OFDMDemodulator per-stage profiling report.
+# Run the full BS<->UE pipeline in simulation mode (no USRP)
+# and capture the UE per-stage profiling report.
 #
 # Usage: scripts/sim_profile_run.bash [duration_seconds] [out_tag]
-# Requires: build/ already compiled (ChannelSimulator, OFDMModulator, OFDMDemodulator).
+# Requires: build/ already compiled (ChannelSimulator, BS, UE).
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
@@ -15,19 +15,19 @@ mkdir -p "$OUTDIR"
 cd "$BUILD" || exit 1
 
 # Seed sim configs into the CWD the binaries read from.
-cp "$ROOT/config/Modulator_Sim.yaml"   "$BUILD/Modulator.yaml"
-cp "$ROOT/config/Demodulator_Sim.yaml" "$BUILD/Demodulator.yaml"
+cp "$ROOT/config/BS_Sim.yaml"   "$BUILD/BS.yaml"
+cp "$ROOT/config/UE_Sim.yaml" "$BUILD/UE.yaml"
 
 # Enable demodulation profiling in the demod config.
-if grep -q '^profiling_modules:' "$BUILD/Demodulator.yaml"; then
-    sed -i 's/^profiling_modules:.*/profiling_modules: "demodulation"/' "$BUILD/Demodulator.yaml"
+if grep -q '^profiling_modules:' "$BUILD/UE.yaml"; then
+    sed -i 's/^profiling_modules:.*/profiling_modules: "demodulation"/' "$BUILD/UE.yaml"
 else
-    echo 'profiling_modules: "demodulation"' >> "$BUILD/Demodulator.yaml"
+    echo 'profiling_modules: "demodulation"' >> "$BUILD/UE.yaml"
 fi
 
 # Port 10000 is held by a stale/invisible process in this WSL2 env; move the
 # demod control ROUTER aside so the bind succeeds for measurement runs.
-sed -i 's/^control_port:.*/control_port: 10044/' "$BUILD/Demodulator.yaml"
+sed -i 's/^control_port:.*/control_port: 10044/' "$BUILD/UE.yaml"
 
 DEMOD_LOG="$OUTDIR/demod_${TAG}.log"
 MOD_LOG="$OUTDIR/mod_${TAG}.log"
@@ -41,15 +41,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # 1) Channel simulator owns the SHM control block; start it first.
-./ChannelSimulator Modulator.yaml >"$SIM_LOG" 2>&1 &
+./ChannelSimulator BS.yaml >"$SIM_LOG" 2>&1 &
 SIM_PID=$!
 sleep 2
 
-# 2) Demodulator (consumer) then Modulator (producer).
-./OFDMDemodulator >"$DEMOD_LOG" 2>&1 &
+# 2) UE (consumer) then BS (producer).
+./UE >"$DEMOD_LOG" 2>&1 &
 DEMOD_PID=$!
 sleep 1
-./OFDMModulator   >"$MOD_LOG" 2>&1 &
+./BS   >"$MOD_LOG" 2>&1 &
 MOD_PID=$!
 
 echo "[sim] running ${DUR}s  (sim=$SIM_PID mod=$MOD_PID demod=$DEMOD_PID)"
@@ -58,6 +58,6 @@ sleep "$DUR"
 cleanup
 trap - EXIT INT TERM
 
-echo "===== Demodulator profiling report(s) [$TAG] ====="
+echo "===== UE profiling report(s) [$TAG] ====="
 grep -A 16 "process_ofdm_frame Profiling" "$DEMOD_LOG" | tail -32
 echo "===== (demod log: $DEMOD_LOG) ====="

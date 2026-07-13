@@ -1,8 +1,8 @@
 // ChannelSimulator — the simulated "air" for running UHD_OFDM without USRP.
 //
-// Reads the same YAML config as the Modulator. Creates the shared-memory rings
+// Reads the same YAML config as BS. Creates the shared-memory rings
 // and control block for the session, then continuously:
-//   1. drains transmit samples from the modulator's TX ring,
+//   1. drains transmit samples from the BS TX ring,
 //   2. applies the channel model for each receive antenna:
 //        - sensing RX channels k: superposition of point targets with delay
 //          (range), Doppler (velocity), complex gain, and steering vector (angle),
@@ -200,17 +200,17 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, &handle_signal);
     std::signal(SIGTERM, &handle_signal);
 
-    const std::string config_file = (argc > 1) ? argv[1] : "Modulator.yaml";
-    Config cfg = make_default_modulator_config();
+    const std::string config_file = (argc > 1) ? argv[1] : "BS.yaml";
+    Config cfg = make_default_bs_config();
     if (!path_exists(config_file)) {
         LOG_G_ERROR() << "[ChannelSim] Config file '" << config_file << "' not found.";
         return 1;
     }
-    if (!load_modulator_config_from_yaml(cfg, config_file)) {
+    if (!load_bs_config_from_yaml(cfg, config_file)) {
         LOG_G_ERROR() << "[ChannelSim] Failed to load config from '" << config_file << "'.";
         return 1;
     }
-    normalize_modulator_sensing_channels(cfg);
+    normalize_bs_sensing_channels(cfg);
 
     if (!radio_is_sim(cfg)) {
         LOG_G_WARN() << "[ChannelSim] radio_backend is not 'sim' in " << config_file
@@ -224,6 +224,7 @@ int main(int argc, char** argv) {
     // creates nor produces into its ring, so that path's consumer need not run
     // (and the hub will not block waiting for it).
     const bool enable_comm = sim.enable_comm_rx;
+    const bool enable_uplink = sim.enable_uplink;
     const size_t num_channels =
         sim.enable_sensing_rx ? cfg.sensing_rx_channels.size() : 0; // sensing antennas
     // Electrical ULA spacing d/lambda used in the steering phase. Derive it from the
@@ -315,6 +316,36 @@ int main(int argc, char** argv) {
 
     const size_t L = static_cast<size_t>(max_delay) + 1; // history length
 
+    // --- Build uplink (UE->BS) multipath taps (default: reuse comm taps) ---
+    // The uplink shares the BS radio clock in simulation, so the hub only applies
+    // a tapped-delay-line channel + AWGN; per-link timing (timing advance / DL-UL
+    // timing difference) is handled by the engines, not here.
+    std::vector<Tap> ul_taps;
+    long ul_max_delay = 0;
+    if (enable_uplink) {
+        // Default to a clean 0 dB LoS tap (the uplink frame is mostly zero-padded
+        // within the DL period, so per-chunk SNR scaling is not applied to it).
+        const std::vector<SimMultipathTap>& ul_src = sim.uplink_multipath_taps;
+        if (ul_src.empty()) {
+            Tap tap;
+            tap.gain = cf(1.0f, 0.0f);
+            tap.delay_samples = std::max<long>(0, static_cast<long>(sim.timing_offset_samples));
+            ul_taps.push_back(tap);
+        } else {
+            for (const auto& tp : ul_src) {
+                const double amp = db_to_linear_amplitude(tp.gain_db);
+                const double ph = tp.phase_deg * kTwoPi / 360.0;
+                Tap tap;
+                tap.gain = cf(static_cast<float>(amp * std::cos(ph)), static_cast<float>(amp * std::sin(ph)));
+                tap.delay_samples = tp.delay_samples + sim.timing_offset_samples;
+                if (tap.delay_samples < 0) tap.delay_samples = 0;
+                ul_taps.push_back(tap);
+            }
+        }
+        for (const auto& tap : ul_taps) ul_max_delay = std::max(ul_max_delay, tap.delay_samples);
+    }
+    const size_t ul_L = static_cast<size_t>(ul_max_delay) + 1; // uplink history length
+
     // --- Noise setup ---
     const bool noise_on = sim.noise_power_dbfs > -200.0;
     const double noise_power = noise_on ? std::pow(10.0, sim.noise_power_dbfs / 10.0) : 0.0;
@@ -332,7 +363,7 @@ int main(int argc, char** argv) {
 
     // --- Comm CFO ---
     // `simulation.cfo_hz` is the injected transmitter/receiver carrier mismatch.
-    // The demodulator writes its simulated RX frequency correction into the shared
+    // The UE writes its simulated RX frequency correction into the shared
     // control block, so the comm path rotates with the residual CFO after retuning.
     cf cfo_phasor(1.0f, 0.0f);
     double last_logged_rx_freq_correction_hz = 0.0;
@@ -356,6 +387,16 @@ int main(int argc, char** argv) {
     sim_shm::ShmRing comm_ring;
     if (enable_comm) {
         comm_ring.create(sim_shm::make_shm_name(sim.session, "rx.comm"), sim.ring_capacity_samples);
+    }
+    // Uplink transport: the UE produces into "ul.tx"; the hub applies the uplink
+    // channel and publishes into "rx.ul" for the BS uplink RX to consume.
+    sim_shm::ShmRing ul_tx_ring;
+    sim_shm::ShmRing ul_rx_ring;
+    if (enable_uplink) {
+        ul_tx_ring.create(sim_shm::make_shm_name(sim.session, "ul.tx"), sim.ring_capacity_samples);
+        ul_rx_ring.create(sim_shm::make_shm_name(sim.session, "rx.ul"), sim.ring_capacity_samples);
+        LOG_G_INFO() << "[ChannelSim] uplink enabled (UE ul.tx -> hub -> BS rx.ul), taps="
+                     << ul_taps.size();
     }
 
     std::unique_ptr<ControlCommandHandler> control_handler;
@@ -398,6 +439,12 @@ int main(int argc, char** argv) {
     std::fill(ext.begin(), ext.begin() + L, sample_t(0.0f, 0.0f));
     std::vector<std::vector<sample_t>> out_sens(num_channels, std::vector<sample_t>(max_chunk));
     std::vector<sample_t> out_comm(max_chunk);
+    // Uplink processing buffers: [history | new chunk] for the TDL, plus an input
+    // staging buffer and the channel output published to rx.ul.
+    std::vector<sample_t> ul_in(max_chunk);
+    std::vector<sample_t> ul_out(max_chunk);
+    std::vector<sample_t> ul_ext(ul_L + max_chunk);
+    if (enable_uplink) std::fill(ul_ext.begin(), ul_ext.begin() + ul_L, sample_t(0.0f, 0.0f));
     // Per-target precomputed base signal (gain * delayed x * Doppler) for the
     // monostatic path. Computing this once per target isolates the serial Doppler
     // recurrence so the per-channel accumulation below stays contiguous,
@@ -554,6 +601,38 @@ int main(int argc, char** argv) {
         if (enable_comm) {
             comm_ring.push_block(out_comm.data(), M, running);
         }
+
+        // --- Uplink (UE->BS): drain UE TX for this chunk, apply TDL + AWGN ---
+        // Non-blocking read of up to M samples. We forward exactly the samples the
+        // UE produced (no zero-padding): rx.ul is a faithful, contiguous copy of
+        // the UE uplink frame stream, so the BS reads it frame-aligned from sample
+        // 0 with no sync loop. When the UE has nothing, nothing is forwarded (the
+        // BS recv simply waits), and the hub still makes downlink progress.
+        if (enable_uplink) {
+            const size_t got = ul_tx_ring.pop_block(ul_in.data(), M, running, 0.0);
+            if (got > 0) {
+                std::copy(ul_in.begin(), ul_in.begin() + got, ul_ext.begin() + ul_L);
+                for (size_t n = 0; n < got; ++n) {
+                    cf acc(0.0f, 0.0f);
+                    for (const auto& tap : ul_taps) {
+                        const size_t d = static_cast<size_t>(tap.delay_samples);
+                        acc += tap.gain * ul_ext[ul_L + n - d];
+                    }
+                    ul_out[n] = acc;
+                }
+                // NOTE: no per-chunk SNR-control scaling on the uplink — the uplink
+                // frame is zero-padded within the DL period, so chunk-wise power
+                // normalization would vary the signal level across the frame and
+                // break the BS equalization. Uplink SNR = tap gain vs AWGN.
+                if (noise_on) {
+                    noise_gen.add(ul_out.data(), got, static_cast<float>(noise_sigma));
+                }
+                ul_rx_ring.push_block(ul_out.data(), got, running);
+                // Slide uplink history (last ul_L samples of the extended buffer).
+                std::copy(ul_ext.begin() + got, ul_ext.begin() + got + ul_L, ul_ext.begin());
+            }
+        }
+
         ctrl.advance(M);
         total_produced += M;
 
@@ -578,6 +657,10 @@ int main(int argc, char** argv) {
     tx_ring.unlink();
     for (auto& r : sens_rings) r->unlink();
     comm_ring.unlink();
+    if (enable_uplink) {
+        ul_tx_ring.unlink();
+        ul_rx_ring.unlink();
+    }
     ctrl.unlink();
     return 0;
 }

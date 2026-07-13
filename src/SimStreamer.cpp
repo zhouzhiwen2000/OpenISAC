@@ -28,7 +28,7 @@ size_t SimTxStreamer::send(const buffs_type& buffs,
 
 bool SimTxStreamer::recv_async_msg(uhd::async_metadata_t& /*async_metadata*/, double timeout) {
     // No async TX events in simulation. Sleep for the requested timeout so the
-    // modulator's async-event thread does not busy-spin, then report "no message".
+    // BS async-event thread does not busy-spin, then report "no message".
     if (timeout > 0.0) {
         std::this_thread::sleep_for(std::chrono::duration<double>(timeout));
     }
@@ -102,8 +102,12 @@ bool SimRadio::connect(const SimConfig& sim_cfg) {
 }
 
 uhd::tx_streamer::sptr SimRadio::make_tx_streamer(size_t max_samps) {
+    return make_tx_streamer("tx", max_samps);
+}
+
+uhd::tx_streamer::sptr SimRadio::make_tx_streamer(const std::string& suffix, size_t max_samps) {
     auto ring = std::make_shared<sim_shm::ShmRing>();
-    const std::string name = sim_shm::make_shm_name(_cfg.session, "tx");
+    const std::string name = sim_shm::make_shm_name(_cfg.session, suffix);
     std::atomic<int>* running = _ctrl->valid() ? &_ctrl->block()->running : nullptr;
     if (!ring->open(name, running)) {
         throw std::runtime_error("SimRadio: failed to open TX ring " + name +

@@ -79,8 +79,8 @@ cmake --build build -j4
 
 Expected CPU binaries:
 
-- `build/OFDMModulator`
-- `build/OFDMDemodulator`
+- `build/BS`
+- `build/UE`
 
 ## 4. Prepare runtime YAML files
 
@@ -88,8 +88,8 @@ The executables load YAML from the current working directory.
 
 ```bash
 cd build
-cp ../config/Modulator_B210.yaml Modulator.yaml
-cp ../config/Demodulator_B210.yaml Demodulator.yaml
+cp ../config/BS_B210.yaml BS.yaml
+cp ../config/UE_B210.yaml UE.yaml
 ```
 
 Use the `X310` templates instead if needed.
@@ -100,8 +100,8 @@ Example:
 
 ```bash
 cd build
-./OFDMModulator
-./OFDMDemodulator
+./BS
+./UE
 ```
 
 Notes:

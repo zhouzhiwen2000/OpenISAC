@@ -5,13 +5,13 @@
 
 `ChannelSimulator` 让你在没有任何射频硬件的情况下运行完整的**通信**与**多通道感知**流水线。它用一块共享内存"空口"替代 USRP，并在空口中构造一个基于散射体的多径信道：发射信号经过 LoS 路径、可选静态多径路径，以及一组带时延 / 多普勒 / 增益 / 阵列响应的运动散射体；各路径的整数时延中可以并入固定定时偏移，通信/双站接收链路再叠加相对载波频偏（CFO），最后为每个 RX 输出加入 AWGN。这里的定时偏移是整数样本级的固定偏移；当前仿真不建模采样频率偏差（SFO）。
 
-每个感知 RX 通道被视为一根天线；阵列响应既可以由均匀线阵（ULA，参数 `array_spacing_lambda`）参数化生成，也可以通过 `steering_override_file` 加载完全自定义的阵列流形矩阵。通信信道是一个**真实的多径信道**：LoS 路径加上散射体散射，因此解调器的**双站**感知同样能检测到距离-多普勒目标。
+每个感知 RX 通道被视为一根天线；阵列响应既可以由均匀线阵（ULA，参数 `array_spacing_lambda`）参数化生成，也可以通过 `steering_override_file` 加载完全自定义的阵列流形矩阵。通信信道是一个**真实的多径信道**：LoS 路径加上散射体散射，因此UE的**双站**感知同样能检测到距离-多普勒目标。
 
 ## 工作原理
 
 ```
- OFDMModulator ──TX 采样──▶ ChannelSimulator ──各天线 RX──▶ OFDMDemodulator (通信 RX)
- (SimTxStreamer)            ("空口" + 采样时钟)  └─感知 RX×N──▶ OFDMModulator 单站感知
+ BS ──TX 采样──▶ ChannelSimulator ──各天线 RX──▶ UE (通信 RX)
+ (SimTxStreamer)            ("空口" + 采样时钟)  └─感知 RX×N──▶ BS 单站感知
 ```
 
 三个进程通过以 `simulation.session` 命名的 POSIX 共享内存环形缓冲区相互连接。各引擎通过 YAML 中的 `radio_backend: sim` 选择后端；由于仿真 streamer 实现了抽象的 `uhd::tx_streamer` / `uhd::rx_streamer` 接口，热路径上的 `send()/recv()` 无需任何改动。`radio_backend: uhd`（默认值）保持原有的硬件行为不变。
@@ -19,42 +19,42 @@
 ## 编译
 
 ```
-cd build && cmake .. && make -j ChannelSimulator OFDMModulator OFDMDemodulator
+cd build && cmake .. && make -j ChannelSimulator BS UE
 ```
 
 ## 运行（同一台机器，三个终端）
 
 ```
 cd build
-cp ../config/Modulator_Sim.yaml   Modulator.yaml
-cp ../config/Demodulator_Sim.yaml Demodulator.yaml
+cp ../config/BS_Sim.yaml   BS.yaml
+cp ../config/UE_Sim.yaml UE.yaml
 
 # 1) 先启动"空口"（它创建共享内存，并充当采样时钟）
-./ChannelSimulator                 # 读取 Modulator.yaml（及其中的 simulation: 块）
+./ChannelSimulator                 # 读取 BS.yaml（及其中的 simulation: 块）
 
 # 2) 启动发射机 / 单站感知
-./OFDMModulator
+./BS
 
 # 3) 启动接收机 / 通信解调
-./OFDMDemodulator
+./UE
 ```
 
 务必**先启动** `ChannelSimulator`。默认情况下 hub 通过背压（backpressure）流控：如果启用了通信 RX 或感知 RX，却没有启动对应的消费者进程读取共享内存，相关环形缓冲区填满后，整个仿真都会等待。因此，请启动所有已启用的接收端；如果只需要其中一侧，请在 `simulation:` 中关闭不用的输出：
 
-- **仅感知** —— 设 `enable_comm_rx: false`；hub 不生成通信 RX 输出，只需运行 `ChannelSimulator` + `OFDMModulator`，无需运行 `OFDMDemodulator`。
-- **仅通信** —— 设 `enable_sensing_rx: false`；hub 不生成感知 RX 输出，但仍需运行 `ChannelSimulator` + `OFDMModulator` + `OFDMDemodulator`，因为调制器负责发射，解调器负责通信接收。
+- **仅感知** —— 设 `enable_comm_rx: false`；hub 不生成通信 RX 输出，只需运行 `ChannelSimulator` + `BS`，无需运行 `UE`。
+- **仅通信** —— 设 `enable_sensing_rx: false`；hub 不生成感知 RX 输出，但仍需运行 `ChannelSimulator` + `BS` + `UE`，因为BS负责发射，UE负责通信接收。
 
 关闭感知 RX 有两种方式：设置 `enable_sensing_rx: false`，或将 `sensing_rx_channel_count` 设为 0。
 
 需要查看单站感知结果时，运行 `python3 scripts/plot_sensing_fast.py`。与硬件模式一致，RD 数据流由查看器连接后触发启动。
 
-## 配置信道（Modulator_Sim.yaml 中的 `simulation:` 块）
+## 配置信道（BS_Sim.yaml 中的 `simulation:` 块）
 
 ```yaml
 radio_backend: sim
 simulation:
   session: oisac_sim             # 三个进程必须保持一致
-  enable_comm_rx: true           # 生成通信 RX 路径（false = 仅感知，不运行解调器）
+  enable_comm_rx: true           # 生成通信 RX 路径（false = 仅感知，不运行UE）
   enable_sensing_rx: true        # 生成感知 RX 路径（false = 仅通信）
   noise_power_dbfs: -50          # 每个 RX 通道的 AWGN 功率；<= -200 表示关闭
   cfo_hz: 0.0                    # 通信/双站 RX 上的相对载波频偏

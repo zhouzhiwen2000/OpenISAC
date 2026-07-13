@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
+#include <string>
 #include <stdexcept>
 #include <limits>
 #include <sys/socket.h>
@@ -164,7 +165,7 @@ private:
 /**
  * @brief Per sensing RX channel configuration.
  *
- * Used by OFDMModulator for multi-channel monostatic sensing reception.
+ * Used by BS for multi-channel monostatic sensing reception.
  */
 struct SensingRxChannelConfig {
     uint32_t usrp_channel = 0;          // USRP RX channel index
@@ -177,6 +178,8 @@ struct SensingRxChannelConfig {
     std::string rx_antenna = "";        // RX antenna for this channel (e.g., TX/RX, RX1)
     bool enable_system_delay_estimation = false; // Enable per-channel system delay estimation mode
     bool enable_sensing_output = true;  // Enable ZMQ output for this sensing channel
+    int rx_cpu_core = -1;               // Dedicated SensingChannel::_rx_loop core; -1 = no explicit binding
+    int processing_cpu_core = -1;       // Dedicated SensingChannel::_sensing_loop core; -1 = no explicit binding
 };
 
 /**
@@ -206,14 +209,16 @@ struct SimMultipathTap {
 /**
  * @brief Channel simulator parameters (used when radio_backend == "sim").
  *
- * Shared by the Modulator, Demodulator, and the standalone ChannelSimulator hub.
+ * Shared by the BS, UE, and the standalone ChannelSimulator hub.
  * The `session` string namespaces the POSIX shared-memory segments so all three
  * processes attach to the same simulated "air".
  */
 struct SimConfig {
     std::string session = "oisac_sim";        // shm namespace shared by all processes
-    bool enable_comm_rx = true;                // produce the communication RX channel (run with OFDMDemodulator)
+    bool enable_comm_rx = true;                // produce the communication RX channel (run with UE)
     bool enable_sensing_rx = true;             // produce the monostatic sensing RX channels (one per antenna)
+    bool enable_uplink = false;                // route the UE->BS uplink stream (UE TX -> BS uplink RX)
+    std::vector<SimMultipathTap> uplink_multipath_taps; // Uplink TDL taps (empty => reuse comm_multipath_taps)
     double noise_power_dbfs = -100.0;          // AWGN power per RX channel (dBFS); very low = effectively off
     bool snr_control_enable = false;           // Enable target-SNR scaling of clean signal before AWGN
     double target_snr_db = 40.0;               // Target SNR when snr_control_enable is true
@@ -236,6 +241,68 @@ struct SimConfig {
     std::vector<SimTarget> bistatic_targets;   // Scatterers for the bistatic (comm) channel; empty => reuse `targets`
     std::string steering_override_file = "";   // Optional [num_targets x num_rx_channels] complex<float> matrix
     size_t ring_capacity_samples = 1u << 22;   // Per-stream shm ring capacity (complex<float> samples)
+};
+
+/**
+ * @brief Duplexing scheme between the downlink (BS->UE) and uplink (UE->BS).
+ *
+ * TDD: uplink shares the downlink carrier and is time-multiplexed into a
+ *      contiguous range of OFDM symbols within each frame, separated from the
+ *      downlink by an optional guard interval (both measured in OFDM symbols).
+ * FDD: uplink occupies a separate carrier (`ul_center_freq`) and is transmitted
+ *      continuously, simultaneously with the downlink. Uplink OFDM-symbol
+ *      boundaries remain time-aligned to the downlink frame grid.
+ */
+enum class DuplexMode : uint8_t {
+    TDD = 0,
+    FDD = 1,
+};
+
+inline constexpr const char* kDuplexModeTdd = "tdd";
+inline constexpr const char* kDuplexModeFdd = "fdd";
+
+inline const char* duplex_mode_to_string(DuplexMode mode) {
+    switch (mode) {
+    case DuplexMode::FDD:
+        return kDuplexModeFdd;
+    case DuplexMode::TDD:
+    default:
+        return kDuplexModeTdd;
+    }
+}
+
+inline bool parse_duplex_mode_string(const std::string& raw_mode, DuplexMode& out_mode) {
+    std::string mode;
+    mode.reserve(raw_mode.size());
+    for (char ch : raw_mode) {
+        mode.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    if (mode == kDuplexModeTdd) {
+        out_mode = DuplexMode::TDD;
+        return true;
+    }
+    if (mode == kDuplexModeFdd) {
+        out_mode = DuplexMode::FDD;
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Duplexing configuration shared by the BS and UE.
+ *
+ * The uplink reuses the identical OFDM numerology and frame structure as the
+ * downlink (same fft_size/cp_length/sync_pos/pilots), so the uplink RX can reuse
+ * the downlink demod pipeline verbatim. In TDD the uplink occupies symbols
+ * [ul_symbol_start, ul_symbol_start + ul_symbol_count); the first
+ * `ul_guard_symbols` of that range are a blanked DL->UL guard (may be 0).
+ */
+struct DuplexConfig {
+    DuplexMode mode = DuplexMode::TDD;
+    size_t ul_symbol_start = 0;     // TDD: first uplink OFDM symbol within a frame
+    size_t ul_symbol_count = 0;     // TDD: number of uplink symbols (0 => uplink disabled)
+    size_t ul_guard_symbols = 0;    // TDD: guard symbols at the DL->UL boundary (within the UL range)
+    double ul_center_freq = 0.0;    // FDD: uplink carrier frequency in Hz
 };
 
 /**
@@ -841,6 +908,20 @@ struct Config {
     std::string rx_device_args = "";
     std::string radio_backend = "uhd";  // Radio I/O backend: "uhd" (real USRP) or "sim" (channel simulator)
     SimConfig simulation;               // Channel simulator parameters (used when radio_backend == "sim")
+    bool enable_uplink = false;         // Top-level UE->BS uplink master switch
+    DuplexConfig duplex;                // Duplexing (TDD/FDD) + uplink frame structure
+    // Runtime-adjustable DL/UL boundary timing knobs (samples). The BS knob is
+    // the DL/UL timing difference; the UE knob is the Timing Advance. Each side
+    // adjusts its own value independently at runtime; stored here as the startup
+    // default, mirrored into atomics by the engines.
+    int32_t bs_dl_ul_timing_diff = 0;  // BS: uplink-RX window offset relative to the TX frame anchor (samples)
+    int32_t ue_timing_advance = 0;     // UE: uplink-TX window advance relative to the RX frame anchor (samples)
+    // UE uplink payload UDP input (mirrors udp_input_* on the BS downlink).
+    std::string ul_udp_input_ip = "0.0.0.0";
+    int ul_udp_input_port = 50002;
+    // BS uplink decoded-payload UDP output (mirrors udp_output_* on the UE downlink).
+    std::string ul_udp_output_ip = "127.0.0.1";
+    int ul_udp_output_port = 50003;
     std::string default_out_ip = "127.0.0.1";
     bool mono_sensing_output_enabled = true;
     std::string mono_sensing_ip = "0.0.0.0";
@@ -860,7 +941,7 @@ struct Config {
     // UDP output for decoded payloads
     std::string udp_output_ip = "127.0.0.1";
     int udp_output_port = 50001;
-    // Modulator UDP input (for incoming payloads to modulate)
+    // BS UDP input (for incoming payloads to modulate)
     std::string udp_input_ip = "0.0.0.0"; // bind address
     int udp_input_port = 50000;
     std::string clocksource = "internal"; // Clock source
@@ -874,10 +955,12 @@ struct Config {
     uint32_t sensing_rx_channel_count = 1; // Number of sensing RX channels
     std::vector<SensingRxChannelConfig> sensing_rx_channels; // Per-channel sensing RX config
     size_t sensing_symbol_stride = 20;     // Default sensing STRD applied at startup
-    size_t tx_circular_buffer_size = 8;    // Capacity of modulator frame circular buffer
-    size_t data_packet_buffer_size = 32;   // Capacity of modulator encoded packet buffer
+    size_t tx_circular_buffer_size = 8;    // Capacity of BS frame circular buffer
+    size_t data_packet_buffer_size = 32;   // Capacity of BS encoded packet buffer
     size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
-    std::vector<int> available_cores = {0, 1, 2, 3, 4, 5};
+    std::vector<int> downlink_cpu_cores; // BS: TX/mod/data-ingest; UE: RX/process/sensing/bit-processing
+    std::vector<int> uplink_cpu_cores;   // Dedicated uplink thread cores; empty = no explicit uplink binding
+    int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
     std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, data_ingest, demodulation, agc, align, snr, or "all"
     bool measurement_enable = false;
     std::string measurement_mode = "";
@@ -986,6 +1069,184 @@ inline size_t reserved_sync_symbol_count(const Config& cfg) {
         ++count;
     }
     return count;
+}
+
+/**
+ * @brief Per-frame partition of OFDM symbols into downlink / uplink / guard.
+ *
+ * Built identically on the BS and UE from the shared DuplexConfig so both ends
+ * agree on which symbols carry uplink. In TDD the uplink occupies a contiguous
+ * symbol range whose leading `ul_guard` symbols are a blanked DL->UL guard. In
+ * FDD every symbol is simultaneously downlink (on the DL carrier) and uplink
+ * (on the UL carrier), with no guard.
+ */
+struct DuplexFrameLayout {
+    DuplexMode mode = DuplexMode::TDD;
+    size_t num_symbols = 0;
+    size_t ul_start = 0;     // TDD: first symbol of the uplink range
+    size_t ul_count = 0;     // TDD: uplink range length (includes guard)
+    size_t ul_guard = 0;     // TDD: leading guard symbols within the uplink range
+    bool uplink_enabled = false;
+    std::vector<uint8_t> symbol_is_uplink; // TDD per-symbol UL-data mask (size num_symbols)
+    std::vector<uint8_t> symbol_is_guard;  // TDD per-symbol guard mask (size num_symbols)
+    std::string warning;     // non-empty if the configured range was clamped/invalid
+
+    bool is_uplink(size_t s) const {
+        if (mode == DuplexMode::FDD) return uplink_enabled;
+        return s < symbol_is_uplink.size() && symbol_is_uplink[s] != 0;
+    }
+    bool is_guard(size_t s) const {
+        if (mode == DuplexMode::FDD) return false;
+        return s < symbol_is_guard.size() && symbol_is_guard[s] != 0;
+    }
+    bool is_downlink(size_t s) const {
+        if (mode == DuplexMode::FDD) return true;       // DL carrier always active
+        return !is_uplink(s) && !is_guard(s);
+    }
+    // Start sample (within a frame) of the contiguous uplink data block (TDD).
+    size_t ul_sample_offset(const Config& cfg) const {
+        if (mode == DuplexMode::FDD) return 0;
+        return (ul_start + ul_guard) * (cfg.fft_size + cfg.cp_length);
+    }
+    // Number of samples in the uplink data block.
+    size_t ul_sample_count(const Config& cfg) const {
+        if (mode == DuplexMode::FDD) return cfg.samples_per_frame();
+        const size_t ul_data_syms = (ul_count > ul_guard) ? (ul_count - ul_guard) : 0;
+        return ul_data_syms * (cfg.fft_size + cfg.cp_length);
+    }
+};
+
+inline DuplexFrameLayout build_duplex_frame_layout(const Config& cfg) {
+    DuplexFrameLayout layout;
+    layout.mode = cfg.duplex.mode;
+    layout.num_symbols = cfg.num_symbols;
+    if (!cfg.enable_uplink) {
+        layout.uplink_enabled = false;
+        layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
+        layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+        return layout;
+    }
+
+    if (cfg.duplex.mode == DuplexMode::FDD) {
+        // FDD: continuous uplink on a separate carrier; no symbol gating/guard.
+        layout.uplink_enabled = true;
+        layout.ul_start = 0;
+        layout.ul_count = cfg.num_symbols;
+        layout.ul_guard = 0;
+        return layout;
+    }
+
+    // TDD: validate and clamp the configured uplink symbol range.
+    size_t ul_start = cfg.duplex.ul_symbol_start;
+    size_t ul_count = cfg.duplex.ul_symbol_count;
+    size_t ul_guard = cfg.duplex.ul_guard_symbols;
+
+    if (ul_count == 0) {
+        layout.uplink_enabled = false;   // uplink disabled
+        layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
+        layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+        return layout;
+    }
+
+    if (ul_start >= cfg.num_symbols) {
+        layout.warning = "uplink symbol_start beyond frame; uplink disabled";
+        layout.uplink_enabled = false;
+        layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
+        layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+        return layout;
+    }
+    if (ul_start + ul_count > cfg.num_symbols) {
+        layout.warning = "uplink range exceeds frame; clamped to num_symbols";
+        ul_count = cfg.num_symbols - ul_start;
+    }
+    if (ul_guard > ul_count) {
+        layout.warning = "uplink guard exceeds uplink range; clamped";
+        ul_guard = ul_count;
+    }
+
+    layout.ul_start = ul_start;
+    layout.ul_count = ul_count;
+    layout.ul_guard = ul_guard;
+    layout.uplink_enabled = (ul_count > ul_guard);
+
+    layout.symbol_is_uplink.assign(cfg.num_symbols, 0);
+    layout.symbol_is_guard.assign(cfg.num_symbols, 0);
+    for (size_t s = ul_start; s < ul_start + ul_count; ++s) {
+        if (s < ul_start + ul_guard) {
+            layout.symbol_is_guard[s] = 1;          // leading guard symbols
+        } else {
+            if (is_reserved_sync_symbol(cfg, s)) {
+                throw std::runtime_error(
+                    "TDD uplink data range overlaps reserved DL " +
+                    std::string(reserved_sync_symbol_label(cfg, s)) +
+                    " at symbol " + std::to_string(s) + '.');
+            }
+            layout.symbol_is_uplink[s] = 1;         // uplink data symbols
+        }
+    }
+    return layout;
+}
+
+// Derive the self-contained uplink OFDM (sub)frame configuration from the link
+// config. The uplink is its own compact frame (ZC sync at symbol 0, comb pilots,
+// payload on the remaining REs) that occupies the uplink symbol window of the DL
+// frame period. It reuses the DL numerology (fft_size/cp_length/zc_root/pilots)
+// but drops DL-only features the uplink does not use (sec-sync, CFO training,
+// midframe pilots, sensing pilots, custom data-resource blocks).
+//
+// TDD: num_symbols = ul_symbol_count - ul_guard_symbols (the data-bearing part of
+//      the uplink window). FDD: num_symbols = cfg.num_symbols (continuous uplink).
+inline Config make_uplink_config(const Config& cfg) {
+    Config ul = cfg;
+    const DuplexFrameLayout dl = build_duplex_frame_layout(cfg);
+    const size_t ul_syms = !cfg.enable_uplink
+        ? 0
+        : ((cfg.duplex.mode == DuplexMode::FDD)
+            ? cfg.num_symbols
+            : ((dl.ul_count > dl.ul_guard) ? (dl.ul_count - dl.ul_guard) : 0));
+    ul.num_symbols = ul_syms;
+    ul.sync_pos = 0;
+    ul.enable_sec_sync_symbol = false;
+    ul.enable_cfo_training_sequence = false;
+    ul.midframe_pilot_symbols.clear();
+    ul.sensing_mask_blocks.clear();
+    ul.data_resource_blocks.clear();
+    ul.data_resource_blocks_configured = false;
+    // The uplink does not run sensing; keep sensing_symbol_num consistent.
+    ul.sensing_symbol_num = ul_syms;
+    return ul;
+}
+
+// True when the uplink carries at least one data-bearing symbol (a ZC sync plus
+// at least one data symbol). Uses make_uplink_config()'s derived num_symbols.
+inline bool uplink_enabled(const Config& cfg) {
+    return make_uplink_config(cfg).num_symbols >= 2;
+}
+
+// One-line startup summary of the duplex frame partition. `role` is "BS" or "UE".
+inline void log_duplex_summary(const Config& cfg, const char* role) {
+    const DuplexFrameLayout dl = build_duplex_frame_layout(cfg);
+    if (!uplink_enabled(cfg)) {
+        LOG_G_INFO() << "[" << role << "] duplex: uplink DISABLED (downlink-only); "
+                     << "num_symbols=" << cfg.num_symbols;
+        return;
+    }
+    const Config ul = make_uplink_config(cfg);
+    std::ostringstream oss;
+    oss << "[" << role << "] duplex partition: mode="
+        << duplex_mode_to_string(cfg.duplex.mode)
+        << ", frame_symbols=" << cfg.num_symbols;
+    if (cfg.duplex.mode == DuplexMode::TDD) {
+        const size_t dl_syms = cfg.num_symbols - dl.ul_count;
+        oss << ", DL=" << dl_syms << ", guard=" << dl.ul_guard
+            << ", UL=" << ul.num_symbols
+            << " (UL symbols [" << (dl.ul_start + dl.ul_guard) << ","
+            << (dl.ul_start + dl.ul_count) << "))";
+    } else {
+        oss << ", UL=" << ul.num_symbols << " (continuous), ul_center_freq="
+            << cfg.duplex.ul_center_freq << " Hz";
+    }
+    LOG_G_INFO() << oss.str();
 }
 
 inline bool validate_cfo_training_period(const Config& cfg, std::string* error = nullptr) {
@@ -1568,6 +1829,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.num_symbols = cfg.num_symbols;
     layout.fft_size = cfg.fft_size;
     layout.sync_pos = cfg.sync_pos;
+    const DuplexFrameLayout duplex_layout = build_duplex_frame_layout(cfg);
     layout.midframe_pilot_symbol_mask.assign(cfg.num_symbols, 0);
     layout.midframe_pilot_symbol_to_rank.assign(cfg.num_symbols, -1);
     for (auto sym : cfg.midframe_pilot_symbols) {
@@ -1575,6 +1837,13 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             if (log_warnings) {
                 LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
                              << " outside num_symbols=" << cfg.num_symbols << '.';
+            }
+            continue;
+        }
+        if (!duplex_layout.is_downlink(sym)) {
+            if (log_warnings) {
+                LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
+                             << " because it falls inside a TDD uplink/guard symbol.";
             }
             continue;
         }
@@ -1594,13 +1863,22 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
         layout.midframe_pilot_symbol_mask[sym] = 1;
     }
     layout.midframe_pilot_symbol_count = layout.midframe_pilot_symbols.size();
-    const size_t reserved_symbol_count = reserved_sync_symbol_count(cfg);
-    if (reserved_symbol_count + layout.midframe_pilot_symbol_count > cfg.num_symbols) {
-        throw std::runtime_error(
-            "Reserved sync/training symbols plus midframe_pilot_symbols exceed num_symbols.");
+    size_t downlink_symbol_count = 0;
+    size_t reserved_downlink_symbol_count = 0;
+    for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
+        if (!duplex_layout.is_downlink(sym)) {
+            continue;
+        }
+        ++downlink_symbol_count;
+        if (is_reserved_sync_symbol(cfg, sym)) {
+            ++reserved_downlink_symbol_count;
+        }
     }
-    layout.data_symbol_count =
-        cfg.num_symbols - reserved_symbol_count - layout.midframe_pilot_symbol_count;
+    if (reserved_downlink_symbol_count + layout.midframe_pilot_symbol_count >
+        downlink_symbol_count) {
+        throw std::runtime_error(
+            "Reserved sync/training symbols plus midframe_pilot_symbols exceed downlink symbols.");
+    }
 
     layout.pilot_mask.assign(cfg.fft_size, 0);
     for (auto pos : cfg.pilot_positions) {
@@ -1620,21 +1898,21 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
         layout.non_pilot_subcarrier_indices.push_back(static_cast<int>(k));
     }
     layout.num_non_pilot_subcarriers = layout.non_pilot_subcarrier_indices.size();
-    layout.non_pilot_re_count = layout.data_symbol_count * layout.num_non_pilot_subcarriers;
 
-    layout.data_symbol_to_actual_symbol.reserve(layout.data_symbol_count);
+    layout.data_symbol_to_actual_symbol.reserve(downlink_symbol_count);
     layout.actual_symbol_to_data_symbol.assign(cfg.num_symbols, -1);
     for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
-        if (is_reserved_sync_symbol(cfg, sym) || layout.midframe_pilot_symbol_mask[sym] != 0) {
+        if (!duplex_layout.is_downlink(sym) ||
+            is_reserved_sync_symbol(cfg, sym) ||
+            layout.midframe_pilot_symbol_mask[sym] != 0) {
             continue;
         }
         layout.actual_symbol_to_data_symbol[sym] =
             static_cast<int>(layout.data_symbol_to_actual_symbol.size());
         layout.data_symbol_to_actual_symbol.push_back(static_cast<int>(sym));
     }
-    if (layout.data_symbol_to_actual_symbol.size() != layout.data_symbol_count) {
-        throw std::runtime_error("Failed to derive data-symbol index mapping from sync_pos.");
-    }
+    layout.data_symbol_count = layout.data_symbol_to_actual_symbol.size();
+    layout.non_pilot_re_count = layout.data_symbol_count * layout.num_non_pilot_subcarriers;
 
     layout.payload_mask.assign(layout.non_pilot_re_count, cfg.data_resource_blocks_configured ? 0 : 1);
     layout.sensing_pilot_mask.assign(layout.non_pilot_re_count, 0);
@@ -1646,6 +1924,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     }
 
     size_t stripped_reserved_symbol_re = 0;
+    size_t stripped_non_downlink_symbol_re = 0;
     size_t stripped_pilot_re = 0;
     size_t payload_sensing_pilot_overlap_re = 0;
     if (cfg.data_resource_blocks_configured) {
@@ -1675,6 +1954,10 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             }
 
             for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
+                if (!duplex_layout.is_downlink(sym)) {
+                    stripped_non_downlink_symbol_re += block.subcarrier_count;
+                    continue;
+                }
                 // Reserved sync and mid-frame pilot symbols keep their dedicated
                 // content, so resource blocks never claim RE from those symbols.
                 if (is_reserved_sync_symbol(cfg, sym) ||
@@ -1746,9 +2029,13 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.payload_re_count = payload_rank;
 
     if (log_warnings && cfg.data_resource_blocks_configured &&
-        (stripped_reserved_symbol_re > 0 || stripped_pilot_re > 0)) {
+        (stripped_reserved_symbol_re > 0 ||
+         stripped_non_downlink_symbol_re > 0 ||
+         stripped_pilot_re > 0)) {
         LOG_G_WARN() << "data_resource_blocks overlap stripped " << stripped_reserved_symbol_re
-                     << " sync/mid-frame-pilot symbol RE and " << stripped_pilot_re
+                     << " sync/mid-frame-pilot symbol RE, "
+                     << stripped_non_downlink_symbol_re
+                     << " TDD uplink/guard symbol RE, and " << stripped_pilot_re
                      << " pilot RE. reserved sync symbols, pilot_positions, and midframe_pilot_symbols take precedence.";
     }
     if (log_warnings && payload_sensing_pilot_overlap_re > 0) {
@@ -1835,7 +2122,7 @@ inline bool radio_is_sim(const Config& cfg) {
 /**
  * @brief Emit the radio_backend + simulation block to a YAML emitter.
  *
- * Shared by the Modulator and Demodulator config writers so the two stay in sync.
+ * Shared by the BS and UE config writers so the two stay in sync.
  */
 inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::Key << "radio_backend" << YAML::Value << cfg.radio_backend;
@@ -1844,6 +2131,7 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::Key << "session" << YAML::Value << sim.session;
     out << YAML::Key << "enable_comm_rx" << YAML::Value << sim.enable_comm_rx;
     out << YAML::Key << "enable_sensing_rx" << YAML::Value << sim.enable_sensing_rx;
+    out << YAML::Key << "enable_uplink" << YAML::Value << sim.enable_uplink;
     out << YAML::Key << "noise_power_dbfs" << YAML::Value << sim.noise_power_dbfs;
     out << YAML::Key << "snr_control_enable" << YAML::Value << sim.snr_control_enable;
     out << YAML::Key << "target_snr_db" << YAML::Value << sim.target_snr_db;
@@ -1885,7 +2173,7 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
 /**
  * @brief Parse the radio_backend + simulation block from a YAML node.
  *
- * Shared by the Modulator and Demodulator config loaders. Missing keys keep their
+ * Shared by the BS and UE config loaders. Missing keys keep their
  * struct defaults so existing (hardware) configs are unaffected.
  */
 inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
@@ -1896,6 +2184,7 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["session"]) sim.session = sim_node["session"].as<std::string>();
         if (sim_node["enable_comm_rx"]) sim.enable_comm_rx = sim_node["enable_comm_rx"].as<bool>();
         if (sim_node["enable_sensing_rx"]) sim.enable_sensing_rx = sim_node["enable_sensing_rx"].as<bool>();
+        if (sim_node["enable_uplink"]) sim.enable_uplink = sim_node["enable_uplink"].as<bool>();
         if (sim_node["noise_power_dbfs"]) sim.noise_power_dbfs = sim_node["noise_power_dbfs"].as<double>();
         if (sim_node["snr_control_enable"]) sim.snr_control_enable = sim_node["snr_control_enable"].as<bool>();
         if (sim_node["target_snr_db"]) sim.target_snr_db = sim_node["target_snr_db"].as<double>();
@@ -1906,15 +2195,21 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["array_spacing_lambda"]) sim.array_spacing_lambda = sim_node["array_spacing_lambda"].as<double>();
         if (sim_node["ring_capacity_samples"]) sim.ring_capacity_samples = sim_node["ring_capacity_samples"].as<size_t>();
         if (sim_node["steering_override_file"]) sim.steering_override_file = sim_node["steering_override_file"].as<std::string>();
-        if (sim_node["comm_multipath_taps"] && sim_node["comm_multipath_taps"].IsSequence()) {
-            sim.comm_multipath_taps.clear();
-            for (const auto& node : sim_node["comm_multipath_taps"]) {
+        auto load_tap_seq = [](const YAML::Node& seq, std::vector<SimMultipathTap>& out_list) {
+            out_list.clear();
+            for (const auto& node : seq) {
                 SimMultipathTap tap;
                 if (node["delay_samples"]) tap.delay_samples = node["delay_samples"].as<int>();
                 if (node["gain_db"]) tap.gain_db = node["gain_db"].as<double>();
                 if (node["phase_deg"]) tap.phase_deg = node["phase_deg"].as<double>();
-                sim.comm_multipath_taps.push_back(tap);
+                out_list.push_back(tap);
             }
+        };
+        if (sim_node["comm_multipath_taps"] && sim_node["comm_multipath_taps"].IsSequence()) {
+            load_tap_seq(sim_node["comm_multipath_taps"], sim.comm_multipath_taps);
+        }
+        if (sim_node["uplink_multipath_taps"] && sim_node["uplink_multipath_taps"].IsSequence()) {
+            load_tap_seq(sim_node["uplink_multipath_taps"], sim.uplink_multipath_taps);
         }
         auto load_target_seq = [](const YAML::Node& seq, std::vector<SimTarget>& out_list) {
             out_list.clear();
@@ -1933,6 +2228,46 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["bistatic_targets"] && sim_node["bistatic_targets"].IsSequence()) {
             load_target_seq(sim_node["bistatic_targets"], sim.bistatic_targets);
         }
+    }
+}
+
+// Parse the duplexing block. Shared by the BS and UE config loaders so both
+// agree on the DL/UL/guard symbol partition. Schema:
+//   duplex_mode: tdd | fdd
+//   uplink:
+//     symbol_start: <size_t>     # TDD: first uplink OFDM symbol
+//     symbol_count: <size_t>     # TDD: uplink symbol count (0 => uplink off)
+//     guard_symbols: <size_t>    # TDD: guard symbols at the DL->UL boundary
+//     center_freq: <double>      # FDD: uplink carrier (Hz)
+//   bs_dl_ul_timing_diff: <int>  # BS startup default (samples)
+//   ue_timing_advance: <int>     # UE startup default (samples)
+inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
+    if (config["enable_uplink"]) {
+        cfg.enable_uplink = config["enable_uplink"].as<bool>();
+    }
+    if (config["duplex_mode"]) {
+        const std::string raw = config["duplex_mode"].as<std::string>();
+        DuplexMode mode = cfg.duplex.mode;
+        if (parse_duplex_mode_string(raw, mode)) {
+            cfg.duplex.mode = mode;
+        }
+    }
+    if (config["uplink"] && config["uplink"].IsMap()) {
+        const YAML::Node& ul = config["uplink"];
+        if (ul["symbol_start"]) cfg.duplex.ul_symbol_start = ul["symbol_start"].as<size_t>();
+        if (ul["symbol_count"]) cfg.duplex.ul_symbol_count = ul["symbol_count"].as<size_t>();
+        if (ul["guard_symbols"]) cfg.duplex.ul_guard_symbols = ul["guard_symbols"].as<size_t>();
+        if (ul["center_freq"]) cfg.duplex.ul_center_freq = ul["center_freq"].as<double>();
+        if (ul["udp_input_ip"]) cfg.ul_udp_input_ip = ul["udp_input_ip"].as<std::string>();
+        if (ul["udp_input_port"]) cfg.ul_udp_input_port = ul["udp_input_port"].as<int>();
+        if (ul["udp_output_ip"]) cfg.ul_udp_output_ip = ul["udp_output_ip"].as<std::string>();
+        if (ul["udp_output_port"]) cfg.ul_udp_output_port = ul["udp_output_port"].as<int>();
+    }
+    if (config["bs_dl_ul_timing_diff"]) {
+        cfg.bs_dl_ul_timing_diff = config["bs_dl_ul_timing_diff"].as<int32_t>();
+    }
+    if (config["ue_timing_advance"]) {
+        cfg.ue_timing_advance = config["ue_timing_advance"].as<int32_t>();
     }
 }
 
@@ -2091,26 +2426,30 @@ inline bool path_exists(const std::string& path) {
     return !path.empty() && ::access(path.c_str(), F_OK) == 0;
 }
 
-inline std::optional<size_t> core_from_hint(const Config& cfg, size_t hint) {
-    if (cfg.available_cores.empty()) {
-        return std::nullopt;
-    }
-    const int configured_core = cfg.available_cores[hint % cfg.available_cores.size()];
+inline std::optional<size_t> configured_core_to_optional(int configured_core) {
     if (configured_core < 0) {
         return std::nullopt;
     }
     return static_cast<size_t>(configured_core);
 }
 
+inline std::optional<size_t> core_from_list_hint(const std::vector<int>& cores, size_t hint) {
+    if (cores.empty()) {
+        return std::nullopt;
+    }
+    return configured_core_to_optional(cores[hint % cores.size()]);
+}
+
+inline std::optional<size_t> downlink_core_from_hint(const Config& cfg, size_t hint) {
+    return core_from_list_hint(cfg.downlink_cpu_cores, hint);
+}
+
+inline std::optional<size_t> uplink_core_from_hint(const Config& cfg, size_t hint) {
+    return core_from_list_hint(cfg.uplink_cpu_cores, hint);
+}
+
 inline std::optional<size_t> main_thread_core(const Config& cfg) {
-    if (cfg.available_cores.empty()) {
-        return std::nullopt;
-    }
-    const int configured_core = cfg.available_cores.back();
-    if (configured_core < 0) {
-        return std::nullopt;
-    }
-    return static_cast<size_t>(configured_core);
+    return configured_core_to_optional(cfg.main_cpu_core);
 }
 
 inline bool bind_current_thread_to_core(const std::optional<size_t>& core) {
@@ -2122,8 +2461,12 @@ inline bool bind_current_thread_to_core(const std::optional<size_t>& core) {
     return true;
 }
 
-inline bool bind_current_thread_from_hint(const Config& cfg, size_t hint) {
-    return bind_current_thread_to_core(core_from_hint(cfg, hint));
+inline bool bind_current_thread_from_downlink_hint(const Config& cfg, size_t hint) {
+    return bind_current_thread_to_core(downlink_core_from_hint(cfg, hint));
+}
+
+inline bool bind_current_thread_from_uplink_hint(const Config& cfg, size_t hint) {
+    return bind_current_thread_to_core(uplink_core_from_hint(cfg, hint));
 }
 
 inline bool bind_current_thread_to_main_core(const Config& cfg) {
@@ -2149,6 +2492,17 @@ inline bool reject_legacy_key(const YAML::Node& config, const char* old_key, con
         return false;
     }
     return true;
+}
+
+inline bool yaml_node_is_blank_scalar(const YAML::Node& node) {
+    if (!node || !node.IsScalar()) return false;
+    const std::string raw = node.as<std::string>();
+    return raw.find_first_not_of(" \t\r\n") == std::string::npos;
+}
+
+inline void load_optional_int_yaml(const YAML::Node& node, int& value) {
+    if (!node || yaml_node_is_blank_scalar(node)) return;
+    value = node.as<int>();
 }
 
 inline void emit_resource_blocks_yaml(
@@ -2268,7 +2622,7 @@ inline bool load_sensing_mask_blocks_from_yaml(Config& cfg, const YAML::Node& co
 }
 } // namespace config_detail
 
-inline Config make_default_modulator_config() {
+inline Config make_default_bs_config() {
     Config cfg;
     cfg.fft_size = 1024;
     cfg.cp_length = 128;
@@ -2314,7 +2668,7 @@ inline Config make_default_modulator_config() {
     return cfg;
 }
 
-inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& filepath) {
+inline bool save_bs_config_to_yaml(const Config& cfg, const std::string& filepath) {
     YAML::Emitter out;
     out << YAML::BeginMap;
     out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
@@ -2334,6 +2688,8 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
     out << YAML::Key << "tx_gain" << YAML::Value << cfg.tx_gain;
     out << YAML::Key << "tx_channel" << YAML::Value << cfg.tx_channel;
+    out << YAML::Key << "rx_gain" << YAML::Value << cfg.rx_gain;
+    out << YAML::Key << "rx_channel" << YAML::Value << cfg.rx_channel;
     out << YAML::Key << "zc_root" << YAML::Value << cfg.zc_root;
     out << YAML::Key << "num_symbols" << YAML::Value << cfg.num_symbols;
     out << YAML::Key << "sensing_symbol_num" << YAML::Value << cfg.sensing_symbol_num;
@@ -2375,10 +2731,13 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
         out << YAML::Key << "rx_antenna" << YAML::Value << ch.rx_antenna;
         out << YAML::Key << "enable_system_delay_estimation" << YAML::Value << ch.enable_system_delay_estimation;
         out << YAML::Key << "enable_sensing_output" << YAML::Value << ch.enable_sensing_output;
+        out << YAML::Key << "rx_cpu_core" << YAML::Value << ch.rx_cpu_core;
+        out << YAML::Key << "processing_cpu_core" << YAML::Value << ch.processing_cpu_core;
         out << YAML::EndMap;
     }
     out << YAML::EndSeq;
     emit_simulation_config(out, cfg);
+    out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
     out << YAML::Key << "measurement_enable" << YAML::Value << cfg.measurement_enable;
     out << YAML::Key << "measurement_mode" << YAML::Value << cfg.measurement_mode;
     out << YAML::Key << "measurement_run_id" << YAML::Value << cfg.measurement_run_id;
@@ -2390,6 +2749,9 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "tx_circular_buffer_size" << YAML::Value << cfg.tx_circular_buffer_size;
     out << YAML::Key << "data_packet_buffer_size" << YAML::Value << cfg.data_packet_buffer_size;
     out << YAML::Key << "paired_frame_queue_size" << YAML::Value << cfg.paired_frame_queue_size;
+    out << YAML::Key << "downlink_cpu_cores" << YAML::Value << YAML::Flow << cfg.downlink_cpu_cores;
+    out << YAML::Key << "uplink_cpu_cores" << YAML::Value << YAML::Flow << cfg.uplink_cpu_cores;
+    out << YAML::Key << "main_cpu_core" << YAML::Value << cfg.main_cpu_core;
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
     out << YAML::Key << "pilot_positions" << YAML::Value << YAML::Flow << cfg.pilot_positions;
     out << YAML::Key << "midframe_pilot_symbols" << YAML::Value << YAML::Flow
@@ -2397,7 +2759,6 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "midframe_pilot_seed" << YAML::Value << cfg.midframe_pilot_seed;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
     config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
-    out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
     out << YAML::EndMap;
 
     std::ofstream fout(filepath);
@@ -2410,7 +2771,7 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     return true;
 }
 
-inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& filepath) {
+inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
     }
@@ -2449,6 +2810,8 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
         if (config["tx_gain"]) cfg.tx_gain = config["tx_gain"].as<double>();
         if (config["tx_channel"]) cfg.tx_channel = config["tx_channel"].as<uint32_t>();
+        if (config["rx_gain"]) cfg.rx_gain = config["rx_gain"].as<double>();
+        if (config["rx_channel"]) cfg.rx_channel = config["rx_channel"].as<size_t>();
         if (config["zc_root"]) cfg.zc_root = config["zc_root"].as<int>();
         if (config["num_symbols"]) cfg.num_symbols = config["num_symbols"].as<size_t>();
         if (config["sensing_symbol_num"]) cfg.sensing_symbol_num = config["sensing_symbol_num"].as<size_t>();
@@ -2513,6 +2876,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
                 if (node["enable_sensing_output"]) {
                     ch.enable_sensing_output = node["enable_sensing_output"].as<bool>();
                 }
+                config_detail::load_optional_int_yaml(node["rx_cpu_core"], ch.rx_cpu_core);
+                config_detail::load_optional_int_yaml(
+                    node["processing_cpu_core"], ch.processing_cpu_core);
                 cfg.sensing_rx_channels.push_back(ch);
             }
             if (!has_sensing_count_key) {
@@ -2520,6 +2886,7 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
             }
         }
         load_simulation_config(config, cfg);
+        load_duplex_config(config, cfg);
         if (config["measurement_enable"]) cfg.measurement_enable = config["measurement_enable"].as<bool>();
         if (config["measurement_mode"]) cfg.measurement_mode = config["measurement_mode"].as<std::string>();
         if (config["measurement_run_id"]) cfg.measurement_run_id = config["measurement_run_id"].as<std::string>();
@@ -2538,13 +2905,19 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         if (config["midframe_pilot_seed"]) {
             cfg.midframe_pilot_seed = config["midframe_pilot_seed"].as<uint32_t>();
         }
-        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Modulator config")) {
+        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "BS config")) {
             return false;
         }
-        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "Modulator config")) {
+        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "BS config")) {
             return false;
         }
-        if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<int>>();
+        if (config["downlink_cpu_cores"]) {
+            cfg.downlink_cpu_cores = config["downlink_cpu_cores"].as<std::vector<int>>();
+        }
+        if (config["uplink_cpu_cores"]) {
+            cfg.uplink_cpu_cores = config["uplink_cpu_cores"].as<std::vector<int>>();
+        }
+        if (config["main_cpu_core"]) cfg.main_cpu_core = config["main_cpu_core"].as<int>();
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -2552,9 +2925,9 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
     }
 }
 
-inline void normalize_modulator_sensing_channels(Config& cfg) {
-    normalize_sensing_fft_sizes(cfg, "modulator sensing");
-    normalize_sensing_view_bins(cfg, "modulator sensing");
+inline void normalize_bs_sensing_channels(Config& cfg) {
+    normalize_sensing_fft_sizes(cfg, "BS sensing");
+    normalize_sensing_view_bins(cfg, "BS sensing");
     if (cfg.cuda_mod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda_mod_pipeline_slots = 1;
@@ -2580,7 +2953,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
             cfg.measurement_mode = "internal_prbs";
         }
         if (!measurement_mode_enabled(cfg)) {
-            LOG_G_WARN() << "Unsupported modulator measurement_mode='"
+            LOG_G_WARN() << "Unsupported BS measurement_mode='"
                          << cfg.measurement_mode << "'. Disabling measurement mode.";
             cfg.measurement_enable = false;
         }
@@ -2599,8 +2972,8 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
     cfg.midframe_pilot_symbols.erase(
         std::unique(cfg.midframe_pilot_symbols.begin(), cfg.midframe_pilot_symbols.end()),
         cfg.midframe_pilot_symbols.end());
-    finalize_data_resource_grid_config(cfg, "Modulator");
-    finalize_sensing_mask_config(cfg, "Modulator");
+    finalize_data_resource_grid_config(cfg, "BS");
+    finalize_sensing_mask_config(cfg, "BS");
 
     auto make_default_ch0 = [&cfg]() {
         SensingRxChannelConfig ch;
@@ -2648,7 +3021,7 @@ inline void normalize_modulator_sensing_channels(Config& cfg) {
     cfg.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing_rx_channels.size());
 }
 
-inline Config make_default_demodulator_config() {
+inline Config make_default_ue_config() {
     Config cfg;
     cfg.fft_size = 1024;
     cfg.cp_length = 128;
@@ -2729,7 +3102,7 @@ inline Config make_default_demodulator_config() {
     return cfg;
 }
 
-inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string& filepath) {
+inline bool save_ue_config_to_yaml(const Config& cfg, const std::string& filepath) {
     YAML::Emitter out;
     out << YAML::BeginMap;
     out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
@@ -2743,6 +3116,8 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
     out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
     out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
+    out << YAML::Key << "tx_gain" << YAML::Value << cfg.tx_gain;
+    out << YAML::Key << "tx_channel" << YAML::Value << cfg.tx_channel;
     out << YAML::Key << "rx_gain" << YAML::Value << cfg.rx_gain;
     out << YAML::Key << "rx_agc_enable" << YAML::Value << cfg.rx_agc_enable;
     out << YAML::Key << "rx_agc_low_threshold_db" << YAML::Value << cfg.rx_agc_low_threshold_db;
@@ -2768,6 +3143,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "sensing_view_doppler_bins" << YAML::Value << cfg.sensing_view_doppler_bins;
     out << YAML::Key << "device_args" << YAML::Value << cfg.device_args;
     out << YAML::Key << "clock_source" << YAML::Value << cfg.clocksource;
+    out << YAML::Key << "wire_format_tx" << YAML::Value << cfg.wire_format_tx;
     out << YAML::Key << "wire_format_rx" << YAML::Value << cfg.wire_format_rx;
     out << YAML::Key << "enable_bi_sensing" << YAML::Value << cfg.enable_bi_sensing;
     out << YAML::Key << "bi_sensing_ip" << YAML::Value << cfg.bi_sensing_ip;
@@ -2795,9 +3171,13 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "predictive_delay" << YAML::Value << cfg.predictive_delay;
     out << YAML::Key << "hardware_sync" << YAML::Value << cfg.hardware_sync;
     out << YAML::Key << "hardware_sync_tty" << YAML::Value << cfg.hardware_sync_tty;
+    out << YAML::Key << "downlink_cpu_cores" << YAML::Value << YAML::Flow << cfg.downlink_cpu_cores;
+    out << YAML::Key << "uplink_cpu_cores" << YAML::Value << YAML::Flow << cfg.uplink_cpu_cores;
+    out << YAML::Key << "main_cpu_core" << YAML::Value << cfg.main_cpu_core;
     out << YAML::Key << "profiling_modules" << YAML::Value << cfg.profiling_modules;
     out << YAML::Key << "default_out_ip" << YAML::Value << cfg.default_out_ip;
     emit_simulation_config(out, cfg);
+    out << YAML::Key << "enable_uplink" << YAML::Value << cfg.enable_uplink;
     out << YAML::Key << "ocxo_pi_kp_fast" << YAML::Value << cfg.ocxo_pi_kp_fast;
     out << YAML::Key << "ocxo_pi_ki_fast" << YAML::Value << cfg.ocxo_pi_ki_fast;
     out << YAML::Key << "ocxo_pi_kp_slow" << YAML::Value << cfg.ocxo_pi_kp_slow;
@@ -2835,7 +3215,6 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
         << cfg.channel_tracking_min_pilot_snr;
     config_detail::emit_data_resource_blocks_yaml(out, cfg);
     config_detail::emit_sensing_mask_blocks_yaml(out, cfg);
-    out << YAML::Key << "cpu_cores" << YAML::Value << YAML::Flow << cfg.available_cores;
     out << YAML::EndMap;
 
     std::ofstream fout(filepath);
@@ -2848,7 +3227,7 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     return true;
 }
 
-inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& filepath) {
+inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
     }
@@ -2874,6 +3253,8 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
         if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
         if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
+        if (config["tx_gain"]) cfg.tx_gain = config["tx_gain"].as<double>();
+        if (config["tx_channel"]) cfg.tx_channel = config["tx_channel"].as<uint32_t>();
         if (config["rx_gain"]) cfg.rx_gain = config["rx_gain"].as<double>();
         if (config["rx_agc_enable"]) cfg.rx_agc_enable = config["rx_agc_enable"].as<bool>();
         if (config["rx_agc_low_threshold_db"]) {
@@ -2923,6 +3304,7 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         }
         if (config["device_args"]) cfg.device_args = config["device_args"].as<std::string>();
         if (config["clock_source"]) cfg.clocksource = config["clock_source"].as<std::string>();
+        if (config["wire_format_tx"]) cfg.wire_format_tx = config["wire_format_tx"].as<std::string>();
         if (config["wire_format_rx"]) cfg.wire_format_rx = config["wire_format_rx"].as<std::string>();
         if (config["enable_bi_sensing"]) cfg.enable_bi_sensing = config["enable_bi_sensing"].as<bool>();
         if (config["bi_sensing_ip"]) cfg.bi_sensing_ip = config["bi_sensing_ip"].as<std::string>();
@@ -2957,6 +3339,7 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
             cfg.default_out_ip = config["default_out_ip"].as<std::string>();
         }
         load_simulation_config(config, cfg);
+        load_duplex_config(config, cfg);
         if (config["ocxo_pi_kp_fast"]) cfg.ocxo_pi_kp_fast = config["ocxo_pi_kp_fast"].as<double>();
         if (config["ocxo_pi_ki_fast"]) cfg.ocxo_pi_ki_fast = config["ocxo_pi_ki_fast"].as<double>();
         if (config["ocxo_pi_kp_slow"]) cfg.ocxo_pi_kp_slow = config["ocxo_pi_kp_slow"].as<double>();
@@ -3006,13 +3389,19 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
             cfg.channel_tracking_min_pilot_snr =
                 config["channel_tracking_min_pilot_snr"].as<double>();
         }
-        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "Demodulator config")) {
+        if (!config_detail::load_data_resource_blocks_from_yaml(cfg, config, "UE config")) {
             return false;
         }
-        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "Demodulator config")) {
+        if (!config_detail::load_sensing_mask_blocks_from_yaml(cfg, config, "UE config")) {
             return false;
         }
-        if (config["cpu_cores"]) cfg.available_cores = config["cpu_cores"].as<std::vector<int>>();
+        if (config["downlink_cpu_cores"]) {
+            cfg.downlink_cpu_cores = config["downlink_cpu_cores"].as<std::vector<int>>();
+        }
+        if (config["uplink_cpu_cores"]) {
+            cfg.uplink_cpu_cores = config["uplink_cpu_cores"].as<std::vector<int>>();
+        }
+        if (config["main_cpu_core"]) cfg.main_cpu_core = config["main_cpu_core"].as<int>();
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -3020,9 +3409,9 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
     }
 }
 
-inline void finalize_demodulator_network_defaults(Config& cfg) {
-    normalize_sensing_fft_sizes(cfg, "demodulator sensing");
-    normalize_sensing_view_bins(cfg, "demodulator sensing");
+inline void finalize_ue_network_defaults(Config& cfg) {
+    normalize_sensing_fft_sizes(cfg, "deBS sensing");
+    normalize_sensing_view_bins(cfg, "deBS sensing");
     if (cfg.cuda_demod_pipeline_slots == 0) {
         LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda_demod_pipeline_slots = 1;
@@ -3093,7 +3482,7 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
             cfg.measurement_mode = "internal_prbs";
         }
         if (!measurement_mode_enabled(cfg)) {
-            LOG_G_WARN() << "Unsupported demodulator measurement_mode='"
+            LOG_G_WARN() << "Unsupported UE measurement_mode='"
                          << cfg.measurement_mode << "'. Disabling measurement mode.";
             cfg.measurement_enable = false;
         }
@@ -3108,8 +3497,8 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
             cfg.measurement_packets_per_point = 1;
         }
     }
-    finalize_data_resource_grid_config(cfg, "Demodulator");
-    finalize_sensing_mask_config(cfg, "Demodulator");
+    finalize_data_resource_grid_config(cfg, "UE");
+    finalize_sensing_mask_config(cfg, "UE");
     if (cfg.bi_sensing_ip.empty()) cfg.bi_sensing_ip = "0.0.0.0";
     if (cfg.channel_ip.empty()) cfg.channel_ip = "0.0.0.0";
     if (cfg.pdf_ip.empty()) cfg.pdf_ip = "0.0.0.0";
@@ -3118,7 +3507,7 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
     if (cfg.udp_output_ip.empty()) cfg.udp_output_ip = cfg.default_out_ip;
 }
 
-inline void log_demodulator_sync_mode(const Config& cfg) {
+inline void log_ue_sync_mode(const Config& cfg) {
     if (cfg.hardware_sync && cfg.software_sync) {
         LOG_G_INFO() << "Both software_sync and hardware_sync are enabled.";
     } else if (cfg.hardware_sync) {
@@ -3132,7 +3521,7 @@ inline void log_demodulator_sync_mode(const Config& cfg) {
                  << (cfg.predictive_delay ? "enabled." : "disabled.");
 }
 
-inline void log_demodulator_agc_mode(const Config& cfg) {
+inline void log_ue_agc_mode(const Config& cfg) {
     if (!cfg.rx_agc_enable) {
         LOG_G_INFO() << "RX AGC disabled. Using fixed RX gain: " << cfg.rx_gain << " dB";
         return;
@@ -5597,10 +5986,10 @@ private:
  */
 class HardwareSyncController {
 public:
-    HardwareSyncController(const std::string& device_path) 
+    explicit HardwareSyncController(const std::string& device_path)
         : serial_fd_(-1), 
           worker_thread_(nullptr),
-          terminate_flag_(false) 
+          terminate_flag_(false)
     {
         // Open serial port in non-blocking mode
         serial_fd_ = open(device_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);

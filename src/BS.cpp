@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <Common.hpp>
 #include "LDPCCodec.hpp"
+#include "UplinkRxEngine.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
 #include "SimStreamer.hpp"
@@ -134,15 +135,16 @@ struct QueuedTxFrame {
  * - sensing_thread: Processes received signals for further analysis.
  * - data_thread: Ingests user UDP data and performs LDPC encoding.
  */
-class OFDMISACEngine {
+class BSEngine {
 public:
-    explicit OFDMISACEngine(const Config& cfg)
+    explicit BSEngine(const Config& cfg)
       : _cfg(cfg),
         _gen(std::random_device{}()),
         _dist(0, 3),
         _fft_in(cfg.fft_size),
         _fft_out(cfg.fft_size),
         _blank_frame(cfg.samples_per_frame(), 0.0f),
+        _duplex_layout(build_duplex_frame_layout(cfg)),
         _data_resource_layout(build_data_resource_grid_layout(cfg)),
         _control_handler(cfg.mono_sensing_ip, cfg.control_port),
         _measurement_enabled(measurement_mode_enabled(cfg)),
@@ -172,7 +174,7 @@ public:
             _measurement_summary_path =
                 (_cfg.measurement_output_dir.empty()
                     ? std::string()
-                    : (_cfg.measurement_output_dir + "/modulator_measurement_summary.csv"));
+                    : (_cfg.measurement_output_dir + "/bs_measurement_summary.csv"));
         }
         const CompactSensingMaskAnalysis compact_mask_analysis = analyze_compact_sensing_mask(_cfg);
         _shared_sensing_cfg.sensing_symbol_stride =
@@ -213,7 +215,7 @@ public:
         _register_commands();
     }
 
-    ~OFDMISACEngine() {
+    ~BSEngine() {
         stop();
         if (_ifft_plan != nullptr) {
             fftwf_destroy_plan(_ifft_plan);
@@ -227,8 +229,8 @@ public:
         _next_frame_start_symbol.store(0, std::memory_order_relaxed);
         _next_tx_frame_seq.store(0, std::memory_order_relaxed);
 
-        _mod_thread = std::thread(&OFDMISACEngine::_modulation_proc, this);
-        _data_thread = std::thread(&OFDMISACEngine::_data_ingest_proc, this);
+        _mod_thread = std::thread(&BSEngine::_modulation_proc, this);
+        _data_thread = std::thread(&BSEngine::_data_ingest_proc, this);
 
         // Let modulation prefill as much as possible (prefer full queue) before scheduling TX/RX start.
         bool prefilled_full = false;
@@ -267,9 +269,9 @@ public:
         _tx_underflow_restart_requested.store(false, std::memory_order_relaxed);
         _tx_time_error_restart_requested.store(false, std::memory_order_relaxed);
         _tx_time_error_count.store(0, std::memory_order_relaxed);
-        _tx_thread = std::thread(&OFDMISACEngine::_tx_proc, this);
+        _tx_thread = std::thread(&BSEngine::_tx_proc, this);
         if (_tx_stream) {
-            _tx_async_thread = std::thread(&OFDMISACEngine::_tx_async_event_proc, this);
+            _tx_async_thread = std::thread(&BSEngine::_tx_async_event_proc, this);
         }
 
         if (_aggregated_sensing_sender) {
@@ -277,6 +279,20 @@ public:
         }
         for (auto& ch : _sensing_channels) {
             ch->start(_start_time);
+        }
+
+        _bs_dl_ul_timing_diff.store(_cfg.bs_dl_ul_timing_diff, std::memory_order_relaxed);
+        log_duplex_summary(_cfg, "BS");
+        if (_duplex_layout.mode == DuplexMode::TDD && _duplex_layout.uplink_enabled) {
+            LOG_G_INFO() << "[BS] TDD downlink blanking symbols ["
+                         << _duplex_layout.ul_start << ","
+                         << (_duplex_layout.ul_start + _duplex_layout.ul_count)
+                         << ") for guard/uplink.";
+        } else if (_duplex_layout.mode == DuplexMode::FDD && _duplex_layout.uplink_enabled) {
+            LOG_G_INFO() << "[BS] FDD downlink remains active over the full frame.";
+        }
+        if (_uplink_rx) {
+            _uplink_rx->start();
         }
     }
 
@@ -287,6 +303,10 @@ public:
         }
 
         _control_handler.stop();
+
+        if (_uplink_rx) {
+            _uplink_rx->stop();
+        }
 
         for (auto& ch : _sensing_channels) {
             ch->stop();
@@ -311,6 +331,7 @@ private:
     uhd::usrp::multi_usrp::sptr _tx_usrp;
     std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
     uhd::tx_streamer::sptr _tx_stream;
+    std::unique_ptr<UplinkRxEngine> _uplink_rx;  // non-null when duplex uplink enabled
     size_t _tx_chunk_samps = 0;
 
     // Random number generator
@@ -329,6 +350,7 @@ private:
     AlignedVector _sensing_pilot_seq;
     int _sensing_pilot_zc_root = 0;
     const AlignedVector _blank_frame;
+    const DuplexFrameLayout _duplex_layout;
     const DataResourceGridLayout _data_resource_layout;
     SymbolVector _symbol_templates;
     std::vector<int> _payload_subcarrier_indices_flat;
@@ -356,6 +378,8 @@ private:
     // Control handler
     ControlCommandHandler _control_handler;
     std::atomic<int64_t> _align_target_channel{-1}; // -1 means all channels
+    std::atomic<int32_t> _bs_dl_ul_timing_diff{0};  // DL/UL timing difference (samples)
+    std::atomic<int64_t> _last_duti_ns{0};          // rate-limit guard for DUTI
     SharedSensingRuntime _shared_sensing_cfg;
     std::mutex _shared_sensing_cfg_mutex;
     const bool _measurement_enabled;
@@ -500,8 +524,8 @@ private:
                     }
                     _control_handler.send_heartbeat(ip, port);
                 },
-                [this](size_t hint) {
-                    return core_from_hint(_cfg, hint);
+                [](size_t) {
+                    return std::nullopt;
                 }
             );
             channel->apply_shared_cfg(_shared_sensing_cfg);
@@ -651,6 +675,30 @@ private:
             }
             _align_target_channel.store(static_cast<int64_t>(value));
             LOG_G_INFO() << "ALCH set to channel " << value;
+        });
+
+        // DL/UL boundary timing difference (samples) for the BS.
+        // uplink RX window, relative to the TX frame anchor. Runtime-adjustable.
+        _control_handler.register_command("DUTI", [this](int32_t value) {
+            // Rate-limit so rapid repeated commands don't thrash the framing.
+            const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (now - _last_duti_ns.load(std::memory_order_relaxed) < 50'000'000) {
+                LOG_G_WARN() << "DUTI rate-limited (<50ms since last); ignored " << value;
+                return;
+            }
+            _last_duti_ns.store(now, std::memory_order_relaxed);
+            _bs_dl_ul_timing_diff.store(value, std::memory_order_relaxed);
+            if (_uplink_rx) {
+                _uplink_rx->dl_ul_timing_diff().store(value, std::memory_order_relaxed);
+            }
+            LOG_G_INFO() << "DUTI (DL/UL timing difference) set to "
+                         << value << " samples";
+        });
+        _control_handler.register_request("DUTI", [this](
+            int32_t, const ControlCommandHandler::ControlPeer& peer) {
+            _control_handler.send_control_status(
+                peer, "DUTI", _bs_dl_ul_timing_diff.load(std::memory_order_relaxed));
         });
 
         _control_handler.register_command("ALGN", [this](int32_t value) {
@@ -960,6 +1008,36 @@ private:
             _tx_usrp,
             _sensing_channels
         );
+
+        if (uplink_enabled(_cfg)) {
+            // Full-duplex uplink RX on the BS device. TDD: same carrier as TX.
+            // FDD: the uplink carrier (duplex.ul_center_freq).
+            const double ul_freq = (_cfg.duplex.mode == DuplexMode::FDD &&
+                                    _cfg.duplex.ul_center_freq > 0.0)
+                ? _cfg.duplex.ul_center_freq : _cfg.center_freq;
+            const size_t ul_rx_ch = _cfg.rx_channel;
+            _tx_usrp->set_rx_rate(_cfg.sample_rate);
+            _tx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
+            _tx_usrp->set_rx_gain(_cfg.rx_gain, ul_rx_ch);
+            _tx_usrp->set_rx_bandwidth(_cfg.bandwidth, ul_rx_ch);
+            uhd::stream_args_t ul_rx_args("fc32", _cfg.wire_format_rx);
+            ul_rx_args.channels = {ul_rx_ch};
+            _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
+            _uplink_rx->set_rx_stream(_tx_usrp->get_rx_stream(ul_rx_args));
+            _uplink_rx->dl_ul_timing_diff().store(_cfg.bs_dl_ul_timing_diff,
+                                                  std::memory_order_relaxed);
+            _uplink_rx->set_bs_frame_provider([this]() {
+                const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
+                return _cfg.num_symbols ? (s / _cfg.num_symbols) : s;
+            });
+            const uhd::gain_range_t gr = _tx_usrp->get_rx_gain_range(ul_rx_ch);
+            _uplink_rx->configure_agc(
+                _cfg.rx_gain, gr.start(), gr.stop(),
+                [this, ul_rx_ch](double g) { _tx_usrp->set_rx_gain(g, ul_rx_ch); });
+            LOG_G_INFO() << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
+                         << " @ " << format_freq_hz(ul_freq) << " Hz, "
+                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame";
+        }
     }
 
     // Channel-simulator backend: attach the TX stream and per-antenna sensing RX
@@ -968,7 +1046,7 @@ private:
     void _init_sim_radio() {
         _sim_radio = std::make_unique<SimRadio>();
         if (!_sim_radio->connect(_cfg.simulation)) {
-            throw std::runtime_error("Modulator: failed to connect to ChannelSimulator session '" +
+            throw std::runtime_error("BS: failed to connect to ChannelSimulator session '" +
                                      _cfg.simulation.session + "'. Start ChannelSimulator first.");
         }
         _tx_stream = _sim_radio->make_tx_streamer(_cfg.samples_per_frame());
@@ -978,6 +1056,20 @@ private:
 
         SensingChannel::initialize_rx_hardware_and_sync_sim(
             _cfg, _sim_radio.get(), _sensing_channels);
+
+        if (uplink_enabled(_cfg)) {
+            _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
+            _uplink_rx->set_rx_stream(
+                _sim_radio->make_rx_streamer("rx.ul", _cfg.samples_per_frame()));
+            _uplink_rx->dl_ul_timing_diff().store(_cfg.bs_dl_ul_timing_diff,
+                                                  std::memory_order_relaxed);
+            _uplink_rx->set_bs_frame_provider([this]() {
+                const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
+                return _cfg.num_symbols ? (s / _cfg.num_symbols) : s;
+            });
+            LOG_G_INFO() << "[UL-RX] uplink receive enabled (sim rx.ul), "
+                         << _uplink_rx->uplink_config().num_symbols << " UL symbols/frame";
+        }
     }
 
     size_t _send_frame_chunked(
@@ -990,7 +1082,7 @@ private:
         }
 
         // In simulation the hub paces TX via shared-memory backpressure: when a
-        // consumer (e.g. the demodulator on the comm ring) is not yet attached or is
+        // consumer (e.g. the UE on the comm ring) is not yet attached or is
         // catching up, send() returns short. That is a clean pause, NOT a radio
         // underflow — treat it as such and keep retrying so the air-frame sequence
         // stays locked to the samples actually placed on the air (otherwise the
@@ -1132,7 +1224,6 @@ private:
         _payload_subcarrier_indices_flat.clear();
         _payload_subcarrier_indices_flat.reserve(_data_resource_layout.payload_re_count);
 
-        size_t data_symbol_idx = 0;
         size_t pregen_offset = 0;
         for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
             auto& template_symbol = _symbol_templates[sym];
@@ -1159,6 +1250,14 @@ private:
                 continue;
             }
 
+            const int data_symbol_idx_int =
+                (sym < _data_resource_layout.actual_symbol_to_data_symbol.size())
+                    ? _data_resource_layout.actual_symbol_to_data_symbol[sym]
+                    : -1;
+            if (data_symbol_idx_int < 0) {
+                continue;
+            }
+            const size_t data_symbol_idx = static_cast<size_t>(data_symbol_idx_int);
             const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[data_symbol_idx];
             for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
                 const size_t k = static_cast<size_t>(_data_resource_layout.non_pilot_subcarrier_indices[di]);
@@ -1180,11 +1279,9 @@ private:
                 }
             }
             pregen_offset += _data_resource_layout.num_non_pilot_subcarriers;
-            ++data_symbol_idx;
         }
 
-        if (data_symbol_idx != _data_resource_layout.data_symbol_count ||
-            pregen_offset != _data_resource_layout.non_pilot_re_count ||
+        if (pregen_offset != _data_resource_layout.non_pilot_re_count ||
             _payload_subcarrier_indices_flat.size() != _data_resource_layout.payload_re_count) {
             throw std::runtime_error("Failed to build symbol templates for data_resource_layout.");
         }
@@ -1351,7 +1448,7 @@ private:
     void _data_ingest_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe(0.2f, true);
-        bind_current_thread_from_hint(_cfg, 2);
+        bind_current_thread_from_downlink_hint(_cfg, 2);
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
@@ -1468,7 +1565,7 @@ private:
         if (_cfg.udp_input_ip == "0.0.0.0") {
             _udp_addr.sin_addr.s_addr = INADDR_ANY;
         } else if (inet_pton(AF_INET, _cfg.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
-            LOG_G_ERROR() << "Invalid modulator UDP bind IP: " << _cfg.udp_input_ip;
+            LOG_G_ERROR() << "Invalid BS UDP bind IP: " << _cfg.udp_input_ip;
             close(_udp_sock);
             _udp_sock = -1;
             return;
@@ -1531,7 +1628,7 @@ private:
     void _modulation_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(0.6f, true);
-        bind_current_thread_from_hint(_cfg, 1);
+        bind_current_thread_from_downlink_hint(_cfg, 1);
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
@@ -1641,6 +1738,13 @@ private:
             for (size_t i = 0; i < _cfg.num_symbols; ++i) {
                 const size_t pos = _symbol_positions[i];
                 auto* buf_ptr = current_frame.data() + pos;
+                if (!_duplex_layout.is_downlink(i)) {
+                    std::fill_n(buf_ptr, _cfg.fft_size + _cfg.cp_length,
+                                std::complex<float>(0.0f, 0.0f));
+                    std::fill(current_symbols_ref[i].begin(), current_symbols_ref[i].end(),
+                              std::complex<float>(0.0f, 0.0f));
+                    continue;
+                }
 
                 prof_step_start = ProfileClock::now();
                 std::memcpy(_fft_in.data(), _symbol_templates[i].data(),
@@ -1790,7 +1894,7 @@ private:
     void _tx_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1.0f, true);
-        bind_current_thread_from_hint(_cfg, 0);
+        bind_current_thread_from_downlink_hint(_cfg, 0);
         prefault_thread_stack();
         const bool do_latency_profile =
             _cfg.should_profile("modulation") && _cfg.should_profile("latency");
@@ -1885,6 +1989,12 @@ private:
                 std::memory_order_relaxed);
             handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
             next_frame_starts_burst = true;
+
+            // The TX frame anchor jumped; the uplink RX (anchored to the shared
+            // radio clock on real hardware) must re-lock to the new framing.
+            if (_uplink_rx) {
+                _uplink_rx->request_reacquire();
+            }
 
             LOG_RT_WARN() << std::fixed << std::setprecision(6)
                           << "[TX] " << reason << " restart scheduled at "
@@ -1991,11 +2101,11 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
 #else
     LOG_G_INFO() << "Skipping mlockall(): unsupported on this platform.";
 #endif
-    const std::string default_config_file = "Modulator.yaml";
-    Config cfg = make_default_modulator_config();
+    const std::string default_config_file = "BS.yaml";
+    Config cfg = make_default_bs_config();
 
     if (argc > 1) {
-        LOG_G_ERROR() << "CLI parameters are no longer supported. Please configure OFDMModulator via "
+        LOG_G_ERROR() << "CLI parameters are no longer supported. Please configure BS via "
                       << default_config_file << ".";
         return 1;
     }
@@ -2003,17 +2113,17 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     if (!path_exists(default_config_file)) {
         LOG_G_ERROR() << "Config file '" << default_config_file
                       << "' not found. Copy a sample file from the repository config directory, "
-                      << "such as 'Modulator_X310.yaml' or 'Modulator_B210.yaml', to '" << default_config_file
-                      << "' and edit it before starting OFDMModulator.";
+                      << "such as 'BS_X310.yaml' or 'BS_B210.yaml', to '" << default_config_file
+                      << "' and edit it before starting BS.";
         return 1;
     }
 
-    if (!load_modulator_config_from_yaml(cfg, default_config_file)) {
+    if (!load_bs_config_from_yaml(cfg, default_config_file)) {
         return 1;
     }
 
     LOG_G_INFO() << "Loaded config from: " << default_config_file;
-    normalize_modulator_sensing_channels(cfg);
+    normalize_bs_sensing_channels(cfg);
 
     // Set main thread affinity to the last configured core.
     bind_current_thread_to_main_core(cfg);
@@ -2022,7 +2132,7 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     FFTWManager::import_wisdom();
 
     // Create and start engine
-    OFDMISACEngine isac_engine(cfg);
+    BSEngine isac_engine(cfg);
     isac_engine.start();
 
     // Main loop
