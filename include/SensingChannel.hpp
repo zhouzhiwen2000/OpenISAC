@@ -1,8 +1,6 @@
 #ifndef SENSING_CHANNEL_HPP
 #define SENSING_CHANNEL_HPP
 
-#include <uhd/usrp/multi_usrp.hpp>
-#include <uhd/types/tune_request.hpp>
 #include <fftw3.h>
 
 #include <atomic>
@@ -16,8 +14,7 @@
 
 #include "Common.hpp"
 #include "OFDMCore.hpp"
-
-class SimRadio; // channel-simulator radio handle (no USRP)
+#include "RadioBackend.hpp"
 
 struct SharedSensingRuntime {
     size_t sensing_symbol_stride = 20;
@@ -69,7 +66,7 @@ public:
 
     ~SensingChannel();
 
-    void start(const uhd::time_spec_t& start_time);
+    void start(const radio::TimeSpec& start_time);
     void stop();
     void join();
     void start_bistatic();
@@ -92,21 +89,17 @@ public:
     int32_t target_alignment() const;
     const SensingRxChannelConfig& channel_cfg() const;
 
-    static void initialize_rx_hardware_and_sync(
+    // Initialize every sensing channel's RX path and align device clocks, backend
+    // independently. For the real radio it resolves/dedups RX devices (sharing the
+    // BS TX device when args match), tunes/gains them and runs PPS time-sync; for
+    // the simulator it attaches each channel to the hub's "rx.sens<logical_id>"
+    // shared-memory ring. `tx_device` is the BS TX device (shared candidate);
+    // `tx_device_args` is its registry key.
+    static void initialize_rx_and_sync(
         const Config& cfg,
-        const uhd::tune_request_t& tune_req,
+        const radio::TuneRequest& tune_req,
+        radio::IDevicePtr tx_device,
         const std::string& tx_device_args,
-        const std::string& tx_clock_source,
-        const std::string& tx_time_source,
-        const uhd::usrp::multi_usrp::sptr& tx_usrp,
-        std::vector<std::unique_ptr<SensingChannel>>& channels
-    );
-
-    // Channel-simulator variant: attach each sensing channel's RX stream to the
-    // hub's "rx.sens<logical_id>" shared-memory ring instead of a USRP.
-    static void initialize_rx_hardware_and_sync_sim(
-        const Config& cfg,
-        SimRadio* sim_radio,
         std::vector<std::unique_ptr<SensingChannel>>& channels
     );
 
@@ -168,9 +161,9 @@ private:
     struct RxIoContext {
         uint32_t logical_id = 0;
         SensingRxChannelConfig channel_cfg;
-        uhd::usrp::multi_usrp::sptr rx_usrp;
-        uhd::rx_streamer::sptr rx_stream;
-        uhd::time_spec_t stream_start_time{0.0};
+        radio::IDevicePtr rx_device;
+        radio::IRxStreamPtr rx_stream;
+        radio::TimeSpec stream_start_time{0.0};
         double rx_sample_rate = 0.0;
         double rx_tick_rate = 0.0;
         ObjectPool<AlignedVector> rx_frame_pool;
@@ -270,7 +263,7 @@ private:
     };
 
     std::optional<size_t> _resolve_core(size_t hint) const;
-    void _rx_loop(const uhd::time_spec_t& start_time);
+    void _rx_loop(const radio::TimeSpec& start_time);
     void _handle_alignment();
     void _handle_normal_rx();
     void _sensing_loop();

@@ -23,14 +23,15 @@ UE's **bistatic** sensing can also detect range-Doppler targets.
 
 ```
  BS ──TX samples──▶ ChannelSimulator ──per-antenna RX──▶ UE (comm RX)
- (SimTxStreamer)                (the "air" + clock)  └─sens RX×N──▶ BS monostatic sensing
+ (radio::SimBackend)            (the "air" + clock)  └─sens RX×N──▶ BS monostatic sensing
 ```
 
 All three processes attach to POSIX shared-memory rings named by `simulation.session`.
-The engines select the backend with `radio_backend: sim` in their YAML; the hot
-`send()/recv()` paths are unchanged because the sim streamers implement the abstract
-`uhd::tx_streamer` / `uhd::rx_streamer` interfaces. `radio_backend: uhd` (the default)
-keeps the original hardware behaviour.
+The engines select the backend with `radio_backend: sim` in their YAML. The
+`radio::SimBackend` implements the same OpenISAC radio HAL used by the UHD backend,
+so the BS/UE/sensing hot paths drive `radio::ITxStream` / `radio::IRxStream`
+interfaces regardless of whether the underlying transport is shared memory or a
+USRP. `radio_backend: uhd` (the default) keeps the hardware behaviour.
 
 ## Build
 

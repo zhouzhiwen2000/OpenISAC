@@ -41,9 +41,10 @@
 #include <boost/circular_buffer.hpp>
 #include <functional>
 #include <unordered_map>
+#include "RadioTypes.hpp"
 #include <uhd/types/metadata.hpp>
-#include <uhd/types/time_spec.hpp>
 #include <uhd/utils/thread.hpp>
+#include <uhd/types/time_spec.hpp>
 #include <fcntl.h>
 #include <termios.h>
 #include <fstream>
@@ -3825,8 +3826,19 @@ struct SyncBatch {
     int64_t usrp_time_ns = -1;
 };
 
+inline int64_t time_spec_to_ns(const radio::TimeSpec& time_spec) {
+    return static_cast<int64_t>(std::llround(time_spec.get_real_secs() * 1e9));
+}
+
 inline int64_t time_spec_to_ns(const uhd::time_spec_t& time_spec) {
     return static_cast<int64_t>(std::llround(time_spec.get_real_secs() * 1e9));
+}
+
+inline int64_t metadata_time_to_ns(const radio::RxMetadata& md) {
+    if (!md.has_time_spec) {
+        return -1;
+    }
+    return time_spec_to_ns(md.time_spec);
 }
 
 inline int64_t metadata_time_to_ns(const uhd::rx_metadata_t& md) {
@@ -3890,16 +3902,32 @@ public:
         mark(_last_rx_gain_exec_time_ns, exec_time_ns);
     }
 
+    void mark_reset_now(const radio::TimeSpec& now) {
+        mark_reset(time_spec_to_ns(now));
+    }
+
     void mark_reset_now(const uhd::time_spec_t& now) {
         mark_reset(time_spec_to_ns(now));
+    }
+
+    void mark_alignment_now(const radio::TimeSpec& now) {
+        mark_alignment(time_spec_to_ns(now));
     }
 
     void mark_alignment_now(const uhd::time_spec_t& now) {
         mark_alignment(time_spec_to_ns(now));
     }
 
+    void mark_freq_adjust_now(const radio::TimeSpec& now) {
+        mark_freq_adjust(time_spec_to_ns(now));
+    }
+
     void mark_freq_adjust_now(const uhd::time_spec_t& now) {
         mark_freq_adjust(time_spec_to_ns(now));
+    }
+
+    void mark_rx_gain_adjust_now(const radio::TimeSpec& now) {
+        mark_rx_gain_adjust(time_spec_to_ns(now));
     }
 
     void mark_rx_gain_adjust_now(const uhd::time_spec_t& now) {

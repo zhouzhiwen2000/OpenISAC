@@ -1,6 +1,4 @@
-#include <uhd/utils/thread.hpp>
-#include <uhd/utils/safe_main.hpp>
-#include <uhd/usrp/multi_usrp.hpp>
+#include <uhd/utils/safe_main.hpp>  // UHD_SAFE_MAIN entry macro only
 #include <complex>
 #include <vector>
 #include <atomic>
@@ -25,7 +23,7 @@
 #include "UplinkTxEngine.hpp"
 #include "OFDMCore.hpp"
 #include "SensingChannel.hpp"
-#include "SimStreamer.hpp"
+#include "RadioBackend.hpp"
 
 namespace {
 inline int64_t host_now_ns() {
@@ -33,44 +31,44 @@ inline int64_t host_now_ns() {
         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
 }
 
-const char* tx_async_event_code_to_string(uhd::async_metadata_t::event_code_t event_code)
+const char* tx_async_event_code_to_string(radio::AsyncEvent event_code)
 {
     switch (event_code) {
-    case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+    case radio::AsyncEvent::BurstAck:
         return "BURST_ACK";
-    case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
+    case radio::AsyncEvent::Underflow:
         return "UNDERFLOW";
-    case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
+    case radio::AsyncEvent::SeqError:
         return "SEQ_ERROR";
-    case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+    case radio::AsyncEvent::TimeError:
         return "TIME_ERROR";
-    case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET:
+    case radio::AsyncEvent::UnderflowInPacket:
         return "UNDERFLOW_IN_PACKET";
-    case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST:
+    case radio::AsyncEvent::SeqErrorInBurst:
         return "SEQ_ERROR_IN_BURST";
-    case uhd::async_metadata_t::EVENT_CODE_USER_PAYLOAD:
+    case radio::AsyncEvent::UserPayload:
         return "USER_PAYLOAD";
     default:
         return "UNKNOWN";
     }
 }
 
-const char* rx_error_code_to_string(uhd::rx_metadata_t::error_code_t error_code)
+const char* rx_error_code_to_string(radio::RxError error_code)
 {
     switch (error_code) {
-    case uhd::rx_metadata_t::ERROR_CODE_NONE:
+    case radio::RxError::None:
         return "NONE";
-    case uhd::rx_metadata_t::ERROR_CODE_TIMEOUT:
+    case radio::RxError::Timeout:
         return "TIMEOUT";
-    case uhd::rx_metadata_t::ERROR_CODE_LATE_COMMAND:
+    case radio::RxError::LateCommand:
         return "LATE_COMMAND";
-    case uhd::rx_metadata_t::ERROR_CODE_BROKEN_CHAIN:
+    case radio::RxError::BrokenChain:
         return "BROKEN_CHAIN";
-    case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW:
+    case radio::RxError::Overflow:
         return "OVERFLOW";
-    case uhd::rx_metadata_t::ERROR_CODE_ALIGNMENT:
+    case radio::RxError::Alignment:
         return "ALIGNMENT";
-    case uhd::rx_metadata_t::ERROR_CODE_BAD_PACKET:
+    case radio::RxError::BadPacket:
         return "BAD_PACKET";
     default:
         return "UNKNOWN";
@@ -302,7 +300,7 @@ public:
                          << " (sync root=" << cfg_.ofdm.zc_root << ").";
         }
 
-        init_usrp();
+        init_radio();
         init_filter();
         prepare_fftw();
         init_zmq_publishers();
@@ -340,13 +338,13 @@ public:
         _ue_timing_advance.store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
         log_duplex_summary(cfg_, "UE");
 
-        uhd::time_spec_t stream_start_time(0.0);
-        if (_uplink_tx && !_sim_radio && usrp_) {
+        radio::TimeSpec stream_start_time(0.0);
+        if (_uplink_tx && dev_->supports(radio::Capability::TimedTx)) {
             stream_start_time = _next_timed_stream_start();
             _uplink_tx->set_timed_tx(
                 stream_start_time,
-                usrp_->get_master_clock_rate(),
-                usrp_->get_tx_rate(cfg_.uplink.tx_channel));
+                dev_->master_clock_rate(),
+                dev_->get_tx_rate(cfg_.uplink.tx_channel));
             LOG_G_INFO() << "[UE] timed RX/UL-TX stream start at "
                          << stream_start_time.get_real_secs()
                          << " s on the shared radio clock";
@@ -356,7 +354,7 @@ public:
         rx_thread_ = std::thread(&UEEngine::rx_proc, this, stream_start_time);
         if (_uplink_tx) {
             _uplink_tx->start();
-            if (!_sim_radio) {
+            if (dev_->supports(radio::Capability::AsyncTxEvents)) {
                 _tx_async_exit_requested.store(false, std::memory_order_relaxed);
                 _tx_async_thread = std::thread(&UEEngine::_tx_async_event_proc, this);
             }
@@ -450,9 +448,8 @@ private:
     const DataResourceGridLayout _data_resource_layout;
     std::vector<uint8_t> _cfo_symbol_skip_mask;
     std::vector<int> _payload_subcarrier_indices_flat;
-    uhd::usrp::multi_usrp::sptr usrp_;
-    uhd::rx_streamer::sptr rx_stream_;
-    std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
+    radio::IDevicePtr dev_;        // RX (+ uplink TX) radio device, any backend
+    radio::IRxStreamPtr rx_stream_;
     std::unique_ptr<UplinkTxEngine> _uplink_tx;  // non-null when duplex uplink enabled
     std::thread _tx_async_thread;
     std::atomic<bool> _tx_async_exit_requested{false};
@@ -469,22 +466,22 @@ private:
     std::atomic<bool> _uplink_tx_gain_muted{false};
 
     // Current radio time: real USRP clock, or the simulator's shared sample clock.
-    uhd::time_spec_t radio_time_now() const {
-        return _sim_radio ? _sim_radio->time_now() : usrp_->get_time_now();
+    radio::TimeSpec radio_time_now() const {
+        return dev_->time_now();
     }
 
-    uhd::time_spec_t _next_timed_stream_start() const {
-        if (!usrp_) {
-            return uhd::time_spec_t(0.0);
+    radio::TimeSpec _next_timed_stream_start() const {
+        if (!dev_->supports(radio::Capability::TimedTx)) {
+            return radio::TimeSpec(0.0);
         }
         constexpr double kStartLeadTimeSec = 1.0;
         const double scheduled_start_s =
-            std::ceil(usrp_->get_time_now().get_real_secs() + kStartLeadTimeSec);
-        return uhd::time_spec_t(scheduled_start_s);
+            std::ceil(dev_->time_now().get_real_secs() + kStartLeadTimeSec);
+        return radio::TimeSpec(scheduled_start_s);
     }
 
     void _request_stream_restart(const char* reason) {
-        if (_sim_radio || !_uplink_tx || !usrp_) {
+        if (!dev_->supports(radio::Capability::StreamRestart) || !_uplink_tx) {
             return;
         }
         _stream_restart_requested.store(true, std::memory_order_release);
@@ -509,11 +506,11 @@ private:
     void _tx_async_event_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         while (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
-            if (!_uplink_tx || !usrp_) {
+            if (!_uplink_tx || !dev_->supports(radio::Capability::AsyncTxEvents)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            uhd::async_metadata_t async_md;
+            radio::AsyncMetadata async_md;
             bool got_event = false;
             try {
                 got_event = _uplink_tx->tx_stream()->recv_async_msg(async_md, 0.1);
@@ -529,8 +526,7 @@ private:
 
             auto log_event = [&](auto&& log_line) {
                 log_line << "[UL-TX Async] " << tx_async_event_code_to_string(async_md.event_code)
-                         << " (code=0x" << std::hex << static_cast<int>(async_md.event_code) << std::dec
-                         << ", channel=" << async_md.channel;
+                         << " (channel=" << async_md.channel;
                 if (async_md.has_time_spec) {
                     log_line << ", event_time=" << std::fixed << std::setprecision(6)
                              << async_md.time_spec.get_real_secs() << " s" << std::defaultfloat;
@@ -539,18 +535,18 @@ private:
             };
 
             switch (async_md.event_code) {
-            case uhd::async_metadata_t::EVENT_CODE_BURST_ACK:
+            case radio::AsyncEvent::BurstAck:
                 log_event(LOG_G_INFO());
                 break;
-            case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW:
-            case uhd::async_metadata_t::EVENT_CODE_UNDERFLOW_IN_PACKET:
+            case radio::AsyncEvent::Underflow:
+            case radio::AsyncEvent::UnderflowInPacket:
                 _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
                 log_event(LOG_G_WARN());
                 _request_stream_restart("UL-TX underflow");
                 break;
-            case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR:
-            case uhd::async_metadata_t::EVENT_CODE_SEQ_ERROR_IN_BURST:
-            case uhd::async_metadata_t::EVENT_CODE_TIME_ERROR:
+            case radio::AsyncEvent::SeqError:
+            case radio::AsyncEvent::SeqErrorInBurst:
+            case radio::AsyncEvent::TimeError:
                 _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
                 log_event(LOG_G_ERROR());
                 _request_stream_restart("UL-TX async timing/sequence error");
@@ -563,12 +559,12 @@ private:
     }
 
     bool _handle_rx_metadata_error(
-        const uhd::rx_metadata_t& md,
+        const radio::RxMetadata& md,
         const char* context,
         bool* restart_current_read = nullptr)
     {
-        if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_NONE ||
-            md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+        if (md.error_code == radio::RxError::None ||
+            md.error_code == radio::RxError::Timeout) {
             return false;
         }
 
@@ -581,14 +577,14 @@ private:
                       << md.strerror();
 
         switch (md.error_code) {
-        case uhd::rx_metadata_t::ERROR_CODE_OVERFLOW:
+        case radio::RxError::Overflow:
             _rx_overflow_count.fetch_add(1, std::memory_order_relaxed);
             _request_stream_restart("RX overflow");
             break;
-        case uhd::rx_metadata_t::ERROR_CODE_LATE_COMMAND:
-        case uhd::rx_metadata_t::ERROR_CODE_BROKEN_CHAIN:
-        case uhd::rx_metadata_t::ERROR_CODE_ALIGNMENT:
-        case uhd::rx_metadata_t::ERROR_CODE_BAD_PACKET:
+        case radio::RxError::LateCommand:
+        case radio::RxError::BrokenChain:
+        case radio::RxError::Alignment:
+        case radio::RxError::BadPacket:
             _request_stream_restart("RX metadata error");
             break;
         default:
@@ -655,8 +651,8 @@ private:
     uint64_t _uplink_self_debug_frame_counter = 0;
     
     std::unique_ptr<FIRFilter> freq_offset_filter_;
-    uhd::tune_result_t current_rx_tune_;
-    uhd::tune_result_t current_ul_tx_tune_;
+    radio::TuneResult current_rx_tune_;
+    radio::TuneResult current_ul_tx_tune_;
     bool tune_initialized_ = false;
     std::atomic<bool> running_{false};
     std::thread rx_thread_, process_thread_;
@@ -769,12 +765,13 @@ private:
     }
 
     void _mute_uplink_tx_gain_for_sync_search() {
-        if (!_uplink_tx || _sim_radio || !usrp_ || !_uplink_tx_gain_range_initialized) {
+        if (!_uplink_tx || !dev_->supports(radio::Capability::HardwareGain) ||
+            !_uplink_tx_gain_range_initialized) {
             return;
         }
         std::lock_guard<std::mutex> lock(_uplink_tx_gain_mutex);
         try {
-            usrp_->set_tx_gain(_uplink_tx_gain_min_db, cfg_.uplink.tx_channel);
+            dev_->set_tx_gain(_uplink_tx_gain_min_db, cfg_.uplink.tx_channel);
             _uplink_tx_gain_muted.store(true, std::memory_order_release);
         } catch (const std::exception& e) {
             LOG_RT_WARN() << "[UL-TX] failed to mute TX gain during sync search: " << e.what();
@@ -782,12 +779,13 @@ private:
     }
 
     void _restore_uplink_tx_gain_after_sync() {
-        if (!_uplink_tx || _sim_radio || !usrp_ || !_uplink_tx_gain_range_initialized) {
+        if (!_uplink_tx || !dev_->supports(radio::Capability::HardwareGain) ||
+            !_uplink_tx_gain_range_initialized) {
             return;
         }
         std::lock_guard<std::mutex> lock(_uplink_tx_gain_mutex);
         try {
-            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
+            dev_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
             _uplink_tx_gain_muted.store(false, std::memory_order_release);
         } catch (const std::exception& e) {
             LOG_RT_WARN() << "[UL-TX] failed to restore TX gain after sync: " << e.what();
@@ -1491,53 +1489,88 @@ private:
         freq_offset_filter_->warm_up(0.0f, filter_coeffs.size() * 2);
     }
 
-    void init_usrp() {
-        if (radio_is_sim(cfg_)) {
-            init_sim_radio();
-            return;
-        }
-        // Use device arguments from configuration
-        usrp_ = uhd::usrp::multi_usrp::make(cfg_.usrp_device.device_args);
-        usrp_->set_clock_source(cfg_.clock_time.clock_source);
-        usrp_->set_rx_rate(cfg_.rf_sampling.sample_rate);
-        usrp_->set_rx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.downlink.rx_channel);
-        current_rx_tune_ = usrp_->set_rx_freq(uhd::tune_request_t(cfg_.downlink.center_freq), cfg_.downlink.rx_channel);
+    radio::IDevicePtr _make_device() {
+        radio::DeviceConfig dcfg;
+        dcfg.backend = cfg_.radio.radio_backend;
+        dcfg.device_args = cfg_.usrp_device.device_args;
+        dcfg.clock_source = cfg_.clock_time.clock_source;
+        // The UE only ever set the clock source (never the time source); leave it
+        // empty so the UHD backend does not apply one.
+        dcfg.time_source = "";
+        dcfg.sim_session = cfg_.simulation.session;
+        dcfg.sim_tick_rate = cfg_.rf_sampling.sample_rate;
+        dcfg.sim_center_freq = cfg_.downlink.center_freq;
+        return radio::make_device(dcfg);
+    }
+
+    // Backend-independent radio init. The real radio tunes/gains a USRP; the
+    // simulator attaches RX (and uplink TX) to the hub's shared-memory rings.
+    // Hardware-only behavior is gated on IDevice capability queries.
+    void init_radio() {
+        const bool is_sim = radio_is_sim(cfg_);
+        dev_ = _make_device();
+        dev_->set_rx_rate(cfg_.rf_sampling.sample_rate);
+        dev_->set_rx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.downlink.rx_channel);
+        current_rx_tune_ = dev_->set_rx_freq(radio::TuneRequest(cfg_.downlink.center_freq), cfg_.downlink.rx_channel);
         tune_initialized_ = true;
+        dev_->set_rx_freq_correction(0.0);  // reset comm correction (sim); no-op on real
         LOG_G_INFO() << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
                      << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
                      << " Hz";
-        const auto gain_range = usrp_->get_rx_gain_range(cfg_.downlink.rx_channel);
-        _rx_gain_min_db = gain_range.start();
-        _rx_gain_max_db = gain_range.stop();
-        const double initial_rx_gain_db = std::clamp(cfg_.rf_sampling.rx_gain, _rx_gain_min_db, _rx_gain_max_db);
-        if (initial_rx_gain_db != cfg_.rf_sampling.rx_gain) {
-            LOG_G_WARN() << "Configured rx_gain=" << cfg_.rf_sampling.rx_gain
-                         << " dB is outside hardware range ["
-                         << _rx_gain_min_db << ", " << _rx_gain_max_db
-                         << "] dB. Clamping to " << initial_rx_gain_db << " dB.";
-        }
-        usrp_->set_rx_gain(initial_rx_gain_db, cfg_.downlink.rx_channel);
-        _rx_agc.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
-        _sync_search_gain_sweep.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
-        LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
-                     << "] dB, initial gain: " << initial_rx_gain_db << " dB";
 
-        uhd::stream_args_t args("fc32", cfg_.downlink.rx_wire_format);
+        if (dev_->supports(radio::Capability::HardwareGain)) {
+            const radio::GainRange gain_range = dev_->get_rx_gain_range(cfg_.downlink.rx_channel);
+            _rx_gain_min_db = gain_range.start;
+            _rx_gain_max_db = gain_range.stop;
+            const double initial_rx_gain_db = std::clamp(cfg_.rf_sampling.rx_gain, _rx_gain_min_db, _rx_gain_max_db);
+            if (initial_rx_gain_db != cfg_.rf_sampling.rx_gain) {
+                LOG_G_WARN() << "Configured rx_gain=" << cfg_.rf_sampling.rx_gain
+                             << " dB is outside hardware range ["
+                             << _rx_gain_min_db << ", " << _rx_gain_max_db
+                             << "] dB. Clamping to " << initial_rx_gain_db << " dB.";
+            }
+            dev_->set_rx_gain(initial_rx_gain_db, cfg_.downlink.rx_channel);
+            _rx_agc.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
+            _sync_search_gain_sweep.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
+            LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
+                         << "] dB, initial gain: " << initial_rx_gain_db << " dB";
+        } else {
+            // No hardware gain (simulation): benign zero range so AGC/sweep stay inert.
+            _rx_gain_min_db = 0.0;
+            _rx_gain_max_db = 0.0;
+            _rx_agc.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
+            _sync_search_gain_sweep.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
+        }
+
+        radio::StreamArgs args("fc32", cfg_.downlink.rx_wire_format);
         args.args["block_id"] = "radio";
+        args.args["sim_suffix"] = "rx.comm";
         args.channels = {cfg_.downlink.rx_channel};
-        rx_stream_ = usrp_->get_rx_stream(args);
+        rx_stream_ = dev_->get_rx_stream(args);
+
+        if (is_sim) {
+            LOG_G_INFO() << "RX radio backend: SIMULATION (session='" << cfg_.simulation.session
+                         << "', no USRP).";
+        }
 
         if (uplink_enabled(cfg_)) {
-            // Full-duplex uplink TX on the UE device. TDD: same carrier as RX.
-            // FDD: the uplink carrier (duplex.ul_center_freq).
-            const double ul_freq = (cfg_.uplink.duplex.mode == DuplexMode::FDD &&
-                                    cfg_.uplink.duplex.ul_center_freq > 0.0)
-                ? cfg_.uplink.duplex.ul_center_freq : cfg_.downlink.center_freq;
-            usrp_->set_tx_rate(cfg_.rf_sampling.sample_rate);
-            current_ul_tx_tune_ = usrp_->set_tx_freq(uhd::tune_request_t(ul_freq), cfg_.uplink.tx_channel);
-            const auto tx_gain_range = usrp_->get_tx_gain_range(cfg_.uplink.tx_channel);
-            _uplink_tx_gain_min_db = tx_gain_range.start();
-            _uplink_tx_gain_max_db = tx_gain_range.stop();
+            _init_uplink_tx();
+        }
+    }
+
+    void _init_uplink_tx() {
+        const bool is_sim = radio_is_sim(cfg_);
+        // Full-duplex uplink TX on the UE device. TDD: same carrier as RX.
+        // FDD: the uplink carrier (duplex.ul_center_freq).
+        const double ul_freq = (cfg_.uplink.duplex.mode == DuplexMode::FDD &&
+                                cfg_.uplink.duplex.ul_center_freq > 0.0)
+            ? cfg_.uplink.duplex.ul_center_freq : cfg_.downlink.center_freq;
+        dev_->set_tx_rate(cfg_.rf_sampling.sample_rate);
+        current_ul_tx_tune_ = dev_->set_tx_freq(radio::TuneRequest(ul_freq), cfg_.uplink.tx_channel);
+        if (dev_->supports(radio::Capability::HardwareGain)) {
+            const radio::GainRange tx_gain_range = dev_->get_tx_gain_range(cfg_.uplink.tx_channel);
+            _uplink_tx_gain_min_db = tx_gain_range.start;
+            _uplink_tx_gain_max_db = tx_gain_range.stop;
             _uplink_tx_gain_restore_db = std::clamp(
                 cfg_.uplink.tx_gain,
                 _uplink_tx_gain_min_db,
@@ -1551,56 +1584,22 @@ private:
                              << "] dB. Clamping to "
                              << _uplink_tx_gain_restore_db << " dB.";
             }
-            usrp_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
-            usrp_->set_tx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.uplink.tx_channel);
-            uhd::stream_args_t tx_args("fc32", cfg_.uplink.wire_format_tx);
-            tx_args.channels = {cfg_.uplink.tx_channel};
-            _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
-            _uplink_tx->set_tx_stream(usrp_->get_tx_stream(tx_args));
-            _uplink_tx->timing_advance().store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
-            if (cfg_.should_profile("uplink")) {
-                LOG_G_INFO() << "[UL-TX] uplink transmit enabled on TX ch " << cfg_.uplink.tx_channel
-                             << " @ " << format_freq_hz(ul_freq) << " Hz, "
-                             << _uplink_tx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
-                             << "zc_root=" << _uplink_tx->uplink_config().ofdm.zc_root;
-            }
+            dev_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
         }
-    }
+        dev_->set_tx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.uplink.tx_channel);
 
-    // Channel-simulator backend: attach to the hub's "rx.comm" ring instead of a USRP.
-    void init_sim_radio() {
-        _sim_radio = std::make_unique<SimRadio>();
-        if (!_sim_radio->connect(cfg_.simulation)) {
-            throw std::runtime_error("UE: failed to connect to ChannelSimulator session '" +
-                                     cfg_.simulation.session + "'. Start ChannelSimulator first.");
-        }
-        rx_stream_ = _sim_radio->make_rx_streamer("rx.comm", cfg_.samples_per_frame());
-        // Present a perfect tune so CFO/predictive-delay math sees zero tuning error.
-        current_rx_tune_.target_rf_freq = cfg_.downlink.center_freq;
-        current_rx_tune_.actual_rf_freq = cfg_.downlink.center_freq;
-        current_rx_tune_.target_dsp_freq = 0.0;
-        current_rx_tune_.actual_dsp_freq = 0.0;
-        tune_initialized_ = true;
-        _sim_radio->set_comm_rx_freq_correction_hz(0.0);
-        // No hardware gain in simulation; expose a benign range so AGC/sweep stay inert.
-        _rx_gain_min_db = 0.0;
-        _rx_gain_max_db = 0.0;
-        _rx_agc.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
-        _sync_search_gain_sweep.initialize(0.0, _rx_gain_min_db, _rx_gain_max_db);
-        LOG_G_INFO() << "RX radio backend: SIMULATION (session='" << cfg_.simulation.session
-                     << "', no USRP).";
-
-        if (uplink_enabled(cfg_)) {
-            _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
-            _uplink_tx->set_tx_stream(
-                _sim_radio->make_tx_streamer("ul.tx", cfg_.samples_per_frame()));
-            _uplink_tx->timing_advance().store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
-            // sim: continuous send paced by shm backpressure (no timed scheduling).
-            if (cfg_.should_profile("uplink")) {
-                LOG_G_INFO() << "[UL-TX] uplink transmit enabled (sim ul.tx), "
-                             << _uplink_tx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
-                             << "zc_root=" << _uplink_tx->uplink_config().ofdm.zc_root;
-            }
+        radio::StreamArgs tx_args("fc32", cfg_.uplink.wire_format_tx);
+        tx_args.args["sim_suffix"] = "ul.tx";
+        tx_args.channels = {cfg_.uplink.tx_channel};
+        _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
+        _uplink_tx->set_tx_stream(dev_->get_tx_stream(tx_args));
+        _uplink_tx->timing_advance().store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
+        if (cfg_.should_profile("uplink")) {
+            LOG_G_INFO() << "[UL-TX] uplink transmit enabled" << (is_sim ? " (sim ul.tx)" : "")
+                         << " on TX ch " << cfg_.uplink.tx_channel
+                         << " @ " << format_freq_hz(ul_freq) << " Hz, "
+                         << _uplink_tx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
+                         << "zc_root=" << _uplink_tx->uplink_config().ofdm.zc_root;
         }
     }
 
@@ -1916,32 +1915,28 @@ private:
 
     void adjust_rx_freq(double detected_offset, bool reset = false) {
         // Create new tune request
-        uhd::tune_request_t new_tune_req;
+        radio::TuneRequest new_tune_req;
         new_tune_req.target_freq = current_rx_tune_.actual_rf_freq + detected_offset;
         new_tune_req.rf_freq = current_rx_tune_.actual_rf_freq; // Keep LO unchanged
         new_tune_req.dsp_freq = current_rx_tune_.actual_dsp_freq + detected_offset; // Update DSP only
-        new_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
-        new_tune_req.dsp_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
+        new_tune_req.rf_freq_policy = radio::TunePolicy::Manual;
+        new_tune_req.dsp_freq_policy = radio::TunePolicy::Manual;
         if (reset) {
             // Reset tune request
             new_tune_req.target_freq = cfg_.downlink.center_freq;
             new_tune_req.dsp_freq = 0.0; // Reset DSP frequency
         }
-        // Apply new tune (update DSP only, fast and does not affect LO).
-        if (_sim_radio) {
-            current_rx_tune_.target_rf_freq = new_tune_req.target_freq;
-            current_rx_tune_.actual_rf_freq = cfg_.downlink.center_freq;
-            current_rx_tune_.target_dsp_freq = new_tune_req.dsp_freq;
-            current_rx_tune_.actual_dsp_freq = new_tune_req.dsp_freq;
-            _sim_radio->set_comm_rx_freq_correction_hz(current_rx_tune_.actual_dsp_freq);
-        } else {
-            current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.downlink.rx_channel);
+        // Apply new tune (update DSP only, fast and does not affect LO). On the
+        // simulator backend set_rx_freq applies the comm correction internally and
+        // returns a synthetic tune result; on real hardware it retunes the DSP.
+        current_rx_tune_ = dev_->set_rx_freq(new_tune_req, cfg_.downlink.rx_channel);
+        if (dev_->supports(radio::Capability::RfDspTune)) {
             _retune_uplink_tx_from_rx_correction(current_rx_tune_.actual_dsp_freq);
         }
     }
 
     void _retune_uplink_tx_from_rx_correction(double rx_dsp_correction_hz) {
-        if (!_uplink_tx || _sim_radio || !usrp_) {
+        if (!_uplink_tx || !dev_->supports(radio::Capability::RfDspTune)) {
             return;
         }
         const double ul_base_freq =
@@ -1955,13 +1950,13 @@ private:
 
         // UHD applies DSP tune signs differently: RX target = RF + DSP, TX target = RF - DSP.
         const double tx_dsp_correction_hz = -tx_target_correction_hz;
-        uhd::tune_request_t tx_tune_req;
+        radio::TuneRequest tx_tune_req;
         tx_tune_req.target_freq = ul_base_freq + tx_target_correction_hz;
         tx_tune_req.rf_freq = ul_base_freq;
         tx_tune_req.dsp_freq = tx_dsp_correction_hz;
-        tx_tune_req.rf_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
-        tx_tune_req.dsp_freq_policy = uhd::tune_request_t::POLICY_MANUAL;
-        current_ul_tx_tune_ = usrp_->set_tx_freq(tx_tune_req, cfg_.uplink.tx_channel);
+        tx_tune_req.rf_freq_policy = radio::TunePolicy::Manual;
+        tx_tune_req.dsp_freq_policy = radio::TunePolicy::Manual;
+        current_ul_tx_tune_ = dev_->set_tx_freq(tx_tune_req, cfg_.uplink.tx_channel);
         if (cfg_.should_profile("uplink")) {
             LOG_RT_INFO() << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
                           << format_freq_hz(ul_base_freq)
@@ -2056,7 +2051,7 @@ private:
         double search_gain_db = 0.0;
         const bool reset_search_gain = _sync_search_gain_sweep.reset_to_default(
             [this](double gain_db) {
-                if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
+                dev_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
             },
             [this](double gain_db) {
                 _rx_agc.sync_to_gain(gain_db);
@@ -2080,13 +2075,13 @@ private:
      * Implements a state machine (SYNC_SEARCH -> ALIGNMENT -> NORMAL) to handle
      * frame synchronization and alignment before normal reception.
      */
-    void rx_proc(uhd::time_spec_t stream_start_time) {
+    void rx_proc(radio::TimeSpec stream_start_time) {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
-        uhd::set_thread_priority_safe(1.0, true);
+        radio::set_thread_priority(1.0, true);
         bind_current_thread_from_ue_downlink_role(cfg_, 0);
-        uhd::rx_metadata_t md;
-        auto issue_start = [&](const uhd::time_spec_t& start_time) {
-            uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+        radio::RxMetadata md;
+        auto issue_start = [&](const radio::TimeSpec& start_time) {
+            radio::StreamCmd cmd(radio::StreamMode::StartContinuous);
             const bool timed_start = start_time.get_real_secs() > 0.0;
             cmd.stream_now = !timed_start;
             if (timed_start) {
@@ -2101,7 +2096,7 @@ private:
         };
         auto issue_stop = [&]() {
             try {
-                rx_stream_->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+                rx_stream_->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
             } catch (const std::exception& e) {
                 LOG_RT_WARN() << "[UE RX] failed to stop stream before restart: " << e.what();
             }
@@ -2155,7 +2150,7 @@ private:
      * Reads a blocks of samples and pushes them to the sync queue for correlation.
      * Used to find the start of a frame.
      */
-    void handle_sync_search(uhd::rx_metadata_t& md) {
+    void handle_sync_search(radio::RxMetadata& md) {
         SyncBatch* sync_batch = sync_queue_.producer_slot();
         AlignedVector& target_buffer =
             (sync_batch != nullptr) ? sync_batch->data : _sync_scratch_buffer;
@@ -2192,7 +2187,7 @@ private:
      * by discarding a specific number of samples (discard_samples_). This is also 
      * used for timing adjustments during normal operation.
      */
-    void handle_alignment(uhd::rx_metadata_t& md) {
+    void handle_alignment(radio::RxMetadata& md) {
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         const int alignment_samples = discard_samples_.load(std::memory_order_relaxed);
@@ -2259,7 +2254,7 @@ private:
      * Reads complete frames of aligned samples and pushes them to the frame queue
      * for processing.
      */
-    void handle_normal_rx(uhd::rx_metadata_t& md) {
+    void handle_normal_rx(radio::RxMetadata& md) {
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
         // Acquire pre-allocated RX frame from pool
@@ -2562,7 +2557,7 @@ private:
             const bool stepped_search_gain = _sync_search_gain_sweep.on_search_miss(
                 search_equivalent_frames,
                 [this](double gain_db) {
-                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
+                    dev_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
                 },
                 [this](double gain_db) {
                     _rx_agc.sync_to_gain(gain_db);
@@ -2578,7 +2573,7 @@ private:
 
     void process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
-        uhd::set_thread_priority_safe(1, true);
+        radio::set_thread_priority(1, true);
         bind_current_thread_from_ue_downlink_role(cfg_, 1);
         
         using Clock = std::chrono::high_resolution_clock;
@@ -3235,7 +3230,7 @@ private:
                 frame.usrp_time_ns,
                 _control_time_gates,
                 [this](double gain_db) {
-                    if (!_sim_radio) usrp_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
+                    dev_->set_rx_gain(gain_db, cfg_.downlink.rx_channel);
                 },
                 &agc_adjustment
             );
@@ -3511,7 +3506,7 @@ private:
      */
     void sensing_process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
-        uhd::set_thread_priority_safe(1);
+        radio::set_thread_priority(1);
         bind_current_thread_from_sensing_hint(cfg_, 0);
         SPSCBackoff sensing_backoff;
         while (sensing_running_.load()) {
@@ -3753,7 +3748,7 @@ private:
 
     void bit_processing_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
-        uhd::set_thread_priority_safe();
+        radio::set_thread_priority();
         bind_current_thread_from_ue_downlink_role(cfg_, 2);
         SPSCBackoff llr_backoff;
         const bool do_latency_profile =
@@ -3848,7 +3843,7 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     finalize_ue_network_defaults(cfg);
     log_ue_sync_mode(cfg);
     log_ue_agc_mode(cfg);
-    uhd::set_thread_priority_safe(1, true);
+    radio::set_thread_priority(1, true);
     // Use last available core for main thread
     bind_current_thread_to_main_core(cfg);
     

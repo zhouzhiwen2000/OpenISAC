@@ -35,8 +35,7 @@
 #include <unistd.h>
 
 #include <fftw3.h>
-#include <uhd/stream.hpp>
-#include <uhd/types/time_spec.hpp>
+#include "RadioBackend.hpp"
 
 #include "Common.hpp"
 #include "OFDMCore.hpp"
@@ -95,12 +94,12 @@ public:
     UplinkTxEngine(const UplinkTxEngine&) = delete;
     UplinkTxEngine& operator=(const UplinkTxEngine&) = delete;
 
-    void set_tx_stream(uhd::tx_streamer::sptr stream) { _tx_stream = std::move(stream); }
-    uhd::tx_streamer::sptr tx_stream() const { return _tx_stream; }
+    void set_tx_stream(radio::ITxStreamPtr stream) { _tx_stream = std::move(stream); }
+    radio::ITxStreamPtr tx_stream() const { return _tx_stream; }
 
     // Enable timed (real-USRP) transmission scheduled on the radio clock. When
     // not enabled (sim), frames are streamed back-to-back, paced by the shm ring.
-    void set_timed_tx(uhd::time_spec_t start_time, double tick_rate, double tx_sample_rate) {
+    void set_timed_tx(radio::TimeSpec start_time, double tick_rate, double tx_sample_rate) {
         std::lock_guard<std::mutex> lock(_timing_mutex);
         _start_time = start_time;
         _tick_rate = tick_rate;
@@ -109,7 +108,7 @@ public:
         _restart_requested.store(false, std::memory_order_release);
     }
 
-    void reschedule_timed_tx(uhd::time_spec_t start_time) {
+    void reschedule_timed_tx(radio::TimeSpec start_time) {
         {
             std::lock_guard<std::mutex> lock(_timing_mutex);
             _start_time = start_time;
@@ -550,7 +549,7 @@ private:
     }
 
     void _mod_proc() {
-        uhd::set_thread_priority_safe();
+        radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 1);
         SPSCBackoff backoff;
         while (_running.load(std::memory_order_relaxed)) {
@@ -566,9 +565,9 @@ private:
     }
 
     void _tx_proc() {
-        uhd::set_thread_priority_safe();
+        radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 2);
-        uhd::tx_metadata_t md;
+        radio::TxMetadata md;
         md.start_of_burst = true;
         md.end_of_burst = false;
 
@@ -586,7 +585,7 @@ private:
         SPSCBackoff frame_backoff;
         while (_running.load(std::memory_order_relaxed)) {
             if (_use_timed_tx && _restart_requested.exchange(false, std::memory_order_acq_rel)) {
-                uhd::tx_metadata_t eob_md;
+                radio::TxMetadata eob_md;
                 eob_md.start_of_burst = false;
                 eob_md.end_of_burst = true;
                 eob_md.has_time_spec = false;
@@ -606,7 +605,7 @@ private:
                 _period_queue.clear();
                 if (_link_cfg.should_profile("uplink")) {
                     LOG_RT_WARN() << "[UL-TX] timed TX restart scheduled at "
-                                  << uhd::time_spec_t::from_ticks(next_ticks, _tick_rate).get_real_secs()
+                                  << radio::TimeSpec::from_ticks(next_ticks, _tick_rate).get_real_secs()
                                   << " s";
                 }
             }
@@ -629,7 +628,7 @@ private:
                 md.has_time_spec = true;
                 md.start_of_burst = first;
                 md.end_of_burst = false;
-                md.time_spec = uhd::time_spec_t::from_ticks(
+                md.time_spec = radio::TimeSpec::from_ticks(
                     next_ticks - _samples_to_ticks(target_shift_samples),
                     _tick_rate);
                 next_ticks += period_ticks;
@@ -656,7 +655,7 @@ private:
             }
             _period_queue.consumer_pop();
         }
-        uhd::tx_metadata_t eob_md;
+        radio::TxMetadata eob_md;
         eob_md.start_of_burst = false;
         eob_md.end_of_burst = true;
         eob_md.has_time_spec = false;
@@ -685,10 +684,10 @@ private:
     size_t _send_samples(
         const std::complex<float>* data,
         size_t sample_count,
-        const uhd::tx_metadata_t& first_md)
+        const radio::TxMetadata& first_md)
     {
         size_t sent_total = 0;
-        uhd::tx_metadata_t md = first_md;
+        radio::TxMetadata md = first_md;
         SPSCBackoff backoff;
         while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
             const size_t sent = _tx_stream->send(
@@ -708,9 +707,9 @@ private:
         return sent_total;
     }
 
-    size_t _send_zeros(size_t sample_count, const uhd::tx_metadata_t& first_md) {
+    size_t _send_zeros(size_t sample_count, const radio::TxMetadata& first_md) {
         size_t sent_total = 0;
-        uhd::tx_metadata_t md = first_md;
+        radio::TxMetadata md = first_md;
         while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
             const size_t chunk = std::min(_timing_pad_buffer.size(), sample_count - sent_total);
             const size_t sent = _send_samples(_timing_pad_buffer.data(), chunk, md);
@@ -728,7 +727,7 @@ private:
         const AlignedVector& frame,
         size_t sample_offset,
         size_t sample_count,
-        const uhd::tx_metadata_t& first_md)
+        const radio::TxMetadata& first_md)
     {
         if (sample_offset >= frame.size() || sample_count == 0) {
             return 0;
@@ -745,7 +744,7 @@ private:
 
     SendResult _send_period_with_stream_shift(
         const AlignedVector& frame,
-        const uhd::tx_metadata_t& first_md,
+        const radio::TxMetadata& first_md,
         int64_t target_shift_samples,
         int64_t& applied_shift_samples)
     {
@@ -754,7 +753,7 @@ private:
         result.complete = true;
 
         int64_t delta = target_shift_samples - applied_shift_samples;
-        uhd::tx_metadata_t frame_md = first_md;
+        radio::TxMetadata frame_md = first_md;
 
         if (delta < 0) {
             const size_t insert_samples = static_cast<size_t>(-delta);
@@ -869,10 +868,10 @@ private:
     SPSCRingBuffer<RawUdpPacket> _raw_udp_buffer{256};
     std::thread _udp_recv_thread;
 
-    uhd::tx_streamer::sptr _tx_stream;
+    radio::ITxStreamPtr _tx_stream;
     bool _use_timed_tx = false;
     std::mutex _timing_mutex;
-    uhd::time_spec_t _start_time{0.0};
+    radio::TimeSpec _start_time{0.0};
     double _tick_rate = 0.0;
     double _tx_sample_rate = 0.0;
     std::atomic<int32_t> _timing_advance{0};

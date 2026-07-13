@@ -11,10 +11,10 @@
 
 ```
  BS ──TX 采样──▶ ChannelSimulator ──各天线 RX──▶ UE (通信 RX)
- (SimTxStreamer)            ("空口" + 采样时钟)  └─感知 RX×N──▶ BS 单站感知
+ (radio::SimBackend)        ("空口" + 采样时钟)  └─感知 RX×N──▶ BS 单站感知
 ```
 
-三个进程通过以 `simulation.session` 命名的 POSIX 共享内存环形缓冲区相互连接。各引擎通过 YAML 中的 `radio_backend: sim` 选择后端；由于仿真 streamer 实现了抽象的 `uhd::tx_streamer` / `uhd::rx_streamer` 接口，热路径上的 `send()/recv()` 无需任何改动。`radio_backend: uhd`（默认值）保持原有的硬件行为不变。
+三个进程通过以 `simulation.session` 命名的 POSIX 共享内存环形缓冲区相互连接。各引擎通过 YAML 中的 `radio_backend: sim` 选择后端；`radio::SimBackend` 实现与 UHD 后端相同的 OpenISAC radio HAL，因此 BS/UE/感知热路径始终驱动 `radio::ITxStream` / `radio::IRxStream` 接口，而不关心底层是共享内存还是 USRP。`radio_backend: uhd`（默认值）保持硬件行为不变。
 
 ## 编译
 

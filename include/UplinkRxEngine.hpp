@@ -29,8 +29,7 @@
 #include <vector>
 
 #include <fftw3.h>
-#include <uhd/stream.hpp>
-#include <uhd/types/time_spec.hpp>
+#include "RadioBackend.hpp"
 
 #include "Common.hpp"
 #include "OFDMCore.hpp"
@@ -147,7 +146,7 @@ public:
     UplinkRxEngine(const UplinkRxEngine&) = delete;
     UplinkRxEngine& operator=(const UplinkRxEngine&) = delete;
 
-    void set_rx_stream(uhd::rx_streamer::sptr stream) { _rx_stream = std::move(stream); }
+    void set_rx_stream(radio::IRxStreamPtr stream) { _rx_stream = std::move(stream); }
 
     // AGC plumbing: host supplies a gain setter and the HW gain limits. If unset,
     // AGC is a no-op even when rx_agc_enable is true.
@@ -171,7 +170,7 @@ public:
         _arq_payload_intercept = std::move(fn);
     }
 
-    void request_reacquire(const uhd::time_spec_t& start_time) {
+    void request_reacquire(const radio::TimeSpec& start_time) {
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = start_time;
@@ -185,7 +184,7 @@ public:
     void request_reacquire() {
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
-            _pending_restart_time = uhd::time_spec_t(0.0);
+            _pending_restart_time = radio::TimeSpec(0.0);
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_G_WARN() << "[UL-RX] requested restart without timed anchor";
@@ -209,7 +208,7 @@ public:
         _self_delay_debug_sink = std::move(self_delay_sink);
     }
 
-    void start(const uhd::time_spec_t& start_time = uhd::time_spec_t(0.0)) {
+    void start(const radio::TimeSpec& start_time = radio::TimeSpec(0.0)) {
         if (!_rx_stream) throw std::runtime_error("UplinkRxEngine::start without an RX stream.");
         _running.store(true);
         _rx_thread = std::thread(&UplinkRxEngine::_rx_ingest_proc, this, start_time);
@@ -332,15 +331,15 @@ public:
         std::complex<float>* out,
         size_t count,
         int64_t* first_idx = nullptr,
-        const uhd::time_spec_t* stream_start_time = nullptr)
+        const radio::TimeSpec* stream_start_time = nullptr)
     {
         size_t got = 0;
-        uhd::rx_metadata_t md;
+        radio::RxMetadata md;
         bool got_idx = false;
         while (got < count && _running.load(std::memory_order_relaxed)) {
             const size_t n = _rx_stream->recv(out + got, count - got, md, 1.0, false);
-            if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE &&
-                md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+            if (md.error_code != radio::RxError::None &&
+                md.error_code != radio::RxError::Timeout) {
                 _rx_error_count.fetch_add(1, std::memory_order_relaxed);
                 LOG_RT_WARN() << "[UL-RX] RX metadata error: " << md.strerror();
                 if (md.has_time_spec && stream_start_time != nullptr &&
@@ -351,7 +350,7 @@ public:
                 } else {
                     {
                         std::lock_guard<std::mutex> lock(_restart_mutex);
-                        _pending_restart_time = uhd::time_spec_t(0.0);
+                        _pending_restart_time = radio::TimeSpec(0.0);
                     }
                     _restart_requested.store(true, std::memory_order_release);
                 }
@@ -378,14 +377,14 @@ public:
         return samples;
     }
 
-    uhd::time_spec_t _next_frame_boundary_after(
-        const uhd::time_spec_t& event_time,
-        const uhd::time_spec_t& stream_start_time) const
+    radio::TimeSpec _next_frame_boundary_after(
+        const radio::TimeSpec& event_time,
+        const radio::TimeSpec& stream_start_time) const
     {
         const double tick_rate = _tick_rate_for_idx();
         const int64_t period_ticks = static_cast<int64_t>(_period_samples);
         if (tick_rate <= 0.0 || period_ticks <= 0) {
-            return uhd::time_spec_t(0.0);
+            return radio::TimeSpec(0.0);
         }
         const int64_t start_ticks = stream_start_time.to_ticks(tick_rate);
         const int64_t event_ticks = event_time.to_ticks(tick_rate);
@@ -395,12 +394,12 @@ public:
         if (min_target > start_ticks) {
             frames_ahead = (min_target - start_ticks + period_ticks - 1) / period_ticks;
         }
-        return uhd::time_spec_t::from_ticks(
+        return radio::TimeSpec::from_ticks(
             start_ticks + frames_ahead * period_ticks,
             tick_rate);
     }
 
-    void _request_restart_at(const uhd::time_spec_t& start_time, const char* reason) {
+    void _request_restart_at(const radio::TimeSpec& start_time, const char* reason) {
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = start_time;
@@ -410,12 +409,12 @@ public:
                       << " at " << start_time.get_real_secs() << " s";
     }
 
-    void _rx_ingest_proc(uhd::time_spec_t start_time) {
-        uhd::set_thread_priority_safe();
+    void _rx_ingest_proc(radio::TimeSpec start_time) {
+        radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 0);
-        auto issue_start = [&](const uhd::time_spec_t& stream_start_time) {
+        auto issue_start = [&](const radio::TimeSpec& stream_start_time) {
             if (!_rx_stream) return;
-            uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+            radio::StreamCmd cmd(radio::StreamMode::StartContinuous);
             const bool timed_start = stream_start_time.get_real_secs() > 0.0;
             cmd.stream_now = !timed_start;
             if (timed_start) {
@@ -431,7 +430,7 @@ public:
         auto issue_stop = [&]() {
             if (!_rx_stream) return;
             try {
-                _rx_stream->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+                _rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
             } catch (const std::exception& e) {
                 LOG_RT_WARN() << "[UL-RX] failed to stop RX stream before restart: " << e.what();
             }
@@ -461,11 +460,11 @@ public:
             if (!_restart_requested.exchange(false, std::memory_order_acq_rel)) {
                 return false;
             }
-            uhd::time_spec_t restart_time(0.0);
+            radio::TimeSpec restart_time(0.0);
             {
                 std::lock_guard<std::mutex> lock(_restart_mutex);
                 restart_time = _pending_restart_time;
-                _pending_restart_time = uhd::time_spec_t(0.0);
+                _pending_restart_time = radio::TimeSpec(0.0);
             }
             issue_stop();
             start_time = restart_time;
@@ -531,7 +530,7 @@ public:
     }
 
     void _signal_proc() {
-        uhd::set_thread_priority_safe();
+        radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 1);
         SPSCBackoff backoff;
         while (_running.load(std::memory_order_relaxed) || !_rx_frame_queue.empty()) {
@@ -550,7 +549,7 @@ public:
     }
 
     void _decode_proc() {
-        uhd::set_thread_priority_safe();
+        radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 2);
         SPSCBackoff backoff;
         if (_ldpc_fixed_point) {
@@ -1058,10 +1057,10 @@ public:
 
     ArqPayloadIntercept _arq_payload_intercept;
 
-    uhd::rx_streamer::sptr _rx_stream;
+    radio::IRxStreamPtr _rx_stream;
     std::atomic<int32_t> _dl_ul_timing_diff{0};
     std::mutex _restart_mutex;
-    uhd::time_spec_t _pending_restart_time{0.0};
+    radio::TimeSpec _pending_restart_time{0.0};
     std::atomic<bool> _restart_requested{false};
     std::atomic<uint64_t> _stream_generation{0};
     std::atomic<uint64_t> _rx_error_count{0};

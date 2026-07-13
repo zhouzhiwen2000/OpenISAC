@@ -1,7 +1,5 @@
 #include "SensingChannel.hpp"
-#include "SimStreamer.hpp"
 
-#include <uhd/utils/thread.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -283,8 +281,8 @@ int64_t round_long_double_to_int64(long double value) {
 }
 
 int64_t compute_elapsed_samples_from_ticks(
-    const uhd::time_spec_t& raw_start_time,
-    const uhd::time_spec_t& stream_start_time,
+    const radio::TimeSpec& raw_start_time,
+    const radio::TimeSpec& stream_start_time,
     double sample_rate,
     double tick_rate)
 {
@@ -302,8 +300,8 @@ int64_t compute_elapsed_samples_from_ticks(
 }
 
 uint64_t compute_rx_frame_seq_from_time(
-    const uhd::time_spec_t& raw_start_time,
-    const uhd::time_spec_t& stream_start_time,
+    const radio::TimeSpec& raw_start_time,
+    const radio::TimeSpec& stream_start_time,
     int32_t discard_samples,
     int32_t target_alignment_samples,
     const Config& cfg,
@@ -348,8 +346,8 @@ int32_t normalize_alignment_samples(int64_t samples, int64_t frame_samples) {
 }
 
 int32_t compute_rx_frame_boundary_error_samples(
-    const uhd::time_spec_t& raw_start_time,
-    const uhd::time_spec_t& stream_start_time,
+    const radio::TimeSpec& raw_start_time,
+    const radio::TimeSpec& stream_start_time,
     int32_t discard_samples,
     const Config& cfg,
     double sample_rate,
@@ -1038,7 +1036,7 @@ SensingChannel::~SensingChannel() {
     join();
 }
 
-void SensingChannel::start(const uhd::time_spec_t& start_time) {
+void SensingChannel::start(const radio::TimeSpec& start_time) {
     _stop_requested.store(false, std::memory_order_relaxed);
     _compute.bistatic_active = false;
     _compute.next_delay_estimation_frame_seq = 0;
@@ -1201,16 +1199,16 @@ void SensingChannel::set_alignment(int32_t samples) {
 }
 
 bool SensingChannel::set_rx_gain(double requested_gain_db, double* applied_gain_db) {
-    if (!_rx_io.rx_usrp) {
+    if (!_rx_io.rx_device || !_rx_io.rx_device->supports(radio::Capability::HardwareGain)) {
         LOG_G_WARN() << "RXGN ignored for channel " << _rx_io.logical_id
-                     << ": RX USRP not initialized";
+                     << ": hardware gain not supported on this backend";
         return false;
     }
 
-    const auto gain_range = _rx_io.rx_usrp->get_rx_gain_range(_rx_io.channel_cfg.usrp_channel);
-    const double clamped_gain = std::clamp(requested_gain_db, gain_range.start(), gain_range.stop());
+    const radio::GainRange gain_range = _rx_io.rx_device->get_rx_gain_range(_rx_io.channel_cfg.usrp_channel);
+    const double clamped_gain = std::clamp(requested_gain_db, gain_range.start, gain_range.stop);
     _rx_io.channel_cfg.rx_gain = clamped_gain;
-    _rx_io.rx_usrp->set_rx_gain(clamped_gain, _rx_io.channel_cfg.usrp_channel);
+    _rx_io.rx_device->set_rx_gain(clamped_gain, _rx_io.channel_cfg.usrp_channel);
 
     if (applied_gain_db != nullptr) {
         *applied_gain_db = clamped_gain;
@@ -1630,22 +1628,28 @@ const SensingRxChannelConfig& SensingChannel::channel_cfg() const {
     return _rx_io.channel_cfg;
 }
 
-void SensingChannel::initialize_rx_hardware_and_sync(
+void SensingChannel::initialize_rx_and_sync(
     const Config& cfg,
-    const uhd::tune_request_t& tune_req,
+    const radio::TuneRequest& tune_req,
+    radio::IDevicePtr tx_device,
     const std::string& tx_device_args,
-    const std::string& tx_clock_source,
-    const std::string& tx_time_source,
-    const uhd::usrp::multi_usrp::sptr& tx_usrp,
     std::vector<std::unique_ptr<SensingChannel>>& channels
 ) {
-    struct CachedUsrpContext {
-        uhd::usrp::multi_usrp::sptr usrp;
-        std::string clock_source;
-        std::string time_source;
-    };
-    std::unordered_map<std::string, CachedUsrpContext> rx_usrp_cache;
-    rx_usrp_cache.emplace(tx_device_args, CachedUsrpContext{tx_usrp, tx_clock_source, tx_time_source});
+    // Simulation backend: each sensing channel consumes its own hub ring
+    // ("rx.sens<id>"); there is no tuning, gain, or PPS time-sync to apply.
+    if (radio_is_sim(cfg)) {
+        for (auto& ch : channels) {
+            auto& io = ch->_rx_io;
+            radio::StreamArgs args("fc32", cfg.sensing.rx_wire_format);
+            args.args["sim_suffix"] = "rx.sens" + std::to_string(io.logical_id);
+            args.channels = {io.channel_cfg.usrp_channel};
+            io.rx_device = tx_device;
+            io.rx_stream = tx_device->get_rx_stream(args);
+            io.rx_sample_rate = cfg.rf_sampling.sample_rate;
+            io.rx_tick_rate = cfg.rf_sampling.sample_rate;
+        }
+        return;
+    }
 
     auto resolve_rx_device_args = [&cfg](const SensingRxChannelConfig& ch_cfg) -> std::string {
         if (!ch_cfg.device_args.empty()) return ch_cfg.device_args;
@@ -1671,24 +1675,18 @@ void SensingChannel::initialize_rx_hardware_and_sync(
         return cfg.sensing.rx_wire_format;
     };
 
-    auto get_or_create_rx_usrp = [&](const std::string& rx_args, const std::string& rx_clock_source, const std::string& rx_time_source) -> uhd::usrp::multi_usrp::sptr {
-        auto it = rx_usrp_cache.find(rx_args);
-        if (it != rx_usrp_cache.end()) {
-            if (it->second.clock_source != rx_clock_source || it->second.time_source != rx_time_source) {
-                throw std::runtime_error(
-                    "Clock/time source conflict on shared RX USRP (" + rx_args + "): existing clock='" +
-                    it->second.clock_source + "', requested clock='" + rx_clock_source +
-                    "', existing time='" + it->second.time_source + "', requested time='" + rx_time_source +
-                    "'. Use distinct device_args if different REF/PPS sources are required.");
-            }
-            return it->second.usrp;
-        }
-        auto usrp = uhd::usrp::multi_usrp::make(rx_args);
-        usrp->set_clock_source(rx_clock_source);
-        usrp->set_time_source(rx_time_source);
-        usrp->set_rx_rate(cfg.rf_sampling.sample_rate);
-        rx_usrp_cache.emplace(rx_args, CachedUsrpContext{usrp, rx_clock_source, rx_time_source});
-        return usrp;
+    // The per-process device registry inside make_device() dedups by device_args
+    // and enforces the clock/time-source conflict check, so a sensing RX that
+    // shares the BS TX device args transparently gets the same IDevice instance.
+    auto get_or_create_rx_device = [&](const std::string& rx_args,
+                                       const std::string& rx_clock_source,
+                                       const std::string& rx_time_source) -> radio::IDevicePtr {
+        radio::DeviceConfig dcfg;
+        dcfg.backend = "uhd";
+        dcfg.device_args = rx_args;
+        dcfg.clock_source = rx_clock_source;
+        dcfg.time_source = rx_time_source;
+        return radio::make_device(dcfg);
     };
 
     for (auto& ch : channels) {
@@ -1697,13 +1695,13 @@ void SensingChannel::initialize_rx_hardware_and_sync(
         const std::string rx_clock_source = resolve_rx_clock_source(io.channel_cfg);
         const std::string rx_time_source = resolve_rx_time_source(io.channel_cfg, rx_clock_source);
         const std::string rx_wire_format = resolve_rx_wire_format(io.channel_cfg);
-        io.rx_usrp = get_or_create_rx_usrp(rx_device_args, rx_clock_source, rx_time_source);
+        io.rx_device = get_or_create_rx_device(rx_device_args, rx_clock_source, rx_time_source);
 
-        if (!io.rx_usrp) {
-            throw std::runtime_error("Failed to initialize RX USRP for sensing channel " + std::to_string(io.logical_id));
+        if (!io.rx_device) {
+            throw std::runtime_error("Failed to initialize RX device for sensing channel " + std::to_string(io.logical_id));
         }
 
-        const size_t usrp_rx_channels = io.rx_usrp->get_rx_num_channels();
+        const size_t usrp_rx_channels = io.rx_device->get_rx_num_channels();
         if (io.channel_cfg.usrp_channel >= usrp_rx_channels) {
             throw std::runtime_error(
                 "Configured sensing RX channel out of range: " +
@@ -1711,57 +1709,64 @@ void SensingChannel::initialize_rx_hardware_and_sync(
                 " (USRP supports " + std::to_string(usrp_rx_channels) + " RX channels)");
         }
 
-        io.rx_usrp->set_rx_rate(cfg.rf_sampling.sample_rate);
-        io.rx_usrp->set_rx_freq(tune_req, io.channel_cfg.usrp_channel);
-        io.rx_usrp->set_rx_gain(io.channel_cfg.rx_gain, io.channel_cfg.usrp_channel);
-        io.rx_usrp->set_rx_bandwidth(cfg.rf_sampling.bandwidth, io.channel_cfg.usrp_channel);
-        const double actual_rx_rate = io.rx_usrp->get_rx_rate(io.channel_cfg.usrp_channel);
+        io.rx_device->set_rx_rate(cfg.rf_sampling.sample_rate);
+        io.rx_device->set_rx_freq(tune_req, io.channel_cfg.usrp_channel);
+        io.rx_device->set_rx_gain(io.channel_cfg.rx_gain, io.channel_cfg.usrp_channel);
+        io.rx_device->set_rx_bandwidth(cfg.rf_sampling.bandwidth, io.channel_cfg.usrp_channel);
+        const double actual_rx_rate = io.rx_device->get_rx_rate(io.channel_cfg.usrp_channel);
         io.rx_sample_rate = (actual_rx_rate > 0.0) ? actual_rx_rate : cfg.rf_sampling.sample_rate;
-        const double actual_tick_rate = io.rx_usrp->get_master_clock_rate();
+        const double actual_tick_rate = io.rx_device->master_clock_rate();
         io.rx_tick_rate = (actual_tick_rate > 0.0) ? actual_tick_rate : io.rx_sample_rate;
         if (!io.channel_cfg.rx_antenna.empty()) {
-            io.rx_usrp->set_rx_antenna(io.channel_cfg.rx_antenna, io.channel_cfg.usrp_channel);
+            io.rx_device->set_rx_antenna(io.channel_cfg.rx_antenna, io.channel_cfg.usrp_channel);
         }
 
-        uhd::stream_args_t rx_stream_args("fc32", rx_wire_format);
+        radio::StreamArgs rx_stream_args("fc32", rx_wire_format);
         rx_stream_args.args["block_id"] = "radio";
         rx_stream_args.channels = {io.channel_cfg.usrp_channel};
-        io.rx_stream = io.rx_usrp->get_rx_stream(rx_stream_args);
+        io.rx_stream = io.rx_device->get_rx_stream(rx_stream_args);
     }
 
-    struct SyncUsrpEntry {
+    // PPS time sync across the distinct devices in use (including the shared TX
+    // device). Gated on the backend reporting PpsTimeSync support.
+    struct SyncEntry {
         std::string args;
-        uhd::usrp::multi_usrp::sptr usrp;
+        radio::IDevicePtr device;
     };
     struct SyncSnapshot {
         double now_s = 0.0;
         double last_pps_s = 0.0;
     };
-    std::vector<SyncUsrpEntry> sync_usrps;
-    sync_usrps.reserve(rx_usrp_cache.size());
-    for (const auto& entry : rx_usrp_cache) {
-        if (entry.second.usrp) {
-            sync_usrps.push_back(SyncUsrpEntry{entry.first, entry.second.usrp});
+    std::vector<SyncEntry> sync_devices;
+    auto add_sync_device = [&](const std::string& args, const radio::IDevicePtr& dev) {
+        if (!dev) return;
+        for (const auto& e : sync_devices) {
+            if (e.device.get() == dev.get()) return;
         }
+        sync_devices.push_back(SyncEntry{args, dev});
+    };
+    add_sync_device(tx_device_args, tx_device);
+    for (auto& ch : channels) {
+        add_sync_device(resolve_rx_device_args(ch->_rx_io.channel_cfg), ch->_rx_io.rx_device);
     }
 
     auto collect_sync_snapshot = [&]() {
         std::vector<SyncSnapshot> snapshots;
-        snapshots.reserve(sync_usrps.size());
-        for (const auto& entry : sync_usrps) {
+        snapshots.reserve(sync_devices.size());
+        for (const auto& entry : sync_devices) {
             SyncSnapshot s;
-            s.now_s = entry.usrp->get_time_now().get_real_secs();
-            s.last_pps_s = entry.usrp->get_time_last_pps().get_real_secs();
+            s.now_s = entry.device->time_now().get_real_secs();
+            s.last_pps_s = entry.device->time_last_pps().get_real_secs();
             snapshots.push_back(s);
         }
         return snapshots;
     };
 
     auto print_last_pps_status = [&](const std::string& title, const std::vector<SyncSnapshot>& snapshots) {
-        if (sync_usrps.empty()) return;
+        if (sync_devices.empty()) return;
         LOG_G_INFO() << title;
-        for (size_t i = 0; i < sync_usrps.size(); ++i) {
-            const auto& entry = sync_usrps[i];
+        for (size_t i = 0; i < sync_devices.size(); ++i) {
+            const auto& entry = sync_devices[i];
             const double pps_s = snapshots[i].last_pps_s;
             LOG_G_INFO() << std::fixed << std::setprecision(9)
                       << "  [USRP " << i << "] args='" << entry.args
@@ -1770,15 +1775,16 @@ void SensingChannel::initialize_rx_hardware_and_sync(
         }
     };
 
+    const bool pps_capable = tx_device && tx_device->supports(radio::Capability::PpsTimeSync);
     auto latest_sync_snapshot = collect_sync_snapshot();
-    if (sync_usrps.size() > 1) {
+    if (pps_capable && sync_devices.size() > 1) {
         try {
-            for (const auto& entry : sync_usrps) {
-                entry.usrp->set_time_next_pps(uhd::time_spec_t(0.0));
+            for (const auto& entry : sync_devices) {
+                entry.device->set_time_next_pps(radio::TimeSpec(0.0));
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1100));
             latest_sync_snapshot = collect_sync_snapshot();
-            LOG_G_INFO() << "Time synchronized across " << sync_usrps.size()
+            LOG_G_INFO() << "Time synchronized across " << sync_devices.size()
                          << " USRPs using next PPS.";
             print_last_pps_status("Post-sync USRP PPS status:", latest_sync_snapshot);
 
@@ -1798,32 +1804,16 @@ void SensingChannel::initialize_rx_hardware_and_sync(
         } catch (const std::exception& e) {
             LOG_G_WARN() << "PPS time sync failed (" << e.what()
                          << "), fallback to set_time_now per device.";
-            for (const auto& entry : sync_usrps) {
-                entry.usrp->set_time_now(uhd::time_spec_t(0.0));
+            for (const auto& entry : sync_devices) {
+                entry.device->set_time_now(radio::TimeSpec(0.0));
             }
             latest_sync_snapshot = collect_sync_snapshot();
             print_last_pps_status("Fallback set_time_now USRP PPS status:", latest_sync_snapshot);
         }
-    } else if (!sync_usrps.empty()) {
-        sync_usrps.front().usrp->set_time_now(uhd::time_spec_t(0.0));
+    } else if (!sync_devices.empty()) {
+        sync_devices.front().device->set_time_now(radio::TimeSpec(0.0));
         latest_sync_snapshot = collect_sync_snapshot();
         print_last_pps_status("Single-USRP PPS status:", latest_sync_snapshot);
-    }
-
-    return;
-}
-
-void SensingChannel::initialize_rx_hardware_and_sync_sim(
-    const Config& cfg,
-    SimRadio* sim_radio,
-    std::vector<std::unique_ptr<SensingChannel>>& channels
-) {
-    for (auto& ch : channels) {
-        auto& io = ch->_rx_io;
-        const std::string suffix = "rx.sens" + std::to_string(io.logical_id);
-        io.rx_stream = sim_radio->make_rx_streamer(suffix, cfg.samples_per_frame());
-        io.rx_sample_rate = cfg.rf_sampling.sample_rate;
-        io.rx_tick_rate = cfg.rf_sampling.sample_rate;
     }
 }
 
@@ -1832,13 +1822,13 @@ std::optional<size_t> SensingChannel::_resolve_core(size_t hint) const {
     return std::nullopt;
 }
 
-void SensingChannel::_rx_loop(const uhd::time_spec_t& start_time) {
+void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
     async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
-    uhd::set_thread_priority_safe(1.0f, true);
+    radio::set_thread_priority(1.0f, true);
     bind_current_thread_to_core(configured_core_to_optional(_rx_io.channel_cfg.rx_cpu_core));
     prefault_thread_stack();
 
-    uhd::stream_cmd_t stream_cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+    radio::StreamCmd stream_cmd(radio::StreamMode::StartContinuous);
     stream_cmd.stream_now = false;
     stream_cmd.time_spec = start_time;
     _rx_io.stream_start_time = start_time;
@@ -1855,7 +1845,7 @@ void SensingChannel::_rx_loop(const uhd::time_spec_t& start_time) {
         }
     }
 
-    _rx_io.rx_stream->issue_stream_cmd(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+    _rx_io.rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
 }
 
 void SensingChannel::_handle_alignment() {
@@ -1877,10 +1867,10 @@ void SensingChannel::_handle_alignment() {
     }
     const size_t total_read = static_cast<size_t>(total_read_signed);
     AlignedVector temp_buf(total_read);
-    uhd::rx_metadata_t md;
+    radio::RxMetadata md;
     size_t received = 0;
     bool have_first_time = false;
-    uhd::time_spec_t first_time_spec(0.0);
+    radio::TimeSpec first_time_spec(0.0);
 
     while (received < total_read && _running_ref.load(std::memory_order_relaxed)) {
         size_t num_rx = _rx_io.rx_stream->recv(
@@ -1891,8 +1881,8 @@ void SensingChannel::_handle_alignment() {
             false
         );
 
-        if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
-            if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+        if (md.error_code != radio::RxError::None) {
+            if (md.error_code != radio::RxError::Timeout) {
                 LOG_RT_WARN() << "RX alignment error: " << md.strerror();
                 received = 0;
                 have_first_time = false;
@@ -1957,10 +1947,10 @@ void SensingChannel::_handle_alignment() {
 
 void SensingChannel::_handle_normal_rx() {
     AlignedVector rx_frame = _rx_io.rx_frame_pool.acquire();
-    uhd::rx_metadata_t md;
+    radio::RxMetadata md;
     size_t received = 0;
     bool have_first_time = false;
-    uhd::time_spec_t first_time_spec(0.0);
+    radio::TimeSpec first_time_spec(0.0);
 
     while (received < _cfg.samples_per_frame() && _running_ref.load(std::memory_order_relaxed)) {
         size_t num_rx = _rx_io.rx_stream->recv(
@@ -1971,8 +1961,8 @@ void SensingChannel::_handle_normal_rx() {
             false
         );
 
-        if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
-            if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+        if (md.error_code != radio::RxError::None) {
+            if (md.error_code != radio::RxError::Timeout) {
                 LOG_RT_WARN() << "RX error: " << md.strerror();
                 received = 0;
                 have_first_time = false;
@@ -2041,7 +2031,7 @@ void SensingChannel::_handle_normal_rx() {
 
 void SensingChannel::_sensing_loop() {
     async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
-    uhd::set_thread_priority_safe(0.6f, true);
+    radio::set_thread_priority(0.6f, true);
     bind_current_thread_to_core(configured_core_to_optional(_rx_io.channel_cfg.processing_cpu_core));
     prefault_thread_stack();
 

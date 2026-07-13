@@ -69,32 +69,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find required libraries
 find_package(UHD REQUIRED)
 
-# Detect whether this UHD version exposes post_output_action / post_input_action
-# on uhd::tx_streamer / uhd::rx_streamer (added in newer UHD releases).
-include(CheckCXXSourceCompiles)
-set(CMAKE_REQUIRED_INCLUDES ${UHD_INCLUDE_DIRS})
-set(CMAKE_REQUIRED_LIBRARIES ${UHD_LIBRARIES})
-check_cxx_source_compiles("
-#include <uhd/stream.hpp>
-#include <uhd/rfnoc/actions.hpp>
-struct T : uhd::tx_streamer {
-    size_t get_num_channels() const override { return 0; }
-    size_t get_max_num_samps() const override { return 0; }
-    size_t send(const buffs_type&, size_t, const uhd::tx_metadata_t&, double) override { return 0; }
-    bool recv_async_msg(uhd::async_metadata_t&, double) override { return false; }
-    void post_output_action(const std::shared_ptr<uhd::rfnoc::action_info>&, size_t) override {}
-};
-int main() { return 0; }
-" UHD_HAS_STREAMER_ACTION_HOOKS)
-unset(CMAKE_REQUIRED_INCLUDES)
-unset(CMAKE_REQUIRED_LIBRARIES)
-if(UHD_HAS_STREAMER_ACTION_HOOKS)
-    message(STATUS "UHD: streamer action hooks present — enabling SimStreamer overrides")
-    add_compile_definitions(UHD_HAS_STREAMER_ACTION_HOOKS)
-else()
-    message(STATUS "UHD: streamer action hooks absent (UHD < 4.7) — SimStreamer overrides disabled")
-endif()
-
 set(Boost_NO_BOOST_CMAKE ON)
 find_package(Boost 1.66 REQUIRED)
 
@@ -335,7 +309,8 @@ set(OPENISAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_executable(BS
     ${OPENISAC_SRC_DIR}/BS.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
-    ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+    ${OPENISAC_SRC_DIR}/UhdBackend.cpp
+    ${OPENISAC_SRC_DIR}/SimBackend.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
     ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
@@ -376,7 +351,8 @@ target_compile_options(BS PRIVATE
 add_executable(UE
     ${OPENISAC_SRC_DIR}/UE.cpp
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
-    ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+    ${OPENISAC_SRC_DIR}/UhdBackend.cpp
+    ${OPENISAC_SRC_DIR}/SimBackend.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
     ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
@@ -415,7 +391,6 @@ target_compile_options(UE PRIVATE
 #===========================================================
 add_executable(ChannelSimulator
     ${OPENISAC_SRC_DIR}/ChannelSimulator.cpp
-    ${OPENISAC_SRC_DIR}/SimStreamer.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
 )
 
@@ -450,7 +425,8 @@ if(CUDA_AVAILABLE)
     add_executable(CUDABS
         ${OPENISAC_SRC_DIR}/CUDABS.cu
         ${OPENISAC_SRC_DIR}/CUDASensingChannel.cu
-        ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+        ${OPENISAC_SRC_DIR}/UhdBackend.cpp
+        ${OPENISAC_SRC_DIR}/SimBackend.cpp
         cuda/cuda_kernels.cu
         cuda/ldpc_5041008_cuda.cu
         ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
@@ -496,7 +472,8 @@ if(CUDA_AVAILABLE)
         cuda/cuda_kernels.cu
         cuda/ldpc_5041008_cuda.cu
         ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
-        ${OPENISAC_SRC_DIR}/SimStreamer.cpp
+        ${OPENISAC_SRC_DIR}/UhdBackend.cpp
+        ${OPENISAC_SRC_DIR}/SimBackend.cpp
         ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
         ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
         ${OPENISAC_SRC_DIR}/CUDASensingChannel.cu
