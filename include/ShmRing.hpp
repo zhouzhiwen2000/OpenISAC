@@ -258,6 +258,8 @@ private:
                 ++spins;
 #if defined(__x86_64__) || defined(__i386__)
                 __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+                asm volatile("yield" ::: "memory");
 #endif
             } else {
                 std::this_thread::sleep_for(std::chrono::microseconds(50));

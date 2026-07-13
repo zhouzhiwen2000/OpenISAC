@@ -2,10 +2,13 @@ numpy>=1.21.0
 matplotlib>=3.5.0
 scipy
 optuna
-#cupy-cuda12x # Uncomment the line above if you want to use CuPy for GPU acceleration
+# cupy-cuda12x  # Optional: uncomment to enable NVIDIA GPU acceleration via CuPy
+# dpctl
+# dpnp          # Optional: uncomment dpctl/dpnp to enable Intel GPU acceleration
 mlx==0.31.1; platform_system == "Darwin" and platform_machine == "arm64"
 numba
 pyqtgraph>=0.14.0
 PyQt6>=6.0.0
 PyYAML>=6.0
 pyzmq>=24.0  # Backend<->Frontend transport (sensing streams + control channel)
+markdown-it-py>=3.0.0  # README-to-Astro docs sync
