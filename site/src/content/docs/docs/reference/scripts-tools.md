@@ -10,7 +10,7 @@ OpenISAC includes scripts for visualization, configuration, runtime control, and
 - `scripts/plot_sensing_fast.py` displays BS-side sensing data.
 - `scripts/plot_bi_sensing_fast.py` displays bistatic sensing data.
 - `scripts/uplink_timing_control.py` supports timing-control workflows.
-- `scripts/isolate_cpus.bash` launches backend binaries with CPU isolation.
+- `scripts/isolate_cpus.py` (wrapper: `isolate_cpus.bash`) isolates critical YAML CPU cores and launches backend binaries (`run` allows all process CPUs).
 
 ## Configuration
 

@@ -9,6 +9,7 @@ const APP = window.__APP_STATE__;
     const presetSelect = document.getElementById('presetSelect');
     const commandInput = document.getElementById('commandInput');
     const startBtn = document.getElementById('startBtn');
+    const applyIsolationBtn = document.getElementById('applyIsolationBtn');
     const stopBtn = document.getElementById('stopBtn');
     const resetIsolationBtn = document.getElementById('resetIsolationBtn');
     const refreshBtn = document.getElementById('refreshBtn');
@@ -24,9 +25,15 @@ const APP = window.__APP_STATE__;
     const logBox = document.getElementById('logBox');
     const configSections = document.getElementById('configSections');
     const isolateToggle = document.getElementById('isolateToggle');
+    const isolateBothToggle = document.getElementById('isolateBothToggle');
     const overrideIsolateToggle = document.getElementById('overrideIsolateToggle');
     const overrideIsolateInput = document.getElementById('overrideIsolateInput');
     const sudoPasswordInput = document.getElementById('sudoPasswordInput');
+    const isolatedCpuDisplay = document.getElementById('isolatedCpuDisplay');
+    const boundCpuDisplay = document.getElementById('boundCpuDisplay');
+    const processCpuDisplay = document.getElementById('processCpuDisplay');
+    const systemCpuDisplay = document.getElementById('systemCpuDisplay');
+    const cpuRoleList = document.getElementById('cpuRoleList');
 	    const configRuntimeView = document.getElementById('configRuntimeView');
 	    const plannerView = document.getElementById('plannerView');
 	    const plannerTitle = document.getElementById('plannerTitle');
@@ -470,23 +477,38 @@ const APP = window.__APP_STATE__;
     function currentRuntimePrefs(tab = currentTab) {
       if (!cache[tab]) cache[tab] = {};
       if (!cache[tab].runtimePrefs) {
-        cache[tab].runtimePrefs = { isolateCpu: true, overrideIsolate: false, customCpuSpec: '' };
+        cache[tab].runtimePrefs = {
+          isolateCpu: true,
+          isolateBoth: false,
+          overrideIsolate: false,
+          customCpuSpec: '',
+        };
+      }
+      if (typeof cache[tab].runtimePrefs.isolateBoth !== 'boolean') {
+        cache[tab].runtimePrefs.isolateBoth = false;
       }
       return cache[tab].runtimePrefs;
-    }
-
-    function defaultCpuSpec() {
-      const model = currentModel();
-      if (!model) return '';
-      const unique = [...new Set(moduleCpuValues(model).filter((value) => value >= 0))].sort((a, b) => a - b);
-      return unique.join(',');
     }
 
     function parseCpuListText(text) {
       return String(text || '')
         .split(',')
-        .map((value) => Number.parseInt(value.trim(), 10))
-        .filter((value) => Number.isFinite(value));
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .flatMap((token) => {
+          if (/^\d+-\d+$/.test(token)) {
+            const [loS, hiS] = token.split('-');
+            let lo = Number.parseInt(loS, 10);
+            let hi = Number.parseInt(hiS, 10);
+            if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [];
+            if (lo > hi) [lo, hi] = [hi, lo];
+            const out = [];
+            for (let i = lo; i <= hi; i += 1) out.push(i);
+            return out;
+          }
+          const value = Number.parseInt(token, 10);
+          return Number.isFinite(value) ? [value] : [];
+        });
     }
 
     function parseCpuScalar(value) {
@@ -494,29 +516,253 @@ const APP = window.__APP_STATE__;
       return Number.isFinite(parsed) ? parsed : -1;
     }
 
-    function moduleCpuValues(model) {
+    function formatCpuSpec(values) {
+      const ordered = [...new Set(values.filter((v) => Number.isFinite(v) && v >= 0))].sort((a, b) => a - b);
+      if (!ordered.length) return '';
+      const parts = [];
+      let start = ordered[0];
+      let prev = ordered[0];
+      for (let i = 1; i < ordered.length; i += 1) {
+        const cpu = ordered[i];
+        if (cpu === prev + 1) {
+          prev = cpu;
+          continue;
+        }
+        parts.push(start === prev ? String(start) : `${start}-${prev}`);
+        start = prev = cpu;
+      }
+      parts.push(start === prev ? String(start) : `${start}-${prev}`);
+      return parts.join(',');
+    }
+
+    function fieldCpuList(model, key) {
+      const field = findField(model, key);
+      if (!field) return [];
+      // Prefer structured array values when present; fall back to value_text.
+      if (Array.isArray(field.value)) {
+        return field.value.map((v) => Number.parseInt(String(v), 10)).filter((v) => Number.isFinite(v));
+      }
+      return parseCpuListText(field.value_text ?? field.value ?? '');
+    }
+
+    /**
+     * Most sensitive cores only — aligned with scripts/isolate_cpus.py default:
+     * BS: TX, RX ingest, main, sensing rx_cpu_core
+     * UE: rx_proc, TX send, main
+     * OFDM mod/demod, LDPC, UDP, workers are NOT isolated by default.
+     */
+    function criticalCpuPlan(model, tab = currentTab) {
+      const roles = [];
+      const pushRole = (core, role) => {
+        const c = Number(core);
+        if (!Number.isFinite(c) || c < 0) return;
+        roles.push({ core: c, role });
+      };
+      if (!model) return { values: [], roles: [], side: tab === 'ue' ? 'ue' : 'bs' };
+      const downlink = fieldCpuList(model, 'downlink_cpu_cores');
+      const uplink = fieldCpuList(model, 'uplink_cpu_cores');
+      const side = tab === 'ue' ? 'ue' : 'bs';
+
+      if (side === 'bs') {
+        pushRole(downlink[0], 'bs.tx_proc (USRP TX)');
+        pushRole(uplink[0], 'bs.rx_ingest (USRP RX)');
+        const sensingField = findField(model, 'sensing.rx_channels');
+        (sensingField?.items || []).forEach((item, idx) => {
+          pushRole(parseCpuScalar(item.rx_cpu_core), `bs.sensing_rx[${idx}] (USRP RX)`);
+        });
+      } else {
+        pushRole(downlink[0], 'ue.rx_proc (USRP RX)');
+        pushRole(uplink[2], 'ue.tx_send (USRP TX)');
+      }
+      const mainField = findField(model, 'main_cpu_core');
+      if (mainField) {
+        pushRole(parseCpuScalar(mainField.value_text ?? mainField.value), `${side}.main`);
+      }
+      const values = [...new Set(roles.map((r) => r.core))].sort((a, b) => a - b);
+      return { values, roles, side };
+    }
+
+    /** Union of sensitive cores for BS+UE same-host isolation. */
+    function criticalCpuPlanBoth() {
+      const roles = [];
+      const seen = new Set();
+      for (const tab of ['bs', 'ue']) {
+        const model = modelForTab(tab);
+        const plan = criticalCpuPlan(model, tab);
+        for (const item of plan.roles) {
+          const key = `${item.core}:${item.role}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          roles.push(item);
+        }
+      }
+      const values = [...new Set(roles.map((r) => r.core))].sort((a, b) => a - b);
+      return { values, roles, side: 'both' };
+    }
+
+    function boundCpuValues(model) {
       const values = [];
-      values.push(...parseCpuListText(findField(model, 'downlink_cpu_cores')?.value_text));
-      if (fieldBoolValue(model, 'sensing.bi_enabled', false)) {
-        values.push(...parseCpuListText(findField(model, 'sensing_cpu_cores')?.value_text));
+      for (const key of [
+        'downlink_cpu_cores',
+        'uplink_cpu_cores',
+        'demod_worker_cpu_cores',
+        'ldpc_worker_cpu_cores',
+        'sensing_cpu_cores',
+      ]) {
+        values.push(...fieldCpuList(model, key));
       }
-      values.push(...parseCpuListText(findField(model, 'uplink_cpu_cores')?.value_text));
-      for (const key of ['main_cpu_core']) {
-        const field = findField(model, key);
-        if (field) values.push(parseCpuScalar(field.value_text ?? field.value));
-      }
+      const mainField = findField(model, 'main_cpu_core');
+      if (mainField) values.push(parseCpuScalar(mainField.value_text ?? mainField.value));
       const sensingField = findField(model, 'sensing.rx_channels');
       for (const item of (sensingField?.items || [])) {
         values.push(parseCpuScalar(item.rx_cpu_core));
         values.push(parseCpuScalar(item.processing_cpu_core));
       }
-      return values;
+      return [...new Set(values.filter((v) => Number.isFinite(v) && v >= 0))].sort((a, b) => a - b);
+    }
+
+    /** Legacy helper: critical isolated cores only. */
+    function moduleCpuValues(model) {
+      return criticalCpuPlan(model).values;
+    }
+
+    function defaultCpuSpec(tab = currentTab) {
+      const prefs = currentRuntimePrefs(tab);
+      if (prefs.isolateBoth) {
+        return formatCpuSpec(criticalCpuPlanBoth().values);
+      }
+      const model = modelForTab(tab);
+      if (!model) return '';
+      return formatCpuSpec(criticalCpuPlan(model, tab).values);
+    }
+
+    /**
+     * Host logical CPU count on the machine running the editor / BS / UE.
+     * Prefer server-reported nproc --all (APP.host_cpu_count). Never use
+     * navigator.hardwareConcurrency — the browser may report a different host
+     * or an incorrect value (e.g. 32 when the server has 16).
+     */
+    function hostCpuCount() {
+      const fromApp = Number(APP?.host_cpu_count);
+      if (Number.isFinite(fromApp) && fromApp >= 1) {
+        return Math.floor(fromApp);
+      }
+      // Last-resort fallback only if the page was served without host metadata.
+      const fromNav = Number(navigator.hardwareConcurrency);
+      return Math.max(1, Number.isFinite(fromNav) && fromNav >= 1 ? Math.floor(fromNav) : 1);
+    }
+
+    function allLogicalCpuSpec() {
+      if (APP?.host_cpu_spec && String(APP.host_cpu_spec).trim()) {
+        return String(APP.host_cpu_spec).trim();
+      }
+      const n = hostCpuCount();
+      return n <= 1 ? '0' : `0-${n - 1}`;
+    }
+
+    function complementCpuSpec(isolatedValues) {
+      const n = hostCpuCount();
+      const reserved = new Set(isolatedValues.filter((v) => v >= 0));
+      const system = [];
+      for (let i = 0; i < n; i += 1) {
+        if (!reserved.has(i)) system.push(i);
+      }
+      return formatCpuSpec(system);
+    }
+
+    /**
+     * Isolated CPU set for apply/start (matches isolate_cpus.py default unless overridden).
+     * With isolateBoth, unions sensitive cores from BS and UE YAML models.
+     */
+    function isolatedCpuPlan(tab = currentTab) {
+      const prefs = currentRuntimePrefs(tab);
+      const model = modelForTab(tab);
+      const single = model ? criticalCpuPlan(model, tab) : { values: [], roles: [] };
+      const critical = prefs.isolateBoth ? criticalCpuPlanBoth() : single;
+      if (!prefs.isolateCpu) {
+        return { values: [], roles: [], spec: '', source: 'disabled', critical };
+      }
+      if (prefs.overrideIsolate) {
+        const raw = String(prefs.customCpuSpec || overrideIsolateInput.value || '').trim();
+        const values = [...new Set(parseCpuListText(raw).filter((v) => v >= 0))].sort((a, b) => a - b);
+        return {
+          values,
+          roles: values.map((core) => ({ core, role: 'override' })),
+          spec: formatCpuSpec(values) || raw,
+          source: 'override',
+          critical,
+        };
+      }
+      return {
+        values: critical.values,
+        roles: critical.roles,
+        spec: formatCpuSpec(critical.values),
+        source: prefs.isolateBoth ? 'both' : 'critical',
+        critical,
+      };
+    }
+
+    function effectiveIsolateSpec(tab = currentTab) {
+      return isolatedCpuPlan(tab).spec;
+    }
+
+    function buildClientCpuPlan(tab = currentTab) {
+      const model = modelForTab(tab);
+      const prefs = currentRuntimePrefs(tab);
+      const isolated = isolatedCpuPlan(tab);
+      const bound = model ? boundCpuValues(model) : [];
+      return {
+        isolate_enabled: prefs.isolateCpu,
+        isolate_both: prefs.isolateBoth,
+        isolated_cpu_spec: prefs.isolateCpu ? (isolated.spec || '-') : '(disabled)',
+        isolated_source: isolated.source,
+        bound_cpu_spec: formatCpuSpec(bound) || '-',
+        process_cpu_spec: prefs.isolateCpu ? allLogicalCpuSpec() : '(host default)',
+        system_cpu_spec: prefs.isolateCpu ? (complementCpuSpec(isolated.values) || '-') : allLogicalCpuSpec(),
+        assignments: isolated.roles,
+        default_isolated_cpu_spec: formatCpuSpec(isolated.critical.values) || '-',
+      };
+    }
+
+    function renderCpuPlanPanel(tab = currentTab, runtime = null) {
+      const clientPlan = buildClientCpuPlan(tab);
+
+      isolatedCpuDisplay.textContent = clientPlan.isolated_cpu_spec || '-';
+      boundCpuDisplay.textContent = clientPlan.bound_cpu_spec || '-';
+      processCpuDisplay.textContent = clientPlan.process_cpu_spec || '-';
+      systemCpuDisplay.textContent = clientPlan.system_cpu_spec || '-';
+
+      const roles = clientPlan.assignments || [];
+      if (!roles.length) {
+        cpuRoleList.textContent = clientPlan.isolated_source === 'disabled'
+          ? '(isolation disabled)'
+          : '(no sensitive cores)';
+      } else {
+        const lines = [];
+        const seen = new Set();
+        for (const item of roles) {
+          const core = Number(item.core);
+          const role = item.role || 'role';
+          const key = `${core}:${role}`;
+          if (seen.has(key) || !Number.isFinite(core) || core < 0) continue;
+          seen.add(key);
+          lines.push(`CPU ${core}: ${role}`);
+        }
+        lines.sort((a, b) => {
+          const ca = Number.parseInt(a.replace(/[^\d-]/g, ''), 10);
+          const cb = Number.parseInt(b.replace(/[^\d-]/g, ''), 10);
+          if (Number.isFinite(ca) && Number.isFinite(cb) && ca !== cb) return ca - cb;
+          return a.localeCompare(b);
+        });
+        cpuRoleList.textContent = lines.join('\n');
+      }
     }
 
     function updateRuntimeOptionControls() {
       const prefs = currentRuntimePrefs(currentTab);
       const defaultSpec = defaultCpuSpec();
       isolateToggle.checked = prefs.isolateCpu;
+      if (isolateBothToggle) isolateBothToggle.checked = prefs.isolateBoth;
       overrideIsolateToggle.checked = prefs.overrideIsolate;
       if (!prefs.overrideIsolate) {
         overrideIsolateInput.value = defaultSpec;
@@ -526,7 +772,15 @@ const APP = window.__APP_STATE__;
         }
         overrideIsolateInput.value = prefs.customCpuSpec;
       }
+      if (isolateBothToggle) {
+        isolateBothToggle.disabled = !prefs.isolateCpu || prefs.overrideIsolate;
+      }
+      overrideIsolateToggle.disabled = !prefs.isolateCpu;
       overrideIsolateInput.disabled = !prefs.isolateCpu || !prefs.overrideIsolate;
+      if (applyIsolationBtn) {
+        applyIsolationBtn.disabled = !prefs.isolateCpu;
+      }
+      renderCpuPlanPanel(currentTab, cache[currentTab]?.runtime || null);
     }
 
     function findField(model, key) {
@@ -3144,24 +3398,49 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
       }
     }
 
+    async function ensureBothConfigsLoaded() {
+      const jobs = [];
+      for (const tab of ['bs', 'ue']) {
+        if (!cache[tab]?.config) {
+          jobs.push(loadConfig(tab, true));
+        }
+      }
+      if (jobs.length) await Promise.all(jobs);
+    }
+
     function renderRuntime(tab) {
       const runtime = cache[tab]?.runtime;
-      if (!runtime || tab !== currentTab) return;
+      if (tab !== currentTab) return;
+
+      if (!runtime) {
+        statusPill.classList.add('stopped');
+        statusPill.classList.remove('running');
+        statusText.textContent = 'stopped';
+        processMeta.textContent = '-';
+        renderCpuPlanPanel(tab, null);
+        return;
+      }
 
       const running = runtime.running;
       statusPill.classList.toggle('running', running);
       statusPill.classList.toggle('stopped', !running);
       statusText.textContent = running ? 'running' : 'stopped';
+      const isolated = runtime.isolated_cpu_spec || runtime.cpu_spec || '-';
+      const bound = runtime.bound_cpu_spec || '-';
+      const processCpus = runtime.process_cpu_spec || '-';
       processMeta.textContent =
         `pid: ${runtime.pid ?? '-'}\n` +
         `return code: ${runtime.returncode ?? '-'}\n` +
         `cwd: ${runtime.cwd}\n` +
         `unit: ${runtime.unit_name || '-'}\n` +
-        `isolate cpu: ${runtime.isolate_enabled ? 'on' : 'off'}\n` +
-        `isolated CPUs: ${runtime.cpu_spec || '-'}\n` +
+        `isolate: ${runtime.isolate_enabled ? 'on' : 'off'}\n` +
+        `isolated CPUs: ${isolated}\n` +
+        `bound CPUs: ${bound}\n` +
+        `process AllowedCPUs: ${processCpus}\n` +
         `command: ${runtime.command || '-'}`;
-      logBox.textContent = runtime.logs.length ? runtime.logs.join('\n') : '(no log output yet)';
+      logBox.textContent = (runtime.logs && runtime.logs.length) ? runtime.logs.join('\n') : '(no log output yet)';
       logBox.scrollTop = logBox.scrollHeight;
+      renderCpuPlanPanel(tab, runtime);
       if (!running && !commandInput.matches(':focus')) {
         const draftCommand = cache[tab]?.draftCommand || runtime.command || APP.tabs[tab].default_command;
         commandInput.value = draftCommand;
@@ -3169,7 +3448,10 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
     }
 
     async function refreshRuntime(tab) {
-      const data = await api(`/api/process?name=${encodeURIComponent(tab)}`);
+      const both = currentRuntimePrefs(tab).isolateBoth ? '1' : '0';
+      const data = await api(
+        `/api/process?name=${encodeURIComponent(tab)}&isolate_both=${both}`,
+      );
       cache[tab] = { ...cache[tab], runtime: data };
       renderRuntime(tab);
     }
@@ -3203,6 +3485,9 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
       }
       populatePresets(tab);
       await loadConfig(tab);
+      if (currentRuntimePrefs(tab).isolateBoth) {
+        await ensureBothConfigsLoaded();
+      }
       await refreshRuntime(tab);
       setFlash('');
     }
@@ -3228,6 +3513,27 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
       updateRuntimeOptionControls();
     });
 
+    if (isolateBothToggle) {
+      isolateBothToggle.addEventListener('change', async () => {
+        const prefs = currentRuntimePrefs(currentTab);
+        prefs.isolateBoth = isolateBothToggle.checked;
+        // Keep BS/UE tabs in sync for this host-level isolation choice.
+        for (const tab of ['bs', 'ue']) {
+          if (!cache[tab]) cache[tab] = {};
+          if (!cache[tab].runtimePrefs) currentRuntimePrefs(tab);
+          cache[tab].runtimePrefs.isolateBoth = prefs.isolateBoth;
+        }
+        if (prefs.isolateBoth) {
+          try {
+            await ensureBothConfigsLoaded();
+          } catch (error) {
+            setFlash(error.message, 'err');
+          }
+        }
+        updateRuntimeOptionControls();
+      });
+    }
+
     overrideIsolateToggle.addEventListener('change', () => {
       const prefs = currentRuntimePrefs(currentTab);
       prefs.overrideIsolate = overrideIsolateToggle.checked;
@@ -3239,12 +3545,14 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
 
     overrideIsolateInput.addEventListener('input', () => {
       currentRuntimePrefs(currentTab).customCpuSpec = overrideIsolateInput.value;
+      renderCpuPlanPanel(currentTab, cache[currentTab]?.runtime || null);
     });
 
     saveBtn.addEventListener('click', async () => {
       saveBtn.disabled = true;
       try {
         await saveCurrentTab(true);
+        updateRuntimeOptionControls();
       } catch (error) {
         setFlash(error.message, 'err');
       } finally {
@@ -3256,6 +3564,7 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
       reloadBtn.disabled = true;
       try {
         await loadConfig(currentTab, true);
+        updateRuntimeOptionControls();
         setFlash('Reloaded from disk.', 'ok');
       } catch (error) {
         setFlash(error.message, 'err');
@@ -3268,12 +3577,17 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
       startBtn.disabled = true;
       try {
         await saveCurrentTab(false);
+        if (isolateBothToggle?.checked) {
+          await ensureBothConfigsLoaded();
+          // Persist the other side only if already loaded in the editor; disk YAML is source for isolation.
+        }
         const runtime = await api('/api/process/start', {
           method: 'POST',
           body: JSON.stringify({
             name: currentTab,
             command: commandInput.value,
             isolate_cpu: isolateToggle.checked,
+            isolate_both: !!isolateBothToggle?.checked,
             override_isolate: overrideIsolateToggle.checked,
             isolate_cpu_spec: overrideIsolateInput.value,
             sudo_password: sudoPasswordInput.value,
@@ -3281,11 +3595,48 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
         });
         cache[currentTab] = { ...cache[currentTab], runtime, draftCommand: commandInput.value };
         renderRuntime(currentTab);
-        setFlash('Process started.', 'ok');
+        updateRuntimeOptionControls();
+        setFlash(
+          isolateToggle.checked
+            ? `Process started (isolated ${runtime.isolated_cpu_spec || runtime.cpu_spec || '-'}).`
+            : 'Process started without CPU isolation.',
+          'ok',
+        );
       } catch (error) {
         setFlash(error.message, 'err');
       } finally {
         startBtn.disabled = false;
+      }
+    });
+
+    applyIsolationBtn.addEventListener('click', async () => {
+      applyIsolationBtn.disabled = true;
+      try {
+        await saveCurrentTab(false);
+        if (!isolateToggle.checked) {
+          throw new Error('Enable runtime CPU isolation before applying.');
+        }
+        const runtime = await api('/api/process/apply-isolation', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: currentTab,
+            isolate_both: !!isolateBothToggle?.checked,
+            override_isolate: overrideIsolateToggle.checked,
+            isolate_cpu_spec: overrideIsolateInput.value,
+            sudo_password: sudoPasswordInput.value,
+          }),
+        });
+        cache[currentTab] = { ...cache[currentTab], runtime };
+        renderRuntime(currentTab);
+        updateRuntimeOptionControls();
+        setFlash(
+          `CPU isolation applied: ${runtime.isolated_cpu_spec || runtime.cpu_spec || '-'}.`,
+          'ok',
+        );
+      } catch (error) {
+        setFlash(error.message, 'err');
+      } finally {
+        applyIsolationBtn.disabled = !isolateToggle.checked;
       }
     });
 
@@ -3321,7 +3672,8 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
         });
         cache[currentTab] = { ...cache[currentTab], runtime };
         renderRuntime(currentTab);
-        setFlash('CPU isolation reset.', 'ok');
+        updateRuntimeOptionControls();
+        setFlash('CPU isolation reset (system slices restored to all CPUs).', 'ok');
       } catch (error) {
         setFlash(error.message, 'err');
       } finally {
@@ -3333,6 +3685,7 @@ TDD conflicts: ${txConfig.tddConflictLabels?.length ? txConfig.tddConflictLabels
       refreshBtn.disabled = true;
       try {
         await refreshRuntime(currentTab);
+        updateRuntimeOptionControls();
         setFlash('Runtime status refreshed.', 'ok');
       } catch (error) {
         setFlash(error.message, 'err');

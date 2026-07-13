@@ -16,7 +16,7 @@ sudo apt-get install libyaml-cpp-dev libzmq3-dev cppzmq-dev
 cd OpenISAC
 mkdir build
 cd build
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
@@ -31,12 +31,7 @@ make -j$(nproc)
 
 ## 编译类型
 
-实际运行通常使用 Release 构建：
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-```
+本文默认使用 `-DCMAKE_BUILD_TYPE=Release` 构建，以生成适合实际运行的优化版本。
 
 ## 干净重编译
 
@@ -46,6 +41,6 @@ make -j$(nproc)
 rm -rf build
 mkdir -p build
 cd build
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```

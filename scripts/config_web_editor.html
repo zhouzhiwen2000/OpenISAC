@@ -92,18 +92,44 @@
             </div>
           </div>
           <div class="card">
+            <h3>CPU Plan</h3>
+            <div class="cpu-plan-grid">
+              <div class="cpu-plan-item cpu-plan-item-critical">
+                <label>Isolated CPUs</label>
+                <div class="mono cpu-plan-value" id="isolatedCpuDisplay">-</div>
+              </div>
+              <div class="cpu-plan-item">
+                <label>Bound CPUs</label>
+                <div class="mono cpu-plan-value" id="boundCpuDisplay">-</div>
+              </div>
+              <div class="cpu-plan-item">
+                <label>Process AllowedCPUs</label>
+                <div class="mono cpu-plan-value" id="processCpuDisplay">-</div>
+              </div>
+              <div class="cpu-plan-item">
+                <label>System CPUs</label>
+                <div class="mono cpu-plan-value" id="systemCpuDisplay">-</div>
+              </div>
+            </div>
+            <div class="mono cpu-role-list" id="cpuRoleList" style="margin-top: 10px;">-</div>
+          </div>
+          <div class="card">
             <h3>Runtime Options</h3>
             <label class="checkbox-row">
               <input id="isolateToggle" type="checkbox" checked>
               <span>Enable runtime CPU isolation</span>
             </label>
             <label class="checkbox-row" style="margin-top: 10px;">
+              <input id="isolateBothToggle" type="checkbox">
+              <span>BS+UE (isolate both sides)</span>
+            </label>
+            <label class="checkbox-row" style="margin-top: 10px;">
               <input id="overrideIsolateToggle" type="checkbox">
-              <span>Override CPU isolation list</span>
+              <span>Override isolated CPU list</span>
             </label>
             <div class="field" style="margin-top: 10px;">
-              <label for="overrideIsolateInput">Isolate CPU List</label>
-              <input id="overrideIsolateInput" type="text" autocomplete="off" disabled placeholder="e.g. 4,5,8-10">
+              <label for="overrideIsolateInput">Isolated CPU List</label>
+              <input id="overrideIsolateInput" type="text" autocomplete="off" disabled placeholder="e.g. 1,5,6">
             </div>
             <div class="field" style="margin-top: 10px;">
               <label for="sudoPasswordInput">Sudo Password</label>
@@ -112,8 +138,9 @@
           </div>
           <div class="actions">
             <button class="btn primary" id="startBtn">Save + Start</button>
+            <button class="btn" id="applyIsolationBtn">Apply Isolation</button>
             <button class="btn danger" id="stopBtn">Stop</button>
-            <button class="btn warn" id="resetIsolationBtn">Reset CPU isolation</button>
+            <button class="btn warn" id="resetIsolationBtn">Reset Isolation</button>
             <button class="btn" id="refreshBtn">Refresh</button>
           </div>
           <div class="card">

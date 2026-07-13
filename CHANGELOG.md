@@ -8,6 +8,18 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-10 - Config console runtime CPU plan panel
+
+### Summary
+
+`config_web_editor` runtime 面板重构：右侧展示 Isolated / Bound / Process / System CPU 列表与关键角色明细；新增 **Apply Isolation**；Save+Start / Apply / Reset 对齐 `isolate_cpus.py`（关键核 isolate，进程 AllowedCPUs 为全核）。
+
+## 2026-07-10 - YAML-driven CPU isolation (critical cores only)
+
+### Summary
+
+`scripts/isolate_cpus.py` 重写 CPU 隔离：默认先询问本机是 **BS / UE / BS+UE**，再从对应 YAML 提取关键线程核（USRP 收发、OFDM 调制/解调、main；BS 含 sensing RX ingest）。系统 slice 避开这些核；`run` 的进程 `AllowedCPUs` 为全部逻辑核，非关键线程可使用系统核。`isolate_cpus.bash` 保留为薄封装。Web 配置台启动路径同步该策略。
+
 ## 2026-07-10 - Replace profiling_modules with hierarchical logging
 
 ### Summary

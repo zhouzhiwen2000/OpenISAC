@@ -36,8 +36,9 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 - 当 CPU 核心不足时，建议先给 `main thread affinity` 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。
 - CPU 绑核只配置实时流水线线程和主线程。非实时的服务、输出、辅助线程有意不做绑核。
 - 使用 `-1`、`[]` 或省略可选字段表示该模块不做显式绑核。
-- 若开启 `Enable runtime CPU isolation`，控制台会根据所有非负的实时 CPU 字段共同计算默认 isolate CPU 列表，并在启动前调用 `scripts/isolate_cpus.bash`。
-- 若再开启 `Override CPU isolation list`，右侧文本框会先用默认 isolate 列表初始化，然后允许按本次启动需要手工修改。
-- 若关闭 `Enable runtime CPU isolation`，控制台仍会通过特权运行路径启动选中的命令，但不会调用 `scripts/isolate_cpus.bash`。
-- 运行面板还提供可选的 sudo 密码输入框，以及 `Reset CPU isolation` 操作。
+- 运行面板展示 **Isolated / Bound / Process / System** CPU 列表。默认 isolate 只覆盖最敏感线程（USRP 收发、main；BS sensing RX），不含 OFDM 调制/解调。
+- 勾选 **BS+UE (isolate both sides)** 时合并两侧 YAML 的敏感核；不勾选则只 isolate 当前 tab。
+- **Save + Start** / **Apply Isolation** 调用 `scripts/isolate_cpus.py`；开启隔离时进程 `AllowedCPUs` 为全部逻辑核。
+- **Override isolated CPU list** 可手动指定本次 isolate 列表。
+- **Reset Isolation** 将系统 slice 恢复为可用全部 CPU。
 - 该控制台可以执行网页中输入的启动命令，因此只应绑定到可信网络，或者保持默认 `127.0.0.1`。

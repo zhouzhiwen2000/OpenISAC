@@ -14,7 +14,7 @@ sudo apt-get install libyaml-cpp-dev libzmq3-dev cppzmq-dev
 cd OpenISAC
 mkdir build
 cd build
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
@@ -29,12 +29,7 @@ The primary generated binaries are:
 
 ## Build type
 
-Release builds are the normal runtime target. To make the build type explicit:
-
-```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-```
+This guide uses `-DCMAKE_BUILD_TYPE=Release` by default to produce an optimized build for normal runtime use.
 
 ## Clean rebuild
 
@@ -44,6 +39,6 @@ Use a clean rebuild when CMake cache state is suspect:
 rm -rf build
 mkdir -p build
 cd build
-cmake ..
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```

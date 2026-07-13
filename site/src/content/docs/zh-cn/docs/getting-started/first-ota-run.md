@@ -9,7 +9,7 @@ description: 端到端空口 OpenISAC 测试的最小启动流程。
 - 先选一份最接近你硬件的 YAML 模板。仓库自带 X310/B210 示例，但项目并不限于这两种 USRP。
 - 运行时 YAML 需要放在 `build/` 目录，因为两个二进制程序都会从当前工作目录读取 `BS.yaml` 或 `UE.yaml`。
 - 如果前端跑在另一台机器上，请在 Python 前端中用 `--host <后端IP>` 或 Backend IP 输入框指向后端。`default_out_ip` 只用于目的输出 IP，不用于 UDP/ZMQ 监听地址。
-- 如果你关心实时稳定性，请先执行 `scripts/set_performance.bash`，然后先用 `sudo ../scripts/isolate_cpus.bash` 做 CPU 隔离，再用 `sudo ../scripts/isolate_cpus.bash run ...` 启动程序。
+- 如果你关心实时稳定性，请先执行 `scripts/set_performance.bash`，然后用 `sudo ../scripts/isolate_cpus.py` 做 CPU 隔离（会询问 BS/UE/BS+UE，或传 `--role`），再用 `sudo ../scripts/isolate_cpus.py run ...` 启动程序。
 
 ## 典型使用示例
 
@@ -19,18 +19,18 @@ sudo -s
 cd build
 # 对于 X310:
 cp ../config/BS_X310.yaml BS.yaml
-sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./BS
+sudo ../scripts/isolate_cpus.py
+sudo ../scripts/isolate_cpus.py run ./BS
 
 # 对于 B210:
 cp ../config/BS_B210.yaml BS.yaml
-sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./BS
+sudo ../scripts/isolate_cpus.py
+sudo ../scripts/isolate_cpus.py run ./BS
 
 # 对于 B210 双工:
 cp ../config/BS_B210_Duplex.yaml BS.yaml
-sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./BS
+sudo ../scripts/isolate_cpus.py
+sudo ../scripts/isolate_cpus.py run ./BS
 ```
 *如果您使用单独的计算机作为前端，请在单站感知前端中用 `--host` 或 Backend IP 输入框指向 BS 后端 IP。*
 
@@ -40,18 +40,18 @@ sudo -s
 cd build
 # 对于 X310:
 cp ../config/UE_X310.yaml UE.yaml
-sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./UE
+sudo ../scripts/isolate_cpus.py
+sudo ../scripts/isolate_cpus.py run ./UE
 
 # 对于 B210:
 cp ../config/UE_B210.yaml UE.yaml
-sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./UE
+sudo ../scripts/isolate_cpus.py
+sudo ../scripts/isolate_cpus.py run ./UE
 
 # 对于 B210 双工:
 cp ../config/UE_B210_Duplex.yaml UE.yaml
-sudo ../scripts/isolate_cpus.bash
-sudo ../scripts/isolate_cpus.bash run ./UE
+sudo ../scripts/isolate_cpus.py
+sudo ../scripts/isolate_cpus.py run ./UE
 ```
 *如果您使用单独的计算机作为前端，请在双站感知前端中用 `--host` 或 Backend IP 输入框指向 UE 后端 IP。只有解码/调试类输出需要发往另一台机器时才设置 `default_out_ip`。*
 

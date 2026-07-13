@@ -903,23 +903,218 @@ def unique_cpu_spec(values: list[int]) -> str:
     return ",".join(str(v) for v in unique)
 
 
-def configured_cpu_values(data: dict[str, Any]) -> list[int]:
+_ISOLATE_CPUS_MOD = None
+
+
+def _isolate_cpus_module():
+    """Load scripts/isolate_cpus.py for critical-core selection helpers."""
+    global _ISOLATE_CPUS_MOD
+    if _ISOLATE_CPUS_MOD is not None:
+        return _ISOLATE_CPUS_MOD
+
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parent / "isolate_cpus.py"
+    mod_name = "openisac_isolate_cpus"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load isolate helper from {path}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses need the module registered before exec_module.
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    _ISOLATE_CPUS_MOD = module
+    return module
+
+
+def format_cpu_spec(values: list[int]) -> str:
+    """Prefer isolate_cpus compact range format; fall back to unique_cpu_spec."""
+    unique = sorted(set(non_negative_cpu_values(values)))
+    if not unique:
+        return ""
+    try:
+        mod = _isolate_cpus_module()
+        return mod.format_cpu_list(unique)
+    except Exception:
+        return unique_cpu_spec(unique)
+
+
+def all_logical_cpu_ids() -> list[int]:
+    try:
+        mod = _isolate_cpus_module()
+        return list(mod.all_cpu_ids())
+    except Exception:
+        count = max(1, os.cpu_count() or 1)
+        return list(range(count))
+
+
+def all_logical_cpu_spec() -> str:
+    return format_cpu_spec(all_logical_cpu_ids())
+
+
+def tab_side(name: str) -> str:
+    return "ue" if str(name).lower().startswith("ue") else "bs"
+
+
+def configured_cpu_values(data: dict[str, Any], side: str = "bs") -> list[int]:
+    """Return default isolate cores: USRP TX/RX + main (+ BS sensing RX).
+
+    OFDM mod/demod, LDPC, UDP, sensing processing, and workers are omitted so
+    only the most scheduling-sensitive threads get reserved cores.
+    """
+    try:
+        mod = _isolate_cpus_module()
+        return mod.extract_critical_cores(data, side=side, source="web-editor")
+    except Exception:
+        # Fallback: most sensitive sample I/O + main only.
+        values: list[int] = []
+        downlink = list(data.get("downlink_cpu_cores", []) or [])
+        uplink = list(data.get("uplink_cpu_cores", []) or [])
+        side_l = str(side).lower()
+        if side_l == "ue":
+            if downlink:
+                values.append(int_or_zero(downlink[0]))  # rx_proc
+            if len(uplink) > 2:
+                values.append(int_or_zero(uplink[2]))  # TX send
+        else:
+            if downlink:
+                values.append(int_or_zero(downlink[0]))  # TX
+            if uplink:
+                values.append(int_or_zero(uplink[0]))  # RX ingest
+            channels = data.get("sensing.rx_channels", data.get("rx_channels", [])) or []
+            if isinstance(channels, list):
+                for channel in channels:
+                    if isinstance(channel, dict):
+                        values.append(int_or_zero(channel.get("rx_cpu_core", -1)))
+        main_core = data.get("main_cpu_core", -1)
+        if main_core is not None:
+            values.append(int_or_zero(main_core))
+        return non_negative_cpu_values(values)
+
+
+def bound_cpu_values(data: dict[str, Any]) -> list[int]:
+    """All non-negative thread affinity cores configured in YAML (bind list)."""
     values: list[int] = []
-    values.extend(int_or_zero(v) for v in (data.get("downlink_cpu_cores", []) or []))
-    if bool_value(data.get("sensing.bi_enabled", data.get("bi_enabled", False))):
-        values.extend(int_or_zero(v) for v in (data.get("sensing_cpu_cores", []) or []))
-    values.extend(int_or_zero(v) for v in (data.get("uplink_cpu_cores", []) or []))
-    main_core = data.get("main_cpu_core", -1)
+    cpu = data.get("cpu_cores") if isinstance(data.get("cpu_cores"), dict) else data
+    if not isinstance(cpu, dict):
+        cpu = data
+
+    for key in (
+        "downlink_cpu_cores",
+        "uplink_cpu_cores",
+        "demod_worker_cpu_cores",
+        "ldpc_worker_cpu_cores",
+        "sensing_cpu_cores",
+    ):
+        values.extend(int_or_zero(v) for v in (cpu.get(key, data.get(key, [])) or []))
+
+    main_core = cpu.get("main_cpu_core", data.get("main_cpu_core", -1))
     if main_core is not None:
         values.append(int_or_zero(main_core))
-    channels = data.get("sensing.rx_channels", data.get("rx_channels", [])) or []
+
+    sensing = data.get("sensing")
+    channels: Any = None
+    if isinstance(sensing, dict):
+        channels = sensing.get("rx_channels")
+    if channels is None:
+        channels = data.get("sensing.rx_channels", data.get("rx_channels"))
     if isinstance(channels, list):
         for channel in channels:
             if not isinstance(channel, dict):
                 continue
             values.append(int_or_zero(channel.get("rx_cpu_core", -1)))
             values.append(int_or_zero(channel.get("processing_cpu_core", -1)))
-    return values
+    return sorted(set(non_negative_cpu_values(values)))
+
+
+def critical_cpu_assignments(data: dict[str, Any], side: str = "bs") -> list[dict[str, Any]]:
+    try:
+        mod = _isolate_cpus_module()
+        assignments = mod.extract_critical_assignments(data, side=side, source="config")
+        return [
+            {"core": int(a.core), "role": str(a.role), "source": str(a.source)}
+            for a in assignments
+            if int(a.core) >= 0
+        ]
+    except Exception:
+        cores = configured_cpu_values(data, side=side)
+        return [{"core": c, "role": "critical", "source": "fallback"} for c in cores]
+
+
+def build_cpu_plan(
+    data: dict[str, Any],
+    side: str = "bs",
+    *,
+    isolate_enabled: bool = True,
+    override_isolate_spec: str | None = None,
+) -> dict[str, Any]:
+    """Build isolated / bound / process CPU plan for runtime UI and launch."""
+    side = tab_side(side) if side not in {"bs", "ue"} else side
+    bound = bound_cpu_values(data)
+    critical = configured_cpu_values(data, side=side)
+    assignments = critical_cpu_assignments(data, side=side)
+
+    isolated = list(critical)
+    override_active = bool(override_isolate_spec and str(override_isolate_spec).strip())
+    if override_active:
+        try:
+            mod = _isolate_cpus_module()
+            max_cpu = max(all_logical_cpu_ids() or [0])
+            isolated = mod.parse_cpu_spec(str(override_isolate_spec).strip(), max_cpu)
+        except Exception:
+            # Best-effort parse of simple comma lists / ranges
+            isolated = []
+            for token in str(override_isolate_spec).split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                if "-" in token:
+                    lo_s, hi_s = token.split("-", 1)
+                    try:
+                        lo, hi = int(lo_s), int(hi_s)
+                    except Exception:
+                        continue
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    isolated.extend(range(lo, hi + 1))
+                else:
+                    try:
+                        isolated.append(int(token))
+                    except Exception:
+                        continue
+            isolated = non_negative_cpu_values(isolated)
+
+    isolated = sorted(set(non_negative_cpu_values(isolated)))
+    all_cpus = all_logical_cpu_ids()
+    system = sorted(set(all_cpus) - set(isolated)) if isolated else list(all_cpus)
+    # Process affinity: all CPUs when isolation is on so non-critical threads can
+    # use system cores; when isolation is off, leave unrestricted (all CPUs).
+    process = list(all_cpus)
+
+    return {
+        "side": side,
+        "isolate_enabled": bool(isolate_enabled),
+        "override_active": override_active,
+        "host_cpu_count": len(all_cpus),
+        "host_cpu_spec": format_cpu_spec(all_cpus),
+        "isolated_cpus": isolated if isolate_enabled else [],
+        "isolated_cpu_spec": format_cpu_spec(isolated) if isolate_enabled else "",
+        "default_isolated_cpus": critical,
+        "default_isolated_cpu_spec": format_cpu_spec(critical),
+        "bound_cpus": bound,
+        "bound_cpu_spec": format_cpu_spec(bound),
+        "system_cpus": system if isolate_enabled else list(all_cpus),
+        "system_cpu_spec": format_cpu_spec(system if isolate_enabled else all_cpus),
+        "process_cpus": process,
+        "process_cpu_spec": format_cpu_spec(process),
+        "assignments": assignments,
+        "notes": [
+            "Isolated CPUs: most sensitive threads only (USRP TX/RX, main; BS sensing RX).",
+            "Bound CPUs: all non-negative YAML thread affinities.",
+            "Process AllowedCPUs: all host logical CPUs (nproc --all) when isolation is enabled.",
+        ],
+    }
 
 
 def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1787,10 +1982,22 @@ class ProcessController:
         self._logs: collections.deque[str] = collections.deque(maxlen=4000)
         self._reader_thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._cpu_spec = ""
         self._unit_name = f"openisac-{tab_name}"
         self._isolate_script = isolate_script
-        self._isolate_enabled = True
+        self._isolate_enabled = False
+        self._cpu_plan: dict[str, Any] = {
+            "isolated_cpu_spec": "",
+            "bound_cpu_spec": "",
+            "process_cpu_spec": "",
+            "system_cpu_spec": "",
+            "isolated_cpus": [],
+            "bound_cpus": [],
+            "process_cpus": [],
+            "system_cpus": [],
+            "assignments": [],
+        }
+        # Legacy alias kept for older UI snapshots.
+        self._cpu_spec = ""
 
     def _cleanup_unit(self, sudo_password: str = "") -> None:
         self._run_checked(
@@ -1804,6 +2011,11 @@ class ProcessController:
             sudo_password=sudo_password,
         )
 
+    def _store_plan(self, plan: dict[str, Any], isolate_enabled: bool) -> None:
+        self._cpu_plan = dict(plan)
+        self._isolate_enabled = isolate_enabled
+        self._cpu_spec = str(plan.get("isolated_cpu_spec", "") or "")
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             running = self._process is not None and self._process.poll() is None
@@ -1811,6 +2023,7 @@ class ProcessController:
                 self._returncode = self._process.poll()
                 self._process = None
             pid = self._process.pid if self._process is not None else None
+            plan = dict(self._cpu_plan)
             return {
                 "ok": True,
                 "running": running,
@@ -1818,23 +2031,60 @@ class ProcessController:
                 "returncode": self._returncode,
                 "cwd": str(self._cwd),
                 "command": self._current_command,
+                # Legacy field: isolated CPU list
                 "cpu_spec": self._cpu_spec,
                 "isolate_enabled": self._isolate_enabled,
                 "unit_name": self._unit_name,
                 "logs": list(self._logs),
+                "cpu_plan": plan,
+                "isolated_cpu_spec": plan.get("isolated_cpu_spec", ""),
+                "bound_cpu_spec": plan.get("bound_cpu_spec", ""),
+                "process_cpu_spec": plan.get("process_cpu_spec", ""),
+                "system_cpu_spec": plan.get("system_cpu_spec", ""),
+                "isolated_cpus": plan.get("isolated_cpus", []),
+                "bound_cpus": plan.get("bound_cpus", []),
+                "process_cpus": plan.get("process_cpus", []),
+                "assignments": plan.get("assignments", []),
             }
+
+    def apply_isolation(
+        self,
+        plan: dict[str, Any],
+        *,
+        sudo_password: str = "",
+        clear_logs: bool = False,
+    ) -> dict[str, Any]:
+        isolated_spec = str(plan.get("isolated_cpu_spec", "") or "").strip()
+        if not isolated_spec:
+            raise RuntimeError(
+                "No isolated CPUs to apply. Configure critical YAML cores or override the isolate list."
+            )
+        with self._lock:
+            if clear_logs:
+                self._logs.clear()
+            self._logs.append(f"$ isolate_cpus.py {isolated_spec}")
+            self._store_plan(plan, isolate_enabled=True)
+
+        self._run_checked(
+            [str(self._isolate_script), isolated_spec],
+            "CPU isolation setup failed",
+            sudo_password=sudo_password,
+        )
+        with self._lock:
+            self._logs.append(
+                f"[manager] isolation applied: reserved={isolated_spec}, "
+                f"process={plan.get('process_cpu_spec', all_logical_cpu_spec())}"
+            )
+        return self.snapshot()
 
     def start(
         self,
         command: str,
-        cpu_values: list[int],
+        plan: dict[str, Any],
         isolate_cpu: bool,
-        override_cpu_spec: str | None = None,
         sudo_password: str = "",
     ) -> dict[str, Any]:
         command = command.strip() or self._default_command
-        default_cpu_spec = unique_cpu_spec(cpu_values)
-        cpu_spec = (override_cpu_spec or "").strip() if override_cpu_spec else default_cpu_spec
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 raise RuntimeError(f"{self._tab_name} is already running.")
@@ -1842,16 +2092,23 @@ class ProcessController:
             self._logs.append(f"$ {command}")
             self._returncode = None
             self._current_command = command
-            self._cpu_spec = cpu_spec if isolate_cpu else ""
-            self._isolate_enabled = isolate_cpu
+            self._store_plan(plan, isolate_enabled=isolate_cpu)
 
-        if isolate_cpu and cpu_spec:
+        if isolate_cpu:
+            isolated_spec = str(plan.get("isolated_cpu_spec", "") or "").strip()
+            if not isolated_spec:
+                raise RuntimeError(
+                    "CPU isolation is enabled but no sensitive cores were found. "
+                    "Set main / USRP TX/RX cores in YAML, or override the isolate list."
+                )
             self._run_checked(
-                [str(self._isolate_script), cpu_spec],
+                [str(self._isolate_script), isolated_spec],
                 "CPU isolation setup failed",
                 sudo_password=sudo_password,
             )
+
         self._cleanup_unit(sudo_password=sudo_password)
+        process_spec = str(plan.get("process_cpu_spec", "") or "").strip() or all_logical_cpu_spec()
         run_cmd = [
             "systemd-run",
             "--unit",
@@ -1863,11 +2120,18 @@ class ProcessController:
             "-p",
             f"WorkingDirectory={self._cwd}",
         ]
-        if isolate_cpu and cpu_spec:
-            run_cmd += ["-p", f"AllowedCPUs={cpu_spec}"]
+        # Process may use all CPUs: critical threads stay on reserved cores via
+        # YAML affinity; non-critical threads can share system cores.
+        if isolate_cpu:
+            run_cmd += ["-p", f"AllowedCPUs={process_spec}"]
         run_cmd += ["/bin/bash", "-lc", command]
 
         with self._lock:
+            self._logs.append(
+                f"[manager] process AllowedCPUs={process_spec if isolate_cpu else '(host default)'}; "
+                f"isolated={plan.get('isolated_cpu_spec', '') or '-'}; "
+                f"bound={plan.get('bound_cpu_spec', '') or '-'}"
+            )
             self._process = self._popen_checked(run_cmd, sudo_password)
             self._reader_thread = threading.Thread(target=self._read_output, args=(self._process,), daemon=True)
             self._reader_thread.start()
@@ -1898,6 +2162,17 @@ class ProcessController:
             "CPU isolation reset failed",
             sudo_password=sudo_password,
         )
+        with self._lock:
+            self._isolate_enabled = False
+            # Keep bound/process info for UI, clear isolation reservation.
+            plan = dict(self._cpu_plan)
+            plan["isolated_cpus"] = []
+            plan["isolated_cpu_spec"] = ""
+            plan["system_cpus"] = all_logical_cpu_ids()
+            plan["system_cpu_spec"] = all_logical_cpu_spec()
+            plan["isolate_enabled"] = False
+            self._store_plan(plan, isolate_enabled=False)
+            self._logs.append("[manager] CPU isolation reset (system slices restored to all CPUs)")
         return self.snapshot()
 
     def stop_if_running(self) -> None:
@@ -1964,7 +2239,7 @@ class ProcessController:
 
 class ConfigEditorApp:
     def __init__(self, repo_root: Path, build_dir: Path) -> None:
-        isolate_script = repo_root / "scripts" / "isolate_cpus.bash"
+        isolate_script = repo_root / "scripts" / "isolate_cpus.py"
         self.repo_root = repo_root
         self.build_dir = build_dir
         self.tabs: dict[str, TabConfig] = {
@@ -2046,9 +2321,96 @@ class ConfigEditorApp:
             result["warning"] = warnings[0]
         return result
 
-    def process_snapshot(self, name: str) -> dict[str, Any]:
+    def _load_tab_data(self, name: str) -> dict[str, Any]:
+        tab = self.tab_config(name)
+        data, _, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
+        return data
+
+    def cpu_plan_for_tab(
+        self,
+        name: str,
+        *,
+        isolate_enabled: bool = True,
+        override_isolate_spec: str | None = None,
+        isolate_both: bool = False,
+        data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        side = tab_side(name)
+        cfg = data if data is not None else self._load_tab_data(name)
+        plan = build_cpu_plan(
+            cfg,
+            side=side,
+            isolate_enabled=isolate_enabled,
+            override_isolate_spec=override_isolate_spec,
+        )
+        plan["ok"] = True
+        plan["tab"] = name
+        plan["isolate_both"] = bool(isolate_both)
+
+        # BS+UE: union sensitive cores from both YAML files (unless manual override).
+        if (
+            isolate_enabled
+            and isolate_both
+            and not (override_isolate_spec and str(override_isolate_spec).strip())
+        ):
+            other = "ue" if side == "bs" else "bs"
+            try:
+                other_plan = build_cpu_plan(
+                    self._load_tab_data(other),
+                    side=other,
+                    isolate_enabled=True,
+                    override_isolate_spec=None,
+                )
+            except Exception as exc:
+                plan["isolate_both_warning"] = f"Could not load {other} YAML for joint isolation: {exc}"
+            else:
+                isolated = sorted(
+                    set(plan.get("isolated_cpus", []) or [])
+                    | set(other_plan.get("isolated_cpus", []) or [])
+                )
+                assignments = list(plan.get("assignments", []) or []) + list(
+                    other_plan.get("assignments", []) or []
+                )
+                all_cpus = all_logical_cpu_ids()
+                system = sorted(set(all_cpus) - set(isolated)) if isolated else list(all_cpus)
+                plan["isolated_cpus"] = isolated
+                plan["isolated_cpu_spec"] = format_cpu_spec(isolated)
+                plan["default_isolated_cpus"] = isolated
+                plan["default_isolated_cpu_spec"] = format_cpu_spec(isolated)
+                plan["assignments"] = assignments
+                plan["system_cpus"] = system
+                plan["system_cpu_spec"] = format_cpu_spec(system)
+                # Bound list stays current-tab only (YAML affinities for this process).
+                plan["isolate_sources"] = [name, other]
+
+        return plan
+
+    def process_snapshot(self, name: str, *, isolate_both: bool = False) -> dict[str, Any]:
         self.tab_config(name)
-        return self.processes[name].snapshot()
+        snap = self.processes[name].snapshot()
+        # Overlay live YAML plan so the right panel stays current even when idle.
+        live = self.cpu_plan_for_tab(name, isolate_enabled=True, isolate_both=isolate_both)
+        snap["live_cpu_plan"] = live
+        if not snap.get("running"):
+            # When not running, surface the disk-derived plan for the UI lists.
+            snap.setdefault("cpu_plan", live)
+            for key in (
+                "isolated_cpu_spec",
+                "bound_cpu_spec",
+                "process_cpu_spec",
+                "system_cpu_spec",
+                "isolated_cpus",
+                "bound_cpus",
+                "process_cpus",
+                "assignments",
+                "default_isolated_cpu_spec",
+                "isolate_both",
+            ):
+                if key in live:
+                    snap[key] = live[key]
+            # Preserve controller isolate_enabled; default lists still come from YAML.
+            snap["cpu_spec"] = live.get("default_isolated_cpu_spec", snap.get("cpu_spec", ""))
+        return snap
 
     def process_start(
         self,
@@ -2057,11 +2419,32 @@ class ConfigEditorApp:
         isolate_cpu: bool,
         isolate_cpu_spec: str | None = None,
         sudo_password: str = "",
+        isolate_both: bool = False,
     ) -> dict[str, Any]:
-        tab = self.tab_config(name)
-        data, _, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
-        cpu_values = configured_cpu_values(data)
-        return self.processes[name].start(command, cpu_values, isolate_cpu, isolate_cpu_spec, sudo_password)
+        self.tab_config(name)
+        plan = self.cpu_plan_for_tab(
+            name,
+            isolate_enabled=isolate_cpu,
+            override_isolate_spec=isolate_cpu_spec,
+            isolate_both=isolate_both,
+        )
+        return self.processes[name].start(command, plan, isolate_cpu, sudo_password)
+
+    def process_apply_isolation(
+        self,
+        name: str,
+        isolate_cpu_spec: str | None = None,
+        sudo_password: str = "",
+        isolate_both: bool = False,
+    ) -> dict[str, Any]:
+        self.tab_config(name)
+        plan = self.cpu_plan_for_tab(
+            name,
+            isolate_enabled=True,
+            override_isolate_spec=isolate_cpu_spec,
+            isolate_both=isolate_both,
+        )
+        return self.processes[name].apply_isolation(plan, sudo_password=sudo_password, clear_logs=False)
 
     def process_stop(self, name: str, sudo_password: str = "") -> dict[str, Any]:
         self.tab_config(name)
@@ -2069,15 +2452,23 @@ class ConfigEditorApp:
 
     def process_reset_isolation(self, name: str, sudo_password: str = "") -> dict[str, Any]:
         self.tab_config(name)
-        return self.processes[name].reset_isolation(sudo_password)
+        snap = self.processes[name].reset_isolation(sudo_password)
+        live = self.cpu_plan_for_tab(name, isolate_enabled=False)
+        snap["live_cpu_plan"] = live
+        return snap
 
     def stop_all(self) -> None:
         for controller in self.processes.values():
             controller.stop_if_running()
 
     def app_state_json(self) -> str:
+        host_cpus = all_logical_cpu_ids()
         payload = {
             "build_dir": str(self.build_dir),
+            # Host logical CPU count from the machine running this editor / BS/UE
+            # (nproc --all). Do not use the browser's navigator.hardwareConcurrency.
+            "host_cpu_count": len(host_cpus),
+            "host_cpu_spec": format_cpu_spec(host_cpus),
             "tabs": {
                 name: {
                     "label": tab.label,
@@ -2111,7 +2502,21 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/process":
                 name = self._require_name(parsed)
-                self._send_json(self.server.app.process_snapshot(name))
+                qs = parse_qs(parsed.query or "")
+                isolate_both = str((qs.get("isolate_both") or ["0"])[0]).lower() in {
+                    "1", "true", "yes", "on",
+                }
+                self._send_json(self.server.app.process_snapshot(name, isolate_both=isolate_both))
+                return
+            if parsed.path == "/api/cpu-plan":
+                name = self._require_name(parsed)
+                qs = parse_qs(parsed.query or "")
+                isolate_both = str((qs.get("isolate_both") or ["0"])[0]).lower() in {
+                    "1", "true", "yes", "on",
+                }
+                self._send_json(
+                    self.server.app.cpu_plan_for_tab(name, isolate_both=isolate_both)
+                )
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
         except RuntimeError as exc:
@@ -2139,10 +2544,15 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 override_isolate = payload.get("override_isolate", False)
                 if not isinstance(override_isolate, bool):
                     raise RuntimeError("override_isolate must be a boolean.")
+                isolate_both = payload.get("isolate_both", False)
+                if not isinstance(isolate_both, bool):
+                    raise RuntimeError("isolate_both must be a boolean.")
                 sudo_password = self._read_sudo_password(payload)
                 effective_spec = isolate_cpu_spec if override_isolate else None
                 self._send_json(
-                    self.server.app.process_start(name, command, isolate_cpu, effective_spec, sudo_password)
+                    self.server.app.process_start(
+                        name, command, isolate_cpu, effective_spec, sudo_password, isolate_both
+                    )
                 )
                 return
             if parsed.path == "/api/process/stop":
@@ -2154,6 +2564,25 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 name = self._require_name_from_body(payload)
                 sudo_password = self._read_sudo_password(payload)
                 self._send_json(self.server.app.process_reset_isolation(name, sudo_password))
+                return
+            if parsed.path == "/api/process/apply-isolation":
+                name = self._require_name_from_body(payload)
+                isolate_cpu_spec = payload.get("isolate_cpu_spec", "")
+                if not isinstance(isolate_cpu_spec, str):
+                    raise RuntimeError("isolate_cpu_spec must be a string.")
+                override_isolate = payload.get("override_isolate", False)
+                if not isinstance(override_isolate, bool):
+                    raise RuntimeError("override_isolate must be a boolean.")
+                isolate_both = payload.get("isolate_both", False)
+                if not isinstance(isolate_both, bool):
+                    raise RuntimeError("isolate_both must be a boolean.")
+                sudo_password = self._read_sudo_password(payload)
+                effective_spec = isolate_cpu_spec if override_isolate else None
+                self._send_json(
+                    self.server.app.process_apply_isolation(
+                        name, effective_spec, sudo_password, isolate_both
+                    )
+                )
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
         except RuntimeError as exc:
