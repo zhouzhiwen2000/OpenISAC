@@ -37,7 +37,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - Setup and installation: [Hardware Setup](#hardware-setup), [Software Installation](#software-installation)
 - First end-to-end run: [Typical Usage Example](#typical-usage-example)
 - Runtime configuration: [BS](#bs), [UE](#ue)
-- Web control UI: [Web Config Console](#8-web-config-console)
+- Web control UI: [Web Config Console](#9-web-config-console)
 - Recent updates: [Changelog](CHANGELOG.md)
 
 ## Repository Layout
@@ -470,7 +470,37 @@ python3 ./scripts/plot_bi_sensing_fast.py
 ```
 This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.
 
-### 7. Calibrate sensing channel response
+### 7. Calibrate system delay
+
+Run the system-delay calibration before `Calibrate Hsys`, because the response calibration assumes the sensing RX frame is already aligned to the direct-path timing reference.
+
+First reduce transmit power for the direct connection. Lower `downlink.tx_gain` in `build/BS.yaml` and, if needed, insert a suitable attenuator so the sensing RX path is not saturated. Then connect the transmit RF output directly to the sensing RX input for the channel being measured, and keep that cable path stable during the test.
+
+Enable system-delay estimation for only the sensing channel being measured:
+
+```yaml
+sensing:
+  rx_channels:
+    - usrp_channel: 1
+      alignment: 63
+      enable_system_delay_estimation: true
+```
+
+Start the BS backend from the `build/` directory. In this mode, the selected sensing channel disables the normal sensing pipeline and periodically runs a ZC-based delay test. Watch the BS console for `[SYSDLY CH <n>]` on CPU builds or `[CUDA SYSDLY CH <n>]` on CUDA builds. The CPU log prints `alignment_suggest=<value>`; the CUDA log prints `suggest=<value>`.
+
+When the suggested value is stable, stop the backend, write that value back to the same channel's `alignment` field in `build/BS.yaml`, and turn the estimation mode off:
+
+```yaml
+sensing:
+  rx_channels:
+    - usrp_channel: 1
+      alignment: <suggested value>
+      enable_system_delay_estimation: false
+```
+
+Repeat the same direct-connection measurement for every sensing channel. For multichannel setups, move the RF direct connection to the next sensing RX path and update that channel's own `alignment`; do not reuse one channel's value for another RF path.
+
+### 8. Calibrate sensing channel response
 
 Before calibration, connect the sensing RF path directly: connect the transmit RF output to the corresponding sensing RX input and keep the connection stable during calibration.
 
@@ -484,7 +514,7 @@ Wait for the backend log to report that calibration has completed and the calibr
 
 After calibration is complete, restore the normal antenna or experiment connection before continuing OTA measurements.
 
-### 8. Web Config Console
+### 9. Web Config Console
 For remote-friendly configuration editing and process control, run:
 ```bash
 python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
@@ -519,254 +549,504 @@ Notes:
 
 ## Parameter Reference
 
+The runtime config is hierarchical YAML. The tables below use full YAML paths so similarly named fields, such as `downlink.arq_enabled` and `uplink.arq_enabled`, stay unambiguous. Optional sections can be omitted; missing values use the parser defaults and the sample files under `config/` show common hardware and simulator presets.
+
 ### BS
 
-`BS` is configured through `BS.yaml`.
-Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml` as a starting template.
+`BS` reads `BS.yaml` from its current working directory. Start from `config/BS_X310.yaml`, `config/BS_B210.yaml`, the duplex presets, or the simulator presets.
 
-`BS.yaml` parameter reference:
+#### BS radio
 
-| Key | Type/Unit | Typical Value | Description |
+| Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `fft_size` | `int` | `1024` | OFDM FFT size. |
-| `cp_length` | `int` | `128` | Cyclic prefix length (samples). |
-| `sync_pos` | `int` | `1` | Sync symbol index in one frame. |
-| `enable_sec_sync_symbol` | `bool` | `false` | Reserve `sync_pos-1` as a duplicate ZC sync symbol. When enabled, the receiver uses the two consecutive sync symbols for Schmidl-Cox-style coarse timing/modulo-CFO estimation, resolves CFO aliases by local ZC correlation around `sync_pos`, then refines the main sync. Requires `sync_pos >= 1`. |
-| `enable_cfo_training_sequence` | `bool` | `false` | Reserve `sync_pos+1` as a dedicated repeated CFO training field. The receiver still uses ZC or the optional second sync symbol for frame timing and modulo CFO first; when this field is enabled, it is used only to deambiguate the CFO alias. TX/RX must use the same setting. |
-| `cfo_training_period_samples` | `int` / samples | `16` | Repetition period of the CFO training field. It must divide `fft_size`; the unambiguous CFO span is approximately `+-sample_rate/(2*period)`. |
-| `sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
-| `bandwidth` | `float` / Hz | `50000000` | Analog bandwidth, usually same as `sample_rate`. |
-| `center_freq` | `float` / Hz | `2400000000` | RF center frequency. |
-| `tx_gain` | `float` / dB | `30` | TX gain. |
-| `tx_channel` | `int` | `0` | TX channel index. |
-| `zc_root` | `int` | `29` | Zadoff-Chu root index. |
-| `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
-| `output_mode` | `string` | `dense` | Sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
-| `cuda_mod_pipeline_slots` | `int` | `2` | Number of CUDA modulation pipeline slots. Values below `1` are clamped to `1`. |
-| `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
-| `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame, such as `[25,50,75]`. These symbols are excluded from payload mapping; configured comb-pilot RE keep the comb-pilot sequence for phase tracking, while the remaining RE in those symbols use deterministic BPSK. |
-| `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match between `BS.yaml` and `UE.yaml`. |
-| `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-reserved-sync, non-comb-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-reserved-sync, non-comb-pilot, non-mid-frame-BPSK-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
-| `mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. ZC sync symbols, comb-pilot, and mid-frame BPSK pilot RE are allowed here; the optional CFO training field is rejected because it is not a valid sensing symbol. Overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
-| `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
-| `tx_device_args` | `string` | `""` | TX-specific USRP args. |
-| `rx_device_args` | `string` | `""` | Default sensing RX USRP args. |
-| `clock_source` | `string` | `internal/external/gpsdo` | Global clock source. |
-| `time_source` | `string` | `""` | Global time/PPS source; empty means follow `clock_source`. |
-| `tx_clock_source` | `string` | `""` | TX clock source override. |
-| `tx_time_source` | `string` | `""` | TX time source override. |
-| `rx_clock_source` | `string` | `""` | Default sensing RX clock source override. |
-| `rx_time_source` | `string` | `""` | Default sensing RX time source override. |
-| `wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
-| `rx_channel` | `int` | `0` | BS uplink RX channel index on the shared TX/RX USRP. |
-| `rx_wire_format` | `string` | `sc16` | BS uplink RX wire format, typically `sc16` or `sc8`. |
-| `rx_wire_format` | `string` | `sc16` | BS sensing RX default wire format, typically `sc16` or `sc8`. |
-| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS downlink payload UDP bind IP. This is the input stream transmitted on the BS->UE downlink. |
-| `udp_input_port` | `int` | `50000` | BS downlink payload UDP bind port. |
-| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS decoded uplink payload UDP destination IP. This is the output stream recovered from UE->BS uplink. |
-| `udp_output_port` | `int` | `50003` | BS decoded uplink payload UDP destination port. |
-| `udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress. |
-| `udp_egress_pacer_target_mbps` | `float` | `0` | UDP egress pacer target payload rate. `0` enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate. |
-| `udp_egress_pacer_queue_packets` | `int` | `10240` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
-| `udp_egress_pacer_max_delay_ms` | `float` | `0` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
-| `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
-| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols, and `center_freq` is ignored. In FDD, `center_freq` defines the UE->BS carrier, while `symbol_start`, `symbol_count`, and `guard_symbols` are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
-| `rx_agc_enable` | `bool` | `false` | Uplink setting. Enable hardware RX AGC on the BS uplink receiver. The hardware Duplex templates enable it by default; the fixed `uplink.rx_gain` value is used as the initial gain. |
-| `rx_agc_low_threshold_db` | `float` / dB | `14.0` | Uplink setting. Lower bound of the uplink tracking AGC window. Gain is increased only when the filtered uplink delay-spectrum peak falls below this threshold. |
-| `rx_agc_high_threshold_db` | `float` / dB | `16.0` | Uplink setting. Upper bound of the uplink tracking AGC window. Gain is decreased only when the filtered uplink delay-spectrum peak rises above this threshold. |
-| `rx_agc_max_step_db` | `float` / dB | `1.0` | Uplink setting. Maximum BS uplink RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down. |
-| `rx_agc_update_frames` | `int` | `4` | Uplink setting. Minimum processed-uplink-frame interval between tracking-stage AGC updates. Values below `1` are clamped to `1`. |
-| `bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
-| `ertm_to_enable` | `bool` | `false` | Enable CPU-path eRTM TO estimation. BS embeds its latest frequency-domain uplink channel estimate and runtime `DUTI` into internal downlink LDPC payloads; UE consumes those payloads and logs centroid3-refined TO estimates instead of forwarding them to UDP. |
-| `ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames. Values below `1` are clamped to `1`. |
-| `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the monostatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
-| `mono_sensing_port` | `int` | `8888` | ZeroMQ PUB bind port for the monostatic sensing stream. |
-| `uplink_channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink channel-estimation debug stream. |
-| `uplink_channel_port` | `int` | `12358` | ZeroMQ PUB bind port for the BS uplink channel-estimation debug stream. |
-| `uplink_pdf_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink delay-profile debug stream. |
-| `uplink_pdf_port` | `int` | `12359` | ZeroMQ PUB bind port for the BS uplink delay-profile debug stream. |
-| `uplink_constellation_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink constellation debug stream. |
-| `uplink_constellation_port` | `int` | `12356` | ZeroMQ PUB bind port for the BS uplink constellation debug stream. |
-| `rx_channel_count` | `int` | `1` | Number of sensing RX channels (`0` disables sensing RX). |
-| `rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
-| `tx_circular_buffer_size` | `int` | `32` | Capacity of the modulated-frame queue feeding TX. |
-| `paired_frame_queue_size` | `int` | `64` | Capacity of each sensing channel's RX/TX frame-pairing queues. Keep this above `tx_circular_buffer_size` so it can retain TX references while RX startup, network buffering, and alignment complete. A continuously full queue after startup indicates insufficient sensing-processing throughput rather than a need for unlimited buffering. |
-| `control_port` | `int` | `9999` | ZeroMQ ROUTER bind port for the bidirectional control channel (commands in, params/heartbeat out). |
-| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. When enabled, `BS` generates deterministic PRBS payloads instead of listening on `udp_input_*`, and `UE` switches decoded measurement payloads into BER/BLER/EVM accounting. CUDA binaries ignore this mode. |
-| `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
-| `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
-| `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
-| `measurement_payload_bytes` | `int` | `1024` | Bytes per internally generated measurement payload. Values below the internal header size are clamped up. |
-| `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to derive deterministic PRBS payload contents. |
-| `measurement_packets_per_point` | `int` | `1` | Number of measurement payloads sent for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `modulation`, `latency`, `ldpc_encode`, `sensing_proc`, `agc`, `uplink`, and `ertm`; `all` enables every module. BS end-to-end latency profiling is enabled only when both `modulation` and `latency` are included. |
-| `downlink_cpu_cores` | `int[]` | `[]` | BS downlink CPU cores: indices `0..3` bind `_tx_proc`, `_modulation_proc`, `_ldpc_encode_proc`, and `_udp_recv_proc`. |
-| `uplink_cpu_cores` | `int[]` | `[]` | BS uplink CPU cores: indices `0`, `1`, and `2` bind RX sample ingest, OFDM/LLR signal processing, and LDPC decode + UDP output. |
-| `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
+| `radio.radio_backend` | `string` | `uhd` | Radio I/O backend. Use `uhd` for real USRPs or `sim` for the shared-memory channel simulator. |
 
-Quick mental model:
-* `data_resource_blocks` decides where communication data goes.
-* `mask_blocks` decides which RE are exported for compact sensing.
-* The first affects payload mapping; the second affects sensing output only.
+#### BS simulation
 
-If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `UE.yaml`. If a block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still take precedence. The optional CFO training field at `sync_pos+1` is reserved for CFO acquisition/deambiguation and is not a valid sensing-pilot or sensing-mask symbol. Priority is always `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
-
-In dense sensing mode, the configured `symbol_stride` and runtime `STRD` command are rejected if they would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary, so the new stride does not inherit a drifting phase from the old stride. ZC sync symbols remain valid sensing symbols.
-
-When `output_mode=compact_mask`, sensing sends one compact message per OFDM frame and includes only the RE selected by `mask_blocks`. In this mode `STRD` is ignored, because the mask itself defines the sampling pattern. If the mask is "regular" (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime `MTI` and local Delay-Doppler processing can also be enabled: `SKIP=1` keeps the raw compact RE output, while `SKIP=0` switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands `range_fft_size` and `doppler_fft_size` when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`, followed by `re_count` raw `complex<float>` values in fixed order. Existing `plot_sensing*.py` viewers cannot handle non-"regular" compact payloads yet.
-
-`rx_channels` object fields:
-
-| Key | Type | Typical Value | Description |
+| Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `usrp_channel` | `int` | `0` | USRP RX channel index. |
-| `device_args` | `string` | `""` | Per-channel USRP args. |
+| `simulation.session` | `string` | `oisac_sim` | Shared simulator session namespace used by BS, UE, and `ChannelSimulator`. |
+| `simulation.enable_comm_rx` | `bool` | `true` | Simulator produces the communication RX path for UE. |
+| `simulation.enable_sensing_rx` | `bool` | `true` | Simulator produces monostatic sensing RX paths. |
+| `simulation.enable_uplink` | `bool` | `false` | Simulator routes the UE-to-BS uplink stream. |
+| `simulation.pacing_enabled` | `bool` | `true` | Pace simulator output to wall-clock sample time. |
+| `simulation.noise_power_dbfs` | `float` / dBFS | `-70` | AWGN power per RX channel; very low values effectively disable noise. |
+| `simulation.snr_control_enable` | `bool` | `false` | Scale the clean simulated signal before AWGN to maintain `target_snr_db`. |
+| `simulation.target_snr_db` | `float` / dB | `40` | Initial SNR target when SNR control is enabled. |
+| `simulation.control_port` | `int` | `10002` | ChannelSimulator ZMQ control port for runtime SNR commands. |
+| `simulation.cfo_hz` | `float` / Hz | `0` | Initial carrier offset injected before UE RX correction. |
+| `simulation.sample_rate_offset_ppm` | `float` / ppm | `0` | UE sample-clock offset relative to the BS clock. |
+| `simulation.timing_offset_samples` | `int` / samples | `0` | Constant integer sample delay injected on RX. |
+| `simulation.array_spacing_m` | `float` / m | `0.04283` | Physical ULA element spacing; set `<=0` to use `array_spacing_lambda`. |
+| `simulation.array_spacing_lambda` | `float` / lambda | `0.5` | Legacy ULA spacing in wavelengths. |
+| `simulation.ring_capacity_samples` | `int` / samples | `262144` | Per-stream shared-memory ring capacity. |
+| `simulation.steering_override_file` | `string` | `""` | Optional steering matrix file; empty uses ULA steering. |
+| `simulation.comm_multipath_taps[]` | `object[]` | optional | Communication tapped-delay-line taps with `delay_samples`, `gain_db`, and `phase_deg`. |
+| `simulation.targets[]` | `object[]` | optional | Monostatic point scatterers with `range_m`, `velocity_mps`, `gain_db`, and `angle_deg`. |
+| `simulation.bistatic_targets[]` | `object[]` | optional | Bistatic/communication point scatterers with the same target fields. |
+
+#### BS rf_sampling
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `rf_sampling.sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
+| `rf_sampling.bandwidth` | `float` / Hz | `50000000` | Analog bandwidth, usually matching `sample_rate`. |
+
+#### BS usrp_device
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `usrp_device.device_args` | `string` | `addr=...` | Shared USRP device args fallback. |
+
+#### BS clock_time
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `clock_time.clock_source` | `string` | `external` | Global clock source: `internal`, `external`, or `gpsdo`. |
+| `clock_time.time_source` | `string` | `internal` | Global time/PPS source; empty follows `clock_source`. |
+
+#### BS ofdm_frame
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `ofdm_frame.fft_size` | `int` | `1024` | OFDM FFT size. |
+| `ofdm_frame.cp_length` | `int` / samples | `128` | Cyclic prefix length. |
+| `ofdm_frame.sync_pos` | `int` | `1` | Sync symbol index inside each frame. |
+| `ofdm_frame.enable_sec_sync_symbol` | `bool` | `false` | Reserve `sync_pos-1` as a duplicate ZC sync symbol. |
+| `ofdm_frame.enable_cfo_training_sequence` | `bool` | `false` | Reserve `sync_pos+1` as a repeated CFO training field. |
+| `ofdm_frame.cfo_training_period_samples` | `int` / samples | `16` | Repetition period of the CFO training field; must divide `fft_size`. |
+| `ofdm_frame.num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
+| `ofdm_frame.sensing_symbol_num` | `int` | `100` | Number of symbols used in sensing processing. |
+| `ofdm_frame.zc_root` | `int` | `29` | Zadoff-Chu root for sync/preamble. |
+| `ofdm_frame.pilot_positions` | `int[]` | `[571,...]` | Comb-pilot subcarrier indices. |
+| `ofdm_frame.midframe_pilot_symbols` | `int[]` | `[]` | Optional in-frame BPSK pilot symbol indices. |
+| `ofdm_frame.midframe_pilot_seed` | `int` | `1296453708` | Deterministic mid-frame BPSK pilot seed; must match TX/RX. |
+
+#### BS cuda
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `cuda.cuda_mod_pipeline_slots` | `int` | `3` | CUDA modulation pipeline slots; values below `1` are clamped. |
+
+#### BS ldpc
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `ldpc.fixed_point` | `bool` | `false` | Use the int16/Q16 layered-NMS CPU decoder instead of float32. |
+| `ldpc.fixed_point_scale` | `int` | `16` | Power-of-two LLR scale before int16 saturation in fixed-point mode. |
+
+#### BS downlink
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `downlink.center_freq` | `float` / Hz | `2400000000` | BS downlink RF center frequency. |
+| `downlink.tx_gain` | `float` / dB | `60` | BS downlink TX gain. |
+| `downlink.tx_channel` | `int` | `0` | BS downlink TX channel index. |
+| `downlink.tx_device_args` | `string` | `""` | TX-specific device args; empty uses `usrp_device.device_args`. |
+| `downlink.tx_clock_source` | `string` | `""` | TX clock source override. |
+| `downlink.tx_time_source` | `string` | `""` | TX time source override. |
+| `downlink.wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
+| `downlink.arq_enabled` | `bool` | `false` | Enable downlink ARQ on the BS transmitter. |
+| `downlink.arq_window_packets` | `int` | `32767` | Downlink ARQ outstanding packet window. |
+| `downlink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Downlink ARQ retransmission timeout. |
+| `downlink.arq_max_retries` | `int` | `5` | Max downlink retransmission retries; `0` means unlimited within the window. |
+
+#### BS downlink_pipeline
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `downlink_pipeline.tx_circular_buffer_size` | `int` | `8` | Capacity of the modulated-frame queue feeding TX. |
+| `downlink_pipeline.data_packet_buffer_size` | `int` | `256` | Capacity of the encoded-packet buffer. |
+
+#### BS uplink
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `uplink.enabled` | `bool` | `false` | Master switch for the UE-to-BS uplink/duplex path. |
+| `uplink.duplex_mode` | `string` | `tdd` | `tdd` uses an uplink symbol window; `fdd` uses `uplink.center_freq` and a full-frame uplink. |
+| `uplink.center_freq` | `float` / Hz | `2500000000` | FDD-only uplink carrier. TDD uses the downlink center frequency. |
+| `uplink.symbol_start` | `int` | `90` | TDD-only first uplink symbol in the downlink frame. |
+| `uplink.symbol_count` | `int` | `10` | TDD-only uplink window length; `0` disables TDD uplink. |
+| `uplink.guard_symbols` | `int` | `1` | TDD-only leading guard symbols inside the uplink window. |
+| `uplink.bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side uplink RX window offset relative to the downlink TX frame anchor. |
+| `uplink.debug_self_channel` | `bool` | `false` | Estimate local TX leakage/self channel from uplink RX windows for `DUTI` debugging. |
+| `uplink.ertm_to_enable` | `bool` | `false` | Enable eRTM timing-offset payloads and UE-side TO logs. |
+| `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames. |
+| `uplink.rx_gain` | `float` / dB | `0` | BS uplink RX gain. |
+| `uplink.rx_channel` | `int` | `0` | BS uplink RX channel index. |
+| `uplink.rx_wire_format` | `string` | `sc16` | BS uplink RX wire format. |
+| `uplink.rx_device_args` | `string` | `""` | Uplink RX device args override. |
+| `uplink.rx_clock_source` | `string` | `""` | Uplink RX clock source override. |
+| `uplink.rx_time_source` | `string` | `""` | Uplink RX time source override. |
+| `uplink.rx_agc_enable` | `bool` | `false` | Enable BS uplink hardware RX AGC. |
+| `uplink.rx_agc_low_threshold_db` | `float` / dB | `14` | Increase uplink RX gain below this filtered delay-spectrum peak threshold. |
+| `uplink.rx_agc_high_threshold_db` | `float` / dB | `16` | Decrease uplink RX gain above this threshold. |
+| `uplink.rx_agc_max_step_db` | `float` / dB | `1` | Maximum uplink RX gain step per AGC update. |
+| `uplink.rx_agc_update_frames` | `int` | `4` | Minimum processed-uplink-frame interval between AGC updates. |
+| `uplink.equalizer_mode` | `string` | `mmse` | BS uplink equalizer inverse mode: `zf` or `mmse`. |
+| `uplink.channel_tracking_mode` | `string` | `pilot_phase` | Uplink per-symbol comb-pilot tracking mode: `disabled` or `pilot_phase`. |
+| `uplink.equalizer_mag_floor` | `float` | `1e-6` | Lower bound for `|H|^2` in uplink channel inversion. |
+| `uplink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual weight before falling back. |
+| `uplink.arq_enabled` | `bool` | `false` | Enable uplink ARQ on the BS receiver. |
+| `uplink.arq_ordered_delivery` | `bool` | `false` | Buffer accepted uplink packets for in-order UDP delivery. |
+| `uplink.arq_window_packets` | `int` | `32767` | Uplink ARQ receive/reorder window. |
+| `uplink.arq_feedback_interval_ms` | `int` / ms | `10` | Minimum interval between uplink ARQ ACK feedback packets. |
+
+#### BS sensing
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `sensing.rx_wire_format` | `string` | `sc16` | Default sensing RX wire format. |
+| `sensing.rx_device_args` | `string` | `""` | Default sensing RX args. |
+| `sensing.rx_clock_source` | `string` | `""` | Default sensing RX clock source override. |
+| `sensing.rx_time_source` | `string` | `""` | Default sensing RX time source override. |
+| `sensing.rx_channel_count` | `int` | `1` | Number of monostatic sensing RX channels; `0` disables sensing RX. |
+| `sensing.rx_channels[]` | `object[]` | see below | Per-channel sensing RX settings. |
+| `sensing.range_fft_size` | `int` | `1024` | Range FFT size. |
+| `sensing.doppler_fft_size` | `int` | `100` | Doppler FFT size. |
+| `sensing.view_range_bins` | `int` | `0` | Backend RD view width; `0` means full `range_fft_size`. |
+| `sensing.view_doppler_bins` | `int` | `0` | Backend RD view height; `0` means full `doppler_fft_size`. |
+| `sensing.output_mode` | `string` | `dense` | `dense` uses STRD-based full output; `compact_mask` exports selected RE only. |
+| `sensing.on_wire_format` | `string` | `complex_float32` | Sensing payload wire format. |
+| `sensing.backend_processing_enabled` | `bool` | `false` | Publish backend RD/CFAR/micro-Doppler sidecars when supported. |
+| `sensing.symbol_stride` | `int` | `20` | Default dense-mode STRD applied at startup. |
+| `sensing.paired_frame_queue_size` | `int` | `64` | Per-channel RX/TX frame-pairing queue capacity. |
+| `sensing.mask_blocks` | via `resource_preview.mask_blocks` | optional | Runtime sensing mask derived from resource preview. |
+
+#### BS sensing.rx_channels[] fields
+
+| Field | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `usrp_channel` | `int` | `1` | USRP RX channel index for this sensing path. |
+| `device_args` | `string` | `""` | Per-channel device args override. |
 | `clock_source` | `string` | `""` | Per-channel clock source override. |
 | `time_source` | `string` | `""` | Per-channel time source override. |
-| `wire_format` | `string` | `""` | Per-channel sensing RX wire format override. |
-| `rx_gain` | `float` | `30` | RX gain for this channel. |
-| `alignment` | `int` | `63` | Per-channel alignment offset (samples). |
-| `rx_antenna` | `string` | `""` | RX antenna name, e.g. `TX/RX`, `RX1`. |
-| `enable_system_delay_estimation` | `bool` | `false` | If `true`, this channel performs a ZC-based system delay estimation at startup and then once every 434 frames, while keeping the sensing pipeline disabled and continuing to drain frames. |
-| `rx_cpu_core` | `int` | `-1` | CPU core for this channel's RX loop. |
-| `processing_cpu_core` | `int` | `-1` | CPU core for this channel's sensing-processing loop. |
+| `wire_format` | `string` | `""` | Per-channel wire-format override. |
+| `rx_gain` | `float` / dB | `30` | Per-channel RX gain. |
+| `alignment` | `int` / samples | `63` | Per-channel timing alignment offset. |
+| `rx_antenna` | `string` | `RX2` | RX antenna port, such as `RX1`, `RX2`, or `TX/RX`. |
+| `enable_system_delay_estimation` | `bool` | `false` | Run periodic ZC-based system-delay estimation and disable normal sensing for this channel. |
+| `enable_sensing_output` | `bool` | inherits output switch | Per-channel monostatic output switch. |
+| `rx_cpu_core` | `int` | `-1` | CPU core for the channel RX loop. |
+| `processing_cpu_core` | `int` | `-1` | CPU core for the channel sensing-processing loop. |
 
-Notes:
-* If `rx_channels` is empty and `rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
-* If the count and list size differ, the list is resized to match `rx_channel_count`.
-* When `enable_system_delay_estimation=true` for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing output remain disabled.
-* In practice, keep hardware-specific fields such as `device_args`, `wire_format_*`, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.
-* BS uplink AGC reuses the same tracking `HardwareRxAgc` logic as the UE downlink path: it computes the uplink sync-symbol delay spectrum, checks sync-symbol samples for near/full-scale ADC usage, and adjusts USRP RX gain through the uplink RX channel's hardware gain control. The UE-only `SYNC_SEARCH` gain sweep is not used on the BS uplink path because the BS receives a scheduled uplink window rather than running a continuous sync-search state machine.
+#### BS resource_preview
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `resource_preview.data_resource_blocks[]` | `object[]` | optional | Payload / sensing-pilot RE rectangles. Each item has `kind`, `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
+| `resource_preview.mask_blocks[]` | `object[]` | optional | Compact sensing RE rectangles with `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
+
+#### BS measurement
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `measurement.measurement_enable` | `bool` | `false` | Enable internal PRBS measurement traffic. |
+| `measurement.measurement_mode` | `string` | `internal_prbs` | Measurement generator/checker mode. |
+| `measurement.measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
+| `measurement.measurement_output_dir` | `string` | `""` | Output directory for measurement CSV summaries. |
+| `measurement.measurement_payload_bytes` | `int` / bytes | `1024` | Bytes per generated measurement payload. |
+| `measurement.measurement_prbs_seed` | `int` | `0x5A` | Base seed for deterministic PRBS payload contents. |
+| `measurement.measurement_packets_per_point` | `int` | `1` | Packets sent for one measurement epoch. |
+| `measurement.measurement_max_packets_per_frame` | `int` | `1` | Max measurement packets pulled per frame; `0` means unlimited. |
+
+#### BS network_output
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `network_output.udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS downlink payload UDP bind IP. |
+| `network_output.udp_input_port` | `int` | `50000` | BS downlink payload UDP bind port. |
+| `network_output.udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS decoded uplink UDP destination IP. |
+| `network_output.udp_output_port` | `int` | `50003` | BS decoded uplink UDP destination port. |
+| `network_output.udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded UDP egress. |
+| `network_output.udp_egress_pacer_target_mbps` | `float` / Mbps | `0` | Egress pacer target rate; `0` auto-estimates from enqueue rate. |
+| `network_output.udp_egress_pacer_queue_packets` | `int` | `10240` | Egress pacer queue capacity in datagrams. |
+| `network_output.udp_egress_pacer_max_delay_ms` | `float` / ms | `0` | Max queued packet age; `0` disables age drops. |
+| `network_output.mono_sensing_output_enabled` | `bool` | `true` | Enable monostatic sensing ZMQ output. |
+| `network_output.mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | Monostatic sensing/control ZMQ bind IP. |
+| `network_output.mono_sensing_port` | `int` | `8888` | Monostatic sensing PUB port. |
+| `network_output.uplink_channel_ip` | `string` / IPv4 | `0.0.0.0` | BS uplink channel-estimate debug PUB IP. |
+| `network_output.uplink_channel_port` | `int` | `12358` | BS uplink channel-estimate debug PUB port. |
+| `network_output.uplink_pdf_ip` | `string` / IPv4 | `0.0.0.0` | BS uplink delay-spectrum debug PUB IP. |
+| `network_output.uplink_pdf_port` | `int` | `12359` | BS uplink delay-spectrum debug PUB port. |
+| `network_output.uplink_constellation_ip` | `string` / IPv4 | `0.0.0.0` | BS uplink constellation debug PUB IP. |
+| `network_output.uplink_constellation_port` | `int` | `12356` | BS uplink constellation debug PUB port. |
+| `network_output.self_channel_ip` | `string` / IPv4 | `0.0.0.0` | BS self-channel debug PUB IP. |
+| `network_output.self_channel_port` | `int` | `12360` | BS self-channel debug PUB port. |
+| `network_output.self_pdf_ip` | `string` / IPv4 | `0.0.0.0` | BS self-delay-spectrum debug PUB IP. |
+| `network_output.self_pdf_port` | `int` | `12361` | BS self-delay-spectrum debug PUB port. |
+| `network_output.ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | eRTM debug PUB IP. |
+| `network_output.ertm_debug_port` | `int` | `12362` | eRTM debug PUB port. |
+| `network_output.control_port` | `int` | `9999` | ZMQ ROUTER port for runtime control. |
+
+#### BS cpu_cores
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `cpu_cores.downlink_cpu_cores` | `int[]` | `[1,2,3,-1]` | BS downlink cores: TX, modulation, LDPC encode, UDP receive. |
+| `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | BS uplink cores: RX ingest, OFDM/LLR processing, LDPC decode + UDP output. |
+| `cpu_cores.main_cpu_core` | `int` | `-1` | Main-thread CPU core; `-1` disables binding. |
+
+#### BS runtime
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `runtime.profiling_modules` | `string` | `""` | Comma-separated profiling modules such as `modulation`, `latency`, `ldpc_encode`, `sensing_proc`, `agc`, `arq`, `uplink`, `ertm`, or `all`. |
 
 ### UE
 
-`UE` is configured through `UE.yaml`.
-Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml` as a starting template.
+`UE` reads `UE.yaml` from its current working directory. Start from `config/UE_X310.yaml`, `config/UE_B210.yaml`, the duplex presets, or the simulator presets.
 
-`UE.yaml` parameter reference:
+#### UE radio
 
-| Key | Type/Unit | Typical Value | Description |
+| Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `fft_size` | `int` | `1024` | OFDM FFT size. |
-| `cp_length` | `int` | `128` | Cyclic prefix length (samples). |
-| `sync_pos` | `int` | `1` | Sync symbol index in one frame. |
-| `enable_sec_sync_symbol` | `bool` | `false` | Reserve `sync_pos-1` as a duplicate ZC sync symbol. When enabled, initial synchronization first uses the two consecutive sync symbols for Schmidl-Cox-style coarse timing/modulo-CFO estimation, resolves CFO aliases with local ZC correlation, then refines the main sync. Requires the transmitter to use the same setting. |
-| `enable_cfo_training_sequence` | `bool` | `false` | Use the dedicated CFO training field at `sync_pos+1` to deambiguate CFO aliases. Frame timing still comes from ZC or the optional second sync symbol; CP/second-sync modulo CFO is estimated first, then the CFO field selects the alias closest to its repeated-training CFO estimate. Requires the transmitter to use the same setting. |
-| `cfo_training_period_samples` | `int` / samples | `16` | Repetition period of the CFO training field. It must divide `fft_size`; the unambiguous CFO span is approximately `+-sample_rate/(2*period)`. |
-| `sync_cfo_alias_search_range_hz` | `float` / Hz | `800000` | Maximum absolute CFO span covered by the sync alias resolver. The receiver converts this physical range to the required integer alias search span for the CP and second-sync modulo periods. Set `profiling_modules` to include `sync` to print per-alias peak comparisons. |
-| `sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
-| `bandwidth` | `float` / Hz | `50000000` | Analog bandwidth, usually same as `sample_rate`. |
-| `center_freq` | `float` / Hz | `2400000000` | RF center frequency. |
-| `rx_gain` | `float` / dB | `50` | RX gain. |
-| `rx_agc_enable` | `bool` | `false` | Enable hardware RX AGC. Tracking AGC uses the filtered `delay_spectrum` main peak to adjust USRP RX gain, applies stale-frame timestamp gating like alignment/frequency updates, and forces gain reduction when the sync symbol approaches ADC full scale. |
-| `rx_agc_low_threshold_db` | `float` / dB | `11.0` | Lower bound of the tracking AGC window. Gain is increased only when the filtered `delay_spectrum` main peak falls below this threshold. |
-| `rx_agc_high_threshold_db` | `float` / dB | `13.0` | Upper bound of the tracking AGC window. Gain is decreased only when the filtered `delay_spectrum` main peak rises above this threshold. |
-| `rx_agc_max_step_db` | `float` / dB | `3.0` | Maximum RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down. |
-| `rx_agc_update_frames` | `int` | `4` | Minimum processed-frame interval between tracking-stage AGC updates. Values below `1` are clamped to `1`. |
-| `rx_channel` | `int` | `0` | RX channel index. |
-| `tx_channel` | `int` | `0` | TX channel index used by UE uplink when duplex/uplink is enabled. Downlink-only UE runs do not require this TX path. |
-| `zc_root` | `int` | `29` | Zadoff-Chu root index. |
-| `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
-| `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
-| `output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
-| `bi_enabled` | `bool` | `true` | Enable the bistatic sensing processing pipeline. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
-| `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink center frequency and sends only in the configured uplink symbol window; `fdd` transmits continuously over the full frame on `uplink.center_freq`. |
-| `idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
-| `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | UE uplink settings. TDD uses `symbol_start`, `symbol_count`, and `guard_symbols` and ignores `center_freq`; FDD uses `center_freq` and ignores the TDD symbol-window fields, transmitting over the full frame. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
-| `ue_timing_advance` | `int` / samples | `63` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
-| `ertm_to_enable` | `bool` | `false` | Enable CPU-path eRTM TO estimation payload consumption and TO logs. UE computes configured-oversample zero-padded IFFT delay spectra from the BS-provided uplink channel and its local downlink channel before eRTM correlation, then applies centroid3 fractional-bin refinement to the correlation peak. |
-| `ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT oversampling factor. Values below `1` are clamped to `1`; values above `128` are clamped to `128`. Higher values improve delay-grid resolution at higher CPU/FFTW/memory cost. |
-| `sensing_delay_correction_mode` | `string` | `los_tracking` | UE `sensing` setting for the sensing delay correction source. `los_tracking` uses the local LoS sync/SFO tracking delay; `ertm_absolute` uses the latest CPU-path eRTM `TO_UE_samples` as the absolute sensing delay when available, then still applies runtime `ALGN` user trim. CUDAUE currently falls back to `los_tracking` for this mode. |
-| `ertm_dl_rf_delay_ns` | `float` / ns | `0.0` | Calibrated downlink RF-chain delay term used in the eRTM TO equations. |
-| `ertm_ul_rf_delay_ns` | `float` / ns | `0.0` | Calibrated uplink RF-chain delay term used in the eRTM TO equations. |
-| `ertm_debug_output_enabled` | `bool` | `false` | Enable UE-side eRTM debug ZeroMQ output for the center window of the configured-oversample BS uplink delay spectrum, UE downlink delay spectrum, eRTM correlation spectrum, TO-corrected debug spectra, and peak metadata. View with `scripts/plot_ertm_debug.py`. |
-| `ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames; keep this matched with BS when comparing logs. |
-| `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
-| `frame_queue_size` | `int` | `8` | Capacity of the UE RX frame queue. Values below `1` are clamped to `1`. |
-| `sync_queue_size` | `int` | `8` | Capacity of the UE sync-search batch queue. Values below `1` are clamped to `1`. |
-| `reset_hold_s` | `float` / s | `0.5` | How long invalid delay conditions must persist before the UE forces a hard reset back to sync search. Internally this is converted to a frame count from `samples_per_frame / sample_rate`. Values below `0` are clamped to `0.5`. |
-| `range_fft_size` | `int` | `1024` | Range FFT size. |
-| `doppler_fft_size` | `int` | `100` | Doppler FFT size. |
-| `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
-| `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame. The receiver uses the full known symbol as an additional channel-estimation anchor, keeps comb-pilot RE available for phase tracking, and excludes the symbol from payload LLR extraction. |
-| `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match the transmitter. |
-| `equalizer_mode` | `string` | `mmse` | Communication equalizer inverse. `zf` uses a floored channel-power denominator; `mmse` adds `noise_var` to that denominator to reduce noise enhancement on deep fades. |
-| `channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking for communication equalization on both CPU and CUDA demodulators. `disabled` keeps the sync-only channel estimate, while `pilot_phase` fits common and linear residual phase from comb pilots on each data symbol. |
-| `equalizer_mag_floor` | `float` | `1e-6` | Lower bound for channel magnitude squared during inversion, used by both `zf` and `mmse`. |
-| `channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual power/weight accepted by per-symbol tracking before falling back to the sync-only correction. |
-| `data_resource_blocks` | `object[]` | omitted | Receiver-side communication resource map. It answers: "which RE should be interpreted as payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set `[]` to extract no payload LLR at all. Use the same rectangles and `kind` values as the transmitter. Blocks with `kind: payload` produce payload LLR; blocks with `kind: sensing_pilot` are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root. |
-| `mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the BS side: absolute frame-symbol index, raw FFT-bin index, ZC sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, CFO training field rejected, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
-| `device_args` | `string` | `""` | USRP device args. |
-| `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
-| `wire_format_tx` | `string` | `sc16` | TX wire format for the optional UE uplink path, typically `sc16` or `sc8`. |
-| `rx_wire_format` | `string` | `sc16` | UE downlink RX wire format, typically `sc16` or `sc8`. |
-| `software_sync` | `bool` | `true` | Enable software synchronization tracking. |
-| `predictive_delay` | `bool` | `true` | Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP. |
-| `hardware_sync` | `bool` | `false` | Enable hardware synchronization. |
-| `hardware_sync_tty` | `string` | `/dev/ttyUSB0` | TTY device used by hardware sync controller. |
-| `ocxo_pi_switch_abs_error_ppm` | `float` | `0.0002` | Switch to slow-stage OCXO PI when absolute `error_ppm` stays below this threshold. |
-| `akf_enable` | `bool` | `true` | Enable adaptive Kalman filtering (AKF) on hardware-sync `error_ppm`. |
-| `akf_bootstrap_frames` | `int` | `64` | Cold-start frame count before AKF starts normal KF updates. |
-| `akf_innovation_window` | `int` | `64` | Innovation history window used for ACF/LS adaptation. |
-| `akf_max_lag` | `int` | `4` | Maximum innovation autocorrelation lag used in LS fitting. |
-| `akf_adapt_interval` | `int` | `64` | Frame interval for adaptive `Q/R` least-squares updates. |
-| `akf_gate_sigma` | `float` | `3.0` | Innovation gating threshold (sigma). |
-| `akf_tikhonov_lambda` | `float` | `1e-3` | Tikhonov regularization weight for LS adaptation. |
-| `akf_update_smooth` | `float` | `0.2` | Exponential smoothing factor for updated `Q/R`. |
-| `akf_q_wf_min` | `float` | `1e-10` | Lower bound of white-frequency-noise coefficient. |
-| `akf_q_wf_max` | `float` | `1e2` | Upper bound of white-frequency-noise coefficient. |
-| `akf_q_rw_min` | `float` | `1e-12` | Lower bound of random-walk-frequency-noise coefficient. |
-| `akf_q_rw_max` | `float` | `1e1` | Upper bound of random-walk-frequency-noise coefficient. |
-| `akf_r_min` | `float` | `1e-8` | Lower bound of observation-noise variance `R`. |
-| `akf_r_max` | `float` | `1e3` | Upper bound of observation-noise variance `R`. |
-| `ppm_adjust_factor` | `float` | `0.05` | Frequency offset compensation factor. |
-| `desired_peak_pos` | `int` | `20` | Target delay-peak position used by alignment logic. |
-| `bi_sensing_output_enabled` | `bool` | `true` | Enable the bistatic sensing ZeroMQ PUB output. The processing pipeline can remain enabled while this output is disabled. |
-| `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ bind IP for the bistatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
-| `bi_sensing_port` | `int` | `8889` | ZeroMQ PUB bind port for the bistatic sensing data stream. |
-| `ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for UE eRTM debug output. |
-| `ertm_debug_port` | `int` | `12362` | ZeroMQ PUB bind port for UE eRTM debug output. |
-| `channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
-| `channel_port` | `int` | `12348` | ZeroMQ PUB bind port for channel-estimation output. |
-| `pdf_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for PDP/PDF output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
-| `pdf_port` | `int` | `12349` | ZeroMQ PUB bind port for PDP/PDF output. |
-| `constellation_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for constellation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
-| `constellation_port` | `int` | `12346` | ZeroMQ PUB bind port for constellation output. |
-| `vofa_debug_ip` | `string` / IPv4 | `127.0.0.1` | Destination IP for VOFA+ debug output. |
-| `vofa_debug_port` | `int` | `12347` | Destination port for VOFA+ debug output. |
-| `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | UE uplink payload UDP bind IP. This is the input stream transmitted on the UE->BS uplink. |
-| `udp_input_port` | `int` | `50002` | UE uplink payload UDP bind port. |
-| `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | UE decoded downlink payload UDP destination IP. This is the output stream recovered from the BS->UE downlink. |
-| `udp_output_port` | `int` | `50001` | UE decoded downlink payload UDP destination port. |
-| `udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress. |
-| `udp_egress_pacer_target_mbps` | `float` | `0` | UDP egress pacer target payload rate. `0` enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate. |
-| `udp_egress_pacer_queue_packets` | `int` | `10240` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
-| `udp_egress_pacer_max_delay_ms` | `float` | `0` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
-| `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value. |
-| `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
-| `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. CUDA binaries ignore this mode. |
-| `measurement_mode` | `string` | `internal_prbs` | Measurement mode selector. Only `internal_prbs` is supported. Unsupported values disable measurement mode during config normalization. |
-| `measurement_run_id` | `string` | `""` | Run identifier written into measurement CSV summaries. |
-| `measurement_output_dir` | `string` | `""` | Output directory used by the CPU measurement summaries. |
-| `measurement_payload_bytes` | `int` | `1024` | Expected bytes per measurement payload. Values below the internal header size are clamped up. |
-| `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to rebuild deterministic PRBS measurement payloads. |
-| `measurement_packets_per_point` | `int` | `1` | Expected measurement payload count for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `cfo`, `sync`, `agc`, `align`, `snr`, `uplink`, and `ertm`; `all` enables every module. `cfo` gates CUDA CFO diagnostics, `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates, `uplink` gates `[UL-TX]` timing/waveform diagnostics, and `ertm` gates eRTM TO/payload/debug-spectrum diagnostics. Sensing delay-correction warnings and pending-alignment updates remain visible. |
-| `downlink_cpu_cores` | `int[]` | `[]` | UE downlink CPU cores: indices `0..2` bind `rx_proc`, `process_proc`, and `bit_processing_proc`. |
-| `demod_worker_cpu_cores` | `int[]` | `[]` | UE CPU demod worker cores for frame-level OFDM/LLR processing. Each configured core adds one worker; empty starts one unbound worker (configure dedicated cores for stable real-time performance). |
-| `ldpc_worker_cpu_cores` | `int[]` | `[]` | UE CPU LDPC decode worker cores. Each configured core adds one decode worker with its own LDPC decoder instance; empty starts one unbound worker. |
-| `sensing_cpu_cores` | `int[]` | `[]` | UE bistatic sensing CPU cores: index `0` binds `sensing_process_proc`. |
-| `uplink_cpu_cores` | `int[]` | `[]` | UE uplink CPU cores: indices `0..3` bind `UplinkTxEngine::_ldpc_encode_proc`, `_mod_proc`, `_tx_proc`, and `_udp_recv_proc`. |
-| `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
+| `radio.radio_backend` | `string` | `uhd` | Radio I/O backend. Use `uhd` for real USRPs or `sim` for the channel simulator. |
 
-Receiver-side note:
-* `data_resource_blocks` should normally match the transmitter exactly, including `kind`.
-* If a resource block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still win. The optional CFO training field at `sync_pos+1` is rejected for sensing-pilot and sensing-mask selection. Priority is `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
-* In dense mode, `symbol_stride` / runtime `STRD` is rejected if it would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary; ZC sync symbols remain valid sensing symbols.
-* In `compact_mask` mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by `mask_blocks`; `STRD` is ignored in this mode because the mask already defines the sampling pattern.
-* The compact payload format is the same as on the BS side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
+#### UE simulation
 
-Notes:
-* UE downlink RX AGC has two phases. During `SYNC_SEARCH`, the receiver resets gain to the configured `rx_gain` and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered `delay_spectrum` peak window defined by `rx_agc_low_threshold_db` and `rx_agc_high_threshold_db`.
-* Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the UE receiver forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.
-* A hard reset clears timing/frequency tracking state, flushes pending queues, resets the tracking AGC state, and returns the receiver to `SYNC_SEARCH`. `reset_hold_s` controls how long bad delay conditions must persist before this happens.
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `simulation.session` | `string` | `oisac_sim` | Shared simulator session namespace. |
+| `simulation.enable_comm_rx` | `bool` | `true` | Simulator produces the communication RX path. |
+| `simulation.enable_sensing_rx` | `bool` | `true` | Simulator produces sensing RX paths. |
+| `simulation.enable_uplink` | `bool` | `false` | Simulator routes the UE-to-BS uplink stream. |
+| `simulation.pacing_enabled` | `bool` | `true` | Pace simulator output to wall-clock sample time. |
+| `simulation.noise_power_dbfs` | `float` / dBFS | `-100` | AWGN power per RX channel. |
+| `simulation.snr_control_enable` | `bool` | `false` | Maintain `target_snr_db` by scaling clean simulated signal. |
+| `simulation.target_snr_db` | `float` / dB | `40` | Initial target SNR when SNR control is enabled. |
+| `simulation.control_port` | `int` | `10002` | ChannelSimulator control port. |
+| `simulation.cfo_hz` | `float` / Hz | `0` | Initial carrier offset. |
+| `simulation.sample_rate_offset_ppm` | `float` / ppm | `0` | UE sample-clock offset relative to BS. |
+| `simulation.timing_offset_samples` | `int` / samples | `0` | Constant integer sample delay. |
+| `simulation.array_spacing_m` | `float` / m | `0.04283` | Physical ULA spacing. |
+| `simulation.array_spacing_lambda` | `float` | `0.5` | Legacy ULA spacing in wavelengths. |
+| `simulation.ring_capacity_samples` | `int` | `262144` | Shared-memory ring capacity. |
+| `simulation.steering_override_file` | `string` | `""` | Optional steering matrix file. |
+| `simulation.comm_multipath_taps[]` | `object[]` | optional | Communication taps with `delay_samples`, `gain_db`, and `phase_deg`. |
+| `simulation.targets[]` | `object[]` | optional | Monostatic point scatterers. |
+| `simulation.bistatic_targets[]` | `object[]` | optional | Bistatic/communication point scatterers. |
+
+#### UE rf_sampling
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `rf_sampling.sample_rate` | `float` / Hz | `50000000` | Baseband sample rate. |
+| `rf_sampling.bandwidth` | `float` / Hz | `50000000` | Analog bandwidth. |
+| `rf_sampling.rx_gain` | `float` / dB | `10` | UE downlink RX gain. |
+| `rf_sampling.rx_agc_enable` | `bool` | `true` | Enable UE downlink hardware RX AGC. |
+| `rf_sampling.rx_agc_low_threshold_db` | `float` / dB | `14` | Increase RX gain below this filtered delay-spectrum threshold. |
+| `rf_sampling.rx_agc_high_threshold_db` | `float` / dB | `16` | Decrease RX gain above this threshold. |
+| `rf_sampling.rx_agc_max_step_db` | `float` / dB | `1` | Maximum RX gain step per AGC update. |
+| `rf_sampling.rx_agc_update_frames` | `int` | `4` | Minimum processed-frame interval between AGC updates. |
+
+#### UE usrp_device
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `usrp_device.device_args` | `string` | `addr=...` | USRP device args. |
+| `usrp_device.clock_source` | `string` | `external` | UE clock source: `internal`, `external`, or `gpsdo`. |
+
+#### UE ofdm_frame
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `ofdm_frame.fft_size` | `int` | `1024` | OFDM FFT size. |
+| `ofdm_frame.cp_length` | `int` / samples | `128` | Cyclic prefix length. |
+| `ofdm_frame.sync_pos` | `int` | `1` | Sync symbol index. |
+| `ofdm_frame.enable_sec_sync_symbol` | `bool` | `false` | Expect a duplicate ZC sync symbol at `sync_pos-1`. |
+| `ofdm_frame.enable_cfo_training_sequence` | `bool` | `false` | Use the `sync_pos+1` CFO training field to resolve CFO aliases. |
+| `ofdm_frame.cfo_training_period_samples` | `int` / samples | `16` | CFO training repetition period. |
+| `ofdm_frame.num_symbols` | `int` | `100` | OFDM symbols per frame. |
+| `ofdm_frame.sensing_symbol_num` | `int` | `100` | Symbols used for sensing. |
+| `ofdm_frame.frame_queue_size` | `int` | `32` | Demodulated RX frame queue capacity. |
+| `ofdm_frame.zc_root` | `int` | `29` | Zadoff-Chu root. |
+| `ofdm_frame.pilot_positions` | `int[]` | `[571,...]` | Comb-pilot subcarrier indices. |
+| `ofdm_frame.midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbols. |
+| `ofdm_frame.midframe_pilot_seed` | `int` | `1296453708` | Deterministic mid-frame BPSK pilot seed. |
+
+#### UE cuda
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `cuda.cuda_demod_pipeline_slots` | `int` | `3` | CUDA demodulation pipeline slots. |
+| `cuda.cuda_ldpc_decoder_backend` | `string` | `gpu` | CUDA demod LDPC decoder backend: `gpu` or `cpu`. |
+| `cuda.cuda_ldpc_worker_buffers` | `int` | `3` | CUDA LDPC async worker batch buffers. |
+| `cuda.cuda_ldpc_cross_frame_flush_frames` | `int` | `2` | Max frames accumulated before CUDA LDPC batch decode. |
+| `cuda.cuda_ldpc_cross_frame_flush_us` | `float` / us | `1000` | Max CUDA LDPC cross-frame batch wait time. |
+
+#### UE ldpc
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `ldpc.fixed_point` | `bool` | `false` | Use int16/Q16 CPU LDPC decode path. |
+| `ldpc.fixed_point_scale` | `int` | `16` | LLR scale before int16 saturation. |
+
+#### UE downlink
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `downlink.center_freq` | `float` / Hz | `2400000000` | UE downlink RF center frequency. |
+| `downlink.rx_wire_format` | `string` | `sc16` | UE downlink RX wire format. |
+| `downlink.rx_channel` | `int` | `0` | UE downlink RX channel index. |
+| `downlink.equalizer_mode` | `string` | `mmse` | Downlink equalizer inverse mode: `zf` or `mmse`. |
+| `downlink.channel_tracking_mode` | `string` | `pilot_phase` | Per-symbol comb-pilot tracking mode. |
+| `downlink.equalizer_mag_floor` | `float` | `1e-6` | Lower bound for `|H|^2` in channel inversion. |
+| `downlink.channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual weight before fallback. |
+| `downlink.arq_enabled` | `bool` | `false` | Enable downlink ARQ on the UE receiver. |
+| `downlink.arq_ordered_delivery` | `bool` | `false` | Buffer downlink packets for in-order UDP delivery. |
+| `downlink.arq_window_packets` | `int` | `32767` | Downlink ARQ receive/reorder window. |
+| `downlink.arq_feedback_interval_ms` | `int` / ms | `10` | Minimum interval between downlink ARQ ACK feedback packets. |
+
+#### UE uplink
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `uplink.enabled` | `bool` | `false` | Master switch for UE uplink/duplex. |
+| `uplink.duplex_mode` | `string` | `tdd` | Must match BS: `tdd` windowed uplink or `fdd` full-frame uplink. |
+| `uplink.center_freq` | `float` / Hz | `2500000000` | FDD-only uplink carrier. TDD uses the downlink center frequency. |
+| `uplink.idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform: `random_qpsk` or `zero`. |
+| `uplink.symbol_start` | `int` | `90` | TDD-only first uplink symbol. |
+| `uplink.symbol_count` | `int` | `10` | TDD-only uplink window length. |
+| `uplink.guard_symbols` | `int` | `1` | TDD-only leading guard symbols. |
+| `uplink.tx_gain` | `float` / dB | `0` | UE uplink TX gain. |
+| `uplink.tx_channel` | `int` | `0` | UE uplink TX channel index. |
+| `uplink.wire_format_tx` | `string` | `sc16` | UE uplink TX wire format. |
+| `uplink.ue_timing_advance` | `int` / samples | `63` | UE uplink transmit timing advance. |
+| `uplink.debug_self_channel` | `bool` | `false` | Estimate UE self-TX leakage channel from RX windows for `TADV` debugging. |
+| `uplink.ertm_to_enable` | `bool` | `false` | Enable eRTM TO payload consumption and TO logs. |
+| `uplink.ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT oversampling factor. |
+| `uplink.ertm_dl_rf_delay_ns` | `float` / ns | `0` | Calibrated downlink RF-chain delay for eRTM equations. |
+| `uplink.ertm_ul_rf_delay_ns` | `float` / ns | `0` | Calibrated uplink RF-chain delay for eRTM equations. |
+| `uplink.ertm_debug_output_enabled` | `bool` | `false` | Enable UE-side eRTM debug ZMQ spectra. |
+| `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM report cadence; keep matched with BS. |
+| `uplink.arq_enabled` | `bool` | `false` | Enable uplink ARQ on the UE transmitter. |
+| `uplink.arq_window_packets` | `int` | `32767` | Uplink ARQ outstanding packet window. |
+| `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Uplink ARQ retransmission timeout. |
+| `uplink.arq_max_retries` | `int` | `5` | Max uplink retransmission retries; `0` means unlimited within the window. |
+
+#### UE sync_tracking
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `sync_tracking.sync_queue_size` | `int` | `32` | Sync-search batch queue capacity. |
+| `sync_tracking.sync_cfo_alias_search_range_hz` | `float` / Hz | `800000` | CFO range covered by the sync alias resolver. |
+| `sync_tracking.reset_hold_s` | `float` / s | `0.5` | Invalid-delay duration before a hard reset to sync search. |
+| `sync_tracking.software_sync` | `bool` | `true` | Enable software sync tracking. |
+| `sync_tracking.predictive_delay` | `bool` | `true` | Use CFO-based predictive delay compensation. |
+| `sync_tracking.hardware_sync` | `bool` | `false` | Enable hardware synchronization mode. |
+| `sync_tracking.hardware_sync_tty` | `string` | `/dev/ttyUSB0` | Serial device for the hardware sync controller. |
+| `sync_tracking.ocxo_pi_kp_fast` | `float` | `30` | Fast-stage OCXO PI proportional gain. |
+| `sync_tracking.ocxo_pi_ki_fast` | `float` | `1` | Fast-stage OCXO PI integral gain. |
+| `sync_tracking.ocxo_pi_kp_slow` | `float` | `30` | Slow-stage OCXO PI proportional gain. |
+| `sync_tracking.ocxo_pi_ki_slow` | `float` | `0.05` | Slow-stage OCXO PI integral gain. |
+| `sync_tracking.ocxo_pi_switch_abs_error_ppm` | `float` / ppm | `0.0002` | Error threshold for switching to slow OCXO PI stage. |
+| `sync_tracking.ocxo_pi_switch_hold_s` | `float` / s | `60` | Hold time below threshold before switching stages. |
+| `sync_tracking.ocxo_pi_max_step_fast_ppm` | `float` / ppm | `0.01` | Fast-stage maximum OCXO adjustment per update. |
+| `sync_tracking.ocxo_pi_max_step_slow_ppm` | `float` / ppm | `0.01` | Slow-stage maximum OCXO adjustment per update. |
+| `sync_tracking.ocxo_pi_max_step_ppm` | `float` / ppm | optional | Legacy alias applied to both fast and slow max-step fields. |
+| `sync_tracking.akf_enable` | `bool` | `true` | Enable adaptive Kalman filter on hardware-sync `error_ppm`. |
+| `sync_tracking.akf_bootstrap_frames` | `int` | `64` | Cold-start frames before normal AKF updates. |
+| `sync_tracking.akf_innovation_window` | `int` | `64` | Innovation history window for adaptation. |
+| `sync_tracking.akf_max_lag` | `int` | `4` | Maximum innovation autocorrelation lag. |
+| `sync_tracking.akf_adapt_interval` | `int` | `64` | Frame interval for adaptive `Q/R` updates. |
+| `sync_tracking.akf_gate_sigma` | `float` | `3` | Innovation gate in sigma units. |
+| `sync_tracking.akf_tikhonov_lambda` | `float` | `1e-3` | Tikhonov regularization for LS adaptation. |
+| `sync_tracking.akf_update_smooth` | `float` | `0.2` | Exponential smoothing for updated `Q/R`. |
+| `sync_tracking.akf_q_wf_min` | `float` | `1e-10` | White-frequency-noise lower bound. |
+| `sync_tracking.akf_q_wf_max` | `float` | `1e2` | White-frequency-noise upper bound. |
+| `sync_tracking.akf_q_rw_min` | `float` | `1e-12` | Random-walk-frequency-noise lower bound. |
+| `sync_tracking.akf_q_rw_max` | `float` | `1e1` | Random-walk-frequency-noise upper bound. |
+| `sync_tracking.akf_r_min` | `float` | `1e-8` | Observation-noise variance lower bound. |
+| `sync_tracking.akf_r_max` | `float` | `1e3` | Observation-noise variance upper bound. |
+| `sync_tracking.desired_peak_pos` | `int` | `20` | Target delay-peak position for alignment logic. |
+
+#### UE sensing
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `sensing.sensing_delay_correction_mode` | `string` | `los_tracking` | Bistatic sensing delay correction source: `los_tracking` or `ertm_absolute`. |
+| `sensing.bi_enabled` | `bool` | `true` | Enable bistatic sensing processing. |
+| `sensing.range_fft_size` | `int` | `1024` | Range FFT size. |
+| `sensing.doppler_fft_size` | `int` | `100` | Doppler FFT size. |
+| `sensing.view_range_bins` | `int` | `0` | Backend RD view width; `0` means full range. |
+| `sensing.view_doppler_bins` | `int` | `0` | Backend RD view height; `0` means full Doppler size. |
+| `sensing.output_mode` | `string` | `dense` | `dense` full-buffer output or `compact_mask` selected-RE output. |
+| `sensing.on_wire_format` | `string` | `complex_float32` | Sensing payload wire format. |
+| `sensing.backend_processing_enabled` | `bool` | `false` | Publish backend RD/CFAR/micro-Doppler sidecars when supported. |
+| `sensing.symbol_stride` | `int` | `20` | Default dense-mode STRD applied at startup. |
+
+#### UE resource_preview
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `resource_preview.data_resource_blocks[]` | `object[]` | optional | Payload / sensing-pilot RE rectangles; each item has `kind`, `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
+| `resource_preview.mask_blocks[]` | `object[]` | optional | Compact sensing RE rectangles with `symbol_start`, `symbol_count`, `subcarrier_start`, and `subcarrier_count`. |
+
+#### UE measurement
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `measurement.measurement_enable` | `bool` | `false` | Enable internal PRBS measurement checking. |
+| `measurement.measurement_mode` | `string` | `internal_prbs` | Measurement checker mode. |
+| `measurement.measurement_run_id` | `string` | `""` | Run ID written to measurement CSV summaries. |
+| `measurement.measurement_output_dir` | `string` | `""` | Output directory for measurement CSV summaries. |
+| `measurement.measurement_payload_bytes` | `int` / bytes | `1024` | Expected bytes per measurement payload. |
+| `measurement.measurement_prbs_seed` | `int` | `0x5A` | Base seed for rebuilding deterministic PRBS payloads. |
+| `measurement.measurement_packets_per_point` | `int` | `1` | Expected packets for one measurement epoch. |
+| `measurement.measurement_max_packets_per_frame` | `int` | `1` | Max measurement packets checked per frame; `0` means unlimited. |
+
+#### UE network_output
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `network_output.udp_input_ip` | `string` / IPv4 | `0.0.0.0` | UE uplink payload UDP bind IP. |
+| `network_output.udp_input_port` | `int` | `50002` | UE uplink payload UDP bind port. |
+| `network_output.udp_output_ip` | `string` / IPv4 | `""` | UE decoded downlink UDP destination IP; empty uses `runtime.default_out_ip`. |
+| `network_output.udp_output_port` | `int` | `50001` | UE decoded downlink UDP destination port. |
+| `network_output.udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded UDP egress. |
+| `network_output.udp_egress_pacer_target_mbps` | `float` / Mbps | `0` | Egress pacer target rate; `0` auto-estimates. |
+| `network_output.udp_egress_pacer_queue_packets` | `int` | `10240` | Egress pacer queue capacity. |
+| `network_output.udp_egress_pacer_max_delay_ms` | `float` / ms | `0` | Max queued packet age; `0` disables age drops. |
+| `network_output.bi_sensing_output_enabled` | `bool` | `true` | Enable bistatic sensing ZMQ output. |
+| `network_output.bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | Bistatic sensing/control ZMQ bind IP. |
+| `network_output.bi_sensing_port` | `int` | `8889` | Bistatic sensing PUB port. |
+| `network_output.channel_ip` | `string` / IPv4 | `0.0.0.0` | Channel-estimate PUB IP. |
+| `network_output.channel_port` | `int` | `12348` | Channel-estimate PUB port. |
+| `network_output.pdf_ip` | `string` / IPv4 | `0.0.0.0` | Delay-spectrum PUB IP. |
+| `network_output.pdf_port` | `int` | `12349` | Delay-spectrum PUB port. |
+| `network_output.constellation_ip` | `string` / IPv4 | `0.0.0.0` | Constellation PUB IP. |
+| `network_output.constellation_port` | `int` | `12346` | Constellation PUB port. |
+| `network_output.self_channel_ip` | `string` / IPv4 | `0.0.0.0` | UE self-channel debug PUB IP. |
+| `network_output.self_channel_port` | `int` | `12350` | UE self-channel debug PUB port. |
+| `network_output.self_pdf_ip` | `string` / IPv4 | `0.0.0.0` | UE self-delay-spectrum debug PUB IP. |
+| `network_output.self_pdf_port` | `int` | `12351` | UE self-delay-spectrum debug PUB port. |
+| `network_output.ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | UE eRTM debug PUB IP. |
+| `network_output.ertm_debug_port` | `int` | `12362` | UE eRTM debug PUB port. |
+| `network_output.control_port` | `int` | `10001` | ZMQ ROUTER port for runtime control. |
+
+#### UE cpu_cores
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `cpu_cores.downlink_cpu_cores` | `int[]` | `[1,2,3]` | UE downlink cores: RX, processing, bit processing. |
+| `cpu_cores.demod_worker_cpu_cores` | `int[]` | `[]` | UE CPU demod worker cores; empty starts one unbound worker. |
+| `cpu_cores.ldpc_worker_cpu_cores` | `int[]` | `[]` | UE CPU LDPC decode worker cores; empty starts one unbound worker. |
+| `cpu_cores.sensing_cpu_cores` | `int[]` | `[4]` | UE bistatic sensing cores. |
+| `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | UE uplink cores: LDPC encode, modulation, TX send, UDP receive. |
+| `cpu_cores.main_cpu_core` | `int` | `-1` | Main-thread CPU core; `-1` disables binding. |
+
+#### UE runtime
+
+| Path | Type/Unit | Typical Value | Description |
+| :--- | :--- | :--- | :--- |
+| `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP and VOFA+ outputs when specific IP fields are empty. |
+| `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug destination IP; empty uses `default_out_ip`. |
+| `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug destination port. |
+| `runtime.profiling_modules` | `string` | `""` | Comma-separated modules such as `demodulation`, `cfo`, `sync`, `agc`, `align`, `snr`, `arq`, `uplink`, `ertm`, or `all`. |
+
+Resource-map notes:
+* `resource_preview.data_resource_blocks` should normally match between BS and UE, including `kind`.
+* Built-in ZC sync symbols, the optional CFO training field, comb pilots, and mid-frame BPSK pilots take precedence over configured resource blocks.
+* `resource_preview.mask_blocks` controls compact sensing export only. In `output_mode=compact_mask`, runtime `STRD` is ignored because the mask defines the sampling pattern.
+* Compact sensing payloads begin with `CompactSensingFrameHeader`, followed by fixed-order raw `complex<float>` samples.

@@ -288,14 +288,33 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <pre><code class="language-bash">python3 ./scripts/plot_bi_sensing_fast.py
 </code></pre>
 <p>This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.</p>
-<h3 id="7-calibrate-sensing-channel-response">7. Calibrate sensing channel response</h3>
+<h3 id="7-calibrate-system-delay">7. Calibrate system delay</h3>
+<p>Run the system-delay calibration before <code>Calibrate Hsys</code>, because the response calibration assumes the sensing RX frame is already aligned to the direct-path timing reference.</p>
+<p>First reduce transmit power for the direct connection. Lower <code>downlink.tx_gain</code> in <code>build/BS.yaml</code> and, if needed, insert a suitable attenuator so the sensing RX path is not saturated. Then connect the transmit RF output directly to the sensing RX input for the channel being measured, and keep that cable path stable during the test.</p>
+<p>Enable system-delay estimation for only the sensing channel being measured:</p>
+<pre><code class="language-yaml">sensing:
+  rx_channels:
+    - usrp_channel: 1
+      alignment: 63
+      enable_system_delay_estimation: true
+</code></pre>
+<p>Start the BS backend from the <code>build/</code> directory. In this mode, the selected sensing channel disables the normal sensing pipeline and periodically runs a ZC-based delay test. Watch the BS console for <code>[SYSDLY CH &lt;n&gt;]</code> on CPU builds or <code>[CUDA SYSDLY CH &lt;n&gt;]</code> on CUDA builds. The CPU log prints <code>alignment_suggest=&lt;value&gt;</code>; the CUDA log prints <code>suggest=&lt;value&gt;</code>.</p>
+<p>When the suggested value is stable, stop the backend, write that value back to the same channel's <code>alignment</code> field in <code>build/BS.yaml</code>, and turn the estimation mode off:</p>
+<pre><code class="language-yaml">sensing:
+  rx_channels:
+    - usrp_channel: 1
+      alignment: &lt;suggested value&gt;
+      enable_system_delay_estimation: false
+</code></pre>
+<p>Repeat the same direct-connection measurement for every sensing channel. For multichannel setups, move the RF direct connection to the next sensing RX path and update that channel's own <code>alignment</code>; do not reuse one channel's value for another RF path.</p>
+<h3 id="8-calibrate-sensing-channel-response">8. Calibrate sensing channel response</h3>
 <p>Before calibration, connect the sensing RF path directly: connect the transmit RF output to the corresponding sensing RX input and keep the connection stable during calibration.</p>
 <p>If the transmit power is high, reduce the transmit power first. If needed, insert a suitable attenuator in the direct RF path to avoid RX saturation. The attenuator should be as flat as possible across the signal bandwidth; otherwise its in-band ripple will be included in the calibration result.</p>
 <p>For monostatic sensing, start the BS backend and the monostatic sensing frontend, select the sensing channel you want to calibrate in the viewer, then click <code>Calibrate Hsys</code>. For multichannel monostatic setups, repeat this for each channel that needs its own RF path calibration.</p>
 <p>For bistatic sensing, start the BS and UE backends, open the bistatic sensing frontend, then click <code>Calibrate Hsys</code> in the bistatic viewer while the RF path is directly connected.</p>
 <p>Wait for the backend log to report that calibration has completed and the calibration file has been saved. The current run will immediately use the new response calibration. On later launches, the backend automatically loads the matching calibration file; if no matching file is found, sensing continues without calibration and prints a notice.</p>
 <p>After calibration is complete, restore the normal antenna or experiment connection before continuing OTA measurements.</p>
-<h3 id="8-web-config-console">8. Web Config Console</h3>
+<h3 id="9-web-config-console">9. Web Config Console</h3>
 <p>For remote-friendly configuration editing and process control, run:</p>
 <pre><code class="language-bash">python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 </code></pre>
@@ -328,14 +347,14 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <li>Because the console can launch arbitrary commands entered in the web UI, bind it only to trusted networks or keep the default <code>127.0.0.1</code>.</li>
 </ul>
 <h2 id="parameter-reference">Parameter Reference</h2>
+<p>The runtime config is hierarchical YAML. The tables below use full YAML paths so similarly named fields, such as <code>downlink.arq_enabled</code> and <code>uplink.arq_enabled</code>, stay unambiguous. Optional sections can be omitted; missing values use the parser defaults and the sample files under <code>config/</code> show common hardware and simulator presets.</p>
 <h3 id="bs">BS</h3>
-<p><code>BS</code> is configured through <code>BS.yaml</code>.
-Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code>config/BS_B210_Duplex.yaml</code> as a starting template.</p>
-<p><code>BS.yaml</code> parameter reference:</p>
+<p><code>BS</code> reads <code>BS.yaml</code> from its current working directory. Start from <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, the duplex presets, or the simulator presets.</p>
+<h4 id="bs-radio">BS radio</h4>
 <table>
 <thead>
 <tr>
-<th style="text-align:left">Key</th>
+<th style="text-align:left">Path</th>
 <th style="text-align:left">Type/Unit</th>
 <th style="text-align:left">Typical Value</th>
 <th style="text-align:left">Description</th>
@@ -343,472 +362,744 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 </thead>
 <tbody>
 <tr>
-<td style="text-align:left"><code>fft_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">OFDM FFT size.</td>
+<td style="text-align:left"><code>radio.radio_backend</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>uhd</code></td>
+<td style="text-align:left">Radio I/O backend. Use <code>uhd</code> for real USRPs or <code>sim</code> for the shared-memory channel simulator.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-simulation">BS simulation</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>simulation.session</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>oisac_sim</code></td>
+<td style="text-align:left">Shared simulator session namespace used by BS, UE, and <code>ChannelSimulator</code>.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cp_length</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>128</code></td>
-<td style="text-align:left">Cyclic prefix length (samples).</td>
+<td style="text-align:left"><code>simulation.enable_comm_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Simulator produces the communication RX path for UE.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sync_pos</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">Sync symbol index in one frame.</td>
+<td style="text-align:left"><code>simulation.enable_sensing_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Simulator produces monostatic sensing RX paths.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>simulation.enable_uplink</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Reserve <code>sync_pos-1</code> as a duplicate ZC sync symbol. When enabled, the receiver uses the two consecutive sync symbols for Schmidl-Cox-style coarse timing/modulo-CFO estimation, resolves CFO aliases by local ZC correlation around <code>sync_pos</code>, then refines the main sync. Requires <code>sync_pos &gt;= 1</code>.</td>
+<td style="text-align:left">Simulator routes the UE-to-BS uplink stream.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>simulation.pacing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Pace simulator output to wall-clock sample time.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.noise_power_dbfs</code></td>
+<td style="text-align:left"><code>float</code> / dBFS</td>
+<td style="text-align:left"><code>-70</code></td>
+<td style="text-align:left">AWGN power per RX channel; very low values effectively disable noise.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.snr_control_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Reserve <code>sync_pos+1</code> as a dedicated repeated CFO training field. The receiver still uses ZC or the optional second sync symbol for frame timing and modulo CFO first; when this field is enabled, it is used only to deambiguate the CFO alias. TX/RX must use the same setting.</td>
+<td style="text-align:left">Scale the clean simulated signal before AWGN to maintain <code>target_snr_db</code>.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cfo_training_period_samples</code></td>
+<td style="text-align:left"><code>simulation.target_snr_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>40</code></td>
+<td style="text-align:left">Initial SNR target when SNR control is enabled.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10002</code></td>
+<td style="text-align:left">ChannelSimulator ZMQ control port for runtime SNR commands.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.cfo_hz</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Initial carrier offset injected before UE RX correction.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.sample_rate_offset_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE sample-clock offset relative to the BS clock.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.timing_offset_samples</code></td>
 <td style="text-align:left"><code>int</code> / samples</td>
-<td style="text-align:left"><code>16</code></td>
-<td style="text-align:left">Repetition period of the CFO training field. It must divide <code>fft_size</code>; the unambiguous CFO span is approximately <code>+-sample_rate/(2*period)</code>.</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Constant integer sample delay injected on RX.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sample_rate</code></td>
+<td style="text-align:left"><code>simulation.array_spacing_m</code></td>
+<td style="text-align:left"><code>float</code> / m</td>
+<td style="text-align:left"><code>0.04283</code></td>
+<td style="text-align:left">Physical ULA element spacing; set <code>&lt;=0</code> to use <code>array_spacing_lambda</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_lambda</code></td>
+<td style="text-align:left"><code>float</code> / lambda</td>
+<td style="text-align:left"><code>0.5</code></td>
+<td style="text-align:left">Legacy ULA spacing in wavelengths.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.ring_capacity_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>262144</code></td>
+<td style="text-align:left">Per-stream shared-memory ring capacity.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.steering_override_file</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Optional steering matrix file; empty uses ULA steering.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.comm_multipath_taps[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Communication tapped-delay-line taps with <code>delay_samples</code>, <code>gain_db</code>, and <code>phase_deg</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Monostatic point scatterers with <code>range_m</code>, <code>velocity_mps</code>, <code>gain_db</code>, and <code>angle_deg</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.bistatic_targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Bistatic/communication point scatterers with the same target fields.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-rf-sampling">BS rf_sampling</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>rf_sampling.sample_rate</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
 <td style="text-align:left"><code>50000000</code></td>
 <td style="text-align:left">Baseband sample rate.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>bandwidth</code></td>
+<td style="text-align:left"><code>rf_sampling.bandwidth</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
 <td style="text-align:left"><code>50000000</code></td>
-<td style="text-align:left">Analog bandwidth, usually same as <code>sample_rate</code>.</td>
+<td style="text-align:left">Analog bandwidth, usually matching <code>sample_rate</code>.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-usrp-device">BS usrp_device</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>usrp_device.device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>addr=...</code></td>
+<td style="text-align:left">Shared USRP device args fallback.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-clock-time">BS clock_time</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>clock_time.clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>external</code></td>
+<td style="text-align:left">Global clock source: <code>internal</code>, <code>external</code>, or <code>gpsdo</code>.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>center_freq</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>2400000000</code></td>
-<td style="text-align:left">RF center frequency.</td>
+<td style="text-align:left"><code>clock_time.time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal</code></td>
+<td style="text-align:left">Global time/PPS source; empty follows <code>clock_source</code>.</td>
 </tr>
+</tbody>
+</table>
+<h4 id="bs-ofdm-frame">BS ofdm_frame</h4>
+<table>
+<thead>
 <tr>
-<td style="text-align:left"><code>tx_gain</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>30</code></td>
-<td style="text-align:left">TX gain.</td>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
 </tr>
+</thead>
+<tbody>
 <tr>
-<td style="text-align:left"><code>tx_channel</code></td>
+<td style="text-align:left"><code>ofdm_frame.fft_size</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">TX channel index.</td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">OFDM FFT size.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>zc_root</code></td>
+<td style="text-align:left"><code>ofdm_frame.cp_length</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>128</code></td>
+<td style="text-align:left">Cyclic prefix length.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.sync_pos</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>29</code></td>
-<td style="text-align:left">Zadoff-Chu root index.</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Sync symbol index inside each frame.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>num_symbols</code></td>
+<td style="text-align:left"><code>ofdm_frame.enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Reserve <code>sync_pos-1</code> as a duplicate ZC sync symbol.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Reserve <code>sync_pos+1</code> as a repeated CFO training field.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.cfo_training_period_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">Repetition period of the CFO training field; must divide <code>fft_size</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.num_symbols</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>100</code></td>
 <td style="text-align:left">Number of OFDM symbols per frame.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>output_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>dense</code></td>
-<td style="text-align:left">Sensing output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>cuda_mod_pipeline_slots</code></td>
+<td style="text-align:left"><code>ofdm_frame.sensing_symbol_num</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>2</code></td>
-<td style="text-align:left">Number of CUDA modulation pipeline slots. Values below <code>1</code> are clamped to <code>1</code>.</td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">Number of symbols used in sensing processing.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>pilot_positions</code></td>
+<td style="text-align:left"><code>ofdm_frame.zc_root</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>29</code></td>
+<td style="text-align:left">Zadoff-Chu root for sync/preamble.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.pilot_positions</code></td>
 <td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[571,631,...,451]</code></td>
-<td style="text-align:left">Configurable comb-pilot subcarrier indices spread across the occupied band.</td>
+<td style="text-align:left"><code>[571,...]</code></td>
+<td style="text-align:left">Comb-pilot subcarrier indices.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>midframe_pilot_symbols</code></td>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_symbols</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">Optional mid-frame BPSK pilot symbol indices inside each frame, such as <code>[25,50,75]</code>. These symbols are excluded from payload mapping; configured comb-pilot RE keep the comb-pilot sequence for phase tracking, while the remaining RE in those symbols use deterministic BPSK.</td>
+<td style="text-align:left">Optional in-frame BPSK pilot symbol indices.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>midframe_pilot_seed</code></td>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_seed</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>1296453708</code></td>
-<td style="text-align:left">Deterministic BPSK pilot seed. It must match between <code>BS.yaml</code> and <code>UE.yaml</code>.</td>
+<td style="text-align:left">Deterministic mid-frame BPSK pilot seed; must match TX/RX.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-cuda">BS cuda</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_mod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA modulation pipeline slots; values below <code>1</code> are clamped.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-ldpc">BS ldpc</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Use the int16/Q16 layered-NMS CPU decoder instead of float32.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>data_resource_blocks</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">omitted</td>
-<td style="text-align:left">Optional communication resource map. It answers: &quot;which RE are allowed to carry payload?&quot; Omit the key to keep the legacy behavior, where every non-reserved-sync, non-comb-pilot RE carries payload. Set <code>[]</code> to disable payload RE entirely. Each block is a rectangle with <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, <code>subcarrier_count</code>, and optional <code>kind</code>. <code>kind: payload</code> means those RE carry real payload. <code>kind: sensing_pilot</code> means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-reserved-sync, non-comb-pilot, non-mid-frame-BPSK-pilot RE outside <code>payload</code> blocks transmit pre-generated QPSK.</td>
+<td style="text-align:left"><code>ldpc.fixed_point_scale</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">Power-of-two LLR scale before int16 saturation in fixed-point mode.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-downlink">BS downlink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>downlink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2400000000</code></td>
+<td style="text-align:left">BS downlink RF center frequency.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>mask_blocks</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">omitted</td>
-<td style="text-align:left">Optional compact sensing resource map. It answers: &quot;which RE should be exported on the sensing output path?&quot; It is used only when <code>output_mode=compact_mask</code>; in <code>dense</code> mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. ZC sync symbols, comb-pilot, and mid-frame BPSK pilot RE are allowed here; the optional CFO training field is rejected because it is not a valid sensing symbol. Overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled.</td>
+<td style="text-align:left"><code>downlink.tx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>60</code></td>
+<td style="text-align:left">BS downlink TX gain.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>device_args</code></td>
+<td style="text-align:left"><code>downlink.tx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS downlink TX channel index.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.tx_device_args</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Shared USRP args fallback for TX/RX.</td>
+<td style="text-align:left">TX-specific device args; empty uses <code>usrp_device.device_args</code>.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>tx_device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">TX-specific USRP args.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Default sensing RX USRP args.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal/external/gpsdo</code></td>
-<td style="text-align:left">Global clock source.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>time_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Global time/PPS source; empty means follow <code>clock_source</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_clock_source</code></td>
+<td style="text-align:left"><code>downlink.tx_clock_source</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
 <td style="text-align:left">TX clock source override.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>tx_time_source</code></td>
+<td style="text-align:left"><code>downlink.tx_time_source</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
 <td style="text-align:left">TX time source override.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Default sensing RX clock source override.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_time_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Default sensing RX time source override.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>wire_format_tx</code></td>
+<td style="text-align:left"><code>downlink.wire_format_tx</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
 <td style="text-align:left">TX wire format, typically <code>sc16</code> or <code>sc8</code>.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_channel</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">BS uplink RX channel index on the shared TX/RX USRP.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_wire_format</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">BS uplink RX wire format, typically <code>sc16</code> or <code>sc8</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_wire_format</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">BS sensing RX default wire format, typically <code>sc16</code> or <code>sc8</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">BS downlink payload UDP bind IP. This is the input stream transmitted on the BS-&gt;UE downlink.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50000</code></td>
-<td style="text-align:left">BS downlink payload UDP bind port.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">BS decoded uplink payload UDP destination IP. This is the output stream recovered from UE-&gt;BS uplink.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50003</code></td>
-<td style="text-align:left">BS decoded uplink payload UDP destination port.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_enabled</code></td>
+<td style="text-align:left"><code>downlink.arq_enabled</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress.</td>
+<td style="text-align:left">Enable downlink ARQ on the BS transmitter.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>udp_egress_pacer_target_mbps</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">UDP egress pacer target payload rate. <code>0</code> enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>downlink.arq_window_packets</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10240</code></td>
-<td style="text-align:left">Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet.</td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">Downlink ARQ outstanding packet window.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">Maximum queued packet age before the egress pacer drops it. Set <code>0</code> to disable age-based drops.</td>
+<td style="text-align:left"><code>downlink.arq_retransmit_timeout_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">Downlink ARQ retransmission timeout.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>duplex_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">Duplexing scheme. <code>tdd</code> time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; <code>fdd</code> keeps BS downlink active while UE uplink uses <code>uplink.center_freq</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink</code></td>
-<td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>, <code>symbol_count=10</code>, <code>guard_symbols=1</code>, <code>center_freq=2500000000</code></td>
-<td style="text-align:left">Uplink/duplex settings. In TDD, <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> define the DL/UL boundary in OFDM symbols, and <code>center_freq</code> is ignored. In FDD, <code>center_freq</code> defines the UE-&gt;BS carrier, while <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Uplink setting. Enable hardware RX AGC on the BS uplink receiver. The hardware Duplex templates enable it by default; the fixed <code>uplink.rx_gain</code> value is used as the initial gain.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>14.0</code></td>
-<td style="text-align:left">Uplink setting. Lower bound of the uplink tracking AGC window. Gain is increased only when the filtered uplink delay-spectrum peak falls below this threshold.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>16.0</code></td>
-<td style="text-align:left">Uplink setting. Upper bound of the uplink tracking AGC window. Gain is decreased only when the filtered uplink delay-spectrum peak rises above this threshold.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>1.0</code></td>
-<td style="text-align:left">Uplink setting. Maximum BS uplink RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>downlink.arq_max_retries</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">Uplink setting. Minimum processed-uplink-frame interval between tracking-stage AGC updates. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
-<td style="text-align:left"><code>int</code> / samples</td>
-<td style="text-align:left"><code>63</code></td>
-<td style="text-align:left">BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with <code>DUTI</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_to_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU-path eRTM TO estimation. BS embeds its latest frequency-domain uplink channel estimate and runtime <code>DUTI</code> into internal downlink LDPC payloads; UE consumes those payloads and logs centroid3-refined TO estimates instead of forwarding them to UDP.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
-<td style="text-align:left"><code>int</code> / frames</td>
-<td style="text-align:left"><code>32</code></td>
-<td style="text-align:left">BS eRTM payload/report cadence in downlink TX frames. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>mono_sensing_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZMQ listen IP for the monostatic sensing stream and control channel. Use <code>0.0.0.0</code> to accept remote viewers, or <code>127.0.0.1</code> for local-only access.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>mono_sensing_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8888</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for the monostatic sensing stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_channel_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for the BS uplink channel-estimation debug stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_channel_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12358</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for the BS uplink channel-estimation debug stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_pdf_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for the BS uplink delay-profile debug stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_pdf_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12359</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for the BS uplink delay-profile debug stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_constellation_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for the BS uplink constellation debug stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_constellation_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12356</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for the BS uplink constellation debug stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_channel_count</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">Number of sensing RX channels (<code>0</code> disables sensing RX).</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_channels</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">Per-channel sensing RX settings (see table below).</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_circular_buffer_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>32</code></td>
-<td style="text-align:left">Capacity of the modulated-frame queue feeding TX.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>paired_frame_queue_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">Capacity of each sensing channel's RX/TX frame-pairing queues. Keep this above <code>tx_circular_buffer_size</code> so it can retain TX references while RX startup, network buffering, and alignment complete. A continuously full queue after startup indicates insufficient sensing-processing throughput rather than a need for unlimited buffering.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>control_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>9999</code></td>
-<td style="text-align:left">ZeroMQ ROUTER bind port for the bidirectional control channel (commands in, params/heartbeat out).</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU internal measurement mode. When enabled, <code>BS</code> generates deterministic PRBS payloads instead of listening on <code>udp_input_*</code>, and <code>UE</code> switches decoded measurement payloads into BER/BLER/EVM accounting. CUDA binaries ignore this mode.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal_prbs</code></td>
-<td style="text-align:left">Measurement mode selector. Only <code>internal_prbs</code> is supported. Unsupported values disable measurement mode during config normalization.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_run_id</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Run identifier written into measurement CSV summaries.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_output_dir</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Output directory used by the CPU measurement summaries.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_payload_bytes</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">Bytes per internally generated measurement payload. Values below the internal header size are clamped up.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_prbs_seed</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0x5A</code></td>
-<td style="text-align:left">Base seed used to derive deterministic PRBS payload contents.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_packets_per_point</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">Number of measurement payloads sent for each online <code>MRST</code> epoch. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>profiling_modules</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, <code>sensing_proc</code>, <code>agc</code>, <code>uplink</code>, and <code>ertm</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>downlink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">BS downlink CPU cores: indices <code>0..3</code> bind <code>_tx_proc</code>, <code>_modulation_proc</code>, <code>_ldpc_encode_proc</code>, and <code>_udp_recv_proc</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">BS uplink CPU cores: indices <code>0</code>, <code>1</code>, and <code>2</code> bind RX sample ingest, OFDM/LLR signal processing, and LDPC decode + UDP output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>main_cpu_core</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">Main-thread CPU core.</td>
+<td style="text-align:left"><code>5</code></td>
+<td style="text-align:left">Max downlink retransmission retries; <code>0</code> means unlimited within the window.</td>
 </tr>
 </tbody>
 </table>
-<p>Quick mental model:</p>
-<ul>
-<li><code>data_resource_blocks</code> decides where communication data goes.</li>
-<li><code>mask_blocks</code> decides which RE are exported for compact sensing.</li>
-<li>The first affects payload mapping; the second affects sensing output only.</li>
-</ul>
-<p>If <code>data_resource_blocks</code> is enabled, copy the same rectangles and <code>kind</code> values into <code>UE.yaml</code>. If a block overlaps <code>sync_pos</code>, the optional second sync symbol at <code>sync_pos-1</code>, <code>midframe_pilot_symbols</code>, or <code>pilot_positions</code>, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still take precedence. The optional CFO training field at <code>sync_pos+1</code> is reserved for CFO acquisition/deambiguation and is not a valid sensing-pilot or sensing-mask symbol. Priority is always <code>ZC sync symbols &gt; CFO training field &gt; comb-pilot RE &gt; mid-frame BPSK pilot &gt; sensing_pilot &gt; payload/random QPSK</code>.</p>
-<p>In dense sensing mode, the configured <code>symbol_stride</code> and runtime <code>STRD</code> command are rejected if they would sample the optional CFO training field at <code>sync_pos+1</code>. Runtime <code>STRD</code> changes restart the deterministic sampling phase at the scheduled frame boundary, so the new stride does not inherit a drifting phase from the old stride. ZC sync symbols remain valid sensing symbols.</p>
-<p>When <code>output_mode=compact_mask</code>, sensing sends one compact message per OFDM frame and includes only the RE selected by <code>mask_blocks</code>. In this mode <code>STRD</code> is ignored, because the mask itself defines the sampling pattern. If the mask is &quot;regular&quot; (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime <code>MTI</code> and local Delay-Doppler processing can also be enabled: <code>SKIP=1</code> keeps the raw compact RE output, while <code>SKIP=0</code> switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands <code>range_fft_size</code> and <code>doppler_fft_size</code> when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>, followed by <code>re_count</code> raw <code>complex&lt;float&gt;</code> values in fixed order. Existing <code>plot_sensing*.py</code> viewers cannot handle non-&quot;regular&quot; compact payloads yet.</p>
-<p><code>rx_channels</code> object fields:</p>
+<h4 id="bs-downlink-pipeline">BS downlink_pipeline</h4>
 <table>
 <thead>
 <tr>
-<th style="text-align:left">Key</th>
-<th style="text-align:left">Type</th>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>downlink_pipeline.tx_circular_buffer_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8</code></td>
+<td style="text-align:left">Capacity of the modulated-frame queue feeding TX.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink_pipeline.data_packet_buffer_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>256</code></td>
+<td style="text-align:left">Capacity of the encoded-packet buffer.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-uplink">BS uplink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>uplink.enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Master switch for the UE-to-BS uplink/duplex path.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.duplex_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>tdd</code></td>
+<td style="text-align:left"><code>tdd</code> uses an uplink symbol window; <code>fdd</code> uses <code>uplink.center_freq</code> and a full-frame uplink.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2500000000</code></td>
+<td style="text-align:left">FDD-only uplink carrier. TDD uses the downlink center frequency.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_start</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>90</code></td>
+<td style="text-align:left">TDD-only first uplink symbol in the downlink frame.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">TDD-only uplink window length; <code>0</code> disables TDD uplink.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.guard_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">TDD-only leading guard symbols inside the uplink window.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.bs_dl_ul_timing_diff</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>63</code></td>
+<td style="text-align:left">BS-side uplink RX window offset relative to the downlink TX frame anchor.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.debug_self_channel</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Estimate local TX leakage/self channel from uplink RX windows for <code>DUTI</code> debugging.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable eRTM timing-offset payloads and UE-side TO logs.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / frames</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM payload/report cadence in downlink TX frames.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS uplink RX gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS uplink RX channel index.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">BS uplink RX wire format.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Uplink RX device args override.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Uplink RX clock source override.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Uplink RX time source override.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable BS uplink hardware RX AGC.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>14</code></td>
+<td style="text-align:left">Increase uplink RX gain below this filtered delay-spectrum peak threshold.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">Decrease uplink RX gain above this threshold.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Maximum uplink RX gain step per AGC update.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">Minimum processed-uplink-frame interval between AGC updates.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.equalizer_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>mmse</code></td>
+<td style="text-align:left">BS uplink equalizer inverse mode: <code>zf</code> or <code>mmse</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.channel_tracking_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>pilot_phase</code></td>
+<td style="text-align:left">Uplink per-symbol comb-pilot tracking mode: <code>disabled</code> or <code>pilot_phase</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.equalizer_mag_floor</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-6</code></td>
+<td style="text-align:left">Lower bound for `</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.channel_tracking_min_pilot_snr</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-4</code></td>
+<td style="text-align:left">Minimum comb-pilot residual weight before falling back.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable uplink ARQ on the BS receiver.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_ordered_delivery</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Buffer accepted uplink packets for in-order UDP delivery.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">Uplink ARQ receive/reorder window.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_feedback_interval_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">Minimum interval between uplink ARQ ACK feedback packets.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-sensing">BS sensing</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>sensing.rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">Default sensing RX wire format.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Default sensing RX args.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Default sensing RX clock source override.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Default sensing RX time source override.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_channel_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Number of monostatic sensing RX channels; <code>0</code> disables sensing RX.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_channels[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">see below</td>
+<td style="text-align:left">Per-channel sensing RX settings.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.range_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">Range FFT size.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.doppler_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">Doppler FFT size.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.view_range_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Backend RD view width; <code>0</code> means full <code>range_fft_size</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.view_doppler_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Backend RD view height; <code>0</code> means full <code>doppler_fft_size</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left"><code>dense</code> uses STRD-based full output; <code>compact_mask</code> exports selected RE only.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.on_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>complex_float32</code></td>
+<td style="text-align:left">Sensing payload wire format.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.backend_processing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Publish backend RD/CFAR/micro-Doppler sidecars when supported.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.symbol_stride</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>20</code></td>
+<td style="text-align:left">Default dense-mode STRD applied at startup.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.paired_frame_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">Per-channel RX/TX frame-pairing queue capacity.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.mask_blocks</code></td>
+<td style="text-align:left">via <code>resource_preview.mask_blocks</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Runtime sensing mask derived from resource preview.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-sensing-rx-channels-fields">BS sensing.rx_channels[] fields</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Field</th>
+<th style="text-align:left">Type/Unit</th>
 <th style="text-align:left">Typical Value</th>
 <th style="text-align:left">Description</th>
 </tr>
@@ -817,14 +1108,14 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <tr>
 <td style="text-align:left"><code>usrp_channel</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">USRP RX channel index.</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">USRP RX channel index for this sensing path.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Per-channel USRP args.</td>
+<td style="text-align:left">Per-channel device args override.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>clock_source</code></td>
@@ -842,62 +1133,57 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left"><code>wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Per-channel sensing RX wire format override.</td>
+<td style="text-align:left">Per-channel wire-format override.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_gain</code></td>
-<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
 <td style="text-align:left"><code>30</code></td>
-<td style="text-align:left">RX gain for this channel.</td>
+<td style="text-align:left">Per-channel RX gain.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>alignment</code></td>
-<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
 <td style="text-align:left"><code>63</code></td>
-<td style="text-align:left">Per-channel alignment offset (samples).</td>
+<td style="text-align:left">Per-channel timing alignment offset.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_antenna</code></td>
 <td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">RX antenna name, e.g. <code>TX/RX</code>, <code>RX1</code>.</td>
+<td style="text-align:left"><code>RX2</code></td>
+<td style="text-align:left">RX antenna port, such as <code>RX1</code>, <code>RX2</code>, or <code>TX/RX</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>enable_system_delay_estimation</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">If <code>true</code>, this channel performs a ZC-based system delay estimation at startup and then once every 434 frames, while keeping the sensing pipeline disabled and continuing to drain frames.</td>
+<td style="text-align:left">Run periodic ZC-based system-delay estimation and disable normal sensing for this channel.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>enable_sensing_output</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left">inherits output switch</td>
+<td style="text-align:left">Per-channel monostatic output switch.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_cpu_core</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">CPU core for this channel's RX loop.</td>
+<td style="text-align:left">CPU core for the channel RX loop.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>processing_cpu_core</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">CPU core for this channel's sensing-processing loop.</td>
+<td style="text-align:left">CPU core for the channel sensing-processing loop.</td>
 </tr>
 </tbody>
 </table>
-<p>Notes:</p>
-<ul>
-<li>If <code>rx_channels</code> is empty and <code>rx_channel_count &gt; 0</code>, default channels <code>0..N-1</code> are generated automatically.</li>
-<li>If the count and list size differ, the list is resized to match <code>rx_channel_count</code>.</li>
-<li>When <code>enable_system_delay_estimation=true</code> for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing output remain disabled.</li>
-<li>In practice, keep hardware-specific fields such as <code>device_args</code>, <code>wire_format_*</code>, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.</li>
-<li>BS uplink AGC reuses the same tracking <code>HardwareRxAgc</code> logic as the UE downlink path: it computes the uplink sync-symbol delay spectrum, checks sync-symbol samples for near/full-scale ADC usage, and adjusts USRP RX gain through the uplink RX channel's hardware gain control. The UE-only <code>SYNC_SEARCH</code> gain sweep is not used on the BS uplink path because the BS receives a scheduled uplink window rather than running a continuous sync-search state machine.</li>
-</ul>
-<h3 id="ue">UE</h3>
-<p><code>UE</code> is configured through <code>UE.yaml</code>.
-Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code>config/UE_B210_Duplex.yaml</code> as a starting template.</p>
-<p><code>UE.yaml</code> parameter reference:</p>
+<h4 id="bs-resource-preview">BS resource_preview</h4>
 <table>
 <thead>
 <tr>
-<th style="text-align:left">Key</th>
+<th style="text-align:left">Path</th>
 <th style="text-align:left">Type/Unit</th>
 <th style="text-align:left">Typical Value</th>
 <th style="text-align:left">Description</th>
@@ -905,684 +1191,1509 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 </thead>
 <tbody>
 <tr>
-<td style="text-align:left"><code>fft_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">OFDM FFT size.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>cp_length</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>128</code></td>
-<td style="text-align:left">Cyclic prefix length (samples).</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sync_pos</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">Sync symbol index in one frame.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>enable_sec_sync_symbol</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Reserve <code>sync_pos-1</code> as a duplicate ZC sync symbol. When enabled, initial synchronization first uses the two consecutive sync symbols for Schmidl-Cox-style coarse timing/modulo-CFO estimation, resolves CFO aliases with local ZC correlation, then refines the main sync. Requires the transmitter to use the same setting.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>enable_cfo_training_sequence</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Use the dedicated CFO training field at <code>sync_pos+1</code> to deambiguate CFO aliases. Frame timing still comes from ZC or the optional second sync symbol; CP/second-sync modulo CFO is estimated first, then the CFO field selects the alias closest to its repeated-training CFO estimate. Requires the transmitter to use the same setting.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>cfo_training_period_samples</code></td>
-<td style="text-align:left"><code>int</code> / samples</td>
-<td style="text-align:left"><code>16</code></td>
-<td style="text-align:left">Repetition period of the CFO training field. It must divide <code>fft_size</code>; the unambiguous CFO span is approximately <code>+-sample_rate/(2*period)</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sync_cfo_alias_search_range_hz</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>800000</code></td>
-<td style="text-align:left">Maximum absolute CFO span covered by the sync alias resolver. The receiver converts this physical range to the required integer alias search span for the CP and second-sync modulo periods. Set <code>profiling_modules</code> to include <code>sync</code> to print per-alias peak comparisons.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sample_rate</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>50000000</code></td>
-<td style="text-align:left">Baseband sample rate.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bandwidth</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>50000000</code></td>
-<td style="text-align:left">Analog bandwidth, usually same as <code>sample_rate</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>center_freq</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>2400000000</code></td>
-<td style="text-align:left">RF center frequency.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_gain</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>50</code></td>
-<td style="text-align:left">RX gain.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable hardware RX AGC. Tracking AGC uses the filtered <code>delay_spectrum</code> main peak to adjust USRP RX gain, applies stale-frame timestamp gating like alignment/frequency updates, and forces gain reduction when the sync symbol approaches ADC full scale.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>11.0</code></td>
-<td style="text-align:left">Lower bound of the tracking AGC window. Gain is increased only when the filtered <code>delay_spectrum</code> main peak falls below this threshold.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>13.0</code></td>
-<td style="text-align:left">Upper bound of the tracking AGC window. Gain is decreased only when the filtered <code>delay_spectrum</code> main peak rises above this threshold.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>3.0</code></td>
-<td style="text-align:left">Maximum RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_update_frames</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">Minimum processed-frame interval between tracking-stage AGC updates. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_channel</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">RX channel index.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_channel</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">TX channel index used by UE uplink when duplex/uplink is enabled. Downlink-only UE runs do not require this TX path.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>zc_root</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>29</code></td>
-<td style="text-align:left">Zadoff-Chu root index.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>num_symbols</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>100</code></td>
-<td style="text-align:left">Number of OFDM symbols per frame.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sensing_symbol_num</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>100</code></td>
-<td style="text-align:left">Number of symbols used for sensing processing.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>output_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>dense</code></td>
-<td style="text-align:left">Bistatic sensing output mode. <code>dense</code> keeps the legacy STRD-based full-buffer output. <code>compact_mask</code> switches sensing to per-frame compact RE extraction.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable the bistatic sensing processing pipeline. When set to <code>false</code>, both <code>UE</code> and <code>CUDAUE</code> skip bistatic sensing channel startup.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>duplex_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">Must match <code>BS.yaml</code>. <code>tdd</code> shares the downlink center frequency and sends only in the configured uplink symbol window; <code>fdd</code> transmits continuously over the full frame on <code>uplink.center_freq</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>idle_waveform</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>random_qpsk</code></td>
-<td style="text-align:left">UE uplink idle waveform when no UDP payload is queued. <code>random_qpsk</code> sends a zero-length mini-header followed by deterministic random QPSK filler; <code>zero</code> sends the zero-length mini-header and leaves the remaining payload RE at zero.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink</code></td>
-<td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>, <code>symbol_count=10</code>, <code>guard_symbols=1</code>, <code>center_freq=2500000000</code></td>
-<td style="text-align:left">UE uplink settings. TDD uses <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> and ignores <code>center_freq</code>; FDD uses <code>center_freq</code> and ignores the TDD symbol-window fields, transmitting over the full frame. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ue_timing_advance</code></td>
-<td style="text-align:left"><code>int</code> / samples</td>
-<td style="text-align:left"><code>63</code></td>
-<td style="text-align:left">UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable <code>TADV</code> value.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_to_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU-path eRTM TO estimation payload consumption and TO logs. UE computes configured-oversample zero-padded IFFT delay spectra from the BS-provided uplink channel and its local downlink channel before eRTM correlation, then applies centroid3 fractional-bin refinement to the correlation peak.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_delay_oversample_factor</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10</code></td>
-<td style="text-align:left">eRTM delay-spectrum IFFT oversampling factor. Values below <code>1</code> are clamped to <code>1</code>; values above <code>128</code> are clamped to <code>128</code>. Higher values improve delay-grid resolution at higher CPU/FFTW/memory cost.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sensing_delay_correction_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>los_tracking</code></td>
-<td style="text-align:left">UE <code>sensing</code> setting for the sensing delay correction source. <code>los_tracking</code> uses the local LoS sync/SFO tracking delay; <code>ertm_absolute</code> uses the latest CPU-path eRTM <code>TO_UE_samples</code> as the absolute sensing delay when available, then still applies runtime <code>ALGN</code> user trim. CUDAUE currently falls back to <code>los_tracking</code> for this mode.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_dl_rf_delay_ns</code></td>
-<td style="text-align:left"><code>float</code> / ns</td>
-<td style="text-align:left"><code>0.0</code></td>
-<td style="text-align:left">Calibrated downlink RF-chain delay term used in the eRTM TO equations.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_ul_rf_delay_ns</code></td>
-<td style="text-align:left"><code>float</code> / ns</td>
-<td style="text-align:left"><code>0.0</code></td>
-<td style="text-align:left">Calibrated uplink RF-chain delay term used in the eRTM TO equations.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_debug_output_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable UE-side eRTM debug ZeroMQ output for the center window of the configured-oversample BS uplink delay spectrum, UE downlink delay spectrum, eRTM correlation spectrum, TO-corrected debug spectra, and peak metadata. View with <code>scripts/plot_ertm_debug.py</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
-<td style="text-align:left"><code>int</code> / frames</td>
-<td style="text-align:left"><code>32</code></td>
-<td style="text-align:left">BS eRTM payload/report cadence in downlink TX frames; keep this matched with BS when comparing logs.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>3</code></td>
-<td style="text-align:left">Number of CUDA demodulation pipeline slots. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>frame_queue_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8</code></td>
-<td style="text-align:left">Capacity of the UE RX frame queue. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sync_queue_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8</code></td>
-<td style="text-align:left">Capacity of the UE sync-search batch queue. Values below <code>1</code> are clamped to <code>1</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>reset_hold_s</code></td>
-<td style="text-align:left"><code>float</code> / s</td>
-<td style="text-align:left"><code>0.5</code></td>
-<td style="text-align:left">How long invalid delay conditions must persist before the UE forces a hard reset back to sync search. Internally this is converted to a frame count from <code>samples_per_frame / sample_rate</code>. Values below <code>0</code> are clamped to <code>0.5</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>range_fft_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">Range FFT size.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>doppler_fft_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>100</code></td>
-<td style="text-align:left">Doppler FFT size.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>pilot_positions</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[571,631,...,451]</code></td>
-<td style="text-align:left">Configurable comb-pilot subcarrier indices spread across the occupied band.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>midframe_pilot_symbols</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">Optional mid-frame BPSK pilot symbol indices inside each frame. The receiver uses the full known symbol as an additional channel-estimation anchor, keeps comb-pilot RE available for phase tracking, and excludes the symbol from payload LLR extraction.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>midframe_pilot_seed</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1296453708</code></td>
-<td style="text-align:left">Deterministic BPSK pilot seed. It must match the transmitter.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>equalizer_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>mmse</code></td>
-<td style="text-align:left">Communication equalizer inverse. <code>zf</code> uses a floored channel-power denominator; <code>mmse</code> adds <code>noise_var</code> to that denominator to reduce noise enhancement on deep fades.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_tracking_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>pilot_phase</code></td>
-<td style="text-align:left">Per-symbol comb-pilot tracking for communication equalization on both CPU and CUDA demodulators. <code>disabled</code> keeps the sync-only channel estimate, while <code>pilot_phase</code> fits common and linear residual phase from comb pilots on each data symbol.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>equalizer_mag_floor</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-6</code></td>
-<td style="text-align:left">Lower bound for channel magnitude squared during inversion, used by both <code>zf</code> and <code>mmse</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_tracking_min_pilot_snr</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-4</code></td>
-<td style="text-align:left">Minimum comb-pilot residual power/weight accepted by per-symbol tracking before falling back to the sync-only correction.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>data_resource_blocks</code></td>
+<td style="text-align:left"><code>resource_preview.data_resource_blocks[]</code></td>
 <td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">omitted</td>
-<td style="text-align:left">Receiver-side communication resource map. It answers: &quot;which RE should be interpreted as payload?&quot; Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set <code>[]</code> to extract no payload LLR at all. Use the same rectangles and <code>kind</code> values as the transmitter. Blocks with <code>kind: payload</code> produce payload LLR; blocks with <code>kind: sensing_pilot</code> are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root.</td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Payload / sensing-pilot RE rectangles. Each item has <code>kind</code>, <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>mask_blocks</code></td>
+<td style="text-align:left"><code>resource_preview.mask_blocks[]</code></td>
 <td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">omitted</td>
-<td style="text-align:left">Receiver-side compact sensing resource map. It answers: &quot;which RE should be exported on the bistatic sensing path in <code>compact_mask</code> mode?&quot; The coordinate system and behavior are the same as on the BS side: absolute frame-symbol index, raw FFT-bin index, ZC sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, CFO training field rejected, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled.</td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Compact sensing RE rectangles with <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>.</td>
 </tr>
+</tbody>
+</table>
+<h4 id="bs-measurement">BS measurement</h4>
+<table>
+<thead>
 <tr>
-<td style="text-align:left"><code>device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">USRP device args.</td>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
 </tr>
+</thead>
+<tbody>
 <tr>
-<td style="text-align:left"><code>clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal/external/gpsdo</code></td>
-<td style="text-align:left">Clock source.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>wire_format_tx</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">TX wire format for the optional UE uplink path, typically <code>sc16</code> or <code>sc8</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_wire_format</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">UE downlink RX wire format, typically <code>sc16</code> or <code>sc8</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>software_sync</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable software synchronization tracking.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>predictive_delay</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>hardware_sync</code></td>
+<td style="text-align:left"><code>measurement.measurement_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable hardware synchronization.</td>
+<td style="text-align:left">Enable internal PRBS measurement traffic.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>hardware_sync_tty</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>/dev/ttyUSB0</code></td>
-<td style="text-align:left">TTY device used by hardware sync controller.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ocxo_pi_switch_abs_error_ppm</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0.0002</code></td>
-<td style="text-align:left">Switch to slow-stage OCXO PI when absolute <code>error_ppm</code> stays below this threshold.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable adaptive Kalman filtering (AKF) on hardware-sync <code>error_ppm</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_bootstrap_frames</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">Cold-start frame count before AKF starts normal KF updates.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_innovation_window</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">Innovation history window used for ACF/LS adaptation.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_max_lag</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">Maximum innovation autocorrelation lag used in LS fitting.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_adapt_interval</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">Frame interval for adaptive <code>Q/R</code> least-squares updates.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_gate_sigma</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>3.0</code></td>
-<td style="text-align:left">Innovation gating threshold (sigma).</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_tikhonov_lambda</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-3</code></td>
-<td style="text-align:left">Tikhonov regularization weight for LS adaptation.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_update_smooth</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0.2</code></td>
-<td style="text-align:left">Exponential smoothing factor for updated <code>Q/R</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_wf_min</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-10</code></td>
-<td style="text-align:left">Lower bound of white-frequency-noise coefficient.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_wf_max</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e2</code></td>
-<td style="text-align:left">Upper bound of white-frequency-noise coefficient.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_rw_min</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-12</code></td>
-<td style="text-align:left">Lower bound of random-walk-frequency-noise coefficient.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_rw_max</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e1</code></td>
-<td style="text-align:left">Upper bound of random-walk-frequency-noise coefficient.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_r_min</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-8</code></td>
-<td style="text-align:left">Lower bound of observation-noise variance <code>R</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_r_max</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e3</code></td>
-<td style="text-align:left">Upper bound of observation-noise variance <code>R</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ppm_adjust_factor</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0.05</code></td>
-<td style="text-align:left">Frequency offset compensation factor.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>desired_peak_pos</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>20</code></td>
-<td style="text-align:left">Target delay-peak position used by alignment logic.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_sensing_output_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">Enable the bistatic sensing ZeroMQ PUB output. The processing pipeline can remain enabled while this output is disabled.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_sensing_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZMQ bind IP for the bistatic sensing stream and control channel. Use <code>0.0.0.0</code> to accept remote viewers, or <code>127.0.0.1</code> for local-only access.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_sensing_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8889</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for the bistatic sensing data stream.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_debug_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for UE eRTM debug output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_debug_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12362</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for UE eRTM debug output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to <code>0.0.0.0</code>, not <code>default_out_ip</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12348</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for channel-estimation output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>pdf_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for PDP/PDF output. Empty values also resolve to <code>0.0.0.0</code>, not <code>default_out_ip</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>pdf_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12349</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for PDP/PDF output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>constellation_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">ZeroMQ PUB listen IP for constellation output. Empty values also resolve to <code>0.0.0.0</code>, not <code>default_out_ip</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>constellation_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12346</code></td>
-<td style="text-align:left">ZeroMQ PUB bind port for constellation output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>vofa_debug_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Destination IP for VOFA+ debug output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>vofa_debug_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12347</code></td>
-<td style="text-align:left">Destination port for VOFA+ debug output.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">UE uplink payload UDP bind IP. This is the input stream transmitted on the UE-&gt;BS uplink.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50002</code></td>
-<td style="text-align:left">UE uplink payload UDP bind port.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">UE decoded downlink payload UDP destination IP. This is the output stream recovered from the BS-&gt;UE downlink.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50001</code></td>
-<td style="text-align:left">UE decoded downlink payload UDP destination port.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_target_mbps</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">UDP egress pacer target payload rate. <code>0</code> enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10240</code></td>
-<td style="text-align:left">Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">Maximum queued packet age before the egress pacer drops it. Set <code>0</code> to disable age-based drops.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>default_out_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>control_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10001</code></td>
-<td style="text-align:left">ZeroMQ ROUTER bind port for the bidirectional control channel.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to <code>udp_output_*</code>. CUDA binaries ignore this mode.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_mode</code></td>
+<td style="text-align:left"><code>measurement.measurement_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>internal_prbs</code></td>
-<td style="text-align:left">Measurement mode selector. Only <code>internal_prbs</code> is supported. Unsupported values disable measurement mode during config normalization.</td>
+<td style="text-align:left">Measurement generator/checker mode.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>measurement_run_id</code></td>
+<td style="text-align:left"><code>measurement.measurement_run_id</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
 <td style="text-align:left">Run identifier written into measurement CSV summaries.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>measurement_output_dir</code></td>
+<td style="text-align:left"><code>measurement.measurement_output_dir</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Output directory used by the CPU measurement summaries.</td>
+<td style="text-align:left">Output directory for measurement CSV summaries.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>measurement_payload_bytes</code></td>
-<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>measurement.measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code> / bytes</td>
 <td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">Expected bytes per measurement payload. Values below the internal header size are clamped up.</td>
+<td style="text-align:left">Bytes per generated measurement payload.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>measurement.measurement_prbs_seed</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>0x5A</code></td>
-<td style="text-align:left">Base seed used to rebuild deterministic PRBS measurement payloads.</td>
+<td style="text-align:left">Base seed for deterministic PRBS payload contents.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>measurement.measurement_packets_per_point</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">Expected measurement payload count for each online <code>MRST</code> epoch. Values below <code>1</code> are clamped to <code>1</code>.</td>
+<td style="text-align:left">Packets sent for one measurement epoch.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>profiling_modules</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>cfo</code>, <code>sync</code>, <code>agc</code>, <code>align</code>, <code>snr</code>, <code>uplink</code>, and <code>ertm</code>; <code>all</code> enables every module. <code>cfo</code> gates CUDA CFO diagnostics, <code>sync</code> gates per-alias synchronization peak comparisons, <code>agc</code> gates AGC logs, <code>align</code> gates runtime <code>ALGN:</code> logs, <code>snr</code> prints periodic <code>_snr_db / _noise_var / _llr_scale</code> updates, <code>uplink</code> gates <code>[UL-TX]</code> timing/waveform diagnostics, and <code>ertm</code> gates eRTM TO/payload/debug-spectrum diagnostics. Sensing delay-correction warnings and pending-alignment updates remain visible.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>downlink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE downlink CPU cores: indices <code>0..2</code> bind <code>rx_proc</code>, <code>process_proc</code>, and <code>bit_processing_proc</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>demod_worker_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE CPU demod worker cores for frame-level OFDM/LLR processing. Each configured core adds one worker; empty starts one unbound worker (configure dedicated cores for stable real-time performance).</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ldpc_worker_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE CPU LDPC decode worker cores. Each configured core adds one decode worker with its own LDPC decoder instance; empty starts one unbound worker.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sensing_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE bistatic sensing CPU cores: index <code>0</code> binds <code>sensing_process_proc</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE uplink CPU cores: indices <code>0..3</code> bind <code>UplinkTxEngine::_ldpc_encode_proc</code>, <code>_mod_proc</code>, <code>_tx_proc</code>, and <code>_udp_recv_proc</code>.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>main_cpu_core</code></td>
+<td style="text-align:left"><code>measurement.measurement_max_packets_per_frame</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">Main-thread CPU core.</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Max measurement packets pulled per frame; <code>0</code> means unlimited.</td>
 </tr>
 </tbody>
 </table>
-<p>Receiver-side note:</p>
+<h4 id="bs-network-output">BS network_output</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS downlink payload UDP bind IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50000</code></td>
+<td style="text-align:left">BS downlink payload UDP bind port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">BS decoded uplink UDP destination IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50003</code></td>
+<td style="text-align:left">BS decoded uplink UDP destination port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable queued pacing for decoded UDP egress.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_target_mbps</code></td>
+<td style="text-align:left"><code>float</code> / Mbps</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Egress pacer target rate; <code>0</code> auto-estimates from enqueue rate.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10240</code></td>
+<td style="text-align:left">Egress pacer queue capacity in datagrams.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_max_delay_ms</code></td>
+<td style="text-align:left"><code>float</code> / ms</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Max queued packet age; <code>0</code> disables age drops.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.mono_sensing_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable monostatic sensing ZMQ output.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.mono_sensing_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">Monostatic sensing/control ZMQ bind IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.mono_sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8888</code></td>
+<td style="text-align:left">Monostatic sensing PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS uplink channel-estimate debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12358</code></td>
+<td style="text-align:left">BS uplink channel-estimate debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS uplink delay-spectrum debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12359</code></td>
+<td style="text-align:left">BS uplink delay-spectrum debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_constellation_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS uplink constellation debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_constellation_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12356</code></td>
+<td style="text-align:left">BS uplink constellation debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS self-channel debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12360</code></td>
+<td style="text-align:left">BS self-channel debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS self-delay-spectrum debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12361</code></td>
+<td style="text-align:left">BS self-delay-spectrum debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">eRTM debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12362</code></td>
+<td style="text-align:left">eRTM debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>9999</code></td>
+<td style="text-align:left">ZMQ ROUTER port for runtime control.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-cpu-cores">BS cpu_cores</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cpu_cores.downlink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[1,2,3,-1]</code></td>
+<td style="text-align:left">BS downlink cores: TX, modulation, LDPC encode, UDP receive.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.uplink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">BS uplink cores: RX ingest, OFDM/LLR processing, LDPC decode + UDP output.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.main_cpu_core</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>-1</code></td>
+<td style="text-align:left">Main-thread CPU core; <code>-1</code> disables binding.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-runtime">BS runtime</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>runtime.profiling_modules</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Comma-separated profiling modules such as <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, <code>sensing_proc</code>, <code>agc</code>, <code>arq</code>, <code>uplink</code>, <code>ertm</code>, or <code>all</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ue">UE</h3>
+<p><code>UE</code> reads <code>UE.yaml</code> from its current working directory. Start from <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, the duplex presets, or the simulator presets.</p>
+<h4 id="ue-radio">UE radio</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>radio.radio_backend</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>uhd</code></td>
+<td style="text-align:left">Radio I/O backend. Use <code>uhd</code> for real USRPs or <code>sim</code> for the channel simulator.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-simulation">UE simulation</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>simulation.session</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>oisac_sim</code></td>
+<td style="text-align:left">Shared simulator session namespace.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.enable_comm_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Simulator produces the communication RX path.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.enable_sensing_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Simulator produces sensing RX paths.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.enable_uplink</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Simulator routes the UE-to-BS uplink stream.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.pacing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Pace simulator output to wall-clock sample time.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.noise_power_dbfs</code></td>
+<td style="text-align:left"><code>float</code> / dBFS</td>
+<td style="text-align:left"><code>-100</code></td>
+<td style="text-align:left">AWGN power per RX channel.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.snr_control_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Maintain <code>target_snr_db</code> by scaling clean simulated signal.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.target_snr_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>40</code></td>
+<td style="text-align:left">Initial target SNR when SNR control is enabled.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10002</code></td>
+<td style="text-align:left">ChannelSimulator control port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.cfo_hz</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Initial carrier offset.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.sample_rate_offset_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE sample-clock offset relative to BS.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.timing_offset_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Constant integer sample delay.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_m</code></td>
+<td style="text-align:left"><code>float</code> / m</td>
+<td style="text-align:left"><code>0.04283</code></td>
+<td style="text-align:left">Physical ULA spacing.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_lambda</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.5</code></td>
+<td style="text-align:left">Legacy ULA spacing in wavelengths.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.ring_capacity_samples</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>262144</code></td>
+<td style="text-align:left">Shared-memory ring capacity.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.steering_override_file</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Optional steering matrix file.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.comm_multipath_taps[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Communication taps with <code>delay_samples</code>, <code>gain_db</code>, and <code>phase_deg</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Monostatic point scatterers.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.bistatic_targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Bistatic/communication point scatterers.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-rf-sampling">UE rf_sampling</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>rf_sampling.sample_rate</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>50000000</code></td>
+<td style="text-align:left">Baseband sample rate.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.bandwidth</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>50000000</code></td>
+<td style="text-align:left">Analog bandwidth.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.rx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">UE downlink RX gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.rx_agc_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable UE downlink hardware RX AGC.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>14</code></td>
+<td style="text-align:left">Increase RX gain below this filtered delay-spectrum threshold.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">Decrease RX gain above this threshold.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Maximum RX gain step per AGC update.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rf_sampling.rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">Minimum processed-frame interval between AGC updates.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-usrp-device">UE usrp_device</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>usrp_device.device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>addr=...</code></td>
+<td style="text-align:left">USRP device args.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>usrp_device.clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>external</code></td>
+<td style="text-align:left">UE clock source: <code>internal</code>, <code>external</code>, or <code>gpsdo</code>.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-ofdm-frame">UE ofdm_frame</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">OFDM FFT size.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.cp_length</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>128</code></td>
+<td style="text-align:left">Cyclic prefix length.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.sync_pos</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Sync symbol index.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Expect a duplicate ZC sync symbol at <code>sync_pos-1</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Use the <code>sync_pos+1</code> CFO training field to resolve CFO aliases.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.cfo_training_period_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">CFO training repetition period.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.num_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">OFDM symbols per frame.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.sensing_symbol_num</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">Symbols used for sensing.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.frame_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">Demodulated RX frame queue capacity.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.zc_root</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>29</code></td>
+<td style="text-align:left">Zadoff-Chu root.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.pilot_positions</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[571,...]</code></td>
+<td style="text-align:left">Comb-pilot subcarrier indices.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_symbols</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">Optional mid-frame BPSK pilot symbols.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1296453708</code></td>
+<td style="text-align:left">Deterministic mid-frame BPSK pilot seed.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-cuda">UE cuda</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_demod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA demodulation pipeline slots.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_ldpc_decoder_backend</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>gpu</code></td>
+<td style="text-align:left">CUDA demod LDPC decoder backend: <code>gpu</code> or <code>cpu</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_ldpc_worker_buffers</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA LDPC async worker batch buffers.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_ldpc_cross_frame_flush_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>2</code></td>
+<td style="text-align:left">Max frames accumulated before CUDA LDPC batch decode.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_ldpc_cross_frame_flush_us</code></td>
+<td style="text-align:left"><code>float</code> / us</td>
+<td style="text-align:left"><code>1000</code></td>
+<td style="text-align:left">Max CUDA LDPC cross-frame batch wait time.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-ldpc">UE ldpc</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Use int16/Q16 CPU LDPC decode path.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point_scale</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">LLR scale before int16 saturation.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-downlink">UE downlink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>downlink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2400000000</code></td>
+<td style="text-align:left">UE downlink RF center frequency.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">UE downlink RX wire format.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE downlink RX channel index.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.equalizer_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>mmse</code></td>
+<td style="text-align:left">Downlink equalizer inverse mode: <code>zf</code> or <code>mmse</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.channel_tracking_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>pilot_phase</code></td>
+<td style="text-align:left">Per-symbol comb-pilot tracking mode.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.equalizer_mag_floor</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-6</code></td>
+<td style="text-align:left">Lower bound for `</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.channel_tracking_min_pilot_snr</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-4</code></td>
+<td style="text-align:left">Minimum comb-pilot residual weight before fallback.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable downlink ARQ on the UE receiver.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_ordered_delivery</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Buffer downlink packets for in-order UDP delivery.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">Downlink ARQ receive/reorder window.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_feedback_interval_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">Minimum interval between downlink ARQ ACK feedback packets.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-uplink">UE uplink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>uplink.enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Master switch for UE uplink/duplex.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.duplex_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>tdd</code></td>
+<td style="text-align:left">Must match BS: <code>tdd</code> windowed uplink or <code>fdd</code> full-frame uplink.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2500000000</code></td>
+<td style="text-align:left">FDD-only uplink carrier. TDD uses the downlink center frequency.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.idle_waveform</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>random_qpsk</code></td>
+<td style="text-align:left">UE uplink idle waveform: <code>random_qpsk</code> or <code>zero</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_start</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>90</code></td>
+<td style="text-align:left">TDD-only first uplink symbol.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">TDD-only uplink window length.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.guard_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">TDD-only leading guard symbols.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.tx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE uplink TX gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.tx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE uplink TX channel index.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.wire_format_tx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">UE uplink TX wire format.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ue_timing_advance</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>63</code></td>
+<td style="text-align:left">UE uplink transmit timing advance.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.debug_self_channel</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Estimate UE self-TX leakage channel from RX windows for <code>TADV</code> debugging.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable eRTM TO payload consumption and TO logs.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_delay_oversample_factor</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">eRTM delay-spectrum IFFT oversampling factor.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_dl_rf_delay_ns</code></td>
+<td style="text-align:left"><code>float</code> / ns</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Calibrated downlink RF-chain delay for eRTM equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_ul_rf_delay_ns</code></td>
+<td style="text-align:left"><code>float</code> / ns</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Calibrated uplink RF-chain delay for eRTM equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_debug_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable UE-side eRTM debug ZMQ spectra.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / frames</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM report cadence; keep matched with BS.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable uplink ARQ on the UE transmitter.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">Uplink ARQ outstanding packet window.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_retransmit_timeout_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">Uplink ARQ retransmission timeout.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_max_retries</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>5</code></td>
+<td style="text-align:left">Max uplink retransmission retries; <code>0</code> means unlimited within the window.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-sync-tracking">UE sync_tracking</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>sync_tracking.sync_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">Sync-search batch queue capacity.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.sync_cfo_alias_search_range_hz</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>800000</code></td>
+<td style="text-align:left">CFO range covered by the sync alias resolver.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.reset_hold_s</code></td>
+<td style="text-align:left"><code>float</code> / s</td>
+<td style="text-align:left"><code>0.5</code></td>
+<td style="text-align:left">Invalid-delay duration before a hard reset to sync search.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.software_sync</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable software sync tracking.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.predictive_delay</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Use CFO-based predictive delay compensation.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.hardware_sync</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable hardware synchronization mode.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.hardware_sync_tty</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>/dev/ttyUSB0</code></td>
+<td style="text-align:left">Serial device for the hardware sync controller.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_kp_fast</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>30</code></td>
+<td style="text-align:left">Fast-stage OCXO PI proportional gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_ki_fast</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Fast-stage OCXO PI integral gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_kp_slow</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>30</code></td>
+<td style="text-align:left">Slow-stage OCXO PI proportional gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_ki_slow</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.05</code></td>
+<td style="text-align:left">Slow-stage OCXO PI integral gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_switch_abs_error_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0.0002</code></td>
+<td style="text-align:left">Error threshold for switching to slow OCXO PI stage.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_switch_hold_s</code></td>
+<td style="text-align:left"><code>float</code> / s</td>
+<td style="text-align:left"><code>60</code></td>
+<td style="text-align:left">Hold time below threshold before switching stages.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_max_step_fast_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0.01</code></td>
+<td style="text-align:left">Fast-stage maximum OCXO adjustment per update.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_max_step_slow_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0.01</code></td>
+<td style="text-align:left">Slow-stage maximum OCXO adjustment per update.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_max_step_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Legacy alias applied to both fast and slow max-step fields.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable adaptive Kalman filter on hardware-sync <code>error_ppm</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_bootstrap_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">Cold-start frames before normal AKF updates.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_innovation_window</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">Innovation history window for adaptation.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_max_lag</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">Maximum innovation autocorrelation lag.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_adapt_interval</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">Frame interval for adaptive <code>Q/R</code> updates.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_gate_sigma</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">Innovation gate in sigma units.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_tikhonov_lambda</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-3</code></td>
+<td style="text-align:left">Tikhonov regularization for LS adaptation.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_update_smooth</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.2</code></td>
+<td style="text-align:left">Exponential smoothing for updated <code>Q/R</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_wf_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-10</code></td>
+<td style="text-align:left">White-frequency-noise lower bound.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_wf_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e2</code></td>
+<td style="text-align:left">White-frequency-noise upper bound.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_rw_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-12</code></td>
+<td style="text-align:left">Random-walk-frequency-noise lower bound.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_rw_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e1</code></td>
+<td style="text-align:left">Random-walk-frequency-noise upper bound.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_r_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-8</code></td>
+<td style="text-align:left">Observation-noise variance lower bound.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_r_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e3</code></td>
+<td style="text-align:left">Observation-noise variance upper bound.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.desired_peak_pos</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>20</code></td>
+<td style="text-align:left">Target delay-peak position for alignment logic.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-sensing">UE sensing</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>sensing.sensing_delay_correction_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>los_tracking</code></td>
+<td style="text-align:left">Bistatic sensing delay correction source: <code>los_tracking</code> or <code>ertm_absolute</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.bi_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable bistatic sensing processing.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.range_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">Range FFT size.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.doppler_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">Doppler FFT size.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.view_range_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Backend RD view width; <code>0</code> means full range.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.view_doppler_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Backend RD view height; <code>0</code> means full Doppler size.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left"><code>dense</code> full-buffer output or <code>compact_mask</code> selected-RE output.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.on_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>complex_float32</code></td>
+<td style="text-align:left">Sensing payload wire format.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.backend_processing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Publish backend RD/CFAR/micro-Doppler sidecars when supported.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.symbol_stride</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>20</code></td>
+<td style="text-align:left">Default dense-mode STRD applied at startup.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-resource-preview">UE resource_preview</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>resource_preview.data_resource_blocks[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Payload / sensing-pilot RE rectangles; each item has <code>kind</code>, <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>resource_preview.mask_blocks[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">optional</td>
+<td style="text-align:left">Compact sensing RE rectangles with <code>symbol_start</code>, <code>symbol_count</code>, <code>subcarrier_start</code>, and <code>subcarrier_count</code>.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-measurement">UE measurement</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable internal PRBS measurement checking.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">Measurement checker mode.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Run ID written to measurement CSV summaries.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Output directory for measurement CSV summaries.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code> / bytes</td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">Expected bytes per measurement payload.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">Base seed for rebuilding deterministic PRBS payloads.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Expected packets for one measurement epoch.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_max_packets_per_frame</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">Max measurement packets checked per frame; <code>0</code> means unlimited.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-network-output">UE network_output</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE uplink payload UDP bind IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50002</code></td>
+<td style="text-align:left">UE uplink payload UDP bind port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">UE decoded downlink UDP destination IP; empty uses <code>runtime.default_out_ip</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50001</code></td>
+<td style="text-align:left">UE decoded downlink UDP destination port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable queued pacing for decoded UDP egress.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_target_mbps</code></td>
+<td style="text-align:left"><code>float</code> / Mbps</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Egress pacer target rate; <code>0</code> auto-estimates.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10240</code></td>
+<td style="text-align:left">Egress pacer queue capacity.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_max_delay_ms</code></td>
+<td style="text-align:left"><code>float</code> / ms</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">Max queued packet age; <code>0</code> disables age drops.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.bi_sensing_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">Enable bistatic sensing ZMQ output.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.bi_sensing_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">Bistatic sensing/control ZMQ bind IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.bi_sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8889</code></td>
+<td style="text-align:left">Bistatic sensing PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">Channel-estimate PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12348</code></td>
+<td style="text-align:left">Channel-estimate PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">Delay-spectrum PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12349</code></td>
+<td style="text-align:left">Delay-spectrum PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.constellation_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">Constellation PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.constellation_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12346</code></td>
+<td style="text-align:left">Constellation PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE self-channel debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12350</code></td>
+<td style="text-align:left">UE self-channel debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE self-delay-spectrum debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12351</code></td>
+<td style="text-align:left">UE self-delay-spectrum debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE eRTM debug PUB IP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12362</code></td>
+<td style="text-align:left">UE eRTM debug PUB port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10001</code></td>
+<td style="text-align:left">ZMQ ROUTER port for runtime control.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-cpu-cores">UE cpu_cores</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cpu_cores.downlink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[1,2,3]</code></td>
+<td style="text-align:left">UE downlink cores: RX, processing, bit processing.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.demod_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU demod worker cores; empty starts one unbound worker.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.ldpc_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU LDPC decode worker cores; empty starts one unbound worker.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.sensing_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[4]</code></td>
+<td style="text-align:left">UE bistatic sensing cores.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.uplink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE uplink cores: LDPC encode, modulation, TX send, UDP receive.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.main_cpu_core</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>-1</code></td>
+<td style="text-align:left">Main-thread CPU core; <code>-1</code> disables binding.</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-runtime">UE runtime</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">Path</th>
+<th style="text-align:left">Type/Unit</th>
+<th style="text-align:left">Typical Value</th>
+<th style="text-align:left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>runtime.default_out_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">Default destination IP for UDP and VOFA+ outputs when specific IP fields are empty.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>runtime.vofa_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">VOFA+ debug destination IP; empty uses <code>default_out_ip</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>runtime.vofa_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12347</code></td>
+<td style="text-align:left">VOFA+ debug destination port.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>runtime.profiling_modules</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">Comma-separated modules such as <code>demodulation</code>, <code>cfo</code>, <code>sync</code>, <code>agc</code>, <code>align</code>, <code>snr</code>, <code>arq</code>, <code>uplink</code>, <code>ertm</code>, or <code>all</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Resource-map notes:</p>
 <ul>
-<li><code>data_resource_blocks</code> should normally match the transmitter exactly, including <code>kind</code>.</li>
-<li>If a resource block overlaps <code>sync_pos</code>, the optional second sync symbol at <code>sync_pos-1</code>, <code>midframe_pilot_symbols</code>, or <code>pilot_positions</code>, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still win. The optional CFO training field at <code>sync_pos+1</code> is rejected for sensing-pilot and sensing-mask selection. Priority is <code>ZC sync symbols &gt; CFO training field &gt; comb-pilot RE &gt; mid-frame BPSK pilot &gt; sensing_pilot &gt; payload/random QPSK</code>.</li>
-<li>In dense mode, <code>symbol_stride</code> / runtime <code>STRD</code> is rejected if it would sample the optional CFO training field at <code>sync_pos+1</code>. Runtime <code>STRD</code> changes restart the deterministic sampling phase at the scheduled frame boundary; ZC sync symbols remain valid sensing symbols.</li>
-<li>In <code>compact_mask</code> mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by <code>mask_blocks</code>; <code>STRD</code> is ignored in this mode because the mask already defines the sampling pattern.</li>
-<li>The compact payload format is the same as on the BS side: <code>CompactSensingFrameHeader</code> followed by fixed-order raw <code>complex&lt;float&gt;</code> samples.</li>
-</ul>
-<p>Notes:</p>
-<ul>
-<li>UE downlink RX AGC has two phases. During <code>SYNC_SEARCH</code>, the receiver resets gain to the configured <code>rx_gain</code> and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered <code>delay_spectrum</code> peak window defined by <code>rx_agc_low_threshold_db</code> and <code>rx_agc_high_threshold_db</code>.</li>
-<li>Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the UE receiver forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.</li>
-<li>A hard reset clears timing/frequency tracking state, flushes pending queues, resets the tracking AGC state, and returns the receiver to <code>SYNC_SEARCH</code>. <code>reset_hold_s</code> controls how long bad delay conditions must persist before this happens.</li>
+<li><code>resource_preview.data_resource_blocks</code> should normally match between BS and UE, including <code>kind</code>.</li>
+<li>Built-in ZC sync symbols, the optional CFO training field, comb pilots, and mid-frame BPSK pilots take precedence over configured resource blocks.</li>
+<li><code>resource_preview.mask_blocks</code> controls compact sensing export only. In <code>output_mode=compact_mask</code>, runtime <code>STRD</code> is ignored because the mask defines the sampling pattern.</li>
+<li>Compact sensing payloads begin with <code>CompactSensingFrameHeader</code>, followed by fixed-order raw <code>complex&lt;float&gt;</code> samples.</li>
 </ul></div> </section> </main>  <footer class="site-footer"> <div class="footer-panel"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p><strong>Authors:</strong> Zhiwen Zhou (zhiwen_zhou@seu.edu.cn), Chaoyue Zhang (chaoyue_zhang@seu.edu.cn), Xiaoli Xu (xiaolixu@seu.edu.cn), Yong Zeng (yong_zeng@seu.edu.cn)</p> </div> </footer> </body></html>

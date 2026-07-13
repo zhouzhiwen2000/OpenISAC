@@ -288,14 +288,32 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <pre><code class="language-bash">python3 ./scripts/plot_bi_sensing_fast.py
 </code></pre>
 <p>这是当前维护的统一前端，会自动选择 CUDA、MLX、Intel GPU 或 CPU 后端。</p>
-<h3 id="7-校准感知通道系统响应">7. 校准感知通道系统响应</h3>
+<h3 id="7-校准系统时延">7. 校准系统时延</h3>
+<p>请先完成系统时延校准，再执行后面的系统响应校准。校准前请先进行射频直连：将发射 RF 输出连接到对应的感知 RX 输入，并在校准过程中保持连接稳定。首先为射频直连降低发射功率。可以先降低 <code>build/BS.yaml</code> 中的 <code>downlink.tx_gain</code>；如有需要，在直连链路中加入合适的衰减器，避免感知 RX 饱和。</p>
+<p>只为当前要测试的感知通道开启系统时延估计：</p>
+<pre><code class="language-yaml">sensing:
+  rx_channels:
+    - usrp_channel: 1
+      alignment: 63
+      enable_system_delay_estimation: true
+</code></pre>
+<p>从 <code>build/</code> 目录启动 BS 后端。该模式下，被选中的感知通道会关闭常规感知处理链，并周期性执行基于 ZC 相关的系统时延测试。观察 BS 控制台输出：CPU 版本会打印 <code>[SYSDLY CH &lt;n&gt;]</code>，CUDA 版本会打印 <code>[CUDA SYSDLY CH &lt;n&gt;]</code>。CPU 日志中的建议值字段是 <code>alignment_suggest=&lt;value&gt;</code>；CUDA 日志中的建议值字段是 <code>suggest=&lt;value&gt;</code>。</p>
+<p>当建议值稳定后，停止后端，把该值写回同一通道的 <code>alignment</code> 字段，并关闭估计模式：</p>
+<pre><code class="language-yaml">sensing:
+  rx_channels:
+    - usrp_channel: 1
+      alignment: &lt;suggested value&gt;
+      enable_system_delay_estimation: false
+</code></pre>
+<p>每个感知通道都需要单独执行一次射频直连测量。多通道系统中，请把直连线切换到下一个感知 RX 路径，并更新该通道自己的 <code>alignment</code>；不要把一个通道的结果直接复用到其他 RF 路径。</p>
+<h3 id="8-校准感知通道系统响应">8. 校准感知通道系统响应</h3>
 <p>校准前请先进行射频直连：将发射 RF 输出连接到对应的感知 RX 输入，并在校准过程中保持连接稳定。</p>
 <p>如果发射功率较大，建议优先降低发射功率；必要时在直连链路中加入合适的衰减器，避免 RX 饱和。衰减器本身应在信号带宽内尽量平坦，否则其带内起伏会被一并计入校准结果。</p>
-<p>单站感知校准时，先启动 BS 后端和单站感知前端，在前端中切换到需要校准的感知通道，然后点击 <code>Calibrate Hsys</code>。如果是单站多通道配置，请分别对需要校准的通道执行一次。</p>
-<p>双站感知校准时，先启动 BS 和 UE 两端后端，打开双站感知前端，并在射频直连状态下点击双站前端里的 <code>Calibrate Hsys</code>。</p>
+<p>单站感知校准时，先启动 BS 后端和单站感知前端，在前端中切换到需要校准的感知通道，然后点击系统响应校准。如果是单站多通道配置，请分别对需要校准的通道执行一次。</p>
+<p>双站感知校准时，先启动 BS 和 UE 两端后端，打开双站感知前端，并在射频直连状态下点击双站前端里的系统响应校准。</p>
 <p>等待后端日志提示校准完成并保存校准文件。当前运行会立即使用新的系统响应校准结果；之后重新启动后端时，程序会自动加载匹配的校准文件。如果没有找到匹配文件，程序会继续运行并打印提示，感知处理会跳过系统响应补偿。</p>
 <p>校准完成后，再恢复正常的天线连接或实验连接，然后继续进行空口测量。</p>
-<h3 id="8-网页配置控制台">8. 网页配置控制台</h3>
+<h3 id="9-网页配置控制台">9. 网页配置控制台</h3>
 <p>如果希望通过浏览器远程修改配置并控制进程，可运行：</p>
 <pre><code class="language-bash">python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 </code></pre>
@@ -328,10 +346,10 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <li>该控制台可以执行网页中输入的启动命令，因此只应绑定到可信网络，或者保持默认 <code>127.0.0.1</code>。</li>
 </ul>
 <h2 id="参数说明">参数说明</h2>
+<p>运行时配置采用层级化 YAML。下面的表格使用完整 YAML 参数名，例如 <code>uplink.arq_enabled</code>，避免 BS/UE 或下行/上行里的同名字段混淆。可选 section 可以省略；缺省值由解析器补齐，<code>config/</code> 下的样例文件给出了常用硬件、双工和仿真配置。</p>
 <h3 id="bs">BS</h3>
-<p><code>BS</code> (BS 节点) 使用 <code>BS.yaml</code> 配置。
-可使用 <code>config/BS_X310.yaml</code>、<code>config/BS_B210.yaml</code> 或 <code>config/BS_B210_Duplex.yaml</code> 作为模板。</p>
-<p><code>BS.yaml</code> 参数说明：</p>
+<p><code>BS</code> 从当前工作目录读取 <code>BS.yaml</code>。可从 <code>config/BS_X310.yaml</code>、<code>config/BS_B210.yaml</code>、双工模板或仿真模板开始修改。</p>
+<h4 id="bs-radio">BS radio</h4>
 <table>
 <thead>
 <tr>
@@ -343,472 +361,744 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 </thead>
 <tbody>
 <tr>
-<td style="text-align:left"><code>fft_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">OFDM FFT 点数。</td>
+<td style="text-align:left"><code>radio.radio_backend</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>uhd</code></td>
+<td style="text-align:left">Radio I/O 后端。<code>uhd</code> 表示真实 USRP，<code>sim</code> 表示共享内存信道仿真器。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-simulation">BS simulation</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>simulation.session</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>oisac_sim</code></td>
+<td style="text-align:left">BS、UE 和 <code>ChannelSimulator</code> 共用的仿真 session 命名空间。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cp_length</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>128</code></td>
-<td style="text-align:left">循环前缀长度（采样点）。</td>
+<td style="text-align:left"><code>simulation.enable_comm_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">仿真器生成 UE 通信接收路径。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sync_pos</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">同步符号在帧内的位置索引。</td>
+<td style="text-align:left"><code>simulation.enable_sensing_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">仿真器生成单站感知 RX 路径。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>simulation.enable_uplink</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">预留 <code>sync_pos-1</code> 作为重复 ZC 第二同步符号。启用后，接收端会先用两个连续同步符号做类 Schmidl-Cox 粗定时/模糊 CFO 估计，再用 <code>sync_pos</code> 附近的局部 ZC 相关解析 CFO alias 并精修主同步。要求 <code>sync_pos &gt;= 1</code>。</td>
+<td style="text-align:left">仿真器转发 UE 到 BS 的上行流。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>simulation.pacing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">按真实采样时间 pacing 仿真输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.noise_power_dbfs</code></td>
+<td style="text-align:left"><code>float</code> / dBFS</td>
+<td style="text-align:left"><code>-70</code></td>
+<td style="text-align:left">每个 RX 通道的 AWGN 功率；很低的值近似关闭噪声。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.snr_control_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">预留 <code>sync_pos+1</code> 作为专用重复 CFO training field。接收端仍先依赖 ZC 或可选第二同步符号完成帧定位和 modulo CFO 估计；启用该字段时，它只用于 CFO alias 去模糊。发射端和接收端必须保持一致。</td>
+<td style="text-align:left">在加 AWGN 前缩放干净信号，以维持 <code>target_snr_db</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cfo_training_period_samples</code></td>
-<td style="text-align:left"><code>int</code> / 采样点</td>
-<td style="text-align:left"><code>16</code></td>
-<td style="text-align:left">CFO training field 的重复周期，必须整除 <code>fft_size</code>；无模糊 CFO 范围约为 <code>+-sample_rate/(2*period)</code>。</td>
+<td style="text-align:left"><code>simulation.target_snr_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>40</code></td>
+<td style="text-align:left">开启 SNR 控制时的目标 SNR。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sample_rate</code></td>
+<td style="text-align:left"><code>simulation.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10002</code></td>
+<td style="text-align:left">ChannelSimulator 运行时 SNR 控制 ZMQ 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.cfo_hz</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE RX 校正前注入的初始载波频偏。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.sample_rate_offset_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE 相对 BS 的采样钟偏差。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.timing_offset_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">注入到 RX 的固定整数采样延迟。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_m</code></td>
+<td style="text-align:left"><code>float</code> / m</td>
+<td style="text-align:left"><code>0.04283</code></td>
+<td style="text-align:left">ULA 物理阵元间距；<code>&lt;=0</code> 时使用 <code>array_spacing_lambda</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_lambda</code></td>
+<td style="text-align:left"><code>float</code> / lambda</td>
+<td style="text-align:left"><code>0.5</code></td>
+<td style="text-align:left">旧版按波长归一化的 ULA 间距。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.ring_capacity_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>262144</code></td>
+<td style="text-align:left">每条共享内存流的 ring 容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.steering_override_file</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">可选 steering matrix 文件；空字符串使用 ULA steering。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.comm_multipath_taps[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">通信 tapped-delay-line 信道 tap，字段为 <code>delay_samples</code>、<code>gain_db</code>、<code>phase_deg</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">单站感知点目标，字段为 <code>range_m</code>、<code>velocity_mps</code>、<code>gain_db</code>、<code>angle_deg</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.bistatic_targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">双站/通信点目标，字段同上。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-rf-sampling">BS rf_sampling</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>rf_sampling.sample_rate</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
 <td style="text-align:left"><code>50000000</code></td>
 <td style="text-align:left">基带采样率。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>bandwidth</code></td>
+<td style="text-align:left"><code>rf_sampling.bandwidth</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
 <td style="text-align:left"><code>50000000</code></td>
-<td style="text-align:left">模拟带宽。通常与 <code>sample_rate</code> 保持一致。</td>
+<td style="text-align:left">模拟带宽，通常与采样率一致。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-usrp-device">BS usrp_device</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>usrp_device.device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>addr=...</code></td>
+<td style="text-align:left">通用 USRP device args。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-clock-time">BS clock_time</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>clock_time.clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>external</code></td>
+<td style="text-align:left">全局时钟源：<code>internal</code>、<code>external</code> 或 <code>gpsdo</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>center_freq</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>2400000000</code></td>
-<td style="text-align:left">射频中心频率。</td>
+<td style="text-align:left"><code>clock_time.time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal</code></td>
+<td style="text-align:left">全局时间/PPS 源；空字符串表示跟随 <code>clock_source</code>。</td>
 </tr>
+</tbody>
+</table>
+<h4 id="bs-ofdm-frame">BS ofdm_frame</h4>
+<table>
+<thead>
 <tr>
-<td style="text-align:left"><code>tx_gain</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>30</code></td>
-<td style="text-align:left">发射增益。</td>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
 </tr>
+</thead>
+<tbody>
 <tr>
-<td style="text-align:left"><code>tx_channel</code></td>
+<td style="text-align:left"><code>ofdm_frame.fft_size</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">TX 通道索引。</td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">OFDM FFT 点数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>zc_root</code></td>
+<td style="text-align:left"><code>ofdm_frame.cp_length</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>128</code></td>
+<td style="text-align:left">循环前缀长度。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.sync_pos</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>29</code></td>
-<td style="text-align:left">Zadoff-Chu 根序号。</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">帧内同步符号索引。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>num_symbols</code></td>
+<td style="text-align:left"><code>ofdm_frame.enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">预留 <code>sync_pos-1</code> 作为重复 ZC 同步符号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">预留 <code>sync_pos+1</code> 作为重复 CFO training field。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.cfo_training_period_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">CFO training field 重复周期，必须整除 <code>fft_size</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.num_symbols</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>100</code></td>
 <td style="text-align:left">每帧 OFDM 符号数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>output_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>dense</code></td>
-<td style="text-align:left">感知输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>cuda_mod_pipeline_slots</code></td>
+<td style="text-align:left"><code>ofdm_frame.sensing_symbol_num</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>2</code></td>
-<td style="text-align:left">CUDA 调制流水线 slot 数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">参与感知处理的符号数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>pilot_positions</code></td>
+<td style="text-align:left"><code>ofdm_frame.zc_root</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>29</code></td>
+<td style="text-align:left">同步/前导 Zadoff-Chu 根。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.pilot_positions</code></td>
 <td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[571,631,...,451]</code></td>
-<td style="text-align:left">分布在占用带宽内的可配置梳状导频子载波索引。</td>
+<td style="text-align:left"><code>[571,...]</code></td>
+<td style="text-align:left">梳状导频子载波索引。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>midframe_pilot_symbols</code></td>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_symbols</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">可选的帧内 BPSK 导频符号索引，例如 <code>[25,50,75]</code>。这些符号不参与 payload 映射；配置的梳状导频 RE 会保留梳状导频序列用于相位跟踪，其余 RE 使用确定性 BPSK。</td>
+<td style="text-align:left">可选帧内 BPSK 导频符号索引。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>midframe_pilot_seed</code></td>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_seed</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>1296453708</code></td>
-<td style="text-align:left">确定性帧内 BPSK 导频种子，<code>BS.yaml</code> 和 <code>UE.yaml</code> 必须一致。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>data_resource_blocks</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">缺省</td>
-<td style="text-align:left">可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除预留同步符号和梳状导频 RE 外的所有 RE 都承载 payload。设为 <code>[]</code> 表示完全不发送 payload。每个块是一个矩形，使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>，并可选 <code>kind</code>。<code>kind: payload</code> 表示这些 RE 承载真实业务数据；<code>kind: sensing_pilot</code> 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 <code>sensing_pilot</code> 误判成专用同步符号。未被 <code>payload</code> 块选中的其余非预留同步、非梳状导频、非帧内 BPSK 导频 RE 会发送预生成 QPSK。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>mask_blocks</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">缺省</td>
-<td style="text-align:left">可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 <code>output_mode=compact_mask</code> 时生效；<code>dense</code> 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE；可选 CFO training field 会被拒绝，因为它不是合法感知符号。重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">通用 USRP 参数（TX/RX 兜底）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">TX 专用 USRP 参数。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">感知 RX 默认 USRP 参数。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal/external/gpsdo</code></td>
-<td style="text-align:left">全局时钟源。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>time_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">全局时间/PPS 源；空字符串表示跟随 <code>clock_source</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">TX 时钟源覆盖项。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_time_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">TX 时间源覆盖项。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">感知 RX 默认时钟源覆盖项。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_time_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">感知 RX 默认时间源覆盖项。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>wire_format_tx</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_channel</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">BS 上行 RX 使用的 USRP 通道索引。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_wire_format</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">BS 上行 RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_wire_format</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">BS 感知 RX 默认链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">BS 下行业务 UDP 输入绑定地址，即 BS-&gt;UE 下行要发送的业务流。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50000</code></td>
-<td style="text-align:left">BS 下行业务 UDP 输入绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">BS 解码后的上行业务 UDP 输出目标 IP，即从 UE-&gt;BS 上行恢复出的业务流。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50003</code></td>
-<td style="text-align:left">BS 解码后的上行业务 UDP 输出目标端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用解码后业务 UDP 输出的排队 pacing，用于平滑 decoder 造成的突发输出。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_target_mbps</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">UDP egress pacer 的目标载荷速率。<code>0</code> 表示根据入队速率自动估计；正数表示固定 Mbps 速率。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10240</code></td>
-<td style="text-align:left">egress pacer 最多缓存的 UDP 数据报数量，超过后丢弃最旧数据报。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">egress pacer 中数据报允许排队的最长时间；设为 <code>0</code> 可关闭按年龄丢包。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>duplex_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">双工方式。<code>tdd</code> 将 UE 上行符号按时间复用到 BS 帧内，并使用下行中心频率；<code>fdd</code> 保持 BS 下行连续发送，同时 UE 上行使用 <code>uplink.center_freq</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink</code></td>
-<td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code>、<code>center_freq=2500000000</code></td>
-<td style="text-align:left">上行/双工设置。TDD 下，<code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 以 OFDM 符号为单位定义 DL/UL 边界，<code>center_freq</code> 会被忽略；FDD 下，<code>center_freq</code> 定义 UE-&gt;BS 上行载波，而 <code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 会被忽略，上行按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">上行设置。启用 BS 上行接收端硬件 RX AGC。硬件 Duplex 模板默认开启；固定的 <code>uplink.rx_gain</code> 会作为初始增益。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>14.0</code></td>
-<td style="text-align:left">上行设置。上行跟踪 AGC 窗口下界。只有当滤波后的上行 delay-spectrum 主峰低于该阈值时，才提高 RX 增益。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>16.0</code></td>
-<td style="text-align:left">上行设置。上行跟踪 AGC 窗口上界。只有当滤波后的上行 delay-spectrum 主峰高于该阈值时，才降低 RX 增益。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
-<td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>1.0</code></td>
-<td style="text-align:left">上行设置。BS 上行 RX 单次 AGC 更新允许的最大增益步进。饱和保护强制降增益时也使用这个步进上限。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_agc_update_frames</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">上行设置。上行跟踪 AGC 两次更新之间最少处理的上行帧数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
-<td style="text-align:left"><code>int</code> / 采样点</td>
-<td style="text-align:left"><code>63</code></td>
-<td style="text-align:left">BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 <code>DUTI</code> 调整。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_to_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">开启 CPU 路径 eRTM TO 估计。BS 将最新频域上行信道估计和运行时 <code>DUTI</code> 封装到内部下行 LDPC payload；UE 消费该 payload 并打印 centroid3 细化后的 TO 估计，不转发到用户 UDP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
-<td style="text-align:left"><code>int</code> / 帧</td>
-<td style="text-align:left"><code>32</code></td>
-<td style="text-align:left">BS eRTM payload/report 的下行 TX 帧间隔；小于 <code>1</code> 的值会按 <code>1</code> 处理。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>mono_sensing_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">单站感知数据流和控制通道的 ZMQ 监听 IP。使用 <code>0.0.0.0</code> 可接受远端前端连接；使用 <code>127.0.0.1</code> 则仅允许本机连接。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>mono_sensing_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8888</code></td>
-<td style="text-align:left">单站感知数据流的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_channel_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">BS 上行信道估计调试流的 ZeroMQ PUB 监听 IP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_channel_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12358</code></td>
-<td style="text-align:left">BS 上行信道估计调试流的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_pdf_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">BS 上行 delay profile 调试流的 ZeroMQ PUB 监听 IP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_pdf_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12359</code></td>
-<td style="text-align:left">BS 上行 delay profile 调试流的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_constellation_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">BS 上行星座图调试流的 ZeroMQ PUB 监听 IP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_constellation_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12356</code></td>
-<td style="text-align:left">BS 上行星座图调试流的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_channel_count</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">感知 RX 通道数量（<code>0</code> 表示关闭感知 RX）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_channels</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">感知 RX 每通道详细配置，字段见下表。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>tx_circular_buffer_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>32</code></td>
-<td style="text-align:left">向 TX 供帧的已调制帧队列容量。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>paired_frame_queue_size</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">每个感知通道的 RX/TX 帧配对队列容量。建议大于 <code>tx_circular_buffer_size</code>，以便在 RX 启动、网络缓冲和对齐完成前保留 TX 参考帧。若启动完成后仍持续满队列，通常说明感知处理吞吐不足，而不是应该无限增加缓冲。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>control_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>9999</code></td>
-<td style="text-align:left">双向控制通道的 ZeroMQ ROUTER 绑定端口（接收命令，回送参数/心跳）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用 CPU 版内部测量模式。启用后，<code>BS</code> 不再监听 <code>udp_input_*</code>，而是内部生成确定性的 PRBS 载荷；<code>UE</code> 会把测量载荷转入 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal_prbs</code></td>
-<td style="text-align:left">测量模式选择。目前仅支持 <code>internal_prbs</code>；非法值会在配置归一化阶段自动关闭测量模式。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_run_id</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">写入测量 CSV 汇总的运行 ID。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_output_dir</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">CPU 测量汇总文件输出目录。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_payload_bytes</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">每个内部测量载荷的字节数。若小于内部测量头长度，会自动钳制到最小合法值。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_prbs_seed</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0x5A</code></td>
-<td style="text-align:left">用于生成确定性 PRBS 载荷内容的基础种子。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_packets_per_point</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">每个在线 <code>MRST</code> epoch 要发送的测量载荷数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>profiling_modules</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>ldpc_encode</code>、<code>sensing_proc</code>、<code>agc</code>、<code>uplink</code> 和 <code>ertm</code>；<code>all</code> 表示全部。BS 端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>downlink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">BS 下行 CPU 核列表：索引 <code>0..3</code> 分别绑定 <code>_tx_proc</code>、<code>_modulation_proc</code>、<code>_ldpc_encode_proc</code> 和 <code>_udp_recv_proc</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">BS 上行 CPU 核列表：索引 <code>0</code>、<code>1</code>、<code>2</code> 分别绑定 RX sample ingest、OFDM/LLR signal processing、LDPC decode + UDP output。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>main_cpu_core</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">主线程 CPU 核。</td>
+<td style="text-align:left">确定性帧内 BPSK 导频种子，TX/RX 必须一致。</td>
 </tr>
 </tbody>
 </table>
-<p>快速理解：</p>
-<ul>
-<li><code>data_resource_blocks</code> 决定“通信数据放在哪里”。</li>
-<li><code>mask_blocks</code> 决定“compact 感知时哪些 RE 要导出”。</li>
-<li>前者影响 payload 映射，后者只影响感知输出，两者不是互相替代的关系。</li>
-</ul>
-<p>若启用 <code>data_resource_blocks</code>，请把相同的矩形块和 <code>kind</code> 同步写入 <code>UE.yaml</code>。如果与 <code>sync_pos</code>、可选的 <code>sync_pos-1</code> 第二同步符号、<code>midframe_pilot_symbols</code> 或 <code>pilot_positions</code> 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 <code>sync_pos+1</code> CFO training field 只服务于 CFO 捕获/去模糊，不是合法的 sensing-pilot 或 sensing-mask 符号。优先级始终是“ZC 同步符号 &gt; CFO training field &gt; 梳状导频 RE &gt; 帧内 BPSK 导频 &gt; sensing_pilot &gt; payload/预生成 QPSK”。</p>
-<p>dense 感知模式下，如果配置的 <code>symbol_stride</code> 或运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被直接拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位，不会继承旧 stride 的漂移相位。</p>
-<p>当 <code>output_mode=compact_mask</code> 时，感知会变成“每个 OFDM 帧发送一条紧凑消息”，其中只包含 <code>mask_blocks</code> 选中的 RE。此时 <code>STRD</code> 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启：<code>SKIP=1</code> 保持输出紧凑原始 RE，<code>SKIP=0</code> 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 <code>range_fft_size</code> 和 <code>doppler_fft_size</code>，确保它们能覆盖所选子载波数和符号数。紧凑感知载荷格式为 <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>，后面跟着固定顺序的 <code>re_count</code> 个原始 <code>complex&lt;float&gt;</code> 数据。当前 <code>plot_sensing*.py</code> 还不能处理非“规则”的 compact 载荷。</p>
-<p><code>rx_channels</code> 子项字段：</p>
+<h4 id="bs-cuda">BS cuda</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_mod_pipeline_slots</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA 调制流水线 slot 数，小于 <code>1</code> 会钳制。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-ldpc">BS ldpc</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">使用 int16/Q16 layered-NMS CPU 解码器而不是 float32。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point_scale</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">固定点模式下 int16 饱和前的 LLR 缩放。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-downlink">BS downlink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>downlink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2400000000</code></td>
+<td style="text-align:left">BS 下行 RF 中心频率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.tx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>60</code></td>
+<td style="text-align:left">BS 下行 TX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.tx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS 下行 TX 通道索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.tx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">TX 专用 device args；空字符串使用 <code>usrp_device.device_args</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.tx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">TX 时钟源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.tx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">TX 时间源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.wire_format_tx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">TX wire format，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">在 BS 发射端开启下行 ARQ。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">下行 ARQ outstanding packet 窗口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_retransmit_timeout_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">下行 ARQ 重传超时。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_max_retries</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>5</code></td>
+<td style="text-align:left">下行最大重传次数；<code>0</code> 表示窗口内不限次数。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-downlink-pipeline">BS downlink_pipeline</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>downlink_pipeline.tx_circular_buffer_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8</code></td>
+<td style="text-align:left">送入 TX 的已调制帧队列容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink_pipeline.data_packet_buffer_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>256</code></td>
+<td style="text-align:left">已编码 packet buffer 容量。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-uplink">BS uplink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>uplink.enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">UE 到 BS 上行/双工路径总开关。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.duplex_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>tdd</code></td>
+<td style="text-align:left"><code>tdd</code> 使用上行符号窗口；<code>fdd</code> 使用 <code>uplink.center_freq</code> 和整帧上行。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2500000000</code></td>
+<td style="text-align:left">仅 FDD 使用的上行载波；TDD 使用下行中心频率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_start</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>90</code></td>
+<td style="text-align:left">TDD 下上行窗口起始符号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">TDD 下上行窗口长度；<code>0</code> 关闭 TDD 上行。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.guard_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">TDD 上行窗口内的前置 guard 符号数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.bs_dl_ul_timing_diff</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>63</code></td>
+<td style="text-align:left">BS 上行 RX 窗口相对下行 TX 帧锚点的偏移。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.debug_self_channel</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">从上行 RX 窗口估计本机 TX 泄漏/self channel，用于 <code>DUTI</code> 调试。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启 eRTM timing-offset payload 和 UE 侧 TO 日志。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / frames</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM payload/report 的下行 TX 帧间隔。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS 上行 RX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">BS 上行 RX 通道索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">BS 上行 RX wire format。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">上行 RX device args 覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">上行 RX 时钟源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">上行 RX 时间源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启 BS 上行硬件 RX AGC。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>14</code></td>
+<td style="text-align:left">滤波后 delay-spectrum 主峰低于该阈值时提高增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">主峰高于该阈值时降低增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">单次上行 RX AGC 最大步进。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">两次上行 AGC 更新之间最少处理帧数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.equalizer_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>mmse</code></td>
+<td style="text-align:left">BS 上行均衡器反演模式：<code>zf</code> 或 <code>mmse</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.channel_tracking_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>pilot_phase</code></td>
+<td style="text-align:left">上行每符号梳状导频跟踪模式：<code>disabled</code> 或 <code>pilot_phase</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.equalizer_mag_floor</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-6</code></td>
+<td style="text-align:left">上行信道反演时 `</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.channel_tracking_min_pilot_snr</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-4</code></td>
+<td style="text-align:left">回退前要求的最小梳状导频残差权重。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">在 BS 接收端开启上行 ARQ。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_ordered_delivery</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">缓存上行 packet 以按序输出 UDP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">上行 ARQ 接收/重排窗口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_feedback_interval_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">上行 ARQ ACK feedback 最小间隔。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-sensing">BS sensing</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>sensing.rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">默认感知 RX wire format。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">默认感知 RX args。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">默认感知 RX 时钟源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_time_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">默认感知 RX 时间源覆盖。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_channel_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">单站感知 RX 通道数；<code>0</code> 关闭感知 RX。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.rx_channels[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">见下表</td>
+<td style="text-align:left">每通道感知 RX 设置。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.range_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">距离向 FFT 点数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.doppler_fft_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">多普勒向 FFT 点数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.view_range_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">后端 RD view 宽度；<code>0</code> 表示完整 range FFT。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.view_doppler_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">后端 RD view 高度；<code>0</code> 表示完整 doppler FFT。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.output_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left"><code>dense</code> 为基于 STRD 的完整输出；<code>compact_mask</code> 只导出选中 RE。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.on_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>complex_float32</code></td>
+<td style="text-align:left">感知 payload wire format。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.backend_processing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">在支持时输出后端 RD/CFAR/微多普勒 sidecar。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.symbol_stride</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>20</code></td>
+<td style="text-align:left">dense 模式启动时默认 STRD。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.paired_frame_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">每个感知通道的 RX/TX 帧配对队列容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.mask_blocks</code></td>
+<td style="text-align:left">来自 <code>resource_preview.mask_blocks</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">由 resource preview 生成的运行时感知 mask。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-sensing-rx-channels-字段">BS sensing.rx_channels[] 字段</h4>
 <table>
 <thead>
 <tr>
 <th style="text-align:left">字段</th>
-<th style="text-align:left">类型</th>
+<th style="text-align:left">类型/单位</th>
 <th style="text-align:left">典型值</th>
 <th style="text-align:left">说明</th>
 </tr>
@@ -817,83 +1107,80 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <tr>
 <td style="text-align:left"><code>usrp_channel</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">对应 USRP RX 通道号。</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">当前感知路径使用的 USRP RX 通道。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">该通道专用 USRP 参数。</td>
+<td style="text-align:left">该通道 device args 覆盖。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>clock_source</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">该通道专用时钟源覆盖。</td>
+<td style="text-align:left">该通道时钟源覆盖。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>time_source</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">该通道专用时间源覆盖。</td>
+<td style="text-align:left">该通道时间源覆盖。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">该感知通道专用 RX 数据格式覆盖。</td>
+<td style="text-align:left">该通道 wire-format 覆盖。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_gain</code></td>
-<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
 <td style="text-align:left"><code>30</code></td>
 <td style="text-align:left">该通道 RX 增益。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>alignment</code></td>
-<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
 <td style="text-align:left"><code>63</code></td>
-<td style="text-align:left">该通道对齐偏移（采样点）。</td>
+<td style="text-align:left">该通道定时 alignment。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_antenna</code></td>
 <td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">该通道天线口，如 <code>TX/RX</code>、<code>RX1</code>。</td>
+<td style="text-align:left"><code>RX2</code></td>
+<td style="text-align:left">RX 天线端口，如 <code>RX1</code>、<code>RX2</code>、<code>TX/RX</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>enable_system_delay_estimation</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">若为 <code>true</code>，该通道会在启动时执行一次基于 ZC 相关的系统时延估计，之后每隔 434 个帧再执行一次；同时继续消耗帧数据，但保持常规感知处理链停用。</td>
+<td style="text-align:left">周期执行基于 ZC 的系统时延估计，并关闭该通道常规感知处理。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>enable_sensing_output</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left">继承输出开关</td>
+<td style="text-align:left">该通道单站感知输出开关。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>rx_cpu_core</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">该通道 RX loop 的 CPU 核。</td>
+<td style="text-align:left">该通道 RX loop CPU 核。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>processing_cpu_core</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">该通道感知处理 loop 的 CPU 核。</td>
+<td style="text-align:left">该通道感知处理 loop CPU 核。</td>
 </tr>
 </tbody>
 </table>
-<p>说明：</p>
-<ul>
-<li>当 <code>rx_channels</code> 为空且 <code>rx_channel_count &gt; 0</code> 时，程序按通道号 <code>0..N-1</code> 自动补齐默认项。</li>
-<li>若两者数量不一致，程序会按 <code>rx_channel_count</code> 对通道列表做裁剪或扩展。</li>
-<li>当某通道设置 <code>enable_system_delay_estimation=true</code> 时，该通道会在启动附近执行一次系统时延估计，之后每隔 434 个帧重复执行一次，同时继续消耗帧数据；常规感知处理和感知输出保持停用。</li>
-<li><code>device_args</code>、<code>wire_format_*</code>、每通道天线口和输出 IP 等字段通常与硬件平台和部署环境强相关；样本 YAML 只是起点，不应把不同机器/射频平台的值机械互换。</li>
-<li>BS 上行 AGC 复用 UE 下行路径相同的跟踪 <code>HardwareRxAgc</code> 逻辑：根据上行同步符号的 delay spectrum、同步符号时域样本是否接近/达到 ADC 满幅，调节上行 RX 通道的 USRP 硬件增益。UE 下行专用的 <code>SYNC_SEARCH</code> 增益扫描不用于 BS 上行，因为 BS 接收的是已调度的上行窗口，而不是连续同步搜索状态机。</li>
-</ul>
 <h3 id="ue">UE</h3>
-<p><code>UE</code> (UE 节点) 使用 <code>UE.yaml</code> 配置。
-可使用 <code>config/UE_X310.yaml</code>、<code>config/UE_B210.yaml</code> 或 <code>config/UE_B210_Duplex.yaml</code> 作为模板。</p>
-<p><code>UE.yaml</code> 参数说明：</p>
+<p><code>UE</code> 从当前工作目录读取 <code>UE.yaml</code>。可从 <code>config/UE_X310.yaml</code>、<code>config/UE_B210.yaml</code>、双工模板或仿真模板开始修改。</p>
+<h4 id="bs-resource-preview">BS resource_preview</h4>
 <table>
 <thead>
 <tr>
@@ -905,681 +1192,1507 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 </thead>
 <tbody>
 <tr>
-<td style="text-align:left"><code>fft_size</code></td>
-<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>resource_preview.data_resource_blocks[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">payload / sensing-pilot RE 矩形；每项包含 <code>kind</code>、<code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>resource_preview.mask_blocks[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">compact 感知 RE 矩形；每项包含 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-measurement">BS measurement</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启内部 PRBS 测量流量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">测量生成/检查模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">写入测量 CSV 的 run ID。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">测量 CSV 输出目录。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code> / bytes</td>
 <td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">OFDM FFT 点数。</td>
+<td style="text-align:left">每个测量 payload 字节数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cp_length</code></td>
+<td style="text-align:left"><code>measurement.measurement_prbs_seed</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>128</code></td>
-<td style="text-align:left">循环前缀长度（采样点）。</td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">确定性 PRBS payload 种子。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sync_pos</code></td>
+<td style="text-align:left"><code>measurement.measurement_packets_per_point</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">同步符号在帧内的位置索引。</td>
+<td style="text-align:left">每个测量 epoch 发送的 packet 数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>measurement.measurement_max_packets_per_frame</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每帧最多拉取的测量 packet 数；<code>0</code> 表示不限。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-network-output">BS network_output</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 下行业务 UDP 输入绑定 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50000</code></td>
+<td style="text-align:left">BS 下行业务 UDP 输入端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">BS 解码上行 UDP 输出目标 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50003</code></td>
+<td style="text-align:left">BS 解码上行 UDP 输出目标端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_enabled</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">预留 <code>sync_pos-1</code> 作为重复 ZC 第二同步符号。启用后，初始同步先用两个连续同步符号做类 Schmidl-Cox 粗定时/模糊 CFO 估计，再用局部 ZC 相关解析 CFO alias 并精修主同步。发射端必须使用相同设置。</td>
+<td style="text-align:left">开启解码 UDP 输出 pacing。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_target_mbps</code></td>
+<td style="text-align:left"><code>float</code> / Mbps</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">pacing 目标速率；<code>0</code> 根据入队速率自动估计。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10240</code></td>
+<td style="text-align:left">pacing 队列 datagram 容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_max_delay_ms</code></td>
+<td style="text-align:left"><code>float</code> / ms</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">最大排队时间；<code>0</code> 关闭按年龄丢包。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.mono_sensing_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">开启单站感知 ZMQ 输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.mono_sensing_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">单站感知/control ZMQ 绑定 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.mono_sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8888</code></td>
+<td style="text-align:left">单站感知 PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>9999</code></td>
+<td style="text-align:left">运行时控制 ZMQ ROUTER 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 上行信道估计 debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12358</code></td>
+<td style="text-align:left">BS 上行信道估计 debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 上行 delay-spectrum debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12359</code></td>
+<td style="text-align:left">BS 上行 delay-spectrum debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_constellation_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS 上行星座图 debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.uplink_constellation_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12356</code></td>
+<td style="text-align:left">BS 上行星座图 debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS self-channel debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12360</code></td>
+<td style="text-align:left">BS self-channel debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">BS self-delay-spectrum debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12361</code></td>
+<td style="text-align:left">BS self-delay-spectrum debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">eRTM debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12362</code></td>
+<td style="text-align:left">eRTM debug PUB 端口。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-cpu-cores">BS cpu_cores</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cpu_cores.downlink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[1,2,3,-1]</code></td>
+<td style="text-align:left">BS 下行核心：TX、调制、LDPC 编码、UDP 接收。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.uplink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">BS 上行核心：RX ingest、OFDM/LLR 处理、LDPC decode + UDP 输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.main_cpu_core</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>-1</code></td>
+<td style="text-align:left">主线程 CPU 核；<code>-1</code> 表示不绑定。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="bs-runtime">BS runtime</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>runtime.profiling_modules</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">逗号分隔 profiling 模块，如 <code>modulation</code>、<code>latency</code>、<code>ldpc_encode</code>、<code>sensing_proc</code>、<code>agc</code>、<code>arq</code>、<code>uplink</code>、<code>ertm</code> 或 <code>all</code>。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-radio">UE radio</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>radio.radio_backend</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>uhd</code></td>
+<td style="text-align:left">Radio I/O 后端。<code>uhd</code> 表示真实 USRP，<code>sim</code> 表示信道仿真器。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-simulation">UE simulation</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>simulation.session</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>oisac_sim</code></td>
+<td style="text-align:left">共享仿真 session 命名空间。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.enable_comm_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">仿真器生成通信 RX 路径。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.enable_sensing_rx</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">仿真器生成感知 RX 路径。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.enable_uplink</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">使用 <code>sync_pos+1</code> 的专用 CFO training field 来解析 CFO alias。帧定位仍来自 ZC 或可选第二同步符号；接收端先估计 CP/第二同步 modulo CFO，再用 CFO Field 的重复训练 CFO 估计选择最近的 alias。发射端必须使用相同设置。</td>
+<td style="text-align:left">仿真器转发 UE 到 BS 的上行流。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cfo_training_period_samples</code></td>
-<td style="text-align:left"><code>int</code> / 采样点</td>
-<td style="text-align:left"><code>16</code></td>
-<td style="text-align:left">CFO training field 的重复周期，必须整除 <code>fft_size</code>；无模糊 CFO 范围约为 <code>+-sample_rate/(2*period)</code>。</td>
+<td style="text-align:left"><code>simulation.pacing_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">按真实采样时间 pacing 仿真输出。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sync_cfo_alias_search_range_hz</code></td>
+<td style="text-align:left"><code>simulation.noise_power_dbfs</code></td>
+<td style="text-align:left"><code>float</code> / dBFS</td>
+<td style="text-align:left"><code>-100</code></td>
+<td style="text-align:left">每个 RX 通道的 AWGN 功率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.snr_control_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">通过缩放干净仿真信号维持 <code>target_snr_db</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.target_snr_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>40</code></td>
+<td style="text-align:left">开启 SNR 控制时的目标 SNR。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10002</code></td>
+<td style="text-align:left">ChannelSimulator 控制端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.cfo_hz</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>800000</code></td>
-<td style="text-align:left">同步 alias 解析覆盖的最大绝对 CFO 范围。接收端会根据 CP 和第二同步符号各自的 modulo 周期，把这个物理范围换算为整数 alias 搜索跨度。<code>profiling_modules</code> 包含 <code>sync</code> 时会打印逐 alias 峰值比较。</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">初始载波频偏。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sample_rate</code></td>
+<td style="text-align:left"><code>simulation.sample_rate_offset_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE 相对 BS 的采样钟偏差。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.timing_offset_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">固定整数采样延迟。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_m</code></td>
+<td style="text-align:left"><code>float</code> / m</td>
+<td style="text-align:left"><code>0.04283</code></td>
+<td style="text-align:left">ULA 物理阵元间距。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.array_spacing_lambda</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.5</code></td>
+<td style="text-align:left">按波长归一化的旧版 ULA 间距。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.ring_capacity_samples</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>262144</code></td>
+<td style="text-align:left">共享内存 ring 容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.steering_override_file</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">可选 steering matrix 文件。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.comm_multipath_taps[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">通信 tap：<code>delay_samples</code>、<code>gain_db</code>、<code>phase_deg</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">单站点目标。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>simulation.bistatic_targets[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">双站/通信点目标。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-rf-sampling">UE rf_sampling</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>rf_sampling.sample_rate</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
 <td style="text-align:left"><code>50000000</code></td>
 <td style="text-align:left">基带采样率。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>bandwidth</code></td>
+<td style="text-align:left"><code>rf_sampling.bandwidth</code></td>
 <td style="text-align:left"><code>float</code> / Hz</td>
 <td style="text-align:left"><code>50000000</code></td>
-<td style="text-align:left">模拟带宽。通常与 <code>sample_rate</code> 保持一致。</td>
+<td style="text-align:left">模拟带宽。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>center_freq</code></td>
-<td style="text-align:left"><code>float</code> / Hz</td>
-<td style="text-align:left"><code>2400000000</code></td>
-<td style="text-align:left">射频中心频率。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_gain</code></td>
+<td style="text-align:left"><code>rf_sampling.rx_gain</code></td>
 <td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>50</code></td>
-<td style="text-align:left">接收增益。</td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">UE 下行 RX 增益。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_agc_enable</code></td>
+<td style="text-align:left"><code>rf_sampling.rx_agc_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用硬件 RX AGC。跟踪阶段 AGC 基于滤波后的 <code>delay_spectrum</code> 主峰调节 USRP 的 RX 增益，并使用与对齐/频偏调整相同的时间戳门控丢弃旧帧 AGC 动作；若同步符号接近 ADC 满幅，还会强制降增益。</td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">开启 UE 下行硬件 RX AGC。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>rf_sampling.rx_agc_low_threshold_db</code></td>
 <td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>11.0</code></td>
-<td style="text-align:left">跟踪阶段 AGC 窗口下界。只有当滤波后的 <code>delay_spectrum</code> 主峰低于该阈值时，才提高 RX 增益。</td>
+<td style="text-align:left"><code>14</code></td>
+<td style="text-align:left">滤波后 delay-spectrum 主峰低于该阈值时提高增益。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>rf_sampling.rx_agc_high_threshold_db</code></td>
 <td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>13.0</code></td>
-<td style="text-align:left">跟踪阶段 AGC 窗口上界。只有当滤波后的 <code>delay_spectrum</code> 主峰高于该阈值时，才降低 RX 增益。</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">主峰高于该阈值时降低增益。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>rf_sampling.rx_agc_max_step_db</code></td>
 <td style="text-align:left"><code>float</code> / dB</td>
-<td style="text-align:left"><code>3.0</code></td>
-<td style="text-align:left">单次 AGC 更新允许的最大 RX 增益步进。饱和保护强制降增益时也使用这个步进上限。</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">单次 RX AGC 最大步进。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>rf_sampling.rx_agc_update_frames</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">跟踪阶段两次 AGC 更新之间最少处理的帧数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+<td style="text-align:left">两次 AGC 更新之间最少处理帧数。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-usrp-device">UE usrp_device</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>usrp_device.device_args</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>addr=...</code></td>
+<td style="text-align:left">USRP device args。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>rx_channel</code></td>
+<td style="text-align:left"><code>usrp_device.clock_source</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>external</code></td>
+<td style="text-align:left">UE 时钟源：<code>internal</code>、<code>external</code> 或 <code>gpsdo</code>。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-ofdm-frame">UE ofdm_frame</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.fft_size</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">RX 通道索引。</td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">OFDM FFT 点数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>tx_channel</code></td>
+<td style="text-align:left"><code>ofdm_frame.cp_length</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>128</code></td>
+<td style="text-align:left">循环前缀长度。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.sync_pos</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">开启双工/上行时 UE 使用的 TX 通道索引。下行-only 的 UE 运行不需要这一路 TX。</td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">同步符号索引。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>zc_root</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>29</code></td>
-<td style="text-align:left">Zadoff-Chu 根序号。</td>
+<td style="text-align:left"><code>ofdm_frame.enable_sec_sync_symbol</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">期望 <code>sync_pos-1</code> 处存在重复 ZC 同步符号。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>num_symbols</code></td>
+<td style="text-align:left"><code>ofdm_frame.enable_cfo_training_sequence</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">使用 <code>sync_pos+1</code> CFO training field 解析 CFO alias。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.cfo_training_period_samples</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">CFO training 重复周期。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.num_symbols</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>100</code></td>
 <td style="text-align:left">每帧 OFDM 符号数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_symbol_num</code></td>
+<td style="text-align:left"><code>ofdm_frame.sensing_symbol_num</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>100</code></td>
-<td style="text-align:left">参与感知处理的符号数。</td>
+<td style="text-align:left">参与感知的符号数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>output_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>dense</code></td>
-<td style="text-align:left">双站感知输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用双站感知处理链；设为 <code>false</code> 时 <code>UE</code> 与 <code>CUDAUE</code> 均不会启动双站感知通道。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>duplex_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>tdd</code></td>
-<td style="text-align:left">必须与 <code>BS.yaml</code> 保持一致。<code>tdd</code> 共享下行中心频率并只在配置的上行符号窗口发送；<code>fdd</code> 在 <code>uplink.center_freq</code> 上按整帧连续发送。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>idle_waveform</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>random_qpsk</code></td>
-<td style="text-align:left">UE 无上行 UDP 载荷时的 idle 波形。<code>random_qpsk</code> 发送 zero-length mini-header 后接确定性随机 QPSK 填充；<code>zero</code> 发送 zero-length mini-header，剩余 payload RE 保持为 0。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink</code></td>
-<td style="text-align:left"><code>object</code></td>
-<td style="text-align:left"><code>symbol_start=90</code>、<code>symbol_count=10</code>、<code>guard_symbols=1</code>、<code>center_freq=2500000000</code></td>
-<td style="text-align:left">UE 上行设置。TDD 使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 并忽略 <code>center_freq</code>；FDD 使用 <code>center_freq</code> 并忽略 TDD 符号窗口字段，按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ue_timing_advance</code></td>
-<td style="text-align:left"><code>int</code> / 采样点</td>
-<td style="text-align:left"><code>63</code></td>
-<td style="text-align:left">UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 <code>TADV</code> 值移动后续上行帧。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_to_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">开启 CPU 路径 eRTM TO payload 消费和 TO 日志。UE 会根据 BS 发来的上行频域信道和本地下行频域信道，按配置倍数做补零 IFFT 得到 delay spectrum，再进行 eRTM 相关并用 centroid3 做相关峰小数 bin 细化。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_delay_oversample_factor</code></td>
+<td style="text-align:left"><code>ofdm_frame.frame_queue_size</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10</code></td>
-<td style="text-align:left">eRTM delay spectrum IFFT 过采样倍数。小于 <code>1</code> 的值按 <code>1</code> 处理，大于 <code>128</code> 的值按 <code>128</code> 处理；更高倍数可提高 delay 网格分辨率，但会增加 CPU/FFTW/内存开销。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sensing_delay_correction_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>los_tracking</code></td>
-<td style="text-align:left">UE <code>sensing</code> 设置中的感知时延校正来源。<code>los_tracking</code> 使用本地 LoS 同步/SFO tracking delay；<code>ertm_absolute</code> 在可用时使用 CPU 路径 eRTM 最新 <code>TO_UE_samples</code> 作为绝对感知时延，然后仍叠加运行时 <code>ALGN</code> 用户微调。CUDAUE 目前对该模式回退到 <code>los_tracking</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_dl_rf_delay_ns</code></td>
-<td style="text-align:left"><code>float</code> / ns</td>
-<td style="text-align:left"><code>0.0</code></td>
-<td style="text-align:left">eRTM TO 方程使用的下行 RF 链路校准延迟项。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_ul_rf_delay_ns</code></td>
-<td style="text-align:left"><code>float</code> / ns</td>
-<td style="text-align:left"><code>0.0</code></td>
-<td style="text-align:left">eRTM TO 方程使用的上行 RF 链路校准延迟项。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_debug_output_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用 UE 侧 eRTM debug ZeroMQ 输出，包含按配置倍数过采样的 BS 上行 delay spectrum、UE 下行 delay spectrum、eRTM 相关谱、TO 校正后 debug 谱的中心窗口和峰值元数据。可用 <code>scripts/plot_ertm_debug.py</code> 查看。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
-<td style="text-align:left"><code>int</code> / 帧</td>
 <td style="text-align:left"><code>32</code></td>
-<td style="text-align:left">BS eRTM payload/report 的下行 TX 帧间隔；对比日志时应与 BS 保持一致。</td>
+<td style="text-align:left">解调 RX 帧队列容量。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>
+<td style="text-align:left"><code>ofdm_frame.zc_root</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>29</code></td>
+<td style="text-align:left">Zadoff-Chu 根。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.pilot_positions</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[571,...]</code></td>
+<td style="text-align:left">梳状导频子载波索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_symbols</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">可选帧内 BPSK 导频符号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ofdm_frame.midframe_pilot_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1296453708</code></td>
+<td style="text-align:left">确定性帧内 BPSK 导频种子。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-cuda">UE cuda</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_demod_pipeline_slots</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>3</code></td>
-<td style="text-align:left">CUDA 解调流水线 slot 数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+<td style="text-align:left">CUDA 解调流水线 slot 数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>frame_queue_size</code></td>
+<td style="text-align:left"><code>cuda.cuda_ldpc_decoder_backend</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>gpu</code></td>
+<td style="text-align:left">CUDA 解调 LDPC decoder backend：<code>gpu</code> 或 <code>cpu</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cuda.cuda_ldpc_worker_buffers</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8</code></td>
-<td style="text-align:left">UE RX 帧队列容量。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">CUDA LDPC 异步 worker batch buffer 数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sync_queue_size</code></td>
+<td style="text-align:left"><code>cuda.cuda_ldpc_cross_frame_flush_frames</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8</code></td>
-<td style="text-align:left">同步搜索批队列容量。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+<td style="text-align:left"><code>2</code></td>
+<td style="text-align:left">CUDA LDPC batch decode 前最多累计帧数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>reset_hold_s</code></td>
+<td style="text-align:left"><code>cuda.cuda_ldpc_cross_frame_flush_us</code></td>
+<td style="text-align:left"><code>float</code> / us</td>
+<td style="text-align:left"><code>1000</code></td>
+<td style="text-align:left">CUDA LDPC 跨帧 batch 最长等待时间。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-ldpc">UE ldpc</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">使用 int16/Q16 CPU LDPC 解码路径。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ldpc.fixed_point_scale</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>16</code></td>
+<td style="text-align:left">int16 饱和前的 LLR 缩放。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-downlink">UE downlink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>downlink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2400000000</code></td>
+<td style="text-align:left">UE 下行 RF 中心频率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.rx_wire_format</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">UE 下行 RX wire format。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.rx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE 下行 RX 通道索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.equalizer_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>mmse</code></td>
+<td style="text-align:left">下行均衡器反演模式：<code>zf</code> 或 <code>mmse</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.channel_tracking_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>pilot_phase</code></td>
+<td style="text-align:left">每符号梳状导频跟踪模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.equalizer_mag_floor</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-6</code></td>
+<td style="text-align:left">信道反演时 `</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.channel_tracking_min_pilot_snr</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-4</code></td>
+<td style="text-align:left">回退前要求的最小梳状导频残差权重。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">在 UE 接收端开启下行 ARQ。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_ordered_delivery</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">缓存下行 packet 以按序输出 UDP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">下行 ARQ 接收/重排窗口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>downlink.arq_feedback_interval_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">下行 ARQ ACK feedback 最小间隔。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-uplink">UE uplink</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>uplink.enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">UE 上行/双工总开关。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.duplex_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>tdd</code></td>
+<td style="text-align:left">必须与 BS 一致：<code>tdd</code> 窗口上行或 <code>fdd</code> 整帧上行。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.center_freq</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>2500000000</code></td>
+<td style="text-align:left">仅 FDD 使用的上行载波；TDD 使用下行中心频率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.idle_waveform</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>random_qpsk</code></td>
+<td style="text-align:left">UE 空闲上行波形：<code>random_qpsk</code> 或 <code>zero</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_start</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>90</code></td>
+<td style="text-align:left">TDD 上行起始符号。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.symbol_count</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">TDD 上行窗口长度。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.guard_symbols</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">TDD 上行前置 guard 符号数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.tx_gain</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE 上行 TX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.tx_channel</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UE 上行 TX 通道索引。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.wire_format_tx</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>sc16</code></td>
+<td style="text-align:left">UE 上行 TX wire format。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ue_timing_advance</code></td>
+<td style="text-align:left"><code>int</code> / samples</td>
+<td style="text-align:left"><code>63</code></td>
+<td style="text-align:left">UE 上行发送 timing advance。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.debug_self_channel</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">从 RX 窗口估计 UE self-TX 泄漏信道，用于 <code>TADV</code> 调试。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启 eRTM TO payload 消费和 TO 日志。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_delay_oversample_factor</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">eRTM delay-spectrum IFFT 过采样倍数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_dl_rf_delay_ns</code></td>
+<td style="text-align:left"><code>float</code> / ns</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">eRTM 方程中的下行 RF 链路校准延迟。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_ul_rf_delay_ns</code></td>
+<td style="text-align:left"><code>float</code> / ns</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">eRTM 方程中的上行 RF 链路校准延迟。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_debug_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启 UE 侧 eRTM debug ZMQ 频谱输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / frames</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM report 间隔；对比日志时应与 BS 保持一致。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">在 UE 发射端开启上行 ARQ。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_window_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32767</code></td>
+<td style="text-align:left">上行 ARQ outstanding packet 窗口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_retransmit_timeout_ms</code></td>
+<td style="text-align:left"><code>int</code> / ms</td>
+<td style="text-align:left"><code>100</code></td>
+<td style="text-align:left">上行 ARQ 重传超时。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uplink.arq_max_retries</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>5</code></td>
+<td style="text-align:left">上行最大重传次数；<code>0</code> 表示窗口内不限次数。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-sync-tracking">UE sync_tracking</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>sync_tracking.sync_queue_size</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">同步搜索 batch 队列容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.sync_cfo_alias_search_range_hz</code></td>
+<td style="text-align:left"><code>float</code> / Hz</td>
+<td style="text-align:left"><code>800000</code></td>
+<td style="text-align:left">同步 alias 解析覆盖的 CFO 范围。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.reset_hold_s</code></td>
 <td style="text-align:left"><code>float</code> / s</td>
 <td style="text-align:left"><code>0.5</code></td>
-<td style="text-align:left">在强制回到同步搜索前，坏的 delay 条件必须持续累积的时间。内部会按 <code>samples_per_frame / sample_rate</code> 换算成帧数阈值。小于 <code>0</code> 时会钳制到 <code>0.5</code>。</td>
+<td style="text-align:left">坏 delay 条件持续多久后硬 reset 回同步搜索。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>range_fft_size</code></td>
+<td style="text-align:left"><code>sync_tracking.software_sync</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">开启软件同步跟踪。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.predictive_delay</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">使用基于 CFO 的预测性时延补偿。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.hardware_sync</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启硬件同步模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.hardware_sync_tty</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>/dev/ttyUSB0</code></td>
+<td style="text-align:left">硬件同步控制器串口设备。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.desired_peak_pos</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>20</code></td>
+<td style="text-align:left">alignment 逻辑使用的目标 delay peak 位置。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_kp_fast</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>30</code></td>
+<td style="text-align:left">OCXO PI 快速阶段比例增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_ki_fast</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">OCXO PI 快速阶段积分增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_kp_slow</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>30</code></td>
+<td style="text-align:left">OCXO PI 慢速阶段比例增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_ki_slow</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.05</code></td>
+<td style="text-align:left">OCXO PI 慢速阶段积分增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_switch_abs_error_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0.0002</code></td>
+<td style="text-align:left">切换到慢速阶段的 error 阈值。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_switch_hold_s</code></td>
+<td style="text-align:left"><code>float</code> / s</td>
+<td style="text-align:left"><code>60</code></td>
+<td style="text-align:left">低于阈值后切换阶段所需持续时间。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_max_step_fast_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0.01</code></td>
+<td style="text-align:left">快速阶段单次最大 OCXO 调整量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_max_step_slow_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left"><code>0.01</code></td>
+<td style="text-align:left">慢速阶段单次最大 OCXO 调整量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.ocxo_pi_max_step_ppm</code></td>
+<td style="text-align:left"><code>float</code> / ppm</td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">旧版别名，同时设置 fast/slow max-step。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">对硬件同步 <code>error_ppm</code> 开启自适应 Kalman filter。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_bootstrap_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">AKF 正常更新前的冷启动帧数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_innovation_window</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">自适应使用的新息历史窗口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_max_lag</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">最大新息自相关 lag。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_adapt_interval</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>64</code></td>
+<td style="text-align:left">自适应 <code>Q/R</code> 更新帧间隔。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_gate_sigma</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>3</code></td>
+<td style="text-align:left">新息门限 sigma。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_tikhonov_lambda</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-3</code></td>
+<td style="text-align:left">LS 自适应 Tikhonov 正则项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_update_smooth</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0.2</code></td>
+<td style="text-align:left">更新后 <code>Q/R</code> 的指数平滑系数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_wf_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-10</code></td>
+<td style="text-align:left">白频率噪声下界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_wf_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e2</code></td>
+<td style="text-align:left">白频率噪声上界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_rw_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-12</code></td>
+<td style="text-align:left">随机游走频率噪声下界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_q_rw_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e1</code></td>
+<td style="text-align:left">随机游走频率噪声上界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_r_min</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e-8</code></td>
+<td style="text-align:left">观测噪声方差下界。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sync_tracking.akf_r_max</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>1e3</code></td>
+<td style="text-align:left">观测噪声方差上界。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-sensing">UE sensing</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>sensing.sensing_delay_correction_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>los_tracking</code></td>
+<td style="text-align:left">双站感知时延校正来源：<code>los_tracking</code> 或 <code>ertm_absolute</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.bi_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">开启双站感知处理。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.range_fft_size</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>1024</code></td>
 <td style="text-align:left">距离向 FFT 点数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>doppler_fft_size</code></td>
+<td style="text-align:left"><code>sensing.doppler_fft_size</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>100</code></td>
 <td style="text-align:left">多普勒向 FFT 点数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>pilot_positions</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[571,631,...,451]</code></td>
-<td style="text-align:left">分布在占用带宽内的可配置梳状导频子载波索引。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>midframe_pilot_symbols</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">可选的帧内 BPSK 导频符号索引。接收机会把完整已知符号作为额外信道估计 anchor，同时保留梳状导频 RE 用于相位跟踪，并从 payload LLR 提取中排除。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>midframe_pilot_seed</code></td>
+<td style="text-align:left"><code>sensing.view_range_bins</code></td>
 <td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1296453708</code></td>
-<td style="text-align:left">确定性帧内 BPSK 导频种子，必须与发射端一致。</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">后端 RD view 宽度；<code>0</code> 表示完整 range。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>equalizer_mode</code></td>
+<td style="text-align:left"><code>sensing.view_doppler_bins</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">后端 RD view 高度；<code>0</code> 表示完整 doppler。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing.output_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>mmse</code></td>
-<td style="text-align:left">通信均衡器反演模式。<code>zf</code> 使用带下限的信道功率分母；<code>mmse</code> 会在该分母上加入 <code>noise_var</code>，可降低深衰落处的噪声增强。</td>
+<td style="text-align:left"><code>dense</code></td>
+<td style="text-align:left"><code>dense</code> 完整输出，或 <code>compact_mask</code> 选中 RE 输出。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>channel_tracking_mode</code></td>
+<td style="text-align:left"><code>sensing.on_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>pilot_phase</code></td>
-<td style="text-align:left">CPU 和 CUDA UE 都支持的每符号梳状导频跟踪模式。<code>disabled</code> 使用同步符号得到的固定信道，<code>pilot_phase</code> 对每个数据信号符号用梳状导频残差拟合公共相位和线性相位。</td>
+<td style="text-align:left"><code>complex_float32</code></td>
+<td style="text-align:left">感知 payload wire format。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>equalizer_mag_floor</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-6</code></td>
-<td style="text-align:left">信道幅度平方反演下限，<code>zf</code> 和 <code>mmse</code> 都会使用。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_tracking_min_pilot_snr</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-4</code></td>
-<td style="text-align:left">每符号跟踪接受梳状导频残差的最小功率/权重，低于该值时回退到同步符号信道。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>data_resource_blocks</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">缺省</td>
-<td style="text-align:left">接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都参与 payload 提取。设为 <code>[]</code> 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 <code>kind</code>。其中 <code>kind: payload</code> 的块会产生 payload LLR；<code>kind: sensing_pilot</code> 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>mask_blocks</code></td>
-<td style="text-align:left"><code>object[]</code></td>
-<td style="text-align:left">缺省</td>
-<td style="text-align:left">接收侧的紧凑感知资源映射，用来回答“在 <code>compact_mask</code> 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE，但拒绝 CFO training field；重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 <code>MTI</code> 和本地 Delay-Doppler 处理。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>device_args</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">USRP 参数。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>clock_source</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal/external/gpsdo</code></td>
-<td style="text-align:left">时钟源。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>wire_format_tx</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">可选 UE 上行 TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>rx_wire_format</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>sc16</code></td>
-<td style="text-align:left">UE 下行 RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>software_sync</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用软件同步跟踪。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>predictive_delay</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用基于 CFO 的预测性时延补偿，用于初始对齐和跟踪阶段的时延修正。仅当采样时钟和载波频率来自同一个参考源，且信号链路在 USRP 外没有二级变频时才应启用。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>hardware_sync</code></td>
+<td style="text-align:left"><code>sensing.backend_processing_enabled</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用硬件同步。</td>
+<td style="text-align:left">在支持时输出后端 RD/CFAR/微多普勒 sidecar。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>hardware_sync_tty</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>/dev/ttyUSB0</code></td>
-<td style="text-align:left">硬件同步控制串口设备。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ocxo_pi_switch_abs_error_ppm</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0.0002</code></td>
-<td style="text-align:left">当 <code>error_ppm</code> 绝对值持续低于该阈值时切换到慢速 OCXO PI 阶段。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用硬件同步 <code>error_ppm</code> 的自适应卡尔曼滤波（AKF）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_bootstrap_frames</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">AKF 进入正常 KF 更新前的冷启动帧数。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_innovation_window</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">用于新息自相关/最小二乘自适应的窗口长度。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_max_lag</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>4</code></td>
-<td style="text-align:left">最小二乘拟合使用的新息自相关最大滞后阶。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_adapt_interval</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>64</code></td>
-<td style="text-align:left">自适应更新 <code>Q/R</code> 的帧间隔。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_gate_sigma</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>3.0</code></td>
-<td style="text-align:left">新息门限系数（sigma）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_tikhonov_lambda</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-3</code></td>
-<td style="text-align:left">最小二乘自适应的 Tikhonov 正则项权重。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_update_smooth</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0.2</code></td>
-<td style="text-align:left"><code>Q/R</code> 更新的指数平滑系数。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_wf_min</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-10</code></td>
-<td style="text-align:left">白频率噪声系数下界。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_wf_max</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e2</code></td>
-<td style="text-align:left">白频率噪声系数上界。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_rw_min</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-12</code></td>
-<td style="text-align:left">随机游走频率噪声系数下界。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_q_rw_max</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e1</code></td>
-<td style="text-align:left">随机游走频率噪声系数上界。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_r_min</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e-8</code></td>
-<td style="text-align:left">观测噪声方差 <code>R</code> 下界。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>akf_r_max</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>1e3</code></td>
-<td style="text-align:left">观测噪声方差 <code>R</code> 上界。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ppm_adjust_factor</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0.05</code></td>
-<td style="text-align:left">频偏补偿调节系数。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>desired_peak_pos</code></td>
+<td style="text-align:left"><code>sensing.symbol_stride</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>20</code></td>
-<td style="text-align:left">时延峰目标位置（用于对齐策略）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_sensing_output_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>true</code></td>
-<td style="text-align:left">启用双站感知 ZeroMQ PUB 输出。处理链可以保持开启，同时关闭该输出。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_sensing_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">双站感知数据流和控制通道的 ZMQ 绑定 IP。使用 <code>0.0.0.0</code> 可接受远端前端连接；使用 <code>127.0.0.1</code> 则仅允许本机连接。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>bi_sensing_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>8889</code></td>
-<td style="text-align:left">双站感知数据流的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_debug_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">UE eRTM debug 输出的 ZeroMQ PUB 监听 IP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_debug_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12362</code></td>
-<td style="text-align:left">UE eRTM debug 输出的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">信道估计输出的 ZeroMQ PUB 监听 IP。留空会解析为 <code>0.0.0.0</code>，不会使用 <code>default_out_ip</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>channel_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12348</code></td>
-<td style="text-align:left">信道估计输出的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>pdf_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">PDP/PDF 输出的 ZeroMQ PUB 监听 IP。留空会解析为 <code>0.0.0.0</code>，不会使用 <code>default_out_ip</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>pdf_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12349</code></td>
-<td style="text-align:left">PDP/PDF 输出的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>constellation_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">星座图输出的 ZeroMQ PUB 监听 IP。留空会解析为 <code>0.0.0.0</code>，不会使用 <code>default_out_ip</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>constellation_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12346</code></td>
-<td style="text-align:left">星座图输出的 ZeroMQ PUB 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>vofa_debug_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">VOFA+ 调试输出 IP。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>vofa_debug_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>12347</code></td>
-<td style="text-align:left">VOFA+ 调试输出端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>0.0.0.0</code></td>
-<td style="text-align:left">UE 上行业务 UDP 输入绑定地址，即 UE-&gt;BS 上行要发送的业务流。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_input_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50002</code></td>
-<td style="text-align:left">UE 上行业务 UDP 输入绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">UE 解码后的下行业务 UDP 输出目标 IP，即从 BS-&gt;UE 下行恢复出的业务流。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_output_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>50001</code></td>
-<td style="text-align:left">UE 解码后的下行业务 UDP 输出目标端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_enabled</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用解码后业务 UDP 输出的排队 pacing，用于平滑 decoder 造成的突发输出。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_target_mbps</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">UDP egress pacer 的目标载荷速率。<code>0</code> 表示根据入队速率自动估计；正数表示固定 Mbps 速率。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10240</code></td>
-<td style="text-align:left">egress pacer 最多缓存的 UDP 数据报数量，超过后丢弃最旧数据报。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
-<td style="text-align:left"><code>float</code></td>
-<td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">egress pacer 中数据报允许排队的最长时间；设为 <code>0</code> 可关闭按年龄丢包。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>default_out_ip</code></td>
-<td style="text-align:left"><code>string</code> / IPv4</td>
-<td style="text-align:left"><code>127.0.0.1</code></td>
-<td style="text-align:left">UDP 业务数据和 VOFA+ 调试输出的默认目标 IP；对应 IP 字段留空时使用该值。ZeroMQ PUB 监听 IP 不继承该值。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>control_port</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>10001</code></td>
-<td style="text-align:left">双向控制通道的 ZeroMQ ROUTER 绑定端口。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_enable</code></td>
-<td style="text-align:left"><code>bool</code></td>
-<td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">启用 CPU 版内部测量模式。启用后，测量载荷不会再转发到 <code>udp_output_*</code>，而是直接用于 BER/BLER/EVM 统计。CUDA 二进制忽略该模式。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_mode</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>internal_prbs</code></td>
-<td style="text-align:left">测量模式选择。目前仅支持 <code>internal_prbs</code>；非法值会在配置归一化阶段自动关闭测量模式。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_run_id</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">写入测量 CSV 汇总的运行 ID。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_output_dir</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">CPU 测量汇总文件输出目录。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_payload_bytes</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1024</code></td>
-<td style="text-align:left">每个测量载荷期望的字节数。若小于内部测量头长度，会自动钳制到最小合法值。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_prbs_seed</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>0x5A</code></td>
-<td style="text-align:left">用于重建确定性 PRBS 测量载荷的基础种子。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>measurement_packets_per_point</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>1</code></td>
-<td style="text-align:left">每个在线 <code>MRST</code> epoch 期望统计的测量载荷数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>profiling_modules</code></td>
-<td style="text-align:left"><code>string</code></td>
-<td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>cfo</code>、<code>sync</code>、<code>agc</code>、<code>align</code>、<code>snr</code>、<code>uplink</code>、<code>ertm</code>；<code>all</code> 表示全部。<code>cfo</code> 控制 CUDA CFO 诊断日志，<code>sync</code> 控制逐 alias 同步峰值比较日志，<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前 UE 接收路径的 <code>_snr_db / _noise_var / _llr_scale</code>，<code>uplink</code> 控制 <code>[UL-TX]</code> timing/waveform 诊断日志，<code>ertm</code> 控制 eRTM TO/payload/debug-spectrum 诊断日志。感知时延校正 warning 和 pending alignment 更新日志仍常显。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>downlink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE 下行 CPU 核列表：索引 <code>0..2</code> 分别绑定 <code>rx_proc</code>、<code>process_proc</code> 和 <code>bit_processing_proc</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>demod_worker_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE CPU 解调 worker 核列表，用于帧级 OFDM/LLR 处理。每个配置的核对应 1 个 worker；留空时启动 1 个不绑核的 worker（建议配置专用核以获得稳定的实时性能）。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ldpc_worker_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE CPU LDPC 解码 worker 核列表。每个配置的核对应 1 个持有独立 LDPC 解码器实例的 worker；留空时启动 1 个不绑核的 worker。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>sensing_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE 双站感知 CPU 核列表：索引 <code>0</code> 绑定 <code>sensing_process_proc</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>uplink_cpu_cores</code></td>
-<td style="text-align:left"><code>int[]</code></td>
-<td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE 上行 CPU 核列表：索引 <code>0..3</code> 分别绑定 <code>UplinkTxEngine::_ldpc_encode_proc</code>、<code>_mod_proc</code>、<code>_tx_proc</code> 和 <code>_udp_recv_proc</code>。</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>main_cpu_core</code></td>
-<td style="text-align:left"><code>int</code></td>
-<td style="text-align:left"><code>-1</code></td>
-<td style="text-align:left">主线程 CPU 核。</td>
+<td style="text-align:left">dense 模式启动时默认 STRD。</td>
 </tr>
 </tbody>
 </table>
-<p>说明：</p>
+<h4 id="ue-resource-preview">UE resource_preview</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>resource_preview.data_resource_blocks[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">payload / sensing-pilot RE 矩形；每项包含 <code>kind</code>、<code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>resource_preview.mask_blocks[]</code></td>
+<td style="text-align:left"><code>object[]</code></td>
+<td style="text-align:left">可选</td>
+<td style="text-align:left">compact 感知 RE 矩形；每项包含 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-measurement">UE measurement</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启内部 PRBS 测量检查。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>internal_prbs</code></td>
+<td style="text-align:left">测量检查模式。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_run_id</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">写入测量 CSV 的 run ID。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_output_dir</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">测量 CSV 输出目录。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_payload_bytes</code></td>
+<td style="text-align:left"><code>int</code> / bytes</td>
+<td style="text-align:left"><code>1024</code></td>
+<td style="text-align:left">期望的测量 payload 字节数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_prbs_seed</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>0x5A</code></td>
+<td style="text-align:left">重建确定性 PRBS payload 的种子。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_packets_per_point</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每个测量 epoch 期望 packet 数。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>measurement.measurement_max_packets_per_frame</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>1</code></td>
+<td style="text-align:left">每帧最多检查的测量 packet 数；<code>0</code> 表示不限。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-network-output">UE network_output</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE 上行业务 UDP 输入绑定 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_input_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50002</code></td>
+<td style="text-align:left">UE 上行业务 UDP 输入端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">UE 解码下行 UDP 输出目标 IP；空字符串使用 <code>runtime.default_out_ip</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_output_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>50001</code></td>
+<td style="text-align:left">UE 解码下行 UDP 输出端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启解码 UDP 输出 pacing。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_target_mbps</code></td>
+<td style="text-align:left"><code>float</code> / Mbps</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">pacing 目标速率；<code>0</code> 自动估计。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10240</code></td>
+<td style="text-align:left">pacing 队列容量。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.udp_egress_pacer_max_delay_ms</code></td>
+<td style="text-align:left"><code>float</code> / ms</td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">最大排队时间；<code>0</code> 关闭按年龄丢包。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.bi_sensing_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>true</code></td>
+<td style="text-align:left">开启双站感知 ZMQ 输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.bi_sensing_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">双站感知/control ZMQ 绑定 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.bi_sensing_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>8889</code></td>
+<td style="text-align:left">双站感知 PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.control_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10001</code></td>
+<td style="text-align:left">运行时控制 ZMQ ROUTER 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">信道估计 PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12348</code></td>
+<td style="text-align:left">信道估计 PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">Delay-spectrum PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12349</code></td>
+<td style="text-align:left">Delay-spectrum PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.constellation_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">星座图 PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.constellation_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12346</code></td>
+<td style="text-align:left">星座图 PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE self-channel debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_channel_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12350</code></td>
+<td style="text-align:left">UE self-channel debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE self-delay-spectrum debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.self_pdf_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12351</code></td>
+<td style="text-align:left">UE self-delay-spectrum debug PUB 端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">UE eRTM debug PUB IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>network_output.ertm_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12362</code></td>
+<td style="text-align:left">UE eRTM debug PUB 端口。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-cpu-cores">UE cpu_cores</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>cpu_cores.downlink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[1,2,3]</code></td>
+<td style="text-align:left">UE 下行核心：RX、处理、bit processing。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.demod_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU demod worker 核；空列表启动一个不绑定 worker。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.ldpc_worker_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE CPU LDPC decode worker 核；空列表启动一个不绑定 worker。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.sensing_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[4]</code></td>
+<td style="text-align:left">UE 双站感知核心。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.uplink_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE 上行核心：LDPC 编码、调制、TX 发送、UDP 接收。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>cpu_cores.main_cpu_core</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>-1</code></td>
+<td style="text-align:left">主线程 CPU 核；<code>-1</code> 表示不绑定。</td>
+</tr>
+</tbody>
+</table>
+<h4 id="ue-runtime">UE runtime</h4>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">参数</th>
+<th style="text-align:left">类型/单位</th>
+<th style="text-align:left">典型值</th>
+<th style="text-align:left">说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>runtime.default_out_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>127.0.0.1</code></td>
+<td style="text-align:left">特定输出 IP 为空时，UDP 和 VOFA+ 输出使用的默认目标 IP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>runtime.vofa_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">VOFA+ debug 目标 IP；空字符串使用 <code>default_out_ip</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>runtime.vofa_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12347</code></td>
+<td style="text-align:left">VOFA+ debug 目标端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>runtime.profiling_modules</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>&quot;&quot;</code></td>
+<td style="text-align:left">逗号分隔模块，如 <code>demodulation</code>、<code>cfo</code>、<code>sync</code>、<code>agc</code>、<code>align</code>、<code>snr</code>、<code>arq</code>、<code>uplink</code>、<code>ertm</code> 或 <code>all</code>。</td>
+</tr>
+</tbody>
+</table>
+<p>资源映射说明：</p>
 <ul>
-<li><code>data_resource_blocks</code> 通常应与发射端完全一致，包括 <code>kind</code>。</li>
-<li>如果资源块与 <code>sync_pos</code>、可选的 <code>sync_pos-1</code> 第二同步符号、<code>midframe_pilot_symbols</code> 或 <code>pilot_positions</code> 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 <code>sync_pos+1</code> CFO training field 会在 sensing-pilot 和 sensing-mask 选择中被拒绝。优先级是“ZC 同步符号 &gt; CFO training field &gt; 梳状导频 RE &gt; 帧内 BPSK 导频 &gt; sensing_pilot &gt; payload/预生成 QPSK”。</li>
-<li>dense 模式下，如果 <code>symbol_stride</code> / 运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位。</li>
-<li>当 <code>output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 <code>mask_blocks</code> 选中的 RE；此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
-<li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
-<li>UE 下行 RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
-<li>UE 接收机会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>
-<li>硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 <code>SYNC_SEARCH</code>。<code>reset_hold_s</code> 决定坏的 delay 条件需要持续多久才会触发这一动作。</li>
+<li><code>resource_preview.data_resource_blocks</code> 通常应在 BS 和 UE 之间保持一致，包括 <code>kind</code>。</li>
+<li>内置 ZC 同步符号、可选 CFO training field、梳状导频和帧内 BPSK 导频优先级高于资源块配置。</li>
+<li><code>resource_preview.mask_blocks</code> 只控制 compact 感知导出。<code>output_mode=compact_mask</code> 时运行时 <code>STRD</code> 会被忽略，因为采样图样已经由 mask 定义。</li>
+<li>compact 感知 payload 以 <code>CompactSensingFrameHeader</code> 开头，后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
 </ul></div> </section> </main>  <footer class="site-footer"> <div class="footer-panel"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p><strong>作者:</strong> 周智文 (zhiwen_zhou@seu.edu.cn), 张超越 (chaoyue_zhang@seu.edu.cn), 徐晓莉 (xiaolixu@seu.edu.cn), 曾勇 (yong_zeng@seu.edu.cn)</p> </div> </footer> </body></html>
