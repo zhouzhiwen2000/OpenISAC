@@ -1640,6 +1640,7 @@ ue:
       center_freq: 2500000000
       debug_self_channel: false
       debug_self_scan_spectrum: false
+      debug_self_scan_slice_samples: 0
     optional: true
     scalar_fields:
     - key: symbol_start
@@ -1668,10 +1669,18 @@ ue:
       default: false
       optional: true
     - key: debug_self_scan_spectrum
-      comment: Also publish a full-frame self-ZC matched-filter spectrum (needs debug_self_channel); view with scripts/plot_uplink_self_scan.py
+      comment: Publish a peak-centered self-ZC matched-filter slice + metadata (needs debug_self_channel); view with scripts/plot_uplink_self_scan.py
       kind: bool
       default: false
       optional: true
+    - key: debug_self_scan_slice_samples
+      comment: Correlation samples around the peak shipped to the self-scan viewer; 0 = one OFDM symbol (fft_size + cp_length)
+      kind: int
+      default: 0
+      optional: true
+      enabled_if:
+        key: uplink.debug_self_scan_spectrum
+        value: true
   - type: scalar
     key: tx_gain
     kind: int
@@ -2086,12 +2095,28 @@ ue:
     comment: UE self-ZC scan-spectrum ZMQ listen IP
     default: 0.0.0.0
     optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.debug_self_channel
+        value: true
+      - key: uplink.debug_self_scan_spectrum
+        value: true
   - type: scalar
     key: self_scan_port
     kind: int
     comment: UE self-ZC scan-spectrum output port
     default: 12352
     optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.debug_self_channel
+        value: true
+      - key: uplink.debug_self_scan_spectrum
+        value: true
   - type: scalar
     key: bi_sensing_output_enabled
     kind: bool

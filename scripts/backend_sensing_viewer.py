@@ -41,6 +41,7 @@ from sensing_runtime_protocol import (
     parse_params_packet,
     recv_sensing_frame,
 )
+from viewer_endpoint_store import load_endpoint, load_settings, save_endpoint, save_settings
 
 
 DEFAULT_CONTROL_PORT = 9999
@@ -80,6 +81,10 @@ LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
     doppler_fft_size=100,
     compact_mask_hash=0,
 )
+
+
+def backend_settings_key(mode: str | None) -> str:
+    return "plot_backend_bi_sensing" if mode == "bi" else "plot_backend_sensing"
 
 
 @dataclass
@@ -147,6 +152,15 @@ def load_launch_defaults(
         channel_count = 2
         title = default_title or "OpenISAC Backend Sensing Viewer"
 
+    settings_key = backend_settings_key(inferred_mode)
+    saved_host, saved_port = load_endpoint(settings_key, "127.0.0.1", port)
+    settings = load_settings(settings_key)
+    try:
+        control_port = int(settings.get("control_port", control_port))
+    except (TypeError, ValueError):
+        pass
+    port = int(saved_port)
+
     return ViewerLaunchConfig(
         mode=inferred_mode,
         port=port,
@@ -158,6 +172,7 @@ def load_launch_defaults(
         display_range_bins=DEFAULT_DISPLAY_RANGE_BINS,
         display_doppler_bins=DEFAULT_DISPLAY_DOPPLER_BINS,
         downsample=1,
+        host=saved_host,
     )
 
 
@@ -197,6 +212,11 @@ class BackendViewerRuntime:
         self._control_thread.start()
         self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self._receiver_thread.start()
+        save_endpoint(backend_settings_key(self.launch_cfg.mode), self._host, self.launch_cfg.port)
+        save_settings(
+            backend_settings_key(self.launch_cfg.mode),
+            {"control_port": int(self.launch_cfg.control_port)},
+        )
 
     def stop(self) -> None:
         self._running = False
@@ -250,6 +270,11 @@ class BackendViewerRuntime:
         self._control_thread.start()
         self._receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self._receiver_thread.start()
+        save_endpoint(backend_settings_key(self.launch_cfg.mode), self._host, self.launch_cfg.port)
+        save_settings(
+            backend_settings_key(self.launch_cfg.mode),
+            {"control_port": int(self.launch_cfg.control_port)},
+        )
 
     def ensure_channel_count(self, count: int, reason: str = "auto-detect") -> bool:
         count = max(1, int(count))
@@ -2341,7 +2366,7 @@ def build_parser(
         default=default_mode or "auto",
         help="Viewer mode",
     )
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Backend host to connect to (ZeroMQ)")
+    parser.add_argument("--host", type=str, default=None, help="Backend host to connect to (ZeroMQ)")
     parser.add_argument("--port", type=int, default=None, help="Override sensing stream port")
     parser.add_argument("--control-port", type=int, default=None, help="Override control port")
     parser.add_argument(

@@ -50,6 +50,7 @@ from viewer_panel_utils import (
     set_button_active,
     style_spectrum_plot,
 )
+from viewer_endpoint_store import load_endpoint, save_endpoint, save_settings
 from sensing_detection import (
     CleanParams,
     build_detection_views,
@@ -466,8 +467,8 @@ def parse_args():
     parser.add_argument(
         "--port",
         type=int,
-        default=DEFAULT_DATA_PORT,
-        help=f"Port for {STREAM_DESCRIPTION} frames",
+        default=None,
+        help=f"Port for {STREAM_DESCRIPTION} frames (overrides saved port)",
     )
     parser.add_argument(
         "--channels",
@@ -478,8 +479,8 @@ def parse_args():
     parser.add_argument(
         "--control-port",
         type=int,
-        default=DEFAULT_CONTROL_PORT,
-        help="Fallback control port before heartbeat detection",
+        default=None,
+        help="Fallback control port before heartbeat detection (overrides saved port)",
     )
     parser.add_argument(
         "--local-control-port",
@@ -566,6 +567,10 @@ class ChannelRuntime:
 
 
 args = parse_args()
+_saved_host, _saved_port = load_endpoint(SETTINGS_KEY, "127.0.0.1", DEFAULT_DATA_PORT)
+_saved_control_port = load_viewer_setting(SETTINGS_KEY, "control_port", DEFAULT_CONTROL_PORT)
+args.port = int(args.port if args.port is not None else _saved_port)
+args.control_port = int(args.control_port if args.control_port is not None else _saved_control_port)
 UDP_PORT = int(args.port)
 LOCAL_CONTROL_PORT = max(0, int(args.local_control_port))
 if args.antenna_spacing_m is not None and args.antenna_spacing_m > 0.0:
@@ -582,8 +587,9 @@ DISPLAY_MD_DB_MIN, DISPLAY_MD_DB_MAX = sanitize_display_db_range(
     args.micro_doppler_db_min if args.micro_doppler_db_min is not None else shared_display_db_min,
     args.micro_doppler_db_max if args.micro_doppler_db_max is not None else shared_display_db_max,
 )
-_saved_host = load_viewer_setting(SETTINGS_KEY, "host")
 HOST = str(getattr(args, "host", None) or _saved_host or "127.0.0.1").strip() or "127.0.0.1"
+save_endpoint(SETTINGS_KEY, HOST, UDP_PORT)
+save_settings(SETTINGS_KEY, {"control_port": int(args.control_port)})
 initial_channel_count = max(1, int(args.channels))
 CHANNELS = [ChannelRuntime(idx, UDP_PORT, args.control_port) for idx in range(initial_channel_count)]
 if not CHANNELS:
@@ -707,6 +713,8 @@ def reconnect_backend(host):
         with ch.micro_lock:
             ch.micro_doppler_buffer.clear()
     _clear_queue(aggregate_frame_queue)
+    save_endpoint(SETTINGS_KEY, HOST, UDP_PORT)
+    save_settings(SETTINGS_KEY, {"control_port": int(args.control_port)})
     print(f"[CTRL] Reconnected viewer sockets to backend {HOST}")
     request_viewer_params(0 if CHANNELS else None)
 

@@ -428,18 +428,31 @@ def append_structured_mapping_content_lines(lines: list[str], field: dict[str, A
         lines.extend(rendered)
 
 
-def schema_mapping_value(field: dict[str, Any], value: Any, include_extra: bool = True) -> dict[str, Any]:
+def schema_mapping_value(
+    field: dict[str, Any],
+    value: Any,
+    include_extra: bool = True,
+    enabled_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     known_keys: set[str] = set()
     result: dict[str, Any] = {}
     for scalar_field in field.get("scalar_fields", []):
         key = str(scalar_field.get("key", ""))
+        if enabled_data is not None and not enabled_if_rule_satisfied_for_data(
+            enabled_data, scalar_field.get("enabled_if")
+        ):
+            continue
         if key and key in value:
             result[key] = copy.deepcopy(value[key])
             known_keys.add(key)
     for list_field in field.get("list_fields", []):
         key = str(list_field.get("key", ""))
+        if enabled_data is not None and not enabled_if_rule_satisfied_for_data(
+            enabled_data, list_field.get("enabled_if")
+        ):
+            continue
         if key and key in value:
             result[key] = copy.deepcopy(value[key])
             known_keys.add(key)
@@ -536,6 +549,7 @@ def build_structured_mapping_payload(
             "value_text": value_text,
             "options": copy.deepcopy(scalar_field.get("options", [])),
             "is_set": field_has_value,
+            "enabled_if": copy.deepcopy(scalar_field.get("enabled_if")),
         })
 
     list_fields_payload: list[dict[str, Any]] = []
@@ -682,7 +696,14 @@ def filter_uplink_mapping_for_duplex_mode(value: dict[str, Any], duplex_mode: st
     filtered = copy.deepcopy(value)
     mode = normalized_duplex_mode_value(duplex_mode)
     if mode == "fdd":
-        for key in ("symbol_start", "symbol_count", "guard_symbols", "debug_self_channel"):
+        for key in (
+            "symbol_start",
+            "symbol_count",
+            "guard_symbols",
+            "debug_self_channel",
+            "debug_self_scan_spectrum",
+            "debug_self_scan_slice_samples",
+        ):
             filtered.pop(key, None)
     else:
         filtered.pop("center_freq", None)
@@ -867,6 +888,35 @@ def normalize_loaded_config_values(data: dict[str, Any]) -> None:
         data["channel_tracking_mode"] = normalize_channel_tracking_mode_value(data.get("channel_tracking_mode"))
 
 
+def enabled_if_data_value(data: dict[str, Any], key: str) -> tuple[bool, Any]:
+    if key in data:
+        return True, data.get(key)
+
+    parts = key.split(".")
+    for prefix_len in range(len(parts) - 1, 0, -1):
+        prefix = ".".join(parts[:prefix_len])
+        current = data.get(prefix)
+        if not isinstance(current, dict):
+            continue
+
+        rest_parts = parts[prefix_len:]
+        rest_key = ".".join(rest_parts)
+        if rest_key in current:
+            return True, current.get(rest_key)
+
+        found = True
+        for part in rest_parts:
+            if isinstance(current, dict) and part in current:
+                current = current.get(part)
+            else:
+                found = False
+                break
+        if found:
+            return True, current
+
+    return False, None
+
+
 def enabled_if_rule_satisfied_for_data(data: dict[str, Any], rule: Any) -> bool:
     if not rule:
         return True
@@ -882,7 +932,9 @@ def enabled_if_rule_satisfied_for_data(data: dict[str, Any], rule: Any) -> bool:
     if not key:
         return True
     expected = rule.get("value", True)
-    actual = data.get(str(key))
+    found, actual = enabled_if_data_value(data, str(key))
+    if not found and not isinstance(expected, bool):
+        return True
     if isinstance(expected, bool):
         return bool_value(actual) == expected
     return str(actual) == str(expected)
@@ -1458,14 +1510,14 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
             if field["type"] in {"mapping", "simulation_mapping", "uplink_mapping"}:
                 value = data.get(key, {})
                 if field["type"] == "uplink_mapping":
-                    value = schema_mapping_value(field, value, include_extra=False)
+                    value = schema_mapping_value(field, value, include_extra=False, enabled_data=data)
                     value = filter_uplink_mapping_for_duplex_mode(value, data.get("uplink.duplex_mode", data.get("duplex_mode", "tdd")))
                     if field.get("optional") and not value:
                         continue
                 elif field["type"] == "simulation_mapping":
                     if data.get("radio.radio_backend", data.get("radio_backend", "uhd")) != "sim":
                         continue
-                    value = schema_mapping_value(field, value, include_extra=True)
+                    value = schema_mapping_value(field, value, include_extra=True, enabled_data=data)
                 if yaml_key == section_key:
                     append_structured_mapping_content_lines(section_lines, field, value)
                 else:

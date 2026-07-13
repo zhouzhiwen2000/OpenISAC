@@ -3,6 +3,7 @@ from __future__ import annotations
 from matplotlib.widgets import Button, TextBox
 
 from sensing_runtime_protocol import make_debug_sub_conflate, make_tcp_endpoint
+from viewer_endpoint_store import default_settings_key, load_endpoint, save_endpoint
 
 
 _CONTROL_Y = 0.024
@@ -19,7 +20,12 @@ class DebugZmqConnector:
     def __init__(self, fig, port: int, initial_host: str = "127.0.0.1") -> None:
         self.fig = fig
         self.default_port = int(port)
-        self.host, self.port = self._parse_endpoint(initial_host, self.default_port)
+        self.settings_key = default_settings_key()
+        saved_host, saved_port = load_endpoint(self.settings_key, initial_host, self.default_port)
+        self.host, self.port = self._parse_endpoint(
+            self._format_endpoint(saved_host, saved_port),
+            self.default_port,
+        )
         self.sock = None
 
         self.host_box = TextBox(
@@ -124,6 +130,7 @@ class DebugZmqConnector:
         if old_sock is not None:
             old_sock.close(linger=0)
         endpoint = self._compact_endpoint(self.host, self.port)
+        save_endpoint(self.settings_key, self.host, self.port)
         self.status_text.set_text(f"Connected {endpoint}")
         self.fig.canvas.draw_idle()
 

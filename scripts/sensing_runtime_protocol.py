@@ -210,8 +210,9 @@ class DecodedSensingMetadata:
 #     A whole frame is one (possibly multipart) message: part 0 is the data
 #     payload, an optional part 1 carries the metadata sidecar. The previous
 #     60 KB UDP chunking and the !III reassembly header are gone.
-#   - Debug plot streams (channel/const/pdf): PUB -> SUB with CONFLATE so the
-#     viewer only ever sees the latest frame.
+#   - Debug plot streams (channel/const/pdf): PUB -> SUB with a small RCVHWM;
+#     viewers drain and keep only the latest complete frame in user space
+#     (ZMQ_CONFLATE is avoided because it breaks multipart and can abort).
 #   - Control/params channel: backend ROUTER (bind) <-> frontend DEALER
 #     (connect). Commands are still 12-byte REQUEST_PACKET_STRUCT payloads.
 # ---------------------------------------------------------------------------
@@ -239,17 +240,19 @@ def make_tcp_endpoint(ip: str, port: int) -> str:
 
 
 def make_data_sub(endpoint: str, rcvhwm: int = 4, conflate: bool = False):
-    """SUB socket for a sensing data stream (small HWM, drop-old semantics)."""
+    """SUB socket for a sensing data stream (small HWM, drop-old semantics).
+
+    ``conflate=True`` used to set ZMQ_CONFLATE. That option is unsafe with
+    multipart publishers (libzmq can abort with fq.cpp ``!_more``), so we only
+    apply a small RCVHWM and let callers keep the latest complete message in
+    user space.
+    """
     z = _require_zmq()
     ctx = z.Context.instance()
     sock = ctx.socket(z.SUB)
     sock.setsockopt(z.LINGER, 0)
-    if conflate:
-        # CONFLATE keeps only the most recent message; it must be set before
-        # connect and is incompatible with multipart messages.
-        sock.setsockopt(z.CONFLATE, 1)
-    else:
-        sock.setsockopt(z.RCVHWM, int(rcvhwm))
+    # Prefer a tiny HWM over ZMQ_CONFLATE so multi-part frames stay atomic.
+    sock.setsockopt(z.RCVHWM, 2 if conflate else int(rcvhwm))
     sock.connect(endpoint)
     sock.setsockopt(z.SUBSCRIBE, b"")
     return sock

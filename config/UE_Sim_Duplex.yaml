@@ -63,6 +63,9 @@ uplink:
   ertm_ul_rf_delay_samples: 0.0  # Calibrated uplink RF-chain delay for eRTM TO estimation (samples)
   ertm_debug_output_enabled: false  # Enable UE-side eRTM debug ZMQ output
   ertm_report_interval_frames: 32  # BS eRTM payload/report cadence in downlink frames
+  debug_self_channel: false  # Estimate UE self-TX leakage channel from the RX window using current TADV
+  debug_self_scan_spectrum: false  # Publish peak-centered self-ZC matched-filter slice + metadata (needs debug_self_channel); see scripts/plot_uplink_self_scan.py
+  debug_self_scan_slice_samples: 0  # Correlation samples around the peak; 0 = one OFDM symbol (fft_size + cp_length)
   wire_format_tx: sc16  # Uplink TX wire format; sc16/sc8
   arq_enabled: false  # Enable uplink ARQ on the UE transmitter
   arq_window_packets: 32767  # Uplink ARQ outstanding packet window [1, 32767]
@@ -107,6 +110,12 @@ network_output:
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
   control_port: 10001  # ZMQ port for runtime control commands
+  self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
+  self_channel_port: 12350  # UE self-channel output port
+  self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP
+  self_pdf_port: 12351  # UE self delay-spectrum output port
+  self_scan_ip: 0.0.0.0  # UE self-ZC scan-spectrum ZMQ listen IP
+  self_scan_port: 12352  # UE self-ZC scan-spectrum output port
   ertm_debug_ip: 0.0.0.0  # eRTM debug ZMQ listen IP
   ertm_debug_port: 12362  # eRTM debug output port
   channel_ip: 0.0.0.0  # Channel-estimate ZMQ listen IP

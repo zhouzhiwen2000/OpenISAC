@@ -8,6 +8,20 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-09 - Uplink self-scan 切片传输与 viewer 简化
+
+### Summary
+
+UE self-scan 诊断改为只发布峰值附近 correlation 切片 + 固定 metadata，显著减小 ZMQ 数据量；viewer 纯显示、不再支持客户端 slice 选择。同步修复 self-scan 默认端口与 eRTM debug 端口冲突导致的 libzmq `!_more` 崩溃。
+
+### Changes
+
+- UE 发布格式：`ULSCSCAN` 64 字节 LE header + `complex64[slice_len]`；默认切片长度为一个带 CP 的 OFDM 符号（`fft_size + cp_length`，配置 `debug_self_scan_slice_samples=0` 表示自动）。
+- `scripts/plot_uplink_self_scan.py` 改为解析 metadata/slice 的纯显示端，移除 `--slice` / `--frame-samples` / auto-slice 等客户端裁剪选项。
+- `network_output.self_scan_port` 代码默认值改为 `12352`；全部 UE 模板补齐 `self_channel_*` / `self_pdf_*` / `self_scan_*`。
+- `scripts/qt_debug_plot_common.py` 不再设置 `ZMQ_CONFLATE`；小 `RCVHWM` + `recv_multipart` 完整收帧。
+- `config_web_editor` 增加 `debug_self_scan_slice_samples`；`self_scan_ip/port` 依赖 `debug_self_channel` + `debug_self_scan_spectrum`。
+
 ## 2026-07-08 - eRTM RF delay 样本单位配置
 
 ### Summary

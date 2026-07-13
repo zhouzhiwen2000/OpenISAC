@@ -1072,7 +1072,8 @@ struct UplinkConfig {
     int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
     std::string idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     bool debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
-    bool debug_self_scan_spectrum = false; // Publish a full-frame self-ZC matched-filter spectrum (needs debug_self_channel) to expose large TX-vs-RX window offsets
+    bool debug_self_scan_spectrum = false; // Publish a peak-centered self-ZC matched-filter slice + metadata (needs debug_self_channel)
+    size_t debug_self_scan_slice_samples = 0; // Correlation samples around the peak; 0 = one OFDM symbol (fft_size + cp_length)
     bool ertm_to_enable = false;      // Enable eRTM timing-offset estimation payloads/logs
     size_t ertm_delay_oversample_factor = 10; // UE eRTM delay-spectrum IFFT oversampling factor
     bool ertm_debug_output_enabled = false; // Publish UE-side eRTM debug spectra over ZMQ
@@ -1143,7 +1144,7 @@ struct NetworkOutputConfig {
     std::string uplink_self_pdf_ip = "0.0.0.0";
     int uplink_self_pdf_port = 12361;
     std::string uplink_self_scan_ip = "0.0.0.0";
-    int uplink_self_scan_port = 12362;
+    int uplink_self_scan_port = 12352;
     std::string channel_ip = "0.0.0.0";
     int channel_port = 12348;
     std::string pdf_ip = "0.0.0.0";
@@ -2630,6 +2631,11 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
         }
         if (ul["debug_self_channel"]) cfg.uplink.debug_self_channel = ul["debug_self_channel"].as<bool>();
         if (ul["debug_self_scan_spectrum"]) cfg.uplink.debug_self_scan_spectrum = ul["debug_self_scan_spectrum"].as<bool>();
+        if (ul["debug_self_scan_slice_samples"]) {
+            // 0 keeps the runtime default: one OFDM symbol (fft + CP).
+            cfg.uplink.debug_self_scan_slice_samples =
+                ul["debug_self_scan_slice_samples"].as<size_t>();
+        }
         if (ul["ertm_to_enable"]) cfg.uplink.ertm_to_enable = ul["ertm_to_enable"].as<bool>();
         if (ul["ertm_debug_output_enabled"]) {
             cfg.uplink.ertm_debug_output_enabled = ul["ertm_debug_output_enabled"].as<bool>();

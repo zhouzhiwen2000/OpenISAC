@@ -632,9 +632,11 @@ public:
 
         // Deterministic frame anchoring — NO uplink-ZC correlation search.
         int64_t applied_diff = start_stream_and_align("initial start", base_frame_index);
+        int64_t pending_boundary_correction = 0;
 
         while (_running.load(std::memory_order_relaxed)) {
             if (apply_pending_restart(applied_diff)) {
+                pending_boundary_correction = 0;
                 continue;
             }
             // Runtime DUTI adjustment (operator-driven residual trim). Only positive
@@ -671,11 +673,22 @@ public:
             const uint64_t frame_generation =
                 _stream_generation.load(std::memory_order_acquire);
             int64_t first_sample_idx = std::numeric_limits<int64_t>::min();
-            const ReadResult read = _read_exact(
-                frame->samples.data(),
-                _period_samples,
-                &first_sample_idx,
-                &start_time);
+            ReadResult read{_period_samples, false};
+            if (pending_boundary_correction != 0) {
+                const int64_t correction = pending_boundary_correction;
+                pending_boundary_correction = 0;
+                if (!_consume_alignment_frame(
+                        frame->samples.data(), correction, &first_sample_idx, start_time)) {
+                    if (!_running.load(std::memory_order_relaxed)) break;
+                    continue;
+                }
+            } else {
+                read = _read_exact(
+                    frame->samples.data(),
+                    _period_samples,
+                    &first_sample_idx,
+                    &start_time);
+            }
             if (read.samples != _period_samples ||
                 _restart_requested.load(std::memory_order_acquire)) {
                 if (!_running.load(std::memory_order_relaxed)) break;
@@ -688,32 +701,15 @@ public:
                     frame_offset, residual_samples)) {
                 constexpr int64_t kMetadataJitterToleranceSamples = 1;
                 const bool needs_recovery_alignment =
-                    read.metadata_error &&
                     std::llabs(residual_samples) > kMetadataJitterToleranceSamples;
                 if (needs_recovery_alignment) {
                     const int64_t correction = _normalize_alignment_samples(-residual_samples);
+                    pending_boundary_correction = correction;
                     LOG_RT_WARN() << "[UL-RX] RX frame boundary mismatch after "
                                   << (read.metadata_error ? "metadata error" : "metadata indexing")
                                   << ": residual=" << residual_samples
                                   << " samples, correction=" << correction
-                                  << " samples; dropping recovery frame";
-                    int64_t aligned_first_idx = std::numeric_limits<int64_t>::min();
-                    if (_consume_alignment_frame(
-                            frame->samples.data(), correction, &aligned_first_idx, start_time)) {
-                        uint64_t aligned_frame_offset = 0;
-                        int64_t aligned_residual = 0;
-                        if (_frame_offset_from_first_sample(
-                                aligned_first_idx, start_time, applied_diff,
-                                aligned_frame_offset, aligned_residual)) {
-                            fallback_frame_offset = aligned_frame_offset + 1;
-                            if (aligned_residual != 0) {
-                                LOG_RT_WARN_HZ(5)
-                                    << "[UL-RX] residual after alignment frame: "
-                                    << aligned_residual << " samples";
-                            }
-                        }
-                    }
-                    continue;
+                                  << " samples; applying correction to next frame";
                 }
                 frame->frame_index = base_frame_index + frame_offset;
                 fallback_frame_offset = frame_offset + 1;

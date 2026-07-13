@@ -1,28 +1,22 @@
-"""Visualize the UE uplink self-ZC scan spectrum.
+"""Visualize the UE uplink self-ZC scan spectrum (slice + metadata).
 
-The UE publishes a full-frame matched-filter spectrum of its own uplink ZC
-(one complex value per candidate ZC-symbol start position in the RX frame).
-Unlike the fixed-window self-channel estimator, this locates the self-ZC no
-matter how far the TX-vs-RX window has drifted, so a large post-underflow /
-post-resync offset shows up as the correlation peak moving away from the
-expected uplink-window position.
+The UE runs a full-frame matched-filter search for its own uplink ZC, then
+publishes only a peak-centered correlation slice plus a fixed metadata header.
+This viewer is pure display: it does not choose slices or recompute peaks.
 
 Enable it on the UE with:
     uplink.debug_self_channel: true
     uplink.debug_self_scan_spectrum: true
-and (optionally) network_output.self_scan_ip / self_scan_port (default 12362).
+and (optionally) network_output.self_scan_ip / self_scan_port (default 12352).
 
-Pass --expected <sample> to draw the expected ZC position marker; the gap
-between the peak (solid red) and the expected marker (dashed green) is the
-TX-vs-RX window offset in samples. Use --frame-samples to scale the x-axis to
-the full RX frame. By default the main plot auto-zooms around the detected peak
-and the top overview bar shows that moving slice, similar to an oscilloscope
-zoom bar. Use --slice START:END to force a fixed sample range.
+Wire format (single ZMQ message, little-endian):
+    [64-byte header magic "ULSCSCAN"][complex64 * slice_len]
 """
 
 from __future__ import annotations
 
 import argparse
+import struct
 
 import numpy as np
 import pyqtgraph as pg
@@ -36,8 +30,10 @@ try:
         DebugPlotWindow,
         ViewerArgs,
         configure_plot,
+        normalize_endpoint,
         power_db,
     )
+    from viewer_endpoint_store import default_settings_key, load_endpoint
 except ImportError:
     from scripts.qt_debug_plot_common import (
         PLOT_BACKGROUND,
@@ -45,47 +41,79 @@ except ImportError:
         DebugPlotWindow,
         ViewerArgs,
         configure_plot,
+        normalize_endpoint,
         power_db,
     )
+    from scripts.viewer_endpoint_store import default_settings_key, load_endpoint
 
 
-DEFAULT_PORT = 12362
+DEFAULT_PORT = 12352
+MAGIC = b"ULSCSCAN"
+HEADER_SIZE = 64
+# magic(8) + version/u32*7 + i32 + f32*2 + i32*2 + u64 = 8+28+4+8+8+8 = 64
+HEADER_STRUCT = struct.Struct("<8s7Ii2f2iQ")
+assert HEADER_STRUCT.size == HEADER_SIZE
 
 
-def _parse_slice(text: str | None) -> tuple[int, int] | None:
-    if text is None:
-        return None
-    parts = text.split(":", 1)
-    if len(parts) != 2:
-        raise argparse.ArgumentTypeError("slice must be START:END")
-    try:
-        start = int(parts[0])
-        end = int(parts[1])
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("slice bounds must be integers") from exc
-    if start < 0 or end <= start:
-        raise argparse.ArgumentTypeError("slice must satisfy 0 <= START < END")
-    return start, end
+def parse_self_scan_frame(data: bytes) -> tuple[dict, np.ndarray]:
+    if len(data) < HEADER_SIZE:
+        raise ValueError(f"frame too short for header: {len(data)} B")
+    (
+        magic,
+        version,
+        frame_samples,
+        corr_len,
+        slice_start,
+        slice_len,
+        peak_index,
+        expected_zc_pos,
+        offset_samples,
+        peak_power,
+        avg_power,
+        ul_tx_rx_shift,
+        timing_advance,
+        generation,
+    ) = HEADER_STRUCT.unpack_from(data, 0)
+    if magic != MAGIC:
+        raise ValueError(f"bad self-scan magic: {magic!r}")
+    if version != 1:
+        raise ValueError(f"unsupported self-scan version: {version}")
+    if slice_len == 0:
+        raise ValueError("empty self-scan slice")
+
+    payload = memoryview(data)[HEADER_SIZE:]
+    expected_bytes = slice_len * np.dtype(np.complex64).itemsize
+    if len(payload) < expected_bytes:
+        raise ValueError(
+            f"payload too short: {len(payload)} B, need {expected_bytes} B for slice_len={slice_len}"
+        )
+    if len(payload) != expected_bytes:
+        # Tolerate trailing padding, but require at least the declared samples.
+        payload = payload[:expected_bytes]
+    spectrum = np.frombuffer(payload, dtype=np.complex64).copy()
+    if spectrum.size != slice_len:
+        raise ValueError(f"slice sample count mismatch: {spectrum.size} vs {slice_len}")
+
+    meta = {
+        "version": int(version),
+        "frame_samples": int(frame_samples),
+        "corr_len": int(corr_len),
+        "slice_start": int(slice_start),
+        "slice_len": int(slice_len),
+        "peak_index": int(peak_index),
+        "expected_zc_pos": int(expected_zc_pos),
+        "offset_samples": int(offset_samples),
+        "peak_power": float(peak_power),
+        "avg_power": float(avg_power),
+        "ul_tx_rx_shift": int(ul_tx_rx_shift),
+        "timing_advance": int(timing_advance),
+        "generation": int(generation),
+    }
+    return meta, spectrum
 
 
 class SelfScanWindow(DebugPlotWindow):
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        interval_ms: int,
-        expected: int | None,
-        frame_samples: int | None,
-        view_slice: tuple[int, int] | None,
-        auto_slice: bool,
-        auto_slice_samples: int,
-    ) -> None:
-        self.expected = expected
-        self.frame_samples = frame_samples
-        self.view_slice = view_slice
-        self.auto_slice = auto_slice
-        self.auto_slice_samples = max(1, auto_slice_samples)
-        self.current_slice: tuple[int, int] | None = None
+    def __init__(self, host: str, port: int, interval_ms: int) -> None:
         super().__init__(
             title="Uplink Self-ZC Scan Spectrum",
             default_port=port,
@@ -125,21 +153,17 @@ class SelfScanWindow(DebugPlotWindow):
             angle=90,
             pen=pg.mkPen("#16a34a", width=1.0, style=QtCore.Qt.PenStyle.DashLine),
         )
-        if self.expected is not None:
-            self.overview_expected_line.setPos(self.expected)
-            self.overview.addItem(self.overview_expected_line)
+        self.overview.addItem(self.overview_expected_line)
         self.plot_layout.addWidget(self.overview)
 
         self.plot = pg.PlotWidget()
         configure_plot(
             self.plot,
-            "Uplink Self-ZC Matched-Filter Spectrum",
+            "Uplink Self-ZC Matched-Filter Spectrum (UE slice)",
             "Power (dB)",
             "ZC symbol start (samples into RX frame)",
         )
         self.curve = self.plot.plot([0], [0], pen=pg.mkPen("#2563eb", width=1.2))
-
-        # Measured peak (solid red) and expected uplink-window position (dashed green).
         self.peak_line = pg.InfiniteLine(
             pos=0, angle=90, pen=pg.mkPen("#dc2626", width=1.2)
         )
@@ -149,10 +173,7 @@ class SelfScanWindow(DebugPlotWindow):
             angle=90,
             pen=pg.mkPen("#16a34a", width=1.2, style=QtCore.Qt.PenStyle.DashLine),
         )
-        if self.expected is not None:
-            self.expected_line.setPos(self.expected)
-            self.plot.addItem(self.expected_line)
-
+        self.plot.addItem(self.expected_line)
         self.peak_label = pg.TextItem(
             "",
             anchor=(0, 1),
@@ -163,145 +184,95 @@ class SelfScanWindow(DebugPlotWindow):
         self.plot.addItem(self.peak_label)
         self.plot_layout.addWidget(self.plot)
 
-    def _frame_axis_len(self, n: int) -> int:
-        if self.frame_samples is not None and self.frame_samples > 0:
-            return max(self.frame_samples, n)
-        return n
-
-    def _visible_span(self, n: int, peak_index: int | None = None) -> tuple[int, int]:
-        frame_len = self._frame_axis_len(n)
-        if self.view_slice is None:
-            if self.auto_slice and peak_index is not None:
-                width = min(self.auto_slice_samples, frame_len)
-                start = int(peak_index) - width // 2
-                start = min(max(0, start), max(0, frame_len - width))
-                return start, start + width
-            return 0, frame_len
-        start, end = self.view_slice
-        start = min(max(0, start), max(0, frame_len - 1))
-        end = min(max(end, start + 1), frame_len)
-        return start, end
-
-    def _update_overview(self, n: int, peak_index: int) -> None:
-        frame_len = self._frame_axis_len(n)
-        start, end = self._visible_span(n, peak_index)
-        self.current_slice = (start, end)
-        self.overview_curve.setData([0, frame_len], [0.5, 0.5])
-        self.slice_region.setRegion((start, end))
-        self.overview_peak_line.setPos(peak_index)
-        self.overview.setXRange(0, max(1, frame_len), padding=0)
-
     def handle_message(self, data: bytes) -> None:
-        itemsize = np.dtype(np.complex64).itemsize
-        if len(data) < itemsize or (len(data) % itemsize) != 0:
-            self.status_label.setText(f"Ignored {len(data)} B frame (not complex64)")
+        try:
+            meta, spectrum = parse_self_scan_frame(data)
+        except Exception as exc:
+            self.status_label.setText(f"Ignored frame ({len(data)} B): {exc}")
             return
 
-        cdata = np.frombuffer(data, dtype=np.complex64)
-        power = power_db(cdata)
+        power = power_db(spectrum)
+        start = meta["slice_start"]
         n = power.size
-        x = np.arange(n)
+        x = np.arange(start, start + n, dtype=np.float64)
 
-        peak_index = int(np.argmax(power))
-        peak_value = float(power[peak_index])
-        avg_value = float(np.mean(power))
-        peak_over_avg = peak_value - avg_value  # both already in dB
+        peak_index = meta["peak_index"]
+        expected = meta["expected_zc_pos"]
+        offset = meta["offset_samples"]
+        # Prefer wire-side peak/avg (full-search stats) when valid.
+        if meta["peak_power"] > 0.0 and meta["avg_power"] > 0.0:
+            peak_value = 10.0 * np.log10(meta["peak_power"])
+            avg_value = 10.0 * np.log10(meta["avg_power"])
+        else:
+            local_peak = int(np.argmax(power))
+            peak_value = float(power[local_peak])
+            avg_value = float(np.mean(power))
+        peak_over_avg = peak_value - avg_value
+        finite_power = power[np.isfinite(power)]
+        if finite_power.size:
+            local_floor = float(np.percentile(finite_power, 5.0))
+        else:
+            local_floor = avg_value
+
+        frame_len = max(meta["frame_samples"], meta["corr_len"], start + n, 1)
+        slice_end = start + n
 
         self.curve.setData(x, power)
         self.peak_line.setPos(peak_index)
-        self._update_overview(n, peak_index)
+        self.expected_line.setPos(expected)
+        self.overview_curve.setData([0, frame_len], [0.5, 0.5])
+        self.slice_region.setRegion((start, slice_end))
+        self.overview_peak_line.setPos(peak_index)
+        self.overview_expected_line.setPos(expected)
+        self.overview.setXRange(0, frame_len, padding=0)
 
-        label = f"Peak {peak_value:.1f} dB @ {peak_index}\npeak-avg {peak_over_avg:.1f} dB"
-        if self.expected is not None:
-            offset = peak_index - self.expected
-            frame_len = self._frame_axis_len(n)
-            if offset > frame_len // 2:
-                offset -= frame_len
-            elif offset < -(frame_len // 2):
-                offset += frame_len
-            label += f"\nexpected {self.expected}\noffset {offset:+d} samples"
+        label = (
+            f"Peak {peak_value:.1f} dB @ {peak_index}\n"
+            f"peak-avg {peak_over_avg:.1f} dB\n"
+            f"expected {expected}\n"
+            f"offset {offset:+d} samples\n"
+            f"shift/TADV {meta['ul_tx_rx_shift']}/{meta['timing_advance']}"
+        )
         self.peak_label.setText(label)
         self.peak_label.setPos(peak_index, peak_value)
-        x_start, x_end = self.current_slice or self._visible_span(n, peak_index)
-        self.plot.setXRange(x_start, max(x_start + 1, x_end), padding=0)
-        self.plot.setYRange(avg_value - 5.0, peak_value + 5.0, padding=0)
-        view_text = f"view {x_start}:{x_end}"
-        if self.frame_samples is not None:
-            view_text += f" of frame {self._frame_axis_len(n)}"
-        if self.view_slice is None and self.auto_slice:
-            view_text += " auto"
+        self.plot.setXRange(start, max(start + 1, slice_end), padding=0)
+        y_min = min(local_floor - 5.0, avg_value - 20.0)
+        y_max = max(peak_value + 15.0, y_min + 20.0)
+        self.plot.setYRange(y_min, y_max, padding=0)
         self.status_label.setText(
-            f"{n} taps | {view_text} | peak {peak_value:.1f} dB @ {peak_index} | "
-            f"peak-avg {peak_over_avg:.1f} dB"
+            f"slice {start}:{slice_end} of corr {meta['corr_len']} "
+            f"(frame {meta['frame_samples']}) | peak {peak_value:.1f} dB @ {peak_index} | "
+            f"floor {local_floor:.1f} dB | offset {offset:+d} | gen {meta['generation']}"
         )
 
 
-def _parse_args() -> tuple[
-    ViewerArgs,
-    int | None,
-    int | None,
-    tuple[int, int] | None,
-    bool,
-    int,
-]:
-    parser = argparse.ArgumentParser(description="Plot the uplink self-ZC scan spectrum.")
-    parser.add_argument("--host", default="127.0.0.1", help="Backend host or tcp:// endpoint")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Backend ZMQ port")
+def _parse_args() -> ViewerArgs:
+    parser = argparse.ArgumentParser(
+        description="Plot the UE-published uplink self-ZC scan slice (pure display)."
+    )
+    parser.add_argument("--host", default=None, help="Backend host or tcp:// endpoint")
+    parser.add_argument("--port", type=int, default=None, help="Backend ZMQ port")
     parser.add_argument("--interval-ms", type=int, default=50, help="Plot refresh interval")
-    parser.add_argument(
-        "--frame-samples",
-        type=int,
-        default=None,
-        help="Full RX frame length in samples; extends the x-axis beyond published scan taps",
-    )
-    parser.add_argument(
-        "--slice",
-        type=_parse_slice,
-        default=None,
-        metavar="START:END",
-        help="Only show this fixed sample range on the main plot; disables auto-slice",
-    )
-    parser.add_argument(
-        "--auto-slice-samples",
-        type=int,
-        default=8192,
-        help="Auto-zoom width in samples when --slice is not set",
-    )
-    parser.add_argument(
-        "--no-auto-slice",
-        action="store_true",
-        help="Show the full frame/range instead of auto-following the detected peak",
-    )
-    parser.add_argument(
-        "--expected",
-        type=int,
-        default=None,
-        help="Expected uplink-window ZC start (samples) to mark for offset readout",
-    )
     args = parser.parse_args()
-    return (
-        ViewerArgs(args.host, args.port, max(1, args.interval_ms)),
-        args.expected,
-        args.frame_samples,
-        args.slice,
-        args.slice is None and not args.no_auto_slice,
-        max(1, args.auto_slice_samples),
+    saved_host, saved_port = load_endpoint(default_settings_key(), "127.0.0.1", DEFAULT_PORT)
+    host = args.host if args.host is not None else saved_host
+    port = int(args.port if args.port is not None else saved_port)
+    if args.host is not None:
+        _, parsed_host, parsed_port = normalize_endpoint(args.host, port)
+        host = parsed_host
+        if args.port is None:
+            port = parsed_port
+    return ViewerArgs(
+        host,
+        port,
+        max(1, args.interval_ms),
     )
 
 
 def main() -> None:
-    args, expected, frame_samples, view_slice, auto_slice, auto_slice_samples = _parse_args()
+    args = _parse_args()
     app = QtWidgets.QApplication([])
-    window = SelfScanWindow(
-        args.host,
-        args.port,
-        args.interval_ms,
-        expected,
-        frame_samples,
-        view_slice,
-        auto_slice,
-        auto_slice_samples,
-    )
+    window = SelfScanWindow(args.host, args.port, args.interval_ms)
     window.resize(1160, 720)
     window.show()
     app.exec()

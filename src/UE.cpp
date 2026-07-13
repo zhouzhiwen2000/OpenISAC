@@ -258,8 +258,11 @@ public:
               uplink_self_pdf_pub_->send_container(data);
           }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
           uplink_self_scan_sender_(2, [this](const auto& data) {
-              uplink_self_scan_pub_->send_container(data);
-          }, std::chrono::milliseconds(50), DataSender<std::complex<float>, AlignedAlloc>::DeliveryMode::LatestOnly),
+              if (!uplink_self_scan_pub_ || data.empty()) {
+                  return;
+              }
+              uplink_self_scan_pub_->send(data.data(), data.size());
+          }, std::chrono::milliseconds(50), DataSender<uint8_t>::DeliveryMode::LatestOnly),
           // Initialize object pools for memory reuse
           _rx_frame_pool(32, [&cfg]() {
               RxFrame frame;
@@ -767,9 +770,11 @@ private:
     // the whole RX frame and reports where the self-ZC actually landed, so an
     // arbitrarily large TX-vs-RX window offset is still measurable. Only built
     // when self-channel debug is enabled; only run behind profiling + a stride.
+    // The ZMQ wire payload is a peak-centered correlation slice + fixed header
+    // (see _publish_uplink_self_scan_frame), not the full spectrum.
     std::unique_ptr<SyncProcessor> _uplink_self_scan_processor;
     uint64_t _uplink_self_scan_frame_counter = 0;
-    AlignedVector _uplink_self_scan_spectrum;
+    AlignedVector _uplink_self_scan_slice;
     
     std::unique_ptr<FIRFilter> freq_offset_filter_;
     radio::TuneResult current_rx_tune_;
@@ -797,7 +802,7 @@ private:
     DataSender<std::complex<float>, AlignedAlloc> constellation_sender_;
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_channel_sender_;
     DataSender<std::complex<float>, AlignedAlloc> uplink_self_pdf_sender_;
-    DataSender<std::complex<float>, AlignedAlloc> uplink_self_scan_sender_;
+    DataSender<uint8_t> uplink_self_scan_sender_;
     uint32_t _reset_count = 0;
     // Debug publish stride: constellation / channel / PDF snapshots are copied
     // out of the demod path once every N frames (senders pace at 50 ms anyway).
@@ -4184,6 +4189,109 @@ private:
         log_process_load();
     }
 
+    // Self-scan ZMQ wire format (single message):
+    //   [64-byte LE header "ULSCSCAN1"][complex64 * slice_len]
+    // Viewer is pure display: peak-centered slice + metadata; no client-side
+    // slicing. Header fields are little-endian.
+    void _publish_uplink_self_scan_frame(
+        const RxFrame& frame,
+        int scan_pos,
+        float scan_peak,
+        float scan_avg,
+        size_t expected_zc_pos,
+        int32_t offset_samples,
+        int32_t ul_tx_rx_shift,
+        int32_t timing_advance)
+    {
+        if (!uplink_self_scan_pub_ || !_uplink_self_scan_processor) {
+            return;
+        }
+        const size_t frame_samples = frame.frame_data.size();
+        if (frame_samples == 0) {
+            return;
+        }
+        const size_t symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
+        const size_t corr_len = frame_samples >= symbol_len
+            ? (frame_samples - symbol_len + 1)
+            : 0;
+        if (corr_len == 0) {
+            return;
+        }
+
+        // Default (0): one OFDM symbol including CP, matching the sync-symbol
+        // / correlation window length used by the self-ZC scan.
+        size_t want_slice = cfg_.uplink.debug_self_scan_slice_samples;
+        if (want_slice == 0) {
+            want_slice = symbol_len;
+        }
+        want_slice = std::max<size_t>(1, want_slice);
+        const size_t slice_len = std::min(want_slice, corr_len);
+        const size_t peak_u = static_cast<size_t>(
+            std::max(0, std::min(scan_pos, static_cast<int>(corr_len - 1))));
+        size_t slice_start = (peak_u > slice_len / 2) ? (peak_u - slice_len / 2) : 0;
+        if (slice_start + slice_len > corr_len) {
+            slice_start = corr_len - slice_len;
+        }
+
+        const size_t actual_start = _uplink_self_scan_processor->copy_last_correlation_slice(
+            frame_samples, slice_start, slice_len, _uplink_self_scan_slice);
+        if (_uplink_self_scan_slice.empty()) {
+            return;
+        }
+
+        static constexpr size_t kHeaderBytes = 64;
+        static constexpr uint8_t kMagic[8] = {
+            'U', 'L', 'S', 'C', 'S', 'C', 'A', 'N'};
+        std::vector<uint8_t> packet(
+            kHeaderBytes +
+            _uplink_self_scan_slice.size() * sizeof(std::complex<float>));
+        uint8_t* hdr = packet.data();
+        std::memcpy(hdr, kMagic, sizeof(kMagic));
+        size_t o = sizeof(kMagic);
+        auto put_u32 = [&](uint32_t v) {
+            hdr[o++] = static_cast<uint8_t>(v & 0xFFu);
+            hdr[o++] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+            hdr[o++] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+            hdr[o++] = static_cast<uint8_t>((v >> 24) & 0xFFu);
+        };
+        auto put_i32 = [&](int32_t v) { put_u32(static_cast<uint32_t>(v)); };
+        auto put_f32 = [&](float v) {
+            uint32_t bits = 0;
+            static_assert(sizeof(bits) == sizeof(v), "Unexpected float size");
+            std::memcpy(&bits, &v, sizeof(bits));
+            put_u32(bits);
+        };
+        auto put_u64 = [&](uint64_t v) {
+            for (int i = 0; i < 8; ++i) {
+                hdr[o++] = static_cast<uint8_t>((v >> (i * 8)) & 0xFFu);
+            }
+        };
+
+        put_u32(1);  // version
+        put_u32(static_cast<uint32_t>(frame_samples));
+        put_u32(static_cast<uint32_t>(corr_len));
+        put_u32(static_cast<uint32_t>(actual_start));
+        put_u32(static_cast<uint32_t>(_uplink_self_scan_slice.size()));
+        put_u32(static_cast<uint32_t>(peak_u));
+        put_u32(static_cast<uint32_t>(expected_zc_pos));
+        put_i32(offset_samples);
+        put_f32(scan_peak);
+        put_f32(scan_avg);
+        put_i32(ul_tx_rx_shift);
+        put_i32(timing_advance);
+        put_u64(frame.generation);
+        // Pad remainder of the fixed 64-byte header.
+        while (o < kHeaderBytes) {
+            hdr[o++] = 0;
+        }
+
+        std::memcpy(
+            packet.data() + kHeaderBytes,
+            _uplink_self_scan_slice.data(),
+            _uplink_self_scan_slice.size() * sizeof(std::complex<float>));
+        uplink_self_scan_sender_.add_data(std::move(packet));
+    }
+
     void _publish_uplink_self_channel_debug(const RxFrame& frame) {
         if (!uplink_self_channel_debug_enabled(cfg_) || !_uplink_tx) {
             return;
@@ -4241,11 +4349,15 @@ private:
                              << ", generation=" << frame.generation;
             }
             if (scan_publish) {
-                _uplink_self_scan_processor->copy_last_correlation(
-                    frame.frame_data.size(), _uplink_self_scan_spectrum);
-                uplink_self_scan_sender_.add_data(
-                    AlignedVector(_uplink_self_scan_spectrum.begin(),
-                                  _uplink_self_scan_spectrum.end()));
+                _publish_uplink_self_scan_frame(
+                    frame,
+                    scan_pos,
+                    scan_peak,
+                    scan_avg,
+                    local_tx_zc_start,
+                    static_cast<int32_t>(offset),
+                    ul_tx_rx_shift,
+                    timing_advance);
             }
         }
 

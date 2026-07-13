@@ -1880,6 +1880,40 @@ public:
         }
     }
 
+    /**
+     * @brief Copy a contiguous slice of the last matched-filter correlation.
+     *
+     * Same indexing as copy_last_correlation(): sample i is the complex
+     * correlation at candidate ZC start i in [0, n_windows).
+     *
+     * @param data_size Length of the buffer used for the last correlation
+     * @param start First window index to copy
+     * @param len Number of windows to copy (clamped to available length)
+     * @param out Destination; resized to the actual number of copied samples
+     * @return Actual start index used after clamping
+     */
+    size_t copy_last_correlation_slice(
+        size_t data_size,
+        size_t start,
+        size_t len,
+        AlignedVector& out) const
+    {
+        const size_t n_windows = data_size >= _symbol_len
+            ? (data_size - _symbol_len + 1)
+            : 0;
+        if (n_windows == 0 || len == 0) {
+            out.clear();
+            return 0;
+        }
+        const size_t clamped_start = std::min(start, n_windows - 1);
+        const size_t clamped_len = std::min(len, n_windows - clamped_start);
+        out.resize(clamped_len);
+        for (size_t i = 0; i < clamped_len; ++i) {
+            out[i] = _corr_result[clamped_start + i + _symbol_len - 1];
+        }
+        return clamped_start;
+    }
+
     static SecSyncCoarseSyncResult detect_sec_sync_symbol(
         const AlignedVector& data,
         size_t fft_size,

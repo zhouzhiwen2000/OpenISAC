@@ -70,7 +70,8 @@ uplink:
   ertm_debug_output_enabled: false  # Enable UE-side eRTM debug ZMQ output
   ertm_report_interval_frames: 32  # BS eRTM payload/report cadence in downlink frames
   debug_self_channel: true  # Estimate UE self-TX leakage channel from the RX window using current TADV
-  debug_self_scan_spectrum: false  # Also publish a full-frame self-ZC matched-filter spectrum (needs debug_self_channel); see scripts/plot_uplink_self_scan.py
+  debug_self_scan_spectrum: false  # Publish peak-centered self-ZC matched-filter slice + metadata (needs debug_self_channel); see scripts/plot_uplink_self_scan.py
+  debug_self_scan_slice_samples: 0  # Correlation samples around the peak; 0 = one OFDM symbol (fft_size + cp_length)
   tx_gain: 90  # Uplink TX gain (dB)
   tx_channel: 0  # Uplink TX channel index on USRP
   wire_format_tx: sc8  # Uplink TX wire format; sc16/sc8

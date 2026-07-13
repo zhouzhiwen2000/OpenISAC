@@ -111,6 +111,12 @@ network_output:
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
   control_port: 10001  # ZMQ port for runtime control commands
+  self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
+  self_channel_port: 12350  # UE self-channel output port
+  self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP
+  self_pdf_port: 12351  # UE self delay-spectrum output port
+  self_scan_ip: 0.0.0.0  # UE self-ZC scan-spectrum ZMQ listen IP
+  self_scan_port: 12352  # UE self-ZC scan-spectrum output port
   ertm_debug_ip: 0.0.0.0  # eRTM debug ZMQ listen IP
   ertm_debug_port: 12362  # eRTM debug output port
   channel_ip: 0.0.0.0  # Channel-estimate ZMQ listen IP

@@ -235,13 +235,20 @@ const APP = window.__APP_STATE__;
       return itemFields.filter((sub) => !SIM_HARDWARE_MAPPING_ITEM_KEYS.has(sub.key));
     }
 
-    // self_channel_* live in Network but stay gated by the uplink
-    // mapping's debug_self_channel checkbox (and uplink.enabled/TDD).
+    // self_channel_* / self_scan_* live in Network but stay gated by the
+    // uplink mapping's debug_self_channel checkbox (and uplink.enabled/TDD).
+    // self_scan_* additionally requires debug_self_scan_spectrum.
     function uplinkSelfChannelVisible(model) {
       if (!fieldBoolValue(model, 'uplink.enabled', false)) return false;
       if (duplexModeValue(model) === 'fdd') return false;
       const uplinkField = findField(model, 'uplink');
       return uplinkField ? structuredBoolValue(uplinkField, 'debug_self_channel', false) : false;
+    }
+
+    function uplinkSelfScanVisible(model) {
+      if (!uplinkSelfChannelVisible(model)) return false;
+      const uplinkField = findField(model, 'uplink');
+      return uplinkField ? structuredBoolValue(uplinkField, 'debug_self_scan_spectrum', false) : false;
     }
 
     function duplexModeValue(model = currentModel()) {
@@ -258,6 +265,8 @@ const APP = window.__APP_STATE__;
       self_channel_port: uplinkSelfChannelVisible,
       self_pdf_ip: uplinkSelfChannelVisible,
       self_pdf_port: uplinkSelfChannelVisible,
+      self_scan_ip: uplinkSelfScanVisible,
+      self_scan_port: uplinkSelfScanVisible,
       equalizer_mode: (model) => !fieldIsInSection(model, 'equalizer_mode', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
       channel_tracking_mode: (model) => !fieldIsInSection(model, 'channel_tracking_mode', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
       equalizer_mag_floor: (model) => !fieldIsInSection(model, 'equalizer_mag_floor', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
@@ -322,18 +331,6 @@ const APP = window.__APP_STATE__;
       'sensing.rx_channels': (model) => fieldIntValue(model, 'sensing.rx_channel_count', 0) > 0,
     };
 
-    function singleEnabledIfRuleSatisfied(model, rule) {
-      if (!rule || !rule.key) return true;
-      const expected = Object.prototype.hasOwnProperty.call(rule, 'value') ? rule.value : true;
-      if (typeof expected === 'boolean') {
-        return fieldBoolValue(model, rule.key, false) === expected;
-      }
-      const parent = findField(model, rule.key);
-      if (!parent) return true;
-      const actual = parent.value ?? parent.value_text;
-      return String(actual) === String(expected);
-    }
-
     function enabledIfRuleReferencesKey(rule, key) {
       if (!rule || !key) return false;
       if (Array.isArray(rule)) {
@@ -379,20 +376,72 @@ const APP = window.__APP_STATE__;
       return Boolean(rule && !rule(model));
     }
 
-    function structuredBoolValue(field, key, fallback = false) {
-      const sub = (field.scalar_fields || []).find((item) => item.key === key);
-      if (!sub) return fallback;
-      if (typeof sub.value === 'boolean') return sub.value;
-      const raw = sub.value_text ?? sub.value ?? '';
-      if (typeof raw === 'string') {
-        const normalized = raw.trim().toLowerCase();
+    function boolFromValue(value, fallback = false) {
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
         if (normalized === 'true') return true;
         if (normalized === 'false') return false;
       }
-      return Boolean(raw);
+      if (value === undefined || value === null || value === '') return fallback;
+      return Boolean(value);
+    }
+
+    function fieldValueFromRecord(field) {
+      return field?.value ?? field?.value_text;
+    }
+
+    function modelValueForKey(model, key) {
+      const exactField = findField(model, key);
+      if (exactField) return { found: true, value: fieldValueFromRecord(exactField) };
+
+      const parts = String(key || '').split('.');
+      for (let prefixLen = parts.length - 1; prefixLen > 0; prefixLen -= 1) {
+        const prefix = parts.slice(0, prefixLen).join('.');
+        const field = findField(model, prefix);
+        if (!field) continue;
+
+        const restKey = parts.slice(prefixLen).join('.');
+        const sub = (field.scalar_fields || []).find((item) => item.key === restKey);
+        if (sub) return { found: true, value: fieldValueFromRecord(sub) };
+
+        let current = field.value;
+        let found = current !== undefined && current !== null;
+        for (const part of parts.slice(prefixLen)) {
+          if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, part)) {
+            current = current[part];
+          } else {
+            found = false;
+            break;
+          }
+        }
+        if (found) return { found: true, value: current };
+      }
+
+      return { found: false, value: undefined };
+    }
+
+    function singleEnabledIfRuleSatisfied(model, rule) {
+      if (!rule || !rule.key) return true;
+      const expected = Object.prototype.hasOwnProperty.call(rule, 'value') ? rule.value : true;
+      const resolved = modelValueForKey(model, rule.key);
+      if (typeof expected === 'boolean') {
+        return boolFromValue(resolved.value, false) === expected;
+      }
+      if (!resolved.found) return true;
+      return String(resolved.value) === String(expected);
+    }
+
+    function structuredBoolValue(field, key, fallback = false) {
+      const sub = (field.scalar_fields || []).find((item) => item.key === key);
+      if (!sub) return fallback;
+      return boolFromValue(fieldValueFromRecord(sub), fallback);
     }
 
     function shouldHideStructuredScalar(field, sub, model = currentModel()) {
+      if (sub.enabled_if && !enabledIfRuleSatisfied(model, sub)) {
+        return true;
+      }
       if (field.key === 'simulation' && sub.key === 'uplink.enabled') {
         return !fieldBoolValue(model, 'uplink.enabled', false);
       }
@@ -407,8 +456,12 @@ const APP = window.__APP_STATE__;
         if (sub.key === 'center_freq') {
           return mode !== 'fdd';
         }
-        if (sub.key === 'debug_self_channel') {
+        if (sub.key === 'debug_self_channel' || sub.key === 'debug_self_scan_spectrum') {
           return mode === 'fdd';
+        }
+        if (sub.key === 'debug_self_scan_slice_samples') {
+          if (mode === 'fdd') return true;
+          return !structuredBoolValue(field, 'debug_self_scan_spectrum', false);
         }
       }
       return false;
@@ -510,23 +563,15 @@ const APP = window.__APP_STATE__;
     }
 
     function fieldBoolValue(model, key, fallback = false) {
-      const field = findField(model, key);
-      if (!field) return fallback;
-      if (typeof field.value === 'boolean') return field.value;
-      const raw = field.value_text ?? field.value ?? '';
-      if (typeof raw === 'string') {
-        const normalized = raw.trim().toLowerCase();
-        if (normalized === 'true') return true;
-        if (normalized === 'false') return false;
-      }
-      return Boolean(raw);
+      const resolved = modelValueForKey(model, key);
+      if (!resolved.found) return fallback;
+      return boolFromValue(resolved.value, fallback);
     }
 
     function fieldIntValue(model, key, fallback = 0) {
-      const field = findField(model, key);
-      if (!field) return fallback;
-      const raw = field.value_text ?? field.value ?? '';
-      return parseIntOrNull(raw) ?? fallback;
+      const resolved = modelValueForKey(model, key);
+      if (!resolved.found) return fallback;
+      return parseIntOrNull(resolved.value) ?? fallback;
     }
 
     function mappingScalarText(field, key) {
@@ -2310,7 +2355,10 @@ const APP = window.__APP_STATE__;
           <div class="value-col"></div>
         `;
         renderScalarControl(row.querySelector('.value-col'), sub, (changedField) => {
-          if (changedField.key === 'debug_self_channel') {
+          if (
+            changedField.key === 'debug_self_channel' ||
+            changedField.key === 'debug_self_scan_spectrum'
+          ) {
             renderSections();
           }
         });
