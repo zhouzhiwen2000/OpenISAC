@@ -334,6 +334,30 @@ const APP = window.__APP_STATE__;
       return String(actual) === String(expected);
     }
 
+    function enabledIfRuleReferencesKey(rule, key) {
+      if (!rule || !key) return false;
+      if (Array.isArray(rule)) {
+        return rule.some((item) => enabledIfRuleReferencesKey(item, key));
+      }
+      if (Array.isArray(rule.all)) {
+        return rule.all.some((item) => enabledIfRuleReferencesKey(item, key));
+      }
+      if (Array.isArray(rule.any)) {
+        return rule.any.some((item) => enabledIfRuleReferencesKey(item, key));
+      }
+      return rule.key === key;
+    }
+
+    function fieldControlsEnabledIfDependency(model, key) {
+      if (!model?.sections) return false;
+      for (const section of model.sections) {
+        for (const field of section.fields) {
+          if (enabledIfRuleReferencesKey(field.enabled_if, key)) return true;
+        }
+      }
+      return false;
+    }
+
     function enabledIfRuleSatisfied(model, field) {
       const rule = field.enabled_if;
       if (!rule) return true;
@@ -2004,6 +2028,10 @@ const APP = window.__APP_STATE__;
       return base ? `${base} Optional; blank omits this key.` : 'Optional; blank omits this key.';
     }
 
+    function fieldDisplayKey(field) {
+      return field?.yaml_key || field?.key || '';
+    }
+
     function renderScalarControl(host, field, onChange = () => {}) {
       if (field.kind === 'bool') {
         const wrapper = document.createElement('label');
@@ -2076,7 +2104,7 @@ const APP = window.__APP_STATE__;
         const channel = document.createElement('div');
         channel.className = 'channel-card';
         const heading = document.createElement('h4');
-        heading.textContent = `${field.key}[${index}]`;
+        heading.textContent = `${fieldDisplayKey(field)}[${index}]`;
         channel.appendChild(heading);
         const inner = document.createElement('div');
         inner.className = 'kv';
@@ -2142,7 +2170,7 @@ const APP = window.__APP_STATE__;
       holder.className = 'kv-row';
       holder.innerHTML = `
         <div class="key-col">
-          <code>${field.key}</code>
+          <code>${fieldDisplayKey(field)}</code>
           <div class="hint">${fieldHintText(field)}</div>
         </div>
         <div class="value-col"></div>
@@ -2495,7 +2523,7 @@ const APP = window.__APP_STATE__;
             holder.className = 'kv-row';
             holder.innerHTML = `
               <div class="key-col">
-                <code>${field.key}</code>
+                <code>${fieldDisplayKey(field)}</code>
                 <div class="hint">${fieldHintText(field)}</div>
               </div>
               <div class="value-col"></div>
@@ -2505,7 +2533,7 @@ const APP = window.__APP_STATE__;
               const channel = document.createElement('div');
               channel.className = 'channel-card';
               const heading = document.createElement('h4');
-              heading.textContent = `${field.key}[${index}]`;
+              heading.textContent = `${fieldDisplayKey(field)}[${index}]`;
               channel.appendChild(heading);
               const inner = document.createElement('div');
               inner.className = 'kv';
@@ -2582,7 +2610,7 @@ const APP = window.__APP_STATE__;
             row.className = 'kv-row';
             row.innerHTML = `
               <div class="key-col">
-                <code>${field.key}</code>
+                <code>${fieldDisplayKey(field)}</code>
                 <div class="hint">${fieldHintText(field)}</div>
               </div>
               <div class="value-col"></div>
@@ -2607,7 +2635,7 @@ const APP = window.__APP_STATE__;
             row.className = 'kv-row';
             row.innerHTML = `
               <div class="key-col">
-                <code>${field.key}</code>
+                <code>${fieldDisplayKey(field)}</code>
                 <div class="hint">${fieldHintText(field)}</div>
               </div>
               <div class="value-col"></div>
@@ -2665,7 +2693,7 @@ const APP = window.__APP_STATE__;
           row.className = 'kv-row';
           row.innerHTML = `
             <div class="key-col">
-              <code>${field.key}</code>
+              <code>${fieldDisplayKey(field)}</code>
               <div class="hint">${fieldHintText(field)}</div>
             </div>
             <div class="value-col"></div>
@@ -2680,7 +2708,7 @@ const APP = window.__APP_STATE__;
             input.addEventListener('change', () => {
               field.value = input.checked;
               field.value_text = input.checked ? 'true' : 'false';
-              if ([
+              if (fieldControlsEnabledIfDependency(model, field.key) || [
                 'uplink.enabled',
                 'udp_egress_pacer_enabled',
                 'enable_sec_sync_symbol',

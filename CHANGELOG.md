@@ -19,6 +19,12 @@
 - 新增 `network_output.arq_enabled`、`arq_ordered_delivery`、`arq_window_packets`、`arq_ack_bitmap_bits`、`arq_retransmit_timeout_ms`、`arq_max_retries` 和 `arq_feedback_interval_ms` 配置项，并同步到 BS/UE 配置模板、benchmark 模板和 Web 配置编辑器 schema。
   影响：默认 `arq_enabled: false` 保持原有低延迟 UDP 转发行为；开启后链路层会用 ACK bitmap 反馈确认并重传未确认空口 packet。
 
+- 将下行 ARQ YAML 主配置迁移到 `downlink.arq_*`，BS 端仅暴露发送端窗口/RTO/最大重传次数，UE 端仅暴露接收端保序/反馈间隔参数，并保留旧 `network_output.arq_*` 读取兼容。
+  影响：新配置模板为下行 ARQ 预留与后续上行 ARQ 分离的命名空间；默认 RTO 调整为 `100 ms`、最大重传次数为 `5`、ACK feedback 间隔为 `10 ms`。
+
+- 恢复上行 ARQ 并改为由 `uplink.arq_*` 单独控制，BS 端暴露上行接收/ACK 参数，UE 端暴露上行发送窗口/RTO/最大重传次数。
+  影响：可以独立开启上行或下行 ARQ；下行 ARQ 仍通过 UE uplink 发送 ACK feedback，上行 ARQ 通过 BS downlink 发送 ACK feedback。
+
 - BS/UE 与 CUDA BS/UE 路径接入共享 ARQ helper，支持重复包抑制、ACK feedback 内部消费、重传窗口和可选保序交付。
   影响：视频等需要顺序输出的场景可以开启 `arq_ordered_delivery`，普通低延迟场景可保持关闭以便收到非重复 packet 后立即转发。
 

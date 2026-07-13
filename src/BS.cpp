@@ -245,19 +245,26 @@ public:
         _next_frame_start_symbol.store(0, std::memory_order_relaxed);
         _next_tx_frame_seq.store(0, std::memory_order_relaxed);
 
-        // ARQ: configure DL TX window and UL RX window if enabled
+        // Downlink ARQ: BS owns the DL TX window. The uplink path only carries
+        // UE ACK feedback until a separate uplink ARQ namespace is added.
         _arq_enabled = _cfg.network_output.arq_enabled;
         if (_arq_enabled) {
             _dl_arq_tx.configure(_cfg.network_output);
             _dl_arq_tx.set_direction(0); // downlink
-            _ul_arq_rx.configure(_cfg.network_output);
-            _ul_arq_rx.set_direction(1); // uplink
             LOG_G_INFO() << "[BS ARQ] enabled: window=" << _cfg.network_output.arq_window_packets
                          << " rto=" << _cfg.network_output.arq_retransmit_timeout_ms << "ms"
-                         << " ordered=" << _cfg.network_output.arq_ordered_delivery;
+                         << " max_retries=" << _cfg.network_output.arq_max_retries;
+        }
+        if (_cfg.uplink_arq.arq_enabled) {
+            _ul_arq_rx.configure(_cfg.uplink_arq);
+            _ul_arq_rx.set_direction(1); // uplink
+            LOG_G_INFO() << "[BS UL ARQ] enabled: window=" << _cfg.uplink_arq.arq_window_packets
+                         << " ordered=" << _cfg.uplink_arq.arq_ordered_delivery
+                         << " feedback_interval=" << _cfg.uplink_arq.arq_feedback_interval_ms
+                         << "ms";
         }
         // Wire ARQ intercept on uplink RX if available
-        if (_arq_enabled && _uplink_rx) {
+        if ((_arq_enabled || _cfg.uplink_arq.arq_enabled) && _uplink_rx) {
             _uplink_rx->set_arq_payload_intercept(
                 [this](const uint8_t* data, size_t len, uint16_t seq, uint8_t flags) -> bool {
                     return _handle_arq_uplink_payload(data, len, seq, flags);
@@ -517,6 +524,12 @@ private:
     std::atomic<uint64_t> _arq_dl_acks_received{0};
     std::atomic<uint64_t> _arq_dl_ack_released_total{0};
     std::atomic<uint64_t> _arq_dl_invalid_feedback{0};
+    std::atomic<uint64_t> _arq_dl_ack_direction_mismatch{0};
+    std::atomic<uint64_t> _arq_ul_intercept_payloads{0};
+    std::atomic<uint64_t> _arq_ul_intercept_feedback_flags{0};
+    std::atomic<uint64_t> _arq_ul_intercept_data_flags{0};
+    std::atomic<uint64_t> _arq_ul_data_accepted{0};
+    std::atomic<uint64_t> _arq_ul_data_duplicates{0};
     std::atomic<uint64_t> _arq_dl_packets_tracked{0};
     std::atomic<uint64_t> _arq_dl_track_failures{0};
     std::atomic<uint64_t> _arq_dl_retransmit_enqueued{0};
@@ -646,38 +659,54 @@ private:
 
         std::ostringstream oss;
         oss << "[BS ARQ PROFILE] reason=" << reason
-            << " dl_outstanding=" << outstanding << "/" << window
-            << " dl_room=" << (_dl_arq_tx.has_room() ? "yes" : "no")
+            << "\n  dl: outstanding=" << outstanding << "/" << window
+            << " room=" << (_dl_arq_tx.has_room() ? "yes" : "no")
             << " retx_due=" << retransmit_due.size()
-            << " raw_udp_queue=" << raw_size << "/" << raw_cap
-            << " encoded_queue=" << encoded_size << "/" << encoded_cap
-            << " pending_ul_ack_feedback=" << pending_feedback
-            << " ack_rx=" << _arq_dl_acks_received.load(std::memory_order_relaxed)
-            << " ack_released_total=" << ack_released_total
-            << " tracked_delta=" << tracked_delta
-            << " ack_released_delta=" << ack_released_delta
-            << " retx_delta=" << retx_delta
-            << " raw_udp_drop_delta=" << raw_udp_drop_delta
-            << " encoded_full_delta=" << encoded_full_delta
-            << " frame_payload_fill_ratio=" << std::fixed << std::setprecision(3)
-            << frame_payload_fill_ratio
-            << " packets_per_frame=" << packets_per_frame << std::defaultfloat
-            << " last_ack_base=" << _arq_dl_last_ack_base.load(std::memory_order_relaxed)
-            << " last_ack_released=" << _arq_dl_last_ack_released.load(std::memory_order_relaxed)
-            << " last_ack_bitmap=0x" << std::hex
-            << _arq_dl_last_ack_bitmap.load(std::memory_order_relaxed) << std::dec
             << " tracked=" << tracked_total
             << " track_fail=" << _arq_dl_track_failures.load(std::memory_order_relaxed)
             << " retx_enqueued=" << retx_total
-            << " feedback_enqueued=" << _arq_dl_feedback_enqueued.load(std::memory_order_relaxed)
-            << " feedback_transmitted="
-            << _arq_dl_feedback_transmitted.load(std::memory_order_relaxed)
-            << " window_drops=" << _arq_dl_window_drops.load(std::memory_order_relaxed)
-            << " window_stalls=" << _arq_dl_window_stalls.load(std::memory_order_relaxed)
+            << "\n  queues: raw_udp=" << raw_size << "/" << raw_cap
+            << " encoded=" << encoded_size << "/" << encoded_cap
+            << " pending_ul_ack_feedback=" << pending_feedback
             << " raw_udp_drops=" << raw_udp_drops_total
-            << " encoded_queue_full_events="
-            << encoded_full_total
-            << " invalid_feedback=" << _arq_dl_invalid_feedback.load(std::memory_order_relaxed);
+            << " encoded_full=" << encoded_full_total
+            << "\n  frame: payload_fill=" << std::fixed << std::setprecision(3)
+            << frame_payload_fill_ratio
+            << " packets_per_frame=" << packets_per_frame << std::defaultfloat
+            << "\n  dl_ack: rx=" << _arq_dl_acks_received.load(std::memory_order_relaxed)
+            << " released_total=" << ack_released_total
+            << " last_base=" << _arq_dl_last_ack_base.load(std::memory_order_relaxed)
+            << " last_released=" << _arq_dl_last_ack_released.load(std::memory_order_relaxed)
+            << " last_bitmap=0x" << std::hex
+            << _arq_dl_last_ack_bitmap.load(std::memory_order_relaxed) << std::dec
+            << " invalid=" << _arq_dl_invalid_feedback.load(std::memory_order_relaxed)
+            << " direction_bad="
+            << _arq_dl_ack_direction_mismatch.load(std::memory_order_relaxed)
+            << "\n  ul_intercept: payloads="
+            << _arq_ul_intercept_payloads.load(std::memory_order_relaxed)
+            << " feedback_flags="
+            << _arq_ul_intercept_feedback_flags.load(std::memory_order_relaxed)
+            << " data_flags="
+            << _arq_ul_intercept_data_flags.load(std::memory_order_relaxed)
+            << "\n  ul_arq_rx: accepted="
+            << _arq_ul_data_accepted.load(std::memory_order_relaxed)
+            << " duplicates="
+            << _arq_ul_data_duplicates.load(std::memory_order_relaxed)
+            << " ack_base=" << _ul_arq_rx.ack_base()
+            << " ack_bitmap=0x" << std::hex << _ul_arq_rx.ack_bitmap()
+            << std::dec
+            << " feedback_enqueued=" << _arq_dl_feedback_enqueued.load(std::memory_order_relaxed)
+            << " feedback_tx="
+            << _arq_dl_feedback_transmitted.load(std::memory_order_relaxed)
+            << "\n  deltas: tracked=" << tracked_delta
+            << " ack_released=" << ack_released_delta
+            << " retx=" << retx_delta
+            << " raw_udp_drop=" << raw_udp_drop_delta
+            << " encoded_full=" << encoded_full_delta
+            << "\n  stalls: window_drops="
+            << _arq_dl_window_drops.load(std::memory_order_relaxed)
+            << " window_stalls="
+            << _arq_dl_window_stalls.load(std::memory_order_relaxed);
         LOG_G_INFO() << oss.str();
     }
 
@@ -1813,12 +1842,18 @@ private:
     // Called from UplinkRxEngine's decode thread via the intercept callback.
     // Feedback frames are identified by the mini-header flag, not payload sniffing.
     bool _handle_arq_uplink_payload(const uint8_t* data, size_t len, uint16_t seq, uint8_t flags) {
+        _arq_ul_intercept_payloads.fetch_add(1, std::memory_order_relaxed);
         if (LdpcPacketFraming::is_arq_feedback_flags(flags)) {
+            _arq_ul_intercept_feedback_flags.fetch_add(1, std::memory_order_relaxed);
             // This is an ARQ ACK from the UE for our DL packets. Feedback frames
             // carry their own seq space and are never tracked in the UL RX window.
             ArqFeedback ack;
             if (ArqFeedback::try_unpack(data, len, ack)) {
                 const int64_t now = arq_now_ms();
+                if (ack.direction != 0) {
+                    _arq_dl_ack_direction_mismatch.fetch_add(1, std::memory_order_relaxed);
+                    _log_arq_profile_if_due("dl_ack_direction_bad", now);
+                }
                 const size_t released = _dl_arq_tx.process_ack(ack, now);
                 _arq_dl_acks_received.fetch_add(1, std::memory_order_relaxed);
                 _arq_dl_ack_released_total.fetch_add(released, std::memory_order_relaxed);
@@ -1832,9 +1867,14 @@ private:
             }
             return true; // consumed; do not forward to UDP
         }
-        // Not feedback; process as data through UL RX window.
-        if (_ul_arq_rx.process_received(seq, data, len)) {
-            // New accepted packet; check if we should send ACK back via DL TX.
+        _arq_ul_intercept_data_flags.fetch_add(1, std::memory_order_relaxed);
+        if (_cfg.uplink_arq.arq_enabled) {
+            const bool accepted = _ul_arq_rx.process_received(seq, data, len);
+            if (accepted) {
+                _arq_ul_data_accepted.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                _arq_ul_data_duplicates.fetch_add(1, std::memory_order_relaxed);
+            }
             const int64_t now = arq_now_ms();
             if (_ul_arq_rx.should_send_ack(now)) {
                 ArqFeedback ack = _ul_arq_rx.generate_ack();
@@ -1847,6 +1887,9 @@ private:
                 _arq_dl_feedback_enqueued.fetch_add(1, std::memory_order_relaxed);
                 _ul_arq_rx.mark_ack_sent(now);
                 _log_arq_profile_if_due("ul_ack_feedback_enqueued", now);
+            }
+            if (!accepted) {
+                return true; // duplicate, suppress
             }
         }
         return false; // not consumed; let normal UDP output proceed
@@ -2053,7 +2096,7 @@ private:
         std::vector<uint16_t> retransmit_seqs;
         while (_running.load(std::memory_order_relaxed)) {
             // ARQ: inject pending feedback packets with highest priority
-            if (_arq_enabled) {
+            if (_arq_enabled || _cfg.uplink_arq.arq_enabled) {
                 std::deque<std::vector<uint8_t>> pending_fb;
                 {
                     std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
@@ -2064,7 +2107,9 @@ private:
                     _encode_and_enqueue_payload(fb.data(), fb.size(), 0, false, profile, false, true);
                     _arq_dl_feedback_transmitted.fetch_add(1, std::memory_order_relaxed);
                 }
+            }
 
+            if (_arq_enabled) {
                 // ARQ: handle DL retransmissions (priority over new data)
                 const int64_t now = arq_now_ms();
                 _dl_arq_tx.drop_abandoned(now);

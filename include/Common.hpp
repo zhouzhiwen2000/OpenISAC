@@ -1050,9 +1050,9 @@ struct NetworkOutputConfig {
     bool arq_ordered_delivery = false;
     int arq_window_packets = 32767;      // [1, 32767]; must stay below half the 16-bit seq space
     int arq_ack_bitmap_bits = 64;        // fixed 64 for first pass
-    int arq_retransmit_timeout_ms = 10;  // RTO in ms; 0 => derived from frame period
-    int arq_max_retries = 0;             // 0 = unlimited within window
-    int arq_feedback_interval_ms = 2;    // min interval between ACK feedback packets
+    int arq_retransmit_timeout_ms = 100; // RTO in ms; 0 => default RTO
+    int arq_max_retries = 5;             // 0 = unlimited within window
+    int arq_feedback_interval_ms = 10;   // min interval between ACK feedback packets
 };
 
 struct CpuCoresConfig {
@@ -1111,6 +1111,7 @@ struct Config {
     SyncTrackingConfig sync_tracking;
     MeasurementConfig measurement;
     NetworkOutputConfig network_output;
+    NetworkOutputConfig uplink_arq;
     CpuCoresConfig cpu_cores;
     RuntimeConfig runtime;
     ResourcePreviewConfig resource_preview;
@@ -3026,6 +3027,44 @@ inline void normalize_arq_config(NetworkOutputConfig& net) {
     }
 }
 
+inline void load_legacy_arq_config(const YAML::Node& network, NetworkOutputConfig& net) {
+    config_detail::load_value(network, "arq_enabled", net.arq_enabled);
+    config_detail::load_value(network, "arq_ordered_delivery", net.arq_ordered_delivery);
+    config_detail::load_value(network, "arq_window_packets", net.arq_window_packets);
+    config_detail::load_value(network, "arq_ack_bitmap_bits", net.arq_ack_bitmap_bits);
+    config_detail::load_value(network, "arq_retransmit_timeout_ms", net.arq_retransmit_timeout_ms);
+    config_detail::load_value(network, "arq_max_retries", net.arq_max_retries);
+    config_detail::load_value(network, "arq_feedback_interval_ms", net.arq_feedback_interval_ms);
+}
+
+inline void load_bs_downlink_arq_config(const YAML::Node& downlink, NetworkOutputConfig& net) {
+    config_detail::load_value(downlink, "arq_enabled", net.arq_enabled);
+    config_detail::load_value(downlink, "arq_window_packets", net.arq_window_packets);
+    config_detail::load_value(downlink, "arq_retransmit_timeout_ms", net.arq_retransmit_timeout_ms);
+    config_detail::load_value(downlink, "arq_max_retries", net.arq_max_retries);
+}
+
+inline void load_ue_downlink_arq_config(const YAML::Node& downlink, NetworkOutputConfig& net) {
+    config_detail::load_value(downlink, "arq_enabled", net.arq_enabled);
+    config_detail::load_value(downlink, "arq_ordered_delivery", net.arq_ordered_delivery);
+    config_detail::load_value(downlink, "arq_window_packets", net.arq_window_packets);
+    config_detail::load_value(downlink, "arq_feedback_interval_ms", net.arq_feedback_interval_ms);
+}
+
+inline void load_bs_uplink_arq_config(const YAML::Node& uplink, NetworkOutputConfig& net) {
+    config_detail::load_value(uplink, "arq_enabled", net.arq_enabled);
+    config_detail::load_value(uplink, "arq_ordered_delivery", net.arq_ordered_delivery);
+    config_detail::load_value(uplink, "arq_window_packets", net.arq_window_packets);
+    config_detail::load_value(uplink, "arq_feedback_interval_ms", net.arq_feedback_interval_ms);
+}
+
+inline void load_ue_uplink_arq_config(const YAML::Node& uplink, NetworkOutputConfig& net) {
+    config_detail::load_value(uplink, "arq_enabled", net.arq_enabled);
+    config_detail::load_value(uplink, "arq_window_packets", net.arq_window_packets);
+    config_detail::load_value(uplink, "arq_retransmit_timeout_ms", net.arq_retransmit_timeout_ms);
+    config_detail::load_value(uplink, "arq_max_retries", net.arq_max_retries);
+}
+
 inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
@@ -3203,15 +3242,13 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
             network, "uplink_constellation_port", cfg.network_output.uplink_constellation_port);
         config_detail::load_value(network, "control_port", cfg.network_output.control_port);
 
-        // ARQ link-layer retransmission
-        config_detail::load_value(network, "arq_enabled", cfg.network_output.arq_enabled);
-        config_detail::load_value(network, "arq_ordered_delivery", cfg.network_output.arq_ordered_delivery);
-        config_detail::load_value(network, "arq_window_packets", cfg.network_output.arq_window_packets);
-        config_detail::load_value(network, "arq_ack_bitmap_bits", cfg.network_output.arq_ack_bitmap_bits);
-        config_detail::load_value(network, "arq_retransmit_timeout_ms", cfg.network_output.arq_retransmit_timeout_ms);
-        config_detail::load_value(network, "arq_max_retries", cfg.network_output.arq_max_retries);
-        config_detail::load_value(network, "arq_feedback_interval_ms", cfg.network_output.arq_feedback_interval_ms);
+        // Downlink ARQ. Read legacy network_output.arq_* first for backward
+        // compatibility, then let the new downlink.arq_* keys override it.
+        load_legacy_arq_config(network, cfg.network_output);
+        load_bs_downlink_arq_config(downlink, cfg.network_output);
         normalize_arq_config(cfg.network_output);
+        load_bs_uplink_arq_config(uplink, cfg.uplink_arq);
+        normalize_arq_config(cfg.uplink_arq);
 
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
         config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
@@ -3616,15 +3653,13 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
         config_detail::load_value(network, "self_pdf_port", cfg.network_output.uplink_self_pdf_port);
 
-        // ARQ link-layer retransmission
-        config_detail::load_value(network, "arq_enabled", cfg.network_output.arq_enabled);
-        config_detail::load_value(network, "arq_ordered_delivery", cfg.network_output.arq_ordered_delivery);
-        config_detail::load_value(network, "arq_window_packets", cfg.network_output.arq_window_packets);
-        config_detail::load_value(network, "arq_ack_bitmap_bits", cfg.network_output.arq_ack_bitmap_bits);
-        config_detail::load_value(network, "arq_retransmit_timeout_ms", cfg.network_output.arq_retransmit_timeout_ms);
-        config_detail::load_value(network, "arq_max_retries", cfg.network_output.arq_max_retries);
-        config_detail::load_value(network, "arq_feedback_interval_ms", cfg.network_output.arq_feedback_interval_ms);
+        // Downlink ARQ. Read legacy network_output.arq_* first for backward
+        // compatibility, then let the new downlink.arq_* keys override it.
+        load_legacy_arq_config(network, cfg.network_output);
+        load_ue_downlink_arq_config(downlink, cfg.network_output);
         normalize_arq_config(cfg.network_output);
+        load_ue_uplink_arq_config(uplink, cfg.uplink_arq);
+        normalize_arq_config(cfg.uplink_arq);
 
         config_detail::load_value(runtime, "default_out_ip", cfg.network_output.default_out_ip);
         config_detail::load_value(runtime, "vofa_debug_ip", cfg.network_output.vofa_debug_ip);

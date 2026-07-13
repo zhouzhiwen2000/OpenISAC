@@ -692,6 +692,43 @@ bs:
     comment: Encoded packet buffer capacity
     default: 256
     optional: true
+  - type: scalar
+    key: arq_enabled
+    data_key: downlink.arq_enabled
+    kind: bool
+    comment: Enable downlink ARQ on the BS transmitter
+    default: false
+    optional: true
+  - type: scalar
+    key: arq_window_packets
+    data_key: downlink.arq_window_packets
+    kind: int
+    comment: Downlink ARQ outstanding packet window [1, 32767]
+    default: 32767
+    optional: true
+    enabled_if:
+      key: downlink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_retransmit_timeout_ms
+    data_key: downlink.arq_retransmit_timeout_ms
+    kind: int
+    comment: Downlink ARQ retransmit timeout in ms
+    default: 100
+    optional: true
+    enabled_if:
+      key: downlink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_max_retries
+    data_key: downlink.arq_max_retries
+    kind: int
+    comment: Downlink ARQ max retransmit retries; 0 = unlimited within window
+    default: 5
+    optional: true
+    enabled_if:
+      key: downlink.arq_enabled
+      value: true
 - title: Uplink
   yaml_key: uplink
   order: 40
@@ -839,6 +876,43 @@ bs:
     comment: BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
     default: 63
     optional: true
+  - type: scalar
+    key: arq_enabled
+    data_key: uplink.arq_enabled
+    kind: bool
+    comment: Enable uplink ARQ on the BS receiver
+    default: false
+    optional: true
+  - type: scalar
+    key: arq_ordered_delivery
+    data_key: uplink.arq_ordered_delivery
+    kind: bool
+    comment: Buffer uplink packets and deliver in sequence order
+    default: false
+    optional: true
+    enabled_if:
+      key: uplink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_window_packets
+    data_key: uplink.arq_window_packets
+    kind: int
+    comment: Uplink ARQ receive/reorder window [1, 32767]
+    default: 32767
+    optional: true
+    enabled_if:
+      key: uplink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_feedback_interval_ms
+    data_key: uplink.arq_feedback_interval_ms
+    kind: int
+    comment: Uplink ARQ ACK feedback interval in ms
+    default: 10
+    optional: true
+    enabled_if:
+      key: uplink.arq_enabled
+      value: true
 - title: Network
   yaml_key: network_output
   order: 90
@@ -1002,66 +1076,6 @@ bs:
     comment: ZMQ port for runtime control commands
     default: 9999
     optional: true
-  - type: scalar
-    key: arq_enabled
-    kind: bool
-    comment: Enable ARQ link-layer retransmission
-    default: false
-    optional: true
-  - type: scalar
-    key: arq_ordered_delivery
-    kind: bool
-    comment: Buffer and deliver in sequence order (true) or forward immediately (false)
-    default: false
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_window_packets
-    kind: int
-    comment: Max outstanding unacked packets [1, 32767]
-    default: 32767
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_ack_bitmap_bits
-    kind: int
-    comment: Selective ACK bitmap width (fixed 64 for first pass)
-    default: 64
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_retransmit_timeout_ms
-    kind: int
-    comment: Retransmit timeout in ms; 0 = auto from frame period
-    default: 10
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_max_retries
-    kind: int
-    comment: Max retransmit retries; 0 = unlimited within window
-    default: 0
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_feedback_interval_ms
-    kind: int
-    comment: Min ms between ACK feedback packets
-    default: 2
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
 - title: CPU Cores
   yaml_key: cpu_cores
   order: 91
@@ -1433,6 +1447,43 @@ ue:
     comment: Minimum comb-pilot residual power accepted by per-symbol tracking
     default: 0.0001
     optional: true
+  - type: scalar
+    key: arq_enabled
+    data_key: downlink.arq_enabled
+    kind: bool
+    comment: Enable downlink ARQ on the UE receiver
+    default: false
+    optional: true
+  - type: scalar
+    key: arq_ordered_delivery
+    data_key: downlink.arq_ordered_delivery
+    kind: bool
+    comment: Buffer downlink packets and deliver in sequence order
+    default: false
+    optional: true
+    enabled_if:
+      key: downlink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_window_packets
+    data_key: downlink.arq_window_packets
+    kind: int
+    comment: Downlink ARQ receive/reorder window [1, 32767]
+    default: 32767
+    optional: true
+    enabled_if:
+      key: downlink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_feedback_interval_ms
+    data_key: downlink.arq_feedback_interval_ms
+    kind: int
+    comment: Downlink ARQ ACK feedback interval in ms
+    default: 10
+    optional: true
+    enabled_if:
+      key: downlink.arq_enabled
+      value: true
 - title: Uplink
   yaml_key: uplink
   order: 40
@@ -1521,6 +1572,43 @@ ue:
     options:
     - sc16
     - sc8
+  - type: scalar
+    key: arq_enabled
+    data_key: uplink.arq_enabled
+    kind: bool
+    comment: Enable uplink ARQ on the UE transmitter
+    default: false
+    optional: true
+  - type: scalar
+    key: arq_window_packets
+    data_key: uplink.arq_window_packets
+    kind: int
+    comment: Uplink ARQ outstanding packet window [1, 32767]
+    default: 32767
+    optional: true
+    enabled_if:
+      key: uplink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_retransmit_timeout_ms
+    data_key: uplink.arq_retransmit_timeout_ms
+    kind: int
+    comment: Uplink ARQ retransmit timeout in ms
+    default: 100
+    optional: true
+    enabled_if:
+      key: uplink.arq_enabled
+      value: true
+  - type: scalar
+    key: arq_max_retries
+    data_key: uplink.arq_max_retries
+    kind: int
+    comment: Uplink ARQ max retransmit retries; 0 = unlimited within window
+    default: 5
+    optional: true
+    enabled_if:
+      key: uplink.arq_enabled
+      value: true
   - type: scalar
     key: ue_timing_advance
     kind: int
@@ -1856,66 +1944,6 @@ ue:
     comment: Constellation output port
     default: 12346
     optional: true
-  - type: scalar
-    key: arq_enabled
-    kind: bool
-    comment: Enable ARQ link-layer retransmission
-    default: false
-    optional: true
-  - type: scalar
-    key: arq_ordered_delivery
-    kind: bool
-    comment: Buffer and deliver in sequence order (true) or forward immediately (false)
-    default: false
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_window_packets
-    kind: int
-    comment: Max outstanding unacked packets [1, 32767]
-    default: 32767
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_ack_bitmap_bits
-    kind: int
-    comment: Selective ACK bitmap width (fixed 64 for first pass)
-    default: 64
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_retransmit_timeout_ms
-    kind: int
-    comment: Retransmit timeout in ms; 0 = auto from frame period
-    default: 10
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_max_retries
-    kind: int
-    comment: Max retransmit retries; 0 = unlimited within window
-    default: 0
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
-  - type: scalar
-    key: arq_feedback_interval_ms
-    kind: int
-    comment: Min ms between ACK feedback packets
-    default: 2
-    optional: true
-    enabled_if:
-      key: arq_enabled
-      value: true
 - title: CPU Cores
   yaml_key: cpu_cores
   order: 91

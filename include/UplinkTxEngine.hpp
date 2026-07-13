@@ -62,10 +62,12 @@ public:
         }
         _zc_seq = generate_zc_freq(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root);
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
-        // ARQ: configure TX window if enabled
-        _arq_enabled = link_cfg.network_output.arq_enabled;
+        // Downlink ARQ uses the uplink only as an ACK feedback carrier. Uplink
+        // user-data ARQ will get its own config namespace when added.
+        _arq_feedback_enabled = link_cfg.network_output.arq_enabled;
+        _arq_enabled = link_cfg.uplink_arq.arq_enabled;
         if (_arq_enabled) {
-            _ul_arq_tx.configure(link_cfg.network_output);
+            _ul_arq_tx.configure(link_cfg.uplink_arq);
             _ul_arq_tx.set_direction(1); // uplink direction
         }
         _build_symbol_templates();
@@ -138,16 +140,36 @@ public:
     // ARQ: access the uplink TX ARQ window for ACK processing from the DL RX side.
     ArqTxWindow& arq_tx_window() { return _ul_arq_tx; }
     bool arq_enabled() const { return _arq_enabled; }
+    bool arq_feedback_enabled() const { return _arq_feedback_enabled; }
+    uint64_t arq_feedback_injected_count() const {
+        return _arq_feedback_injected.load(std::memory_order_relaxed);
+    }
+    uint64_t arq_feedback_dropped_disabled_count() const {
+        return _arq_feedback_dropped_disabled.load(std::memory_order_relaxed);
+    }
+    uint64_t arq_feedback_drained_count() const {
+        return _arq_feedback_drained.load(std::memory_order_relaxed);
+    }
+    size_t arq_feedback_pending_count() const {
+        std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+        return _arq_pending_feedback.size();
+    }
 
     // ARQ: inject a feedback packet for transmission. Called from the downlink
     // decode thread, so we must NOT touch the SPSC _packet_buffer here (the
     // uplink encode thread is its sole producer). Instead queue the feedback
     // payload and let _ldpc_encode_proc drain it, mirroring the BS-side pattern.
-    void inject_arq_feedback(const ArqFeedback& feedback) {
+    bool inject_arq_feedback(const ArqFeedback& feedback) {
+        if (!_arq_feedback_enabled) {
+            _arq_feedback_dropped_disabled.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
         std::vector<uint8_t> fb_payload;
         feedback.pack(fb_payload);
         std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
         _arq_pending_feedback.push_back(std::move(fb_payload));
+        _arq_feedback_injected.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
 
     void start() {
@@ -262,13 +284,14 @@ private:
         while (_running.load(std::memory_order_relaxed)) {
             // ARQ: drain pending feedback (queued by the DL decode thread) and
             // encode it here on the single producer thread. Highest priority.
-            if (_arq_enabled) {
+            if (_arq_feedback_enabled) {
                 {
                     std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
                     pending_fb.swap(_arq_pending_feedback);
                 }
                 for (auto& fb : pending_fb) {
                     _encode_and_enqueue_payload(fb.data(), fb.size(), false, true);
+                    _arq_feedback_drained.fetch_add(1, std::memory_order_relaxed);
                 }
                 pending_fb.clear();
             }
@@ -829,11 +852,15 @@ private:
     // ARQ transmit window for uplink direction
     ArqTxWindow _ul_arq_tx;
     bool _arq_enabled{false};
+    bool _arq_feedback_enabled{false};
     // Dedicated seq space for feedback frames so they never collide with data seqs.
     std::atomic<uint32_t> _arq_feedback_seq{0};
+    std::atomic<uint64_t> _arq_feedback_injected{0};
+    std::atomic<uint64_t> _arq_feedback_dropped_disabled{0};
+    std::atomic<uint64_t> _arq_feedback_drained{0};
     // Feedback queued by the DL decode thread, drained by the encode thread to
     // preserve the single-producer contract of _packet_buffer.
-    std::mutex _arq_feedback_mutex;
+    mutable std::mutex _arq_feedback_mutex;
     std::deque<std::vector<uint8_t>> _arq_pending_feedback;
 
     struct RawUdpPacket {

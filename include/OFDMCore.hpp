@@ -4821,7 +4821,7 @@ public:
         _window_size = static_cast<uint16_t>(
             std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
         _rto_ms = net.arq_retransmit_timeout_ms > 0
-            ? net.arq_retransmit_timeout_ms : 10;
+            ? net.arq_retransmit_timeout_ms : 100;
         _max_retries = net.arq_max_retries;
         _direction = 0; // set by caller
     }
@@ -5118,6 +5118,8 @@ public:
 
     bool got_any() const { return _got_any; }
     uint16_t expected_seq() const { return _expected_seq; }
+    uint16_t ack_base() const { return _ack_base; }
+    uint64_t ack_bitmap() const { return _ack_bitmap; }
     uint64_t dup_count() const { return _dup_count; }
     uint64_t accepted_count() const { return _accepted_count; }
     uint64_t skip_count() const { return _skip_count; }

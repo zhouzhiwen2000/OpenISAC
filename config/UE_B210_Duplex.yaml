@@ -50,6 +50,10 @@ downlink:
   channel_tracking_mode: pilot_phase  # Per-symbol comb-pilot tracking mode
   equalizer_mag_floor: 1e-06  # Lower bound for |H|^2 during channel inversion
   channel_tracking_min_pilot_snr: 0.0001  # Minimum comb-pilot residual power accepted by per-symbol tracking
+  arq_enabled: false  # Enable downlink ARQ on the UE receiver
+  arq_ordered_delivery: false  # Buffer downlink packets for in-order UDP delivery
+  arq_window_packets: 32767  # Downlink ARQ receive/reorder window [1, 32767]
+  arq_feedback_interval_ms: 10  # Downlink ARQ ACK feedback interval in ms
 
 # ===== Uplink =====
 uplink:
@@ -63,6 +67,10 @@ uplink:
   tx_gain: 90  # Uplink TX gain (dB)
   tx_channel: 0  # Uplink TX channel index on USRP
   wire_format_tx: sc8  # Uplink TX wire format; sc16/sc8
+  arq_enabled: false  # Enable uplink ARQ on the UE transmitter
+  arq_window_packets: 32767  # Uplink ARQ outstanding packet window [1, 32767]
+  arq_retransmit_timeout_ms: 100  # Uplink ARQ retransmit timeout in ms
+  arq_max_retries: 5  # Uplink ARQ max retransmit retries; 0 = unlimited within window
   ue_timing_advance: 104  # UE Timing Advance (samples) — also adjustable at runtime via TADV
 
 # ===== Sync / Tracking =====
@@ -118,13 +126,6 @@ network_output:
   udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
   udp_egress_pacer_queue_packets: 10240  # UDP egress pacer queue capacity in datagrams
   udp_egress_pacer_max_delay_ms: 0  # UDP egress pacer max queued packet age in ms; 0 disables age drops
-  arq_enabled: false  # Enable ARQ link-layer retransmission
-  arq_ordered_delivery: false  # Buffer decoded packets for in-order UDP delivery
-  arq_window_packets: 32767  # ARQ outstanding packet window [1, 32767]
-  arq_ack_bitmap_bits: 64  # ARQ selective ACK bitmap width; fixed 64 for first pass
-  arq_retransmit_timeout_ms: 10  # ARQ retransmit timeout in ms; 0 = auto from frame period
-  arq_max_retries: 0  # ARQ max retransmit retries; 0 = unlimited within window
-  arq_feedback_interval_ms: 2  # ARQ minimum interval between ACK feedback packets in ms
   self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
   self_channel_port: 12350  # UE self-channel output port
   self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP

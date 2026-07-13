@@ -843,6 +843,81 @@ private:
     // ARQ: downlink receive window for duplicate suppression + ordered delivery
     ArqRxWindow _dl_arq_rx;
     bool _arq_enabled{false};
+    std::atomic<uint64_t> _arq_profile_last_log_ms{0};
+    std::atomic<uint64_t> _arq_dl_data_seen{0};
+    std::atomic<uint64_t> _arq_dl_data_accepted{0};
+    std::atomic<uint64_t> _arq_dl_data_duplicates{0};
+    std::atomic<uint64_t> _arq_dl_feedback_seen{0};
+    std::atomic<uint64_t> _arq_dl_feedback_valid{0};
+    std::atomic<uint64_t> _arq_dl_feedback_invalid{0};
+    std::atomic<uint64_t> _arq_dl_ack_generated{0};
+    std::atomic<uint64_t> _arq_dl_ack_injected{0};
+    std::atomic<uint64_t> _arq_dl_ack_no_uplink_tx{0};
+    std::atomic<uint64_t> _arq_dl_ack_inject_failed{0};
+
+    void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
+        if (!cfg_.should_profile("arq")) {
+            return;
+        }
+        const uint64_t now = static_cast<uint64_t>(std::max<int64_t>(now_ms, 0));
+        uint64_t last = _arq_profile_last_log_ms.load(std::memory_order_relaxed);
+        if (last != 0 && now - last < 1000) {
+            return;
+        }
+        if (!_arq_profile_last_log_ms.compare_exchange_strong(
+                last, now, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            return;
+        }
+
+        const bool uplink_tx_present = static_cast<bool>(_uplink_tx);
+        bool feedback_carrier_enabled = false;
+        uint64_t tx_feedback_injected = 0;
+        uint64_t tx_feedback_dropped_disabled = 0;
+        uint64_t tx_feedback_drained = 0;
+        size_t tx_feedback_pending = 0;
+        if (_uplink_tx) {
+            feedback_carrier_enabled = _uplink_tx->arq_feedback_enabled();
+            tx_feedback_injected = _uplink_tx->arq_feedback_injected_count();
+            tx_feedback_dropped_disabled =
+                _uplink_tx->arq_feedback_dropped_disabled_count();
+            tx_feedback_drained = _uplink_tx->arq_feedback_drained_count();
+            tx_feedback_pending = _uplink_tx->arq_feedback_pending_count();
+        }
+
+        std::ostringstream oss;
+        oss << "[UE ARQ PROFILE] reason=" << reason
+            << "\n  config: dl_arq_enabled=" << (_arq_enabled ? "yes" : "no")
+            << " uplink_tx_present=" << (uplink_tx_present ? "yes" : "no")
+            << " feedback_carrier=" << (feedback_carrier_enabled ? "yes" : "no")
+            << "\n  dl_rx: data_seen=" << _arq_dl_data_seen.load(std::memory_order_relaxed)
+            << " accepted=" << _arq_dl_data_accepted.load(std::memory_order_relaxed)
+            << " duplicates="
+            << _arq_dl_data_duplicates.load(std::memory_order_relaxed)
+            << " ack_base=" << _dl_arq_rx.ack_base()
+            << " ack_bitmap=0x" << std::hex << _dl_arq_rx.ack_bitmap() << std::dec
+            << " rx_accepted_total=" << _dl_arq_rx.accepted_count()
+            << " rx_dup_total=" << _dl_arq_rx.dup_count()
+            << " rx_skip_total=" << _dl_arq_rx.skip_count()
+            << "\n  dl_feedback: seen="
+            << _arq_dl_feedback_seen.load(std::memory_order_relaxed)
+            << " valid="
+            << _arq_dl_feedback_valid.load(std::memory_order_relaxed)
+            << " invalid="
+            << _arq_dl_feedback_invalid.load(std::memory_order_relaxed)
+            << "\n  ack_tx: generated="
+            << _arq_dl_ack_generated.load(std::memory_order_relaxed)
+            << " injected="
+            << _arq_dl_ack_injected.load(std::memory_order_relaxed)
+            << " no_uplink_tx="
+            << _arq_dl_ack_no_uplink_tx.load(std::memory_order_relaxed)
+            << " inject_failed="
+            << _arq_dl_ack_inject_failed.load(std::memory_order_relaxed)
+            << "\n  uplink_feedback_queue: injected=" << tx_feedback_injected
+            << " drained=" << tx_feedback_drained
+            << " pending=" << tx_feedback_pending
+            << " dropped_disabled=" << tx_feedback_dropped_disabled;
+        LOG_G_INFO() << oss.str();
+    }
 
     // Noise/LLR estimation related
     double _noise_var{0.5};              // Complex noise power E[|n|^2] initial value (assume 0.25 per dimension)
@@ -3357,6 +3432,7 @@ private:
         
         // ============== Profiling report ==============
         prof_frame_count++;
+        _log_arq_profile_if_due("periodic", arq_now_ms());
         if (prof_frame_count >= PROF_REPORT_INTERVAL && cfg_.should_profile("demodulation")) {
             double total = prof_fft_total + prof_channel_est_total + prof_cfo_sfo_est_total + 
                           prof_equalization_total + prof_noise_est_total + prof_remodulate_total + 
@@ -3584,33 +3660,52 @@ private:
                     if (_arq_enabled) {
                         if (LdpcPacketFraming::is_arq_feedback(mini_header)) {
                             // This is an ARQ ACK from the BS for our UL packets
+                            _arq_dl_feedback_seen.fetch_add(1, std::memory_order_relaxed);
                             ArqFeedback ack;
                             if (ArqFeedback::try_unpack(udp_data.data(), udp_data.size(), ack)) {
+                                _arq_dl_feedback_valid.fetch_add(1, std::memory_order_relaxed);
                                 if (_uplink_tx && _uplink_tx->arq_enabled()) {
                                     _uplink_tx->arq_tx_window().process_ack(ack, arq_now_ms());
                                 }
+                            } else {
+                                _arq_dl_feedback_invalid.fetch_add(1, std::memory_order_relaxed);
                             }
+                            _log_arq_profile_if_due("dl_feedback", arq_now_ms());
                             arq_consumed = true; // never forward feedback to user UDP
                         } else {
                             // Data packet; process through DL RX ARQ window.
+                            _arq_dl_data_seen.fetch_add(1, std::memory_order_relaxed);
                             const bool accepted = _dl_arq_rx.process_received(
                                 mini_header.seq, udp_data.data(), udp_data.size());
                             if (!accepted) {
+                                _arq_dl_data_duplicates.fetch_add(1, std::memory_order_relaxed);
                                 arq_consumed = true; // duplicate, suppress
                             } else if (!cfg_.network_output.arq_ordered_delivery) {
+                                _arq_dl_data_accepted.fetch_add(1, std::memory_order_relaxed);
                                 // Unordered: forward immediately (fall through to send)
                             } else {
+                                _arq_dl_data_accepted.fetch_add(1, std::memory_order_relaxed);
                                 // Ordered: buffer, deliver later
                                 arq_consumed = true;
                             }
 
                             // Generate ACK feedback and inject into UL TX
                             const int64_t now = arq_now_ms();
-                            if (_dl_arq_rx.should_send_ack(now) && _uplink_tx) {
+                            if (_dl_arq_rx.should_send_ack(now)) {
                                 ArqFeedback fb = _dl_arq_rx.generate_ack();
-                                _uplink_tx->inject_arq_feedback(fb);
+                                _arq_dl_ack_generated.fetch_add(1, std::memory_order_relaxed);
+                                if (!_uplink_tx) {
+                                    _arq_dl_ack_no_uplink_tx.fetch_add(1, std::memory_order_relaxed);
+                                    _log_arq_profile_if_due("ack_no_uplink_tx", now);
+                                } else if (_uplink_tx->inject_arq_feedback(fb)) {
+                                    _arq_dl_ack_injected.fetch_add(1, std::memory_order_relaxed);
+                                } else {
+                                    _arq_dl_ack_inject_failed.fetch_add(1, std::memory_order_relaxed);
+                                    _log_arq_profile_if_due("ack_inject_failed", now);
+                                }
                                 _dl_arq_rx.mark_ack_sent(now);
                             }
+                            _log_arq_profile_if_due(accepted ? "dl_data" : "dl_duplicate", now);
                         }
                     }
 
