@@ -75,6 +75,13 @@ network_output:
   control_port: 9999  # ZMQ port for runtime control commands
 
 # ===== Runtime / Debug =====
+  arq_enabled: false  # Enable ARQ link-layer retransmission
+  arq_ordered_delivery: false  # Buffer decoded packets for in-order UDP delivery
+  arq_window_packets: 64  # ARQ outstanding packet window [1, 64]
+  arq_ack_bitmap_bits: 64  # ARQ selective ACK bitmap width; fixed 64 for first pass
+  arq_retransmit_timeout_ms: 10  # ARQ retransmit timeout in ms; 0 = auto from frame period
+  arq_max_retries: 0  # ARQ max retransmit retries; 0 = unlimited within window
+  arq_feedback_interval_ms: 2  # ARQ minimum interval between ACK feedback packets in ms
 runtime:
   main_cpu_core: 6  # Main-thread CPU core (-1 disables explicit binding)
   profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc), or "all"

@@ -840,6 +840,10 @@ private:
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_output_sender;
 
+    // ARQ: downlink receive window for duplicate suppression + ordered delivery
+    ArqRxWindow _dl_arq_rx;
+    bool _arq_enabled{false};
+
     // Noise/LLR estimation related
     double _noise_var{0.5};              // Complex noise power E[|n|^2] initial value (assume 0.25 per dimension)
     double _llr_scale{2.0};              // LLR scaling factor (updated based on noise variance)
@@ -1823,6 +1827,16 @@ private:
             cfg_.network_output.udp_output_ip,
             static_cast<uint16_t>(cfg_.network_output.udp_output_port),
             cfg_.network_output.udp_egress_pacer);
+
+        // ARQ: configure DL RX window if enabled
+        _arq_enabled = cfg_.network_output.arq_enabled;
+        if (_arq_enabled) {
+            _dl_arq_rx.configure(cfg_.network_output);
+            _dl_arq_rx.set_direction(0); // downlink direction
+            LOG_G_INFO() << "[UE ARQ] DL RX enabled: window="
+                         << cfg_.network_output.arq_window_packets
+                         << " ordered=" << cfg_.network_output.arq_ordered_delivery;
+        }
     }
 
     void adjust_rx_freq(double detected_offset, bool reset = false) {
@@ -3565,7 +3579,53 @@ private:
                 }
 
                 if (!handled_measurement_payload) {
-                    _udp_output_sender->send(udp_data.data(), udp_data.size());
+                    // ARQ: classify feedback by mini-header flag, not payload sniffing
+                    bool arq_consumed = false;
+                    if (_arq_enabled) {
+                        if (LdpcPacketFraming::is_arq_feedback(mini_header)) {
+                            // This is an ARQ ACK from the BS for our UL packets
+                            ArqFeedback ack;
+                            if (ArqFeedback::try_unpack(udp_data.data(), udp_data.size(), ack)) {
+                                if (_uplink_tx && _uplink_tx->arq_enabled()) {
+                                    _uplink_tx->arq_tx_window().process_ack(ack, arq_now_ms());
+                                }
+                            }
+                            arq_consumed = true; // never forward feedback to user UDP
+                        } else {
+                            // Data packet; process through DL RX ARQ window.
+                            const bool accepted = _dl_arq_rx.process_received(
+                                mini_header.seq, udp_data.data(), udp_data.size());
+                            if (!accepted) {
+                                arq_consumed = true; // duplicate, suppress
+                            } else if (!cfg_.network_output.arq_ordered_delivery) {
+                                // Unordered: forward immediately (fall through to send)
+                            } else {
+                                // Ordered: buffer, deliver later
+                                arq_consumed = true;
+                            }
+
+                            // Generate ACK feedback and inject into UL TX
+                            const int64_t now = arq_now_ms();
+                            if (_dl_arq_rx.should_send_ack(now) && _uplink_tx) {
+                                ArqFeedback fb = _dl_arq_rx.generate_ack();
+                                _uplink_tx->inject_arq_feedback(fb);
+                                _dl_arq_rx.mark_ack_sent(now);
+                            }
+                        }
+                    }
+
+                    if (!arq_consumed) {
+                        _udp_output_sender->send(udp_data.data(), udp_data.size());
+                    }
+
+                    // For ordered delivery, flush any contiguous deliverable packets
+                    if (_arq_enabled && cfg_.network_output.arq_ordered_delivery) {
+                        std::vector<std::vector<uint8_t>> deliverable;
+                        _dl_arq_rx.get_deliverable(deliverable);
+                        for (auto& pkt : deliverable) {
+                            _udp_output_sender->send(pkt.data(), pkt.size());
+                        }
+                    }
                     if (!latency_recorded &&
                         do_latency_profile &&
                         rx_enqueue_time_ns > 0 &&

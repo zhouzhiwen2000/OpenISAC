@@ -245,6 +245,25 @@ public:
         _next_frame_start_symbol.store(0, std::memory_order_relaxed);
         _next_tx_frame_seq.store(0, std::memory_order_relaxed);
 
+        // ARQ: configure DL TX window and UL RX window if enabled
+        _arq_enabled = _cfg.network_output.arq_enabled;
+        if (_arq_enabled) {
+            _dl_arq_tx.configure(_cfg.network_output);
+            _dl_arq_tx.set_direction(0); // downlink
+            _ul_arq_rx.configure(_cfg.network_output);
+            _ul_arq_rx.set_direction(1); // uplink
+            LOG_G_INFO() << "[BS ARQ] enabled: window=" << _cfg.network_output.arq_window_packets
+                         << " rto=" << _cfg.network_output.arq_retransmit_timeout_ms << "ms"
+                         << " ordered=" << _cfg.network_output.arq_ordered_delivery;
+        }
+        // Wire ARQ intercept on uplink RX if available
+        if (_arq_enabled && _uplink_rx) {
+            _uplink_rx->set_arq_payload_intercept(
+                [this](const uint8_t* data, size_t len, uint16_t seq, uint8_t flags) -> bool {
+                    return _handle_arq_uplink_payload(data, len, seq, flags);
+                });
+        }
+
         _mod_thread = std::thread(&BSEngine::_modulation_proc, this);
         _ldpc_encode_thread = std::thread(&BSEngine::_ldpc_encode_proc, this);
         if (!_measurement_enabled) {
@@ -486,6 +505,14 @@ private:
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
     std::atomic<uint32_t> _ldpc_packet_seq{0};
+
+    // ARQ link-layer retransmission state
+    bool _arq_enabled{false};
+    ArqTxWindow _dl_arq_tx;     // DL TX window (BS->UE)
+    ArqRxWindow _ul_arq_rx;     // UL RX window (UE->BS)
+    std::mutex _arq_feedback_mutex;
+    std::deque<std::vector<uint8_t>> _arq_pending_feedback; // feedback payloads to inject into DL TX
+    std::atomic<uint16_t> _arq_feedback_seq{0}; // dedicated seq space for feedback frames
 
     struct EncodePacketProfile {
         double header_encode_us{0.0};
@@ -1477,7 +1504,9 @@ private:
         size_t payload_len,
         int64_t pkt_ingest_ns,
         bool do_latency_profile,
-        EncodePacketProfile& profile
+        EncodePacketProfile& profile,
+        bool track_arq = true,
+        bool is_feedback = false
     ) {
         using ProfileClock = std::chrono::high_resolution_clock;
         auto prof_step_start = ProfileClock::now();
@@ -1521,12 +1550,16 @@ private:
         AlignedIntVector packet = _data_packet_pool.acquire();
         packet.clear();
         packet.resize(LdpcPacketFraming::kControlSymbols);
+        const uint16_t frame_seq = is_feedback
+            ? static_cast<uint16_t>(_arq_feedback_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu)
+            : static_cast<uint16_t>(_ldpc_packet_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu);
         const LdpcMiniHeader mini_header{
             LdpcPacketFraming::kVersion,
-            LdpcPacketFraming::kFlags,
+            static_cast<uint8_t>(is_feedback ? LdpcPacketFraming::kFlagArqFeedback
+                                             : LdpcPacketFraming::kFlags),
             static_cast<uint16_t>(payload_len),
             LdpcPacketFraming::payload_blocks_field_for_len(payload_len),
-            static_cast<uint16_t>(_ldpc_packet_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu),
+            frame_seq,
         };
         LdpcPacketFraming::write_control_qpsk(mini_header, packet.data());
         prof_step_end = ProfileClock::now();
@@ -1558,6 +1591,15 @@ private:
             throw std::runtime_error("Unified LDPC packet symbol count mismatch.");
         }
 
+        // ARQ: store encoded packet in DL TX window for potential retransmission.
+        // Feedback frames are never tracked as data.
+        if (_arq_enabled && track_arq && !is_feedback) {
+            const uint16_t arq_seq = mini_header.seq;
+            AlignedIntVector arq_copy(packet); // copy before move into ring buffer
+            _dl_arq_tx.try_insert_encoded(arq_seq, payload_data, payload_len,
+                                          std::move(arq_copy), arq_now_ms());
+        }
+
         prof_step_start = ProfileClock::now();
         bool enqueued = false;
         SPSCBackoff enqueue_backoff;
@@ -1581,6 +1623,37 @@ private:
         profile.enqueue_us =
             std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
         return true;
+    }
+
+    // ARQ: handle a decoded uplink payload. Returns true if consumed (feedback).
+    // Called from UplinkRxEngine's decode thread via the intercept callback.
+    // Feedback frames are identified by the mini-header flag, not payload sniffing.
+    bool _handle_arq_uplink_payload(const uint8_t* data, size_t len, uint16_t seq, uint8_t flags) {
+        if (LdpcPacketFraming::is_arq_feedback_flags(flags)) {
+            // This is an ARQ ACK from the UE for our DL packets. Feedback frames
+            // carry their own seq space and are never tracked in the UL RX window.
+            ArqFeedback ack;
+            if (ArqFeedback::try_unpack(data, len, ack)) {
+                _dl_arq_tx.process_ack(ack, arq_now_ms());
+            }
+            return true; // consumed; do not forward to UDP
+        }
+        // Not feedback; process as data through UL RX window.
+        if (_ul_arq_rx.process_received(seq, data, len)) {
+            // New accepted packet; check if we should send ACK back via DL TX.
+            const int64_t now = arq_now_ms();
+            if (_ul_arq_rx.should_send_ack(now)) {
+                ArqFeedback ack = _ul_arq_rx.generate_ack();
+                std::vector<uint8_t> fb_payload;
+                ack.pack(fb_payload);
+                {
+                    std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+                    _arq_pending_feedback.push_back(std::move(fb_payload));
+                }
+                _ul_arq_rx.mark_ack_sent(now);
+            }
+        }
+        return false; // not consumed; let normal UDP output proceed
     }
 
     /**
@@ -1777,14 +1850,72 @@ private:
 
     template <typename AccumulateProfile>
     void _udp_encode_proc(bool do_latency_profile, AccumulateProfile& accumulate_profile) {
+        std::vector<uint16_t> retransmit_seqs;
         while (_running.load(std::memory_order_relaxed)) {
-            RawUdpPacket* pkt = nullptr;
-            while (_running.load(std::memory_order_relaxed)) {
-                pkt = _raw_udp_buffer.consumer_slot();
-                if (pkt != nullptr) break;
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            // ARQ: inject pending feedback packets with highest priority
+            if (_arq_enabled) {
+                std::deque<std::vector<uint8_t>> pending_fb;
+                {
+                    std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+                    pending_fb.swap(_arq_pending_feedback);
+                }
+                for (auto& fb : pending_fb) {
+                    EncodePacketProfile profile;
+                    _encode_and_enqueue_payload(fb.data(), fb.size(), 0, false, profile, false, true);
+                }
+
+                // ARQ: handle DL retransmissions (priority over new data)
+                const int64_t now = arq_now_ms();
+                _dl_arq_tx.drop_abandoned(now);
+                _dl_arq_tx.get_retransmit(retransmit_seqs, now);
+                for (uint16_t seq : retransmit_seqs) {
+                    ArqTxEntry entry;
+                    if (!_dl_arq_tx.get_entry_copy(seq, entry)) {
+                        continue;
+                    }
+                    if (!entry.encoded_qpsk.empty()) {
+                        // Cheap retransmit: push pre-encoded QPSK directly
+                        AlignedIntVector retrans(entry.encoded_qpsk);
+                        SPSCBackoff bo;
+                        while (_running.load(std::memory_order_relaxed)) {
+                            if (_data_packet_buffer.try_push(std::move(retrans))) break;
+                            bo.pause();
+                        }
+                        _dl_arq_tx.mark_transmitted(seq, now);
+                    } else {
+                        EncodePacketProfile profile;
+                        _encode_and_enqueue_payload(
+                            entry.raw_payload.data(), entry.raw_payload.size(),
+                            0, false, profile, false);
+                        _dl_arq_tx.mark_transmitted(seq, now);
+                    }
+                }
             }
-            if (!_running.load(std::memory_order_relaxed) || pkt == nullptr) break;
+
+            RawUdpPacket* pkt = nullptr;
+            // Only read new data if no pending retransmissions (backpressure)
+            if (!_arq_enabled || !_dl_arq_tx.has_retransmit_pending(arq_now_ms())) {
+                while (_running.load(std::memory_order_relaxed)) {
+                    pkt = _raw_udp_buffer.consumer_slot();
+                    if (pkt != nullptr) break;
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                }
+            }
+            if (!_running.load(std::memory_order_relaxed)) break;
+            if (pkt == nullptr) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                continue;
+            }
+            // ARQ: check window room before encoding new data
+            if (_arq_enabled && !_dl_arq_tx.has_room()) {
+                static std::atomic<uint64_t> arq_drop_count{0};
+                const uint64_t dc = arq_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dc <= 20 || (dc % 100) == 0) {
+                    LOG_G_WARN() << "[BS ARQ DL] TX window full, dropping new packet: dropped=" << dc;
+                }
+                _raw_udp_buffer.consumer_pop();
+                continue;
+            }
             EncodePacketProfile profile;
             if (!_encode_and_enqueue_payload(
                     pkt->bytes.data(), pkt->bytes.size(),

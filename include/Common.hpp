@@ -1044,6 +1044,15 @@ struct NetworkOutputConfig {
     std::string ul_udp_output_ip = "127.0.0.1"; // BS decoded uplink UDP output
     int ul_udp_output_port = 50003;
     UdpEgressPacerConfig udp_egress_pacer;
+
+    // ARQ link-layer retransmission
+    bool arq_enabled = false;
+    bool arq_ordered_delivery = false;
+    int arq_window_packets = 64;         // [1, 64] for first-pass 64-bit ACK bitmap
+    int arq_ack_bitmap_bits = 64;        // fixed 64 for first pass
+    int arq_retransmit_timeout_ms = 10;  // RTO in ms; 0 => derived from frame period
+    int arq_max_retries = 0;             // 0 = unlimited within window
+    int arq_feedback_interval_ms = 2;    // min interval between ACK feedback packets
 };
 
 struct CpuCoresConfig {
@@ -2991,6 +3000,30 @@ inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
     }
 }
 
+inline void normalize_arq_config(NetworkOutputConfig& net) {
+    if (net.arq_window_packets < 1) {
+        LOG_G_WARN() << "arq_window_packets < 1, clamping to 1.";
+        net.arq_window_packets = 1;
+    }
+    if (net.arq_window_packets > 64) {
+        LOG_G_WARN() << "arq_window_packets > 64 exceeds the first-pass ACK bitmap, clamping to 64.";
+        net.arq_window_packets = 64;
+    }
+    if (net.arq_ack_bitmap_bits != 64) {
+        LOG_G_WARN() << "arq_ack_bitmap_bits must be 64 for first pass; overriding.";
+        net.arq_ack_bitmap_bits = 64;
+    }
+    if (net.arq_retransmit_timeout_ms < 0) {
+        net.arq_retransmit_timeout_ms = 0;
+    }
+    if (net.arq_max_retries < 0) {
+        net.arq_max_retries = 0;
+    }
+    if (net.arq_feedback_interval_ms < 0) {
+        net.arq_feedback_interval_ms = 0;
+    }
+}
+
 inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
@@ -3167,6 +3200,16 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(
             network, "uplink_constellation_port", cfg.network_output.uplink_constellation_port);
         config_detail::load_value(network, "control_port", cfg.network_output.control_port);
+
+        // ARQ link-layer retransmission
+        config_detail::load_value(network, "arq_enabled", cfg.network_output.arq_enabled);
+        config_detail::load_value(network, "arq_ordered_delivery", cfg.network_output.arq_ordered_delivery);
+        config_detail::load_value(network, "arq_window_packets", cfg.network_output.arq_window_packets);
+        config_detail::load_value(network, "arq_ack_bitmap_bits", cfg.network_output.arq_ack_bitmap_bits);
+        config_detail::load_value(network, "arq_retransmit_timeout_ms", cfg.network_output.arq_retransmit_timeout_ms);
+        config_detail::load_value(network, "arq_max_retries", cfg.network_output.arq_max_retries);
+        config_detail::load_value(network, "arq_feedback_interval_ms", cfg.network_output.arq_feedback_interval_ms);
+        normalize_arq_config(cfg.network_output);
 
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
         config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
@@ -3570,6 +3613,16 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "self_channel_port", cfg.network_output.uplink_self_channel_port);
         config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
         config_detail::load_value(network, "self_pdf_port", cfg.network_output.uplink_self_pdf_port);
+
+        // ARQ link-layer retransmission
+        config_detail::load_value(network, "arq_enabled", cfg.network_output.arq_enabled);
+        config_detail::load_value(network, "arq_ordered_delivery", cfg.network_output.arq_ordered_delivery);
+        config_detail::load_value(network, "arq_window_packets", cfg.network_output.arq_window_packets);
+        config_detail::load_value(network, "arq_ack_bitmap_bits", cfg.network_output.arq_ack_bitmap_bits);
+        config_detail::load_value(network, "arq_retransmit_timeout_ms", cfg.network_output.arq_retransmit_timeout_ms);
+        config_detail::load_value(network, "arq_max_retries", cfg.network_output.arq_max_retries);
+        config_detail::load_value(network, "arq_feedback_interval_ms", cfg.network_output.arq_feedback_interval_ms);
+        normalize_arq_config(cfg.network_output);
 
         config_detail::load_value(runtime, "default_out_ip", cfg.network_output.default_out_ip);
         config_detail::load_value(runtime, "vofa_debug_ip", cfg.network_output.vofa_debug_ip);

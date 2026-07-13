@@ -1002,6 +1002,66 @@ bs:
     comment: ZMQ port for runtime control commands
     default: 9999
     optional: true
+  - type: scalar
+    key: arq_enabled
+    kind: bool
+    comment: Enable ARQ link-layer retransmission
+    default: false
+    optional: true
+  - type: scalar
+    key: arq_ordered_delivery
+    kind: bool
+    comment: Buffer and deliver in sequence order (true) or forward immediately (false)
+    default: false
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_window_packets
+    kind: int
+    comment: Max outstanding unacked packets [1, 64]
+    default: 64
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_ack_bitmap_bits
+    kind: int
+    comment: Selective ACK bitmap width (fixed 64 for first pass)
+    default: 64
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_retransmit_timeout_ms
+    kind: int
+    comment: Retransmit timeout in ms; 0 = auto from frame period
+    default: 10
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_max_retries
+    kind: int
+    comment: Max retransmit retries; 0 = unlimited within window
+    default: 0
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_feedback_interval_ms
+    kind: int
+    comment: Min ms between ACK feedback packets
+    default: 2
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
 - title: CPU Cores
   yaml_key: cpu_cores
   order: 91
@@ -1796,6 +1856,66 @@ ue:
     comment: Constellation output port
     default: 12346
     optional: true
+  - type: scalar
+    key: arq_enabled
+    kind: bool
+    comment: Enable ARQ link-layer retransmission
+    default: false
+    optional: true
+  - type: scalar
+    key: arq_ordered_delivery
+    kind: bool
+    comment: Buffer and deliver in sequence order (true) or forward immediately (false)
+    default: false
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_window_packets
+    kind: int
+    comment: Max outstanding unacked packets [1, 64]
+    default: 64
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_ack_bitmap_bits
+    kind: int
+    comment: Selective ACK bitmap width (fixed 64 for first pass)
+    default: 64
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_retransmit_timeout_ms
+    kind: int
+    comment: Retransmit timeout in ms; 0 = auto from frame period
+    default: 10
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_max_retries
+    kind: int
+    comment: Max retransmit retries; 0 = unlimited within window
+    default: 0
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
+  - type: scalar
+    key: arq_feedback_interval_ms
+    kind: int
+    comment: Min ms between ACK feedback packets
+    default: 2
+    optional: true
+    enabled_if:
+      key: arq_enabled
+      value: true
 - title: CPU Cores
   yaml_key: cpu_cores
   order: 91

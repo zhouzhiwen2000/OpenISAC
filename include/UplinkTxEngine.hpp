@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -61,6 +62,12 @@ public:
         }
         _zc_seq = generate_zc_freq(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root);
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
+        // ARQ: configure TX window if enabled
+        _arq_enabled = link_cfg.network_output.arq_enabled;
+        if (_arq_enabled) {
+            _ul_arq_tx.configure(link_cfg.network_output);
+            _ul_arq_tx.set_direction(1); // uplink direction
+        }
         _build_symbol_templates();
         _ifft_plan = fftwf_plan_dft_1d(
             static_cast<int>(_cfg.ofdm.fft_size),
@@ -127,6 +134,21 @@ public:
     }
 
     const Config& uplink_config() const { return _cfg; }
+
+    // ARQ: access the uplink TX ARQ window for ACK processing from the DL RX side.
+    ArqTxWindow& arq_tx_window() { return _ul_arq_tx; }
+    bool arq_enabled() const { return _arq_enabled; }
+
+    // ARQ: inject a feedback packet for transmission. Called from the downlink
+    // decode thread, so we must NOT touch the SPSC _packet_buffer here (the
+    // uplink encode thread is its sole producer). Instead queue the feedback
+    // payload and let _ldpc_encode_proc drain it, mirroring the BS-side pattern.
+    void inject_arq_feedback(const ArqFeedback& feedback) {
+        std::vector<uint8_t> fb_payload;
+        feedback.pack(fb_payload);
+        std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+        _arq_pending_feedback.push_back(std::move(fb_payload));
+    }
 
     void start() {
         if (!_tx_stream) {
@@ -235,14 +257,74 @@ private:
     // ---- LDPC encode: raw UDP packet queue -> encoded packet queue ----
     void _ldpc_encode_proc() {
         bind_current_thread_from_uplink_hint(_link_cfg, 0);
+        std::vector<uint16_t> retransmit_seqs;
+        std::deque<std::vector<uint8_t>> pending_fb;
         while (_running.load(std::memory_order_relaxed)) {
-            RawUdpPacket* pkt = nullptr;
-            while (_running.load(std::memory_order_relaxed)) {
-                pkt = _raw_udp_buffer.consumer_slot();
-                if (pkt != nullptr) break;
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            // ARQ: drain pending feedback (queued by the DL decode thread) and
+            // encode it here on the single producer thread. Highest priority.
+            if (_arq_enabled) {
+                {
+                    std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+                    pending_fb.swap(_arq_pending_feedback);
+                }
+                for (auto& fb : pending_fb) {
+                    _encode_and_enqueue_payload(fb.data(), fb.size(), false, true);
+                }
+                pending_fb.clear();
             }
-            if (!_running.load(std::memory_order_relaxed) || pkt == nullptr) break;
+
+            // ARQ: check for retransmissions first (priority over new data)
+            if (_arq_enabled) {
+                const int64_t now = arq_now_ms();
+                _ul_arq_tx.drop_abandoned(now);
+                _ul_arq_tx.get_retransmit(retransmit_seqs, now);
+                for (uint16_t seq : retransmit_seqs) {
+                    ArqTxEntry entry;
+                    if (!_ul_arq_tx.get_entry_copy(seq, entry)) {
+                        continue;
+                    }
+                    if (!entry.encoded_qpsk.empty()) {
+                        // Cheap retransmit: push pre-encoded QPSK directly
+                        AlignedIntVector retrans(entry.encoded_qpsk);
+                        SPSCBackoff bo;
+                        while (_running.load(std::memory_order_relaxed)) {
+                            if (_packet_buffer.try_push(std::move(retrans))) break;
+                            bo.pause();
+                        }
+                        _ul_arq_tx.mark_transmitted(seq, now);
+                    } else {
+                        // Re-encode from raw payload
+                        _encode_and_enqueue_payload(entry.raw_payload.data(), entry.raw_payload.size(), false);
+                        _ul_arq_tx.mark_transmitted(seq, now);
+                    }
+                }
+            }
+
+            RawUdpPacket* pkt = nullptr;
+            // Only read new data if no pending retransmissions (backpressure)
+            if (!_arq_enabled || !_ul_arq_tx.has_retransmit_pending(arq_now_ms())) {
+                while (_running.load(std::memory_order_relaxed)) {
+                    pkt = _raw_udp_buffer.consumer_slot();
+                    if (pkt != nullptr) break;
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                }
+            }
+            if (!_running.load(std::memory_order_relaxed)) break;
+            if (pkt == nullptr) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                continue;
+            }
+            // ARQ: check window room before encoding new data
+            if (_arq_enabled && !_ul_arq_tx.has_room()) {
+                // Window full, drop new packet with backpressure
+                static std::atomic<uint64_t> arq_drop_count{0};
+                const uint64_t dc = arq_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dc <= 20 || (dc % 100) == 0) {
+                    LOG_G_WARN() << "[UL-TX ARQ] TX window full, dropping new packet: dropped=" << dc;
+                }
+                _raw_udp_buffer.consumer_pop();
+                continue;
+            }
             _encode_and_enqueue_payload(pkt->bytes.data(), pkt->bytes.size());
             _raw_udp_buffer.consumer_pop();
         }
@@ -314,7 +396,8 @@ private:
         close_sock();
     }
 
-    void _encode_and_enqueue_payload(const uint8_t* data, size_t len) {
+    void _encode_and_enqueue_payload(const uint8_t* data, size_t len, bool track_arq = true,
+                                     bool is_feedback = false) {
         const size_t bytes_per_block = (_ldpc.get_K() + 7) / 8;
         if (bytes_per_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock ||
             _ldpc.get_N() != LdpcPacketFraming::kLdpcCodeBitsPerBlock) {
@@ -333,12 +416,16 @@ private:
 
         AlignedIntVector packet;
         packet.resize(LdpcPacketFraming::kControlSymbols);
+        const uint16_t frame_seq = is_feedback
+            ? static_cast<uint16_t>(_arq_feedback_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu)
+            : static_cast<uint16_t>(_packet_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu);
         const LdpcMiniHeader hdr{
             LdpcPacketFraming::kVersion,
-            LdpcPacketFraming::kFlags,
+            static_cast<uint8_t>(is_feedback ? LdpcPacketFraming::kFlagArqFeedback
+                                             : LdpcPacketFraming::kFlags),
             static_cast<uint16_t>(len),
             LdpcPacketFraming::payload_blocks_field_for_len(len),
-            static_cast<uint16_t>(_packet_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu),
+            frame_seq,
         };
         LdpcPacketFraming::write_control_qpsk(hdr, packet.data());
 
@@ -355,6 +442,13 @@ private:
         }
         if (packet.size() != packet_qpsk) {
             throw std::runtime_error("UplinkTxEngine: packet symbol count mismatch.");
+        }
+        // ARQ: store encoded packet in TX window for potential retransmission.
+        // Feedback frames are never tracked as data.
+        if (_arq_enabled && track_arq && !is_feedback) {
+            const int64_t now = arq_now_ms();
+            AlignedIntVector arq_copy(packet); // copy before move
+            _ul_arq_tx.try_insert_encoded(hdr.seq, data, len, std::move(arq_copy), now);
         }
         SPSCBackoff backoff;
         while (_running.load(std::memory_order_relaxed)) {
@@ -730,6 +824,16 @@ private:
     std::atomic<uint32_t> _packet_seq{0};
     std::atomic<uint32_t> _idle_seq{0};
     SPSCRingBuffer<AlignedIntVector> _packet_buffer{256};
+
+    // ARQ transmit window for uplink direction
+    ArqTxWindow _ul_arq_tx;
+    bool _arq_enabled{false};
+    // Dedicated seq space for feedback frames so they never collide with data seqs.
+    std::atomic<uint32_t> _arq_feedback_seq{0};
+    // Feedback queued by the DL decode thread, drained by the encode thread to
+    // preserve the single-producer contract of _packet_buffer.
+    std::mutex _arq_feedback_mutex;
+    std::deque<std::vector<uint8_t>> _arq_pending_feedback;
 
     struct RawUdpPacket {
         std::vector<uint8_t> bytes;

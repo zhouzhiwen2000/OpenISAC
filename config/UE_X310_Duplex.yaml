@@ -122,6 +122,13 @@ network_output:
   udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
   udp_egress_pacer_queue_packets: 10240  # UDP egress pacer queue capacity in datagrams
   udp_egress_pacer_max_delay_ms: 0  # UDP egress pacer max queued packet age in ms; 0 disables age drops
+  arq_enabled: false  # Enable ARQ link-layer retransmission
+  arq_ordered_delivery: false  # Buffer decoded packets for in-order UDP delivery
+  arq_window_packets: 64  # ARQ outstanding packet window [1, 64]
+  arq_ack_bitmap_bits: 64  # ARQ selective ACK bitmap width; fixed 64 for first pass
+  arq_retransmit_timeout_ms: 10  # ARQ retransmit timeout in ms; 0 = auto from frame period
+  arq_max_retries: 0  # ARQ max retransmit retries; 0 = unlimited within window
+  arq_feedback_interval_ms: 2  # ARQ minimum interval between ACK feedback packets in ms
   self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
   self_channel_port: 12350  # UE self-channel output port
   self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP

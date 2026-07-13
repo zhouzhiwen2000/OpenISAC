@@ -155,6 +155,16 @@ public:
     std::atomic<int32_t>& dl_ul_timing_diff() { return _dl_ul_timing_diff; }
     const Config& uplink_config() const { return _cfg; }
 
+    using ArqPayloadIntercept = std::function<bool(const uint8_t*, size_t, uint16_t, uint8_t)>;
+
+    // ARQ: set payload intercept callback for decoded uplink packets.
+    // The callback receives (payload, len, seq, flags). Return true to consume
+    // the packet (suppress UDP output); return false to let normal UDP output
+    // proceed. Feedback frames are identified by the mini-header flags.
+    void set_arq_payload_intercept(ArqPayloadIntercept fn) {
+        _arq_payload_intercept = std::move(fn);
+    }
+
     void request_reacquire(const uhd::time_spec_t& start_time) {
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
@@ -744,7 +754,12 @@ public:
                 continue;
             }
             if (decoded.size() >= hdr.payload_len) {
-                _udp_out->send(reinterpret_cast<const uint8_t*>(decoded.data()), hdr.payload_len);
+                const auto* payload_ptr = reinterpret_cast<const uint8_t*>(decoded.data());
+                // ARQ intercept: if callback set and returns true, skip UDP output
+                if (!_arq_payload_intercept ||
+                    !_arq_payload_intercept(payload_ptr, hdr.payload_len, hdr.seq, hdr.flags)) {
+                    _udp_out->send(payload_ptr, hdr.payload_len);
+                }
                 _decoded_count.fetch_add(1, std::memory_order_relaxed);
             }
             symbol_offset = next_off;
@@ -904,6 +919,8 @@ public:
     DebugVectorCallback _constellation_debug_sink;
     DebugVectorCallback _self_channel_debug_sink;
     DebugVectorCallback _self_delay_debug_sink;
+
+    ArqPayloadIntercept _arq_payload_intercept;
 
     uhd::rx_streamer::sptr _rx_stream;
     std::atomic<int32_t> _dl_ul_timing_diff{0};

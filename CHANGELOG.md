@@ -8,6 +8,23 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-26 - 空口 ARQ 丢包重传
+
+### Summary
+
+本次更新为上下行 LDPC 空口 packet 增加可选 ARQ 重传机制，并提供保序交付开关。
+
+### Changes
+
+- 新增 `network_output.arq_enabled`、`arq_ordered_delivery`、`arq_window_packets`、`arq_ack_bitmap_bits`、`arq_retransmit_timeout_ms`、`arq_max_retries` 和 `arq_feedback_interval_ms` 配置项，并同步到 BS/UE 配置模板、benchmark 模板和 Web 配置编辑器 schema。
+  影响：默认 `arq_enabled: false` 保持原有低延迟 UDP 转发行为；开启后链路层会用 ACK bitmap 反馈确认并重传未确认空口 packet。
+
+- BS/UE 与 CUDA BS/UE 路径接入共享 ARQ helper，支持重复包抑制、ACK feedback 内部消费、重传窗口和可选保序交付。
+  影响：视频等需要顺序输出的场景可以开启 `arq_ordered_delivery`，普通低延迟场景可保持关闭以便收到非重复 packet 后立即转发。
+
+- ARQ feedback 使用 LDPC mini-header flag 标识，并使用独立 feedback sequence space；UE 侧 feedback 注入改为由 uplink encode 线程统一入队。
+  影响：feedback packet 不再占用数据 sequence、不会卡住接收窗口或保序交付，也避免了 UE uplink SPSC 队列的双生产者竞态。
+
 ## 2026-06-25 - UDP egress pacer 统计日志
 
 ### Summary

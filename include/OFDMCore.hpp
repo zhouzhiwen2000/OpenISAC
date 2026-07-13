@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <fftw3.h>
 #include "Common.hpp"
@@ -289,7 +290,24 @@ public:
     static constexpr size_t kLdpcQpskSymbolsPerBlock = kLdpcCodeBitsPerBlock / 2;
     static constexpr uint8_t kVersion = 1;
     static constexpr uint8_t kFlags = 0;
+    // Mini-header flag bits (4-bit field). Data frames use 0; ARQ feedback
+    // frames set kFlagArqFeedback so receivers classify them by header, not by
+    // sniffing payload bytes. Unknown flag bits are rejected on decode.
+    static constexpr uint8_t kFlagArqFeedback = 0x01;
+    static constexpr uint8_t kKnownFlagsMask = 0x01;
     static constexpr uint8_t kPayloadBlocksExtended = std::numeric_limits<uint8_t>::max();
+
+    static bool flags_are_known(uint8_t flags) {
+        return (flags & static_cast<uint8_t>(~kKnownFlagsMask)) == 0;
+    }
+
+    static bool is_arq_feedback_flags(uint8_t flags) {
+        return (flags & kFlagArqFeedback) != 0;
+    }
+
+    static bool is_arq_feedback(const LdpcMiniHeader& header) {
+        return is_arq_feedback_flags(header.flags);
+    }
     static constexpr float kMarkerMetricThreshold = 0.50f;
 
     static size_t max_payload_bytes() {
@@ -404,7 +422,7 @@ public:
     }
 
     static uint64_t pack_header(const LdpcMiniHeader& header) {
-        if (header.version != kVersion || header.flags != kFlags) {
+        if (header.version != kVersion || !flags_are_known(header.flags)) {
             throw std::runtime_error("LDPC mini-header version/flags mismatch.");
         }
         if (!payload_len_fits(header.payload_len)) {
@@ -448,7 +466,7 @@ public:
         parsed.payload_blocks = static_cast<uint8_t>((prefix >> 16) & 0xFFu);
         parsed.seq = static_cast<uint16_t>(prefix & 0xFFFFu);
 
-        if (parsed.version != kVersion || parsed.flags != kFlags) {
+        if (parsed.version != kVersion || !flags_are_known(parsed.flags)) {
             return false;
         }
         if (!payload_len_fits(parsed.payload_len)) {
@@ -4702,6 +4720,420 @@ private:
     float _cumulative_sensing_delay_offset = 0.0f;
 };
 
+// ============================================================================
+// ARQ Link-Layer Retransmission Helpers
+// ============================================================================
+
+/**
+ * @brief Modulo-65536 sequence comparison helpers.
+ *
+ * The mini-header seq is 16-bit. Window logic must stay below half the
+ * sequence space (32768).
+ */
+inline int16_t arq_seq_diff(uint16_t a, uint16_t b) {
+    return static_cast<int16_t>(a - b);
+}
+
+inline bool arq_seq_leq(uint16_t a, uint16_t b) {
+    return arq_seq_diff(a, b) <= 0;
+}
+
+/**
+ * @brief ARQ feedback packet identification and payload.
+ *
+ * Feedback packets are carried as regular LDPC payloads over the air link.
+ * They begin with the 4-byte magic "ARQ1" followed by:
+ *   [4] direction (uint8_t): 0=downlink, 1=uplink
+ *   [5..6] ack_base (uint16_t LE): all seq < ack_base in modulo order are ACKed
+ *   [7..14] ack_bitmap (uint64_t LE): bit i = 1 => (ack_base + i) is ACKed
+ * Total feedback payload: 15 bytes.
+ */
+struct ArqFeedback {
+    static constexpr size_t kMagicLen = 4;
+    static constexpr char kMagic[kMagicLen + 1] = "ARQ1";
+    static constexpr size_t kPayloadSize = 15; // 4 magic + 1 dir + 2 base + 8 bitmap
+
+    uint8_t direction = 0;     // 0=downlink, 1=uplink
+    uint16_t ack_base = 0;
+    uint64_t ack_bitmap = 0;
+
+    /** Pack into a byte buffer suitable for LDPC encoding. */
+    void pack(std::vector<uint8_t>& out) const {
+        out.resize(kPayloadSize);
+        std::memcpy(out.data(), kMagic, kMagicLen);
+        out[4] = direction;
+        out[5] = static_cast<uint8_t>(ack_base & 0xFFu);
+        out[6] = static_cast<uint8_t>((ack_base >> 8) & 0xFFu);
+        for (int i = 0; i < 8; ++i) {
+            out[7 + i] = static_cast<uint8_t>((ack_bitmap >> (i * 8)) & 0xFFu);
+        }
+    }
+
+    /** Try to unpack from decoded payload bytes. Returns true on success. */
+    static bool try_unpack(const uint8_t* data, size_t len, ArqFeedback& out) {
+        if (len < kPayloadSize) return false;
+        if (std::memcmp(data, kMagic, kMagicLen) != 0) return false;
+        out.direction = data[4];
+        if (out.direction > 1) return false;
+        out.ack_base = static_cast<uint16_t>(data[5]) | (static_cast<uint16_t>(data[6]) << 8);
+        out.ack_bitmap = 0;
+        for (int i = 0; i < 8; ++i) {
+            out.ack_bitmap |= static_cast<uint64_t>(data[7 + i]) << (i * 8);
+        }
+        return true;
+    }
+
+    /** Quick check: does this payload look like an ARQ feedback packet? */
+    static bool is_feedback(const uint8_t* data, size_t len) {
+        ArqFeedback ignored;
+        return try_unpack(data, len, ignored);
+    }
+};
+
+/**
+ * @brief ARQ transmit-side window entry.
+ *
+ * Stores the raw payload and optionally the pre-encoded QPSK symbols for
+ * cheap retransmission.
+ */
+struct ArqTxEntry {
+    uint16_t seq = 0;
+    int64_t last_tx_time_ms = 0;
+    int retry_count = 0;
+    std::vector<uint8_t> raw_payload;
+    // Pre-encoded QPSK symbols (control + payload), stored for cheap retransmit.
+    // When non-empty, retransmission can skip LDPC encode.
+    AlignedIntVector encoded_qpsk;
+};
+
+/**
+ * @brief Bounded ARQ transmit window.
+ *
+ * Tracks outstanding unacked packets. Prioritizes retransmissions over new
+ * packets. Releases entries on ACK. Retransmits entries whose RTO has expired.
+ */
+class ArqTxWindow {
+public:
+    ArqTxWindow() = default;
+
+    void configure(const NetworkOutputConfig& net) {
+        _window_size = static_cast<uint16_t>(
+            std::max(1, std::min<int>(net.arq_window_packets, 64)));
+        _rto_ms = net.arq_retransmit_timeout_ms > 0
+            ? net.arq_retransmit_timeout_ms : 10;
+        _max_retries = net.arq_max_retries;
+        _direction = 0; // set by caller
+    }
+
+    void set_direction(uint8_t dir) { _direction = dir; }
+
+    /** Insert a new packet. Returns false if window is full (backpressure). */
+    bool try_insert(uint16_t seq, const uint8_t* payload, size_t len,
+                    int64_t now_ms) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!has_room_unlocked()) return false;
+        ArqTxEntry entry;
+        entry.seq = seq;
+        entry.last_tx_time_ms = now_ms;
+        entry.retry_count = 0;
+        entry.raw_payload.assign(payload, payload + len);
+        _entries.emplace(seq, std::move(entry));
+        return true;
+    }
+
+    /** Insert with pre-encoded QPSK for cheap retransmission. */
+    bool try_insert_encoded(uint16_t seq, const uint8_t* payload, size_t len,
+                            AlignedIntVector encoded_qpsk, int64_t now_ms) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!has_room_unlocked()) return false;
+        ArqTxEntry entry;
+        entry.seq = seq;
+        entry.last_tx_time_ms = now_ms;
+        entry.retry_count = 0;
+        entry.raw_payload.assign(payload, payload + len);
+        entry.encoded_qpsk = std::move(encoded_qpsk);
+        _entries.emplace(seq, std::move(entry));
+        return true;
+    }
+
+    /**
+     * Process an ACK feedback. Releases all acknowledged entries.
+     * Returns number of entries released.
+     */
+    size_t process_ack(const ArqFeedback& ack, int64_t now_ms) {
+        (void)now_ms;
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (ack.direction != _direction) {
+            return 0;
+        }
+        size_t released = 0;
+        // Release all seqs < ack_base (cumulative)
+        auto it = _entries.begin();
+        while (it != _entries.end()) {
+            if (arq_seq_diff(it->first, ack.ack_base) < 0) {
+                it = _entries.erase(it);
+                ++released;
+            } else {
+                ++it;
+            }
+        }
+        // Release selective bitmap entries
+        const uint16_t base = ack.ack_base;
+        for (int i = 0; i < 64; ++i) {
+            if (ack.ack_bitmap & (static_cast<uint64_t>(1) << i)) {
+                uint16_t acked_seq = static_cast<uint16_t>(base + i);
+                auto found = _entries.find(acked_seq);
+                if (found != _entries.end()) {
+                    _entries.erase(found);
+                    ++released;
+                }
+            }
+        }
+        return released;
+    }
+
+    /**
+     * Collect seqs that need retransmission (RTO expired).
+     * Returns at most max_count seq numbers.
+     */
+    void get_retransmit(std::vector<uint16_t>& out, int64_t now_ms,
+                        size_t max_count = 16) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        out.clear();
+        for (const auto& [seq, entry] : _entries) {
+            if (out.size() >= max_count) break;
+            if ((now_ms - entry.last_tx_time_ms) >= _rto_ms) {
+                if (_max_retries <= 0 || entry.retry_count < _max_retries) {
+                    out.push_back(seq);
+                }
+            }
+        }
+    }
+
+    /** Mark a seq as just transmitted (update timestamp, bump retry count). */
+    void mark_transmitted(uint16_t seq, int64_t now_ms) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _entries.find(seq);
+        if (it != _entries.end()) {
+            it->second.last_tx_time_ms = now_ms;
+            it->second.retry_count++;
+        }
+    }
+
+    bool get_entry_copy(uint16_t seq, ArqTxEntry& out) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        auto it = _entries.find(seq);
+        if (it == _entries.end()) return false;
+        out = it->second;
+        return true;
+    }
+
+    bool has_room() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return has_room_unlocked();
+    }
+
+    size_t outstanding_count() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _entries.size();
+    }
+
+    bool has_entry(uint16_t seq) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _entries.find(seq) != _entries.end();
+    }
+
+    bool has_room_unlocked() const {
+        return _entries.size() < static_cast<size_t>(_window_size);
+    }
+
+    uint16_t window_size() const { return _window_size; }
+    int rto_ms() const { return _rto_ms; }
+
+    /** Drop entries that exceeded max_retries (if nonzero). Returns count. */
+    size_t drop_abandoned(int64_t now_ms) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_max_retries <= 0) return 0;
+        size_t dropped = 0;
+        auto it = _entries.begin();
+        while (it != _entries.end()) {
+            if (it->second.retry_count >= _max_retries &&
+                (now_ms - it->second.last_tx_time_ms) >= _rto_ms) {
+                it = _entries.erase(it);
+                ++dropped;
+            } else {
+                ++it;
+            }
+        }
+        return dropped;
+    }
+
+    /** Check if any retransmissions are pending. */
+    bool has_retransmit_pending(int64_t now_ms) const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (const auto& [seq, entry] : _entries) {
+            if ((now_ms - entry.last_tx_time_ms) >= _rto_ms) {
+                if (_max_retries <= 0 || entry.retry_count < _max_retries) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+private:
+    uint16_t _window_size = 256;
+    int _rto_ms = 10;
+    int _max_retries = 0;
+    uint8_t _direction = 0;
+    mutable std::mutex _mutex;
+    std::unordered_map<uint16_t, ArqTxEntry> _entries;
+};
+
+/**
+ * @brief Bounded ARQ receive window with duplicate suppression and
+ * optional ordered delivery.
+ *
+ * Tracks received sequence numbers, suppresses duplicates, and generates
+ * cumulative + selective ACK feedback.
+ */
+class ArqRxWindow {
+public:
+    ArqRxWindow() = default;
+
+    void configure(const NetworkOutputConfig& net) {
+        _window_size = static_cast<uint16_t>(
+            std::max(1, std::min<int>(net.arq_window_packets, 64)));
+        _ordered = net.arq_ordered_delivery;
+        _feedback_interval_ms = net.arq_feedback_interval_ms;
+        _max_reorder_buf = static_cast<size_t>(_window_size);
+        _got_any = false;
+        _expected_seq = 0;
+        _ack_base = 0;
+        _ack_bitmap = 0;
+        _reorder_buffer.clear();
+    }
+
+    void set_direction(uint8_t dir) { _feedback_dir = dir; }
+
+    /**
+     * Process a received data packet.
+     * Returns true if this is a new (non-duplicate) packet accepted.
+     * Returns false if duplicate or outside window.
+     *
+     * For ordered delivery: the payload is buffered until it can be
+     * delivered contiguously.
+     * For unordered delivery: the caller should forward the payload
+     * immediately when this returns true.
+     */
+    bool process_received(uint16_t seq, const uint8_t* payload, size_t len) {
+        if (!_got_any) {
+            _got_any = true;
+        }
+
+        const int16_t bit_idx = arq_seq_diff(seq, _ack_base);
+        if (bit_idx < 0) {
+            _dup_count++;
+            return false;
+        }
+        if (bit_idx >= static_cast<int16_t>(_window_size) || bit_idx >= 64) {
+            return false;
+        }
+        const uint64_t bit = static_cast<uint64_t>(1) << bit_idx;
+        if (_ack_bitmap & bit) {
+            _dup_count++;
+            return false;
+        }
+        _ack_bitmap |= bit;
+        _advance_ack_base();
+
+        _accepted_count++;
+
+        if (_ordered) {
+            // Buffer for ordered delivery
+            _reorder_buffer.emplace(seq, std::vector<uint8_t>(payload, payload + len));
+            if (_reorder_buffer.size() > _max_reorder_buf) {
+                _reorder_buffer.erase(_reorder_buffer.begin());
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * For ordered delivery: collect packets that can be delivered
+     * contiguously from _expected_seq.
+     * Returns payloads in order.
+     */
+    void get_deliverable(std::vector<std::vector<uint8_t>>& out) {
+        out.clear();
+        if (!_ordered) return;
+        while (true) {
+            auto it = _reorder_buffer.find(_expected_seq);
+            if (it == _reorder_buffer.end()) break;
+            out.push_back(std::move(it->second));
+            _reorder_buffer.erase(it);
+            _expected_seq = static_cast<uint16_t>(_expected_seq + 1);
+        }
+    }
+
+    /**
+     * Generate an ACK feedback packet for the current receive state.
+     */
+    ArqFeedback generate_ack() const {
+        ArqFeedback ack;
+        ack.direction = _feedback_dir;
+        ack.ack_base = _ack_base;
+        ack.ack_bitmap = _ack_bitmap;
+        return ack;
+    }
+
+    /**
+     * Check if enough time has elapsed since the last ACK was sent.
+     */
+    bool should_send_ack(int64_t now_ms) const {
+        if (!_got_any) return false;
+        if (_last_ack_time_ms == 0) return true;
+        return (now_ms - _last_ack_time_ms) >= _feedback_interval_ms;
+    }
+
+    void mark_ack_sent(int64_t now_ms) {
+        _last_ack_time_ms = now_ms;
+    }
+
+    bool got_any() const { return _got_any; }
+    uint16_t expected_seq() const { return _expected_seq; }
+    uint64_t dup_count() const { return _dup_count; }
+    uint64_t accepted_count() const { return _accepted_count; }
+
+private:
+    void _advance_ack_base() {
+        while (_ack_bitmap & 0x1u) {
+            _ack_bitmap >>= 1;
+            _ack_base = static_cast<uint16_t>(_ack_base + 1);
+        }
+    }
+
+    bool _got_any = false;
+    bool _ordered = false;
+    uint16_t _expected_seq = 0;
+    uint16_t _ack_base = 0;
+    uint64_t _ack_bitmap = 0;
+    uint16_t _window_size = 256;
+    size_t _max_reorder_buf = 256;
+    int _feedback_interval_ms = 2;
+    uint8_t _feedback_dir = 0;
+    int64_t _last_ack_time_ms = 0;
+    uint64_t _dup_count = 0;
+    uint64_t _accepted_count = 0;
+    std::map<uint16_t, std::vector<uint8_t>> _reorder_buffer;
+};
+
+// Convenience: current time in milliseconds for ARQ timestamps
+inline int64_t arq_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 
 
