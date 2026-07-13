@@ -940,6 +940,8 @@ def default_sensing_channel_item(
         "alignment": 63,
         "rx_antenna": "RX2",
         "enable_system_delay_estimation": False,
+        "rx_cpu_core": -1,
+        "processing_cpu_core": -1,
     }
     base_usrp_channel = int_or_default(base.get("usrp_channel"), fallback_item["usrp_channel"])
     usrp_channel = base_usrp_channel if preserve_usrp_channel else base_usrp_channel + index
@@ -957,6 +959,11 @@ def default_sensing_channel_item(
             "enable_system_delay_estimation",
             fallback_item["enable_system_delay_estimation"],
         )),
+        "rx_cpu_core": int_or_default(base.get("rx_cpu_core"), fallback_item["rx_cpu_core"]),
+        "processing_cpu_core": int_or_default(
+            base.get("processing_cpu_core"),
+            fallback_item["processing_cpu_core"],
+        ),
     }
 
 

@@ -47,15 +47,25 @@ class ProcessingTest(unittest.TestCase):
             doppler_fft_size=8,
         )
         frame = self._synthetic_frame(8, 16)
-        opts = ProcessingOptions(range_fft_size=32, doppler_fft_size=16, display_range_bins=20)
+        opts = ProcessingOptions(
+            range_fft_size=32,
+            doppler_fft_size=16,
+            display_range_bins=20,
+            enable_range_window=False,
+            enable_doppler_window=False,
+        )
 
         result = process_range_doppler(frame, params, opts)
+        padded = np.zeros((8, 32), dtype=np.complex64)
+        padded[:, :16] = frame
+        expected_range_time = np.fft.ifft(padded, axis=1) * 32
 
         self.assertEqual(result.magnitude_db.shape, (16, 20))
         self.assertEqual(result.magnitude_db.dtype, np.float32)
         self.assertEqual(result.range_time.shape, (8, 20))
         self.assertEqual(result.rd_complex.shape, (16, 20))
         self.assertTrue(np.all(np.isfinite(result.magnitude_db)))
+        np.testing.assert_allclose(result.range_time, expected_range_time[:, :20], rtol=1e-6, atol=1e-6)
 
     def test_dense_range_doppler_passthrough(self):
         params = ViewerRuntimeParams(

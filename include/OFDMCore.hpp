@@ -3836,6 +3836,10 @@ public:
         for (size_t i = 0; i < num_symbols; ++i) {
             auto* dest = _channel_buffer.data() + i * _params.range_fft_size;
             std::copy(rx_symbols[i].begin(), rx_symbols[i].end(), dest);
+            if (_params.range_fft_size > _params.fft_size) {
+                std::fill(dest + _params.fft_size, dest + _params.range_fft_size,
+                          std::complex<float>(0.0f, 0.0f));
+            }
         }
     }
 
@@ -3850,6 +3854,10 @@ public:
         if (symbol_idx >= _params.doppler_fft_size) return;
         auto* dest = _channel_buffer.data() + symbol_idx * _params.range_fft_size;
         std::copy(fft_output.begin(), fft_output.end(), dest);
+        if (_params.range_fft_size > _params.fft_size) {
+            std::fill(dest + _params.fft_size, dest + _params.range_fft_size,
+                      std::complex<float>(0.0f, 0.0f));
+        }
     }
 
     /**
@@ -3912,6 +3920,10 @@ public:
                     ch2_imag * tx2_real - ch2_real * tx2_imag
                 );
                 ch_data[k + half_size] = std::complex<float>(est_real, est_imag);
+            }
+            if (_params.range_fft_size > fft_size) {
+                std::fill(ch_data + fft_size, ch_data + _params.range_fft_size,
+                          std::complex<float>(0.0f, 0.0f));
             }
         }
     }

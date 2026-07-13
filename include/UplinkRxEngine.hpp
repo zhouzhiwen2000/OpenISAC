@@ -910,7 +910,11 @@ public:
     void _run_agc(const AlignedVector& frame) {
         if (!_rx_agc.enabled() || !_apply_gain) return;
         // Delay spectrum (impulse response) from the channel estimate.
-        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.ofdm.fft_size * sizeof(std::complex<float>));
+        const size_t half = _cfg.ofdm.fft_size / 2;
+        for (size_t i = 0; i < half; ++i) {
+            _ce_in[i] = _h_est[i + half];
+            _ce_in[i + half] = _h_est[i];
+        }
         fftwf_execute(_ce_ifft_plan);
         float peak = 0.0f;
         double sum = 0.0;

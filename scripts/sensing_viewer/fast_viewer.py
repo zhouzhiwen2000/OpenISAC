@@ -1223,13 +1223,10 @@ if HAVE_NUMBA:
     @njit(parallel=True, fastmath=True)
     def cpu_prep_range_fft(frame_data, window, fft_size, range_fft_size):
         num_symbols = frame_data.shape[0]
-        half_n = fft_size // 2
         out = np.zeros((num_symbols, range_fft_size), dtype=np.complex64)
         for i in prange(num_symbols):
-            for j in range(half_n):
-                out[i, j] = frame_data[i, j + half_n] * window[0, j]
-            for j in range(half_n):
-                out[i, j + half_n] = frame_data[i, j] * window[0, j + half_n]
+            for j in range(fft_size):
+                out[i, j] = frame_data[i, j] * window[0, j]
         return out
 
     @njit(parallel=True, fastmath=True)
@@ -1293,8 +1290,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
         range_win = get_range_window(raw_cols) if range_window_active else cp.ones((1, raw_cols), dtype=cp.float32)
         doppler_win = get_doppler_window(raw_rows) if doppler_window_active else cp.ones((raw_rows, 1), dtype=cp.float32)
         frame_data_gpu = cp.asarray(raw_frame, dtype=cp.complex64)
-        shifted_data = cp.fft.fftshift(frame_data_gpu, axes=1)
-        windowed_data = shifted_data * range_win
+        windowed_data = frame_data_gpu * range_win
 
         padded_data = cp.zeros((raw_rows, range_fft_size), dtype=cp.complex64)
         padded_data[:, :raw_cols] = windowed_data
@@ -1321,8 +1317,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
         range_win = get_range_window(raw_cols) if range_window_active else mx.ones((1, raw_cols), dtype=mx.float32)
         doppler_win = get_doppler_window(raw_rows) if doppler_window_active else mx.ones((raw_rows, 1), dtype=mx.float32)
         frame_data_gpu = mx.array(raw_frame, dtype=mx.complex64)
-        shifted_data = mx.fft.fftshift(frame_data_gpu, axes=(1,))
-        windowed_data = shifted_data * range_win
+        windowed_data = frame_data_gpu * range_win
         range_time = mx.fft.ifft(windowed_data, n=range_fft_size, axis=1) * range_fft_size
 
         range_time_view = range_time[:, :max_view_range_bins] if max_view_range_bins < range_fft_size else range_time
@@ -1353,8 +1348,7 @@ def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
         magnitude_db = 20.0 * np.log10(np.abs(doppler_shifted) / rd_display_norm + 1e-12)
         return magnitude_db.astype(np.float32, copy=False), range_time_view, doppler_shifted.astype(np.complex64, copy=False)
 
-    shifted_data = np.fft.fftshift(raw_frame, axes=1)
-    windowed_data = shifted_data * range_win
+    windowed_data = raw_frame * range_win
     padded_data = np.zeros((raw_rows, range_fft_size), dtype=np.complex64)
     padded_data[:, :raw_cols] = windowed_data
     range_time = np.fft.ifft(padded_data, axis=1) * range_fft_size
@@ -1438,8 +1432,7 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
         range_win_3d = cp.reshape(range_win, (1, 1, raw_cols))
         doppler_win_3d = cp.reshape(doppler_win, (1, raw_rows, 1))
         batch_gpu = cp.asarray(raw_batch, dtype=cp.complex64)
-        shifted_batch = cp.fft.fftshift(batch_gpu, axes=2)
-        windowed_batch = shifted_batch * range_win_3d
+        windowed_batch = batch_gpu * range_win_3d
 
         padded_data = cp.zeros((batch_gpu.shape[0], raw_rows, range_fft_size), dtype=cp.complex64)
         padded_data[:, :, :raw_cols] = windowed_batch
@@ -1466,8 +1459,7 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
         range_win_3d = mx.reshape(range_win, (1, 1, raw_cols))
         doppler_win_3d = mx.reshape(doppler_win, (1, raw_rows, 1))
         batch_gpu = mx.array(raw_batch, dtype=mx.complex64)
-        shifted_batch = mx.fft.fftshift(batch_gpu, axes=(2,))
-        windowed_batch = shifted_batch * range_win_3d
+        windowed_batch = batch_gpu * range_win_3d
         range_time = mx.fft.ifft(windowed_batch, n=range_fft_size, axis=2) * range_fft_size
         range_time_view = range_time[:, :, :max_view_range_bins] if max_view_range_bins < range_fft_size else range_time
         doppler_windowed = range_time_view * doppler_win_3d
@@ -1487,8 +1479,7 @@ def process_range_doppler_batch(channel_frames, viewer_params, max_view_range_bi
 
     range_win = get_range_window(raw_cols) if range_window_active else np.ones((1, raw_cols), dtype=np.float32)
     doppler_win = get_doppler_window(raw_rows) if doppler_window_active else np.ones((raw_rows, 1), dtype=np.float32)
-    shifted_batch = np.fft.fftshift(raw_batch, axes=2)
-    windowed_batch = shifted_batch * range_win.reshape(1, 1, raw_cols)
+    windowed_batch = raw_batch * range_win.reshape(1, 1, raw_cols)
     padded_data = np.zeros((raw_batch.shape[0], raw_rows, range_fft_size), dtype=np.complex64)
     padded_data[:, :, :raw_cols] = windowed_batch
     range_time = np.fft.ifft(padded_data, axis=2) * range_fft_size
@@ -1538,8 +1529,7 @@ def process_doppler_frequency_input(frame_data, viewer_params):
         range_win = get_range_window(raw_cols) if range_window_active else cp.ones((1, raw_cols), dtype=cp.float32)
         doppler_win = get_doppler_window(raw_rows) if doppler_window_active else cp.ones((raw_rows, 1), dtype=cp.float32)
         frame_gpu = cp.asarray(raw_frame, dtype=cp.complex64)
-        shifted_data = cp.fft.fftshift(frame_gpu, axes=1)
-        freq_windowed = shifted_data * range_win
+        freq_windowed = frame_gpu * range_win
         doppler_input = freq_windowed * doppler_win
         doppler_shifted = cp.fft.fftshift(cp.fft.fft(doppler_input, n=doppler_fft_size, axis=0), axes=0)
         if USE_NVIDIA_GPU:
@@ -1550,16 +1540,14 @@ def process_doppler_frequency_input(frame_data, viewer_params):
         range_win = get_range_window(raw_cols) if range_window_active else mx.ones((1, raw_cols), dtype=mx.float32)
         doppler_win = get_doppler_window(raw_rows) if doppler_window_active else mx.ones((raw_rows, 1), dtype=mx.float32)
         frame_gpu = mx.array(raw_frame, dtype=mx.complex64)
-        shifted_data = mx.fft.fftshift(frame_gpu, axes=(1,))
-        freq_windowed = shifted_data * range_win
+        freq_windowed = frame_gpu * range_win
         doppler_input = freq_windowed * doppler_win
         doppler_shifted = mx.fft.fftshift(mx.fft.fft(doppler_input, n=doppler_fft_size, axis=0), axes=(0,))
         return np.asarray(doppler_shifted, dtype=np.complex64)
 
     range_win = get_range_window(raw_cols) if range_window_active else np.ones((1, raw_cols), dtype=np.float32)
     doppler_win = get_doppler_window(raw_rows) if doppler_window_active else np.ones((raw_rows, 1), dtype=np.float32)
-    shifted_data = np.fft.fftshift(raw_frame, axes=1)
-    freq_windowed = shifted_data * range_win
+    freq_windowed = raw_frame * range_win
     doppler_input = freq_windowed * doppler_win
     doppler_shifted = np.fft.fftshift(np.fft.fft(doppler_input, n=doppler_fft_size, axis=0), axes=0)
     return doppler_shifted.astype(np.complex64, copy=False)

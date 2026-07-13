@@ -96,8 +96,7 @@ def process_range_doppler(
     range_win = _hamming_window_row(raw_cols) if range_window_active else np.ones((1, raw_cols), dtype=np.float32)
     doppler_win = _hamming_window_col(raw_rows) if doppler_window_active else np.ones((raw_rows, 1), dtype=np.float32)
 
-    shifted_data = np.fft.fftshift(raw_frame, axes=1)
-    windowed_data = shifted_data * range_win
+    windowed_data = raw_frame * range_win
     padded_data = np.zeros((raw_rows, range_fft_size), dtype=np.complex64)
     padded_data[:, :raw_cols] = windowed_data
     range_time = np.fft.ifft(padded_data, axis=1) * range_fft_size

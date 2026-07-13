@@ -2458,8 +2458,7 @@ void SensingChannel::_process_regular_compact_buffer(
         for (size_t row = 0; row < symbol_count; ++row) {
             for (size_t sub_idx = 0; sub_idx < analysis.common_subcarrier_count; ++sub_idx) {
                 const size_t compact_idx = row * analysis.common_subcarrier_count + sub_idx;
-                const size_t shifted_sc = static_cast<size_t>(_compute.compact_shifted_subcarrier_indices[sub_idx]);
-                compact_output[compact_idx] = channel_buf[row * range_stride + shifted_sc];
+                compact_output[compact_idx] = channel_buf[row * range_stride + sub_idx];
             }
         }
         _compute.sensing_sender.push_compact_data(

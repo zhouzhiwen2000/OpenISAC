@@ -926,12 +926,12 @@ private:
                     static_cast<float>(std::sin(phase)));
                 return value * rot;
             };
-            // `channel_freq` is the FFTW-native H_est order produced by the demod FFT:
-            // bins [0, N/2) are DC/positive frequencies, bins [N/2, N) are negative.
-            _ertm_os_ifft_in[i] = rotate(channel_freq[i], static_cast<int64_t>(i));
-            _ertm_os_ifft_in[os_n - half + i] = rotate(
+            // Convert FFTW-native H_est into natural signed-frequency order
+            // [-N/2, ..., N/2-1], then leave all oversampling bins after N as zero.
+            _ertm_os_ifft_in[i] = rotate(
                 channel_freq[i + half],
                 static_cast<int64_t>(i) - static_cast<int64_t>(half));
+            _ertm_os_ifft_in[i + half] = rotate(channel_freq[i], static_cast<int64_t>(i));
         }
 
         fftwf_execute(_ertm_os_ifft_plan);

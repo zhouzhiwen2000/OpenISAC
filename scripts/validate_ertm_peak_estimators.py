@@ -225,15 +225,17 @@ def compute_oversampled_delay_spectrum(
 
     os_in = np.zeros(os_size, dtype=np.complex128)
     apply_shift = math.isfinite(shift_samples) and shift_samples != 0.0
-    pos = channel_freq[:half].copy()
+    # Runtime H_est is FFTW-native: [0, ..., N/2-1, -N/2, ..., -1].
+    # The eRTM delay IFFT works on natural order followed by zero padding.
     neg = channel_freq[half:].copy()
+    pos = channel_freq[:half].copy()
     if apply_shift:
-        pos_k = np.arange(0, half, dtype=np.float64)
         neg_k = np.arange(-half, 0, dtype=np.float64)
+        pos_k = np.arange(0, half, dtype=np.float64)
         pos *= np.exp(-1j * 2.0 * math.pi * pos_k * shift_samples / float(fft_size))
         neg *= np.exp(-1j * 2.0 * math.pi * neg_k * shift_samples / float(fft_size))
-    os_in[:half] = pos
-    os_in[os_size - half :] = neg
+    os_in[:half] = neg
+    os_in[half:fft_size] = pos
 
     # FFTW_BACKWARD is unnormalized; numpy.ifft includes 1/os_size.
     return np.fft.ifft(os_in) * float(os_size) / math.sqrt(float(fft_size))
