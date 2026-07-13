@@ -250,7 +250,7 @@ def correlate_delay_magnitudes(
     denom = math.sqrt(float(np.sum(bs_mag * bs_mag)) * float(np.sum(ue_mag * ue_mag)))
     if not math.isfinite(denom) or denom <= 0.0:
         raise RuntimeError("Cannot normalize zero-energy delay spectra")
-    corr = np.fft.ifft(np.conj(np.fft.fft(bs_mag)) * np.fft.fft(ue_mag)).real
+    corr = np.fft.ifft(np.fft.fft(bs_mag) * np.conj(np.fft.fft(ue_mag))).real
     return corr / denom
 
 
@@ -265,7 +265,7 @@ def correlate_delay_complex(
     )
     if not math.isfinite(denom) or denom <= 0.0:
         raise RuntimeError("Cannot normalize zero-energy delay spectra")
-    corr = np.fft.ifft(np.conj(np.fft.fft(bs_uplink_delay)) * np.fft.fft(ue_downlink_delay))
+    corr = np.fft.ifft(np.fft.fft(bs_uplink_delay) * np.conj(np.fft.fft(ue_downlink_delay)))
     return corr / denom
 
 
@@ -463,8 +463,8 @@ def run_simulation(args: argparse.Namespace) -> tuple[list[SummaryRow], list[Sum
                     rng,
                 )
                 shifted = apply_fractional_delay(base, true_shift)
-                noisy_bs = add_channel_awgn(base, snr_db, rng)
-                noisy_ue = add_channel_awgn(shifted, snr_db, rng)
+                noisy_bs = add_channel_awgn(shifted, snr_db, rng)
+                noisy_ue = add_channel_awgn(base, snr_db, rng)
                 bs_delay = compute_oversampled_delay_spectrum(noisy_bs, args.oversample)
                 ue_delay = compute_oversampled_delay_spectrum(noisy_ue, args.oversample)
                 corr, complex_corr = profile_correlation(bs_delay, ue_delay, args.profile)

@@ -1007,7 +1007,7 @@ private:
         fftwf_execute(_ertm_corr_fft_a_plan);
         fftwf_execute(_ertm_corr_fft_b_plan);
         for (size_t i = 0; i < n; ++i) {
-            _ertm_corr_a_freq[i] = std::conj(_ertm_corr_a_freq[i]) * _ertm_corr_b_freq[i];
+            _ertm_corr_a_freq[i] = _ertm_corr_a_freq[i] * std::conj(_ertm_corr_b_freq[i]);
         }
         fftwf_execute(_ertm_corr_ifft_plan);
 
@@ -1291,8 +1291,10 @@ private:
             static_cast<double>(signed_shift_bins) + centroid3_delta_bins;
         const double to_bs_ue_samples =
             shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
-        const double to_ue_samples = (tau_c_samples - to_bs_ue_samples) * 0.5;
-        const double to_bs_samples = (tau_c_samples + to_bs_ue_samples) * 0.5;
+        const double to_ue_samples = 0.5 * (tau_c_samples - to_bs_ue_samples);
+        const double to_bs_samples = 0.5 * (tau_c_samples + to_bs_ue_samples);
+        const double correction_to_ue_samples = -to_ue_samples;
+        const double correction_to_bs_samples = -to_bs_samples;
         if (std::isfinite(to_ue_samples)) {
             const bool had_previous_to_ue =
                 _ertm_absolute_delay_available.load(std::memory_order_acquire);
@@ -1343,9 +1345,9 @@ private:
             AlignedVector corrected_uplink_delay;
             AlignedVector corrected_downlink_delay;
             if (!_compute_ertm_oversampled_delay_spectrum(
-                    bs_payload.channel_freq, to_bs_samples, corrected_uplink_delay) ||
+                    bs_payload.channel_freq, correction_to_bs_samples, corrected_uplink_delay) ||
                 !_compute_ertm_oversampled_delay_spectrum(
-                    local_channel_freq, to_ue_samples, corrected_downlink_delay)) {
+                    local_channel_freq, correction_to_ue_samples, corrected_downlink_delay)) {
                 if (cfg_.should_profile("ertm")) {
                     LOG_G_WARN() << "[eRTM] failed to compute TO-corrected debug spectra";
                 }
@@ -1430,9 +1432,10 @@ private:
             if (_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
                 const double to_ue_samples =
                     _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
+                const double correction_to_ue_samples = -to_ue_samples;
                 const double pending_alignment =
                     _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
-                base_delay_offset = -static_cast<float>(to_ue_samples - pending_alignment);
+                base_delay_offset = static_cast<float>(correction_to_ue_samples + pending_alignment);
             } else {
                 LOG_RT_WARN_HZ(1)
                     << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "

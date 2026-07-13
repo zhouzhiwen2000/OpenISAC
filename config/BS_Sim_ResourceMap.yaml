@@ -1,0 +1,238 @@
+# ===== Radio backend =====
+radio:
+  radio_backend: sim  # Radio I/O backend; uhd = real USRP, sim = channel simulator
+
+# ===== Channel simulator =====
+simulation:
+  session: oisac_sim  # Shared-memory namespace used by BS, UE, and ChannelSimulator
+  enable_comm_rx: true  # Produce the communication RX path for UE
+  enable_sensing_rx: true  # Produce monostatic sensing RX paths for the antenna array
+  enable_uplink: false  # Route the UE->BS uplink stream through the simulator (duplex)
+  pacing_enabled: true  # Pace ChannelSimulator output to wall-clock sample time
+  noise_power_dbfs: -70.0  # AWGN power per RX channel in dBFS; very low disables effectively
+  snr_control_enable: true  # Scale the clean simulated signal before AWGN to maintain target_snr_db
+  target_snr_db: 40.0  # Initial target SNR in dB when snr_control_enable is true
+  control_port: 10002  # ChannelSimulator ZMQ control port for runtime SNR commands
+  cfo_hz: 5000.0  # Initial carrier offset before UE RX correction in Hz
+  sample_rate_offset_ppm: 0.0  # UE sample-clock offset relative to the BS clock in ppm
+  timing_offset_samples: 0  # Constant integer sample delay injected on RX
+  array_spacing_m: 0.04283  # Physical ULA element spacing in meters; set <=0 to use array_spacing_lambda
+  array_spacing_lambda: 0.5  # Legacy fixed ULA spacing in wavelengths
+  ring_capacity_samples: 262144  # Per-stream shared-memory ring capacity in complex samples
+  steering_override_file: ""  # Optional steering matrix file; empty uses ULA steering
+  comm_multipath_taps:  # Communication-link tapped-delay-line channel taps
+    - delay_samples: 0
+      gain_db: -30.0
+      phase_deg: 0.0
+  targets:  # Monostatic sensing point scatterers
+    - range_m: 30.0
+      velocity_mps: 5.0
+      gain_db: -36.0
+      angle_deg: 20.0
+    - range_m: 75.0
+      velocity_mps: -3.0
+      gain_db: -42.0
+      angle_deg: -10.0
+    - range_m: 50.0
+      velocity_mps: 0.0
+      gain_db: -42.0
+      angle_deg: 60.0
+  bistatic_targets:  # Bistatic / communication-channel point scatterers
+    - range_m: 30.0
+      velocity_mps: 5.0
+      gain_db: -50.0
+      angle_deg: 0.0
+    - range_m: 75.0
+      velocity_mps: -3.0
+      gain_db: -56.0
+      angle_deg: 0.0
+
+# ===== RF / Sampling =====
+rf_sampling:
+  sample_rate: 50000000  # Baseband sample rate (Hz)
+  bandwidth: 50000000  # Analog bandwidth (Hz), usually same as sample_rate
+
+# ===== Clock / Time Sources =====
+clock_time:
+  clock_source: internal  # Global clock source; internal/external/gpsdo
+  time_source: internal  # Global time source; empty follows clock_source
+
+# ===== OFDM Frame =====
+ofdm_frame:
+  fft_size: 1024  # FFT size (subcarrier count)
+  cp_length: 128  # Cyclic prefix length (samples)
+  sync_pos: 1  # Sync symbol index in one frame
+  enable_sec_sync_symbol: false  # Reserve sync_pos-1 as a duplicate ZC sync symbol
+  enable_cfo_training_sequence: false  # Reserve sync_pos+1 as a repeated CFO training field
+  cfo_training_period_samples: 16  # Repetition period of CFO training field in samples
+  num_symbols: 100  # Number of OFDM symbols per frame
+  sensing_symbol_num: 100  # Number of symbols used in sensing processing
+  zc_root: 29  # Zadoff-Chu root for sync/preamble
+  pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]  # Comb-pilot subcarrier indices
+  midframe_pilot_seed: 1296453708  # Deterministic mid-frame BPSK pilot seed; must match TX/RX
+
+# ===== Downlink =====
+downlink:
+  center_freq: 2400000000  # RF center frequency (Hz)
+  tx_gain: 60  # TX gain (dB)
+  tx_channel: 0  # TX channel index on USRP
+  wire_format_tx: sc16  # TX wire format; sc16/sc8
+  arq_enabled: false  # Enable downlink ARQ on the BS transmitter
+
+# ===== Uplink =====
+uplink:
+  enabled: false  # Enable UE-to-BS uplink / duplex path
+  symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
+  symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
+  guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
+  rx_channel: 0  # Uplink RX channel index on USRP
+  rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
+  rx_agc_enable: false  # Enable uplink hardware RX AGC driven by delay-spectrum peak
+  arq_enabled: false  # Enable uplink ARQ on the BS receiver
+
+# ===== Sensing =====
+sensing:
+  rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
+  rx_channel_count: 4  # Number of sensing RX channels (0 disables sensing RX)
+  rx_channels:
+    - usrp_channel: 0  # USRP RX channel index for this sensing path
+      device_args: ""  # Per-channel USRP args override (optional)
+      clock_source: ""  # Per-channel clock source override (optional)
+      time_source: ""  # Per-channel time source override (optional)
+      wire_format: ""  # Per-channel wire format override (optional)
+      rx_gain: 0  # Per-channel RX gain (dB)
+      alignment: 0  # Per-channel timing alignment offset (samples)
+      rx_antenna: ""  # RX antenna port (e.g. RX1/RX2/TX/RX)
+      enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
+      rx_cpu_core: -1  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
+      processing_cpu_core: -1  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
+    - usrp_channel: 1  # USRP RX channel index for this sensing path
+      device_args: ""  # Per-channel USRP args override (optional)
+      clock_source: ""  # Per-channel clock source override (optional)
+      time_source: ""  # Per-channel time source override (optional)
+      wire_format: ""  # Per-channel wire format override (optional)
+      rx_gain: 0  # Per-channel RX gain (dB)
+      alignment: 0  # Per-channel timing alignment offset (samples)
+      rx_antenna: ""  # RX antenna port (e.g. RX1/RX2/TX/RX)
+      enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
+      rx_cpu_core: -1  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
+      processing_cpu_core: -1  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
+    - usrp_channel: 2  # USRP RX channel index for this sensing path
+      device_args: ""  # Per-channel USRP args override (optional)
+      clock_source: ""  # Per-channel clock source override (optional)
+      time_source: ""  # Per-channel time source override (optional)
+      wire_format: ""  # Per-channel wire format override (optional)
+      rx_gain: 0  # Per-channel RX gain (dB)
+      alignment: 0  # Per-channel timing alignment offset (samples)
+      rx_antenna: ""  # RX antenna port (e.g. RX1/RX2/TX/RX)
+      enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
+      rx_cpu_core: -1  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
+      processing_cpu_core: -1  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
+    - usrp_channel: 3  # USRP RX channel index for this sensing path
+      device_args: ""  # Per-channel USRP args override (optional)
+      clock_source: ""  # Per-channel clock source override (optional)
+      time_source: ""  # Per-channel time source override (optional)
+      wire_format: ""  # Per-channel wire format override (optional)
+      rx_gain: 0  # Per-channel RX gain (dB)
+      alignment: 0  # Per-channel timing alignment offset (samples)
+      rx_antenna: ""  # RX antenna port (e.g. RX1/RX2/TX/RX)
+      enable_system_delay_estimation: false  # If true, this channel runs delay estimation only and disables sensing pipeline
+      rx_cpu_core: -1  # CPU core for SensingChannel::_rx_loop (-1 disables explicit binding)
+      processing_cpu_core: -1  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
+  range_fft_size: 1024  # Range FFT size
+  doppler_fft_size: 100  # Doppler FFT size
+  output_mode: compact_mask  # dense or compact_mask
+  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
+  paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
+
+# ===== LDPC decode =====
+ldpc:
+  fixed_point: false  # int16 (Q16) layered-NMS CPU decoder (~1.6x faster, quant fused into demap); false = float32
+  fixed_point_scale: 16  # pow2 multiplier applied to LLRs before int16 saturation (Q16 path only)
+
+# ===== Resource Preview =====
+resource_preview:
+  data_resource_blocks:  # Optional payload / sensing-pilot RE rectangles
+    - kind: payload  # Block role; payload or sensing_pilot
+      symbol_start: 0  # 0-based absolute frame symbol index
+      symbol_count: 90  # Number of OFDM symbols in this block
+      subcarrier_start: 1  # 0-based FFT-bin start index
+      subcarrier_count: 489  # Number of contiguous subcarriers in this block
+    - kind: payload  # Block role; payload or sensing_pilot
+      symbol_start: 0  # 0-based absolute frame symbol index
+      symbol_count: 90  # Number of OFDM symbols in this block
+      subcarrier_start: 535  # 0-based FFT-bin start index
+      subcarrier_count: 489  # Number of contiguous subcarriers in this block
+    - kind: sensing_pilot  # Block role; payload or sensing_pilot
+      symbol_start: 21  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - kind: sensing_pilot  # Block role; payload or sensing_pilot
+      symbol_start: 41  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - kind: sensing_pilot  # Block role; payload or sensing_pilot
+      symbol_start: 61  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - kind: sensing_pilot  # Block role; payload or sensing_pilot
+      symbol_start: 81  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - kind: sensing_pilot  # Block role; payload or sensing_pilot
+      symbol_start: 1  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+  mask_blocks:  # Optional compact sensing RE rectangles
+    - symbol_start: 21  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - symbol_start: 41  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - symbol_start: 61  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - symbol_start: 81  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+    - symbol_start: 1  # 0-based absolute frame symbol index
+      symbol_count: 1  # Number of OFDM symbols in this block
+      subcarrier_start: 0  # 0-based FFT-bin start index
+      subcarrier_count: 1024  # Number of contiguous subcarriers in this block
+
+# ===== Measurement mode =====
+measurement:
+  measurement_enable: false  # Enable internal PRBS measurement traffic
+  measurement_mode: internal_prbs  # Measurement payload generator / checker mode
+  measurement_payload_bytes: 1024  # Bytes per generated measurement payload
+
+# ===== Network =====
+network_output:
+  udp_input_ip: 0.0.0.0  # BS downlink payload UDP bind IP
+  udp_input_port: 50000  # BS downlink payload UDP bind port
+  mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
+  mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
+  mono_sensing_output_enabled: true  # Enable monostatic sensing ZMQ output
+  uplink_channel_ip: 0.0.0.0  # Uplink channel-estimate ZMQ listen IP
+  uplink_channel_port: 12358  # Uplink channel-estimate output port
+  uplink_pdf_ip: 0.0.0.0  # Uplink delay-spectrum ZMQ listen IP
+  uplink_pdf_port: 12359  # Uplink delay-spectrum output port
+  uplink_constellation_ip: 0.0.0.0  # Uplink constellation ZMQ listen IP
+  uplink_constellation_port: 12356  # Uplink constellation output port
+  control_port: 9999  # ZMQ port for runtime control commands
+
+# ===== CPU Cores =====
+cpu_cores:
+  downlink_cpu_cores: [1, 2, 3, -1]  # BS downlink CPU cores: [TX thread, modulation thread, LDPC encode thread, UDP recv thread]
+  main_cpu_core: 6  # Main-thread CPU core (-1 disables explicit binding)
