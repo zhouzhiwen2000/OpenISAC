@@ -243,8 +243,13 @@ description: BS 运行时配置的分组参考。
 | `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | BS 上行核心：RX ingest、OFDM/LLR 处理、LDPC decode + UDP 输出。 |
 | `cpu_cores.main_cpu_core` | `int` | `-1` | 主线程 CPU 核；`-1` 表示不绑定。 |
 
-#### BS runtime
+#### BS logging
+
+性能剖析输出与诊断日志统一由层级化 logging 过滤（不再使用 `profiling_modules`）。
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `runtime.profiling_modules` | `string` | `""` | 逗号分隔 profiling 模块，如 `modulation`、`latency`、`ldpc_encode`、`sensing_proc`、`agc`、`arq`、`uplink`、`ertm` 或 `all`。 |
+| `logging.default_level` | `string` | `warn` | 全局级别：`off` / `error` / `warn` / `info` / `debug`。 |
+| `logging.force_error` | `bool` | `true` | 不可恢复 `Error` 始终输出。 |
+| `logging.timestamps` | `bool` | `false` | 行首加本地时间戳 `HH:MM:SS.uuuuuu`。 |
+| `logging.modules` | `map` | `{}` | 按模块覆盖。**诊断**模块继承父级（如 `mod`、`sensing`、`ertm`）。**性能**模块以 `_profiling` 结尾（如 `mod_profiling`），默认关闭，需显式打开。 |

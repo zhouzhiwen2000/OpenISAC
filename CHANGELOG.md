@@ -8,6 +8,42 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-10 - Replace profiling_modules with hierarchical logging
+
+### Summary
+
+移除 `runtime.profiling_modules`；原 debug 与性能剖析开关统一并入 `logging.modules`。性能相关模块路径以 `_profiling` 结尾，默认关闭且不继承父级 verbosity。
+
+- 全局默认日志级别改为 `warn`，未显式配置的 `info` / `debug` 诊断与 profiling 保持关闭。
+- latency、sensing 与仿真 profiling 脚本仅显式启用各自所需的 `_profiling` 模块。
+
+### Mapping (legacy → logging.modules)
+
+| Legacy | Kind | Module path |
+|--------|------|-------------|
+| demodulation / latency | perf | `demod_profiling` / `cuda.demod_profiling` |
+| breakdown_eq | perf | `demod_eq_profiling` / `cuda.demod_eq_profiling` |
+| modulation / latency | perf | `mod_profiling` / `cuda.mod_profiling` |
+| ldpc_encode | perf | `mod_ldpc_profiling` / `cuda.mod_ldpc_profiling` |
+| sensing / sensing_proc | perf | `sensing_profiling` / `cuda.sensing_profiling` |
+| udp_egress | perf | `udp_egress_profiling` |
+| snr | debug | `demod.snr` |
+| agc / arq / ertm / uplink / ue_recovery / sync / cfo / align | debug | `agc` / `arq` / `ertm` / `ul_tx` / `recovery` / `sync` / `cuda.cfo` / … |
+
+## 2026-07-09 - Hierarchical module logging
+
+### Summary
+
+AsyncLogger 增加分级（error/warn/info/debug）与层次化模块过滤（如 `demod.ldpc`、`cuda.demod.ldpc`），YAML `logging:` 与 config_web_editor 树形编辑支持；Error 默认强制输出，仅用于不可恢复失败。
+
+### Changes
+
+- `LogLevel` 扩展 `Debug`/`Off`；输出前缀 `[LEVEL] [module.path]`；可选 timestamps。
+- 编译期 `LogModule` 树 + 原子 effective level 表；`LOG_*_M(Module)` 宏；旧 `LOG_G_INFO()` 等挂到 Root。
+- `logging.default_level` / `force_error` / `modules` YAML；BS/UE/ChannelSimulator/CUDA 启动后 `apply_logging_config`。
+- 高频前缀调用点（Demod/LDPC/UL/eRTM/sensing/CUDA…）改挂对应模块。
+- config_web_editor 新增 Logging 分区与 `logging_mapping` 树形 level 选择。
+
 ## 2026-07-09 - Uplink self-scan 切片传输与 viewer 简化
 
 ### Summary

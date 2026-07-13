@@ -18,6 +18,7 @@ from bench_bs_cpu import (
     stop_unit,
 )
 from bench_utils import (
+    configure_logging,
     load_yaml,
     mean_of,
     safe_stem,
@@ -270,7 +271,7 @@ def main() -> None:
     mod_cfg["bandwidth"] = float(args.sample_rate)
     mod_cfg["fft_size"] = int(args.fft_size)
     mod_cfg["range_fft_size"] = int(args.fft_size)
-    mod_cfg["profiling_modules"] = "sensing_proc"
+    configure_logging(mod_cfg, {"sensing_profiling": "info"})
     mod_cfg["mono_sensing_output_enabled"] = False
     if isinstance(mod_cfg.get("sensing_rx_channels"), list):
         for ch in mod_cfg["sensing_rx_channels"]:

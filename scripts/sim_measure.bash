@@ -12,8 +12,29 @@ cd "$BUILD" || exit 1
 
 cp "$ROOT/config/BS_Sim.yaml"   BS.yaml
 cp "$ROOT/config/UE_Sim.yaml" UE.yaml
-sed -i 's/^\(\s*\)profiling_modules:.*/\1profiling_modules: "demodulation"/' UE.yaml
-grep -q "profiling_modules" UE.yaml || true
+# Enable demod timing reports via hierarchical logging (replaces profiling_modules).
+python3 - <<'PY'
+from pathlib import Path
+import re
+p = Path("UE.yaml")
+text = p.read_text()
+if "logging:" not in text:
+    text += "\nlogging:\n  default_level: warn\n  force_error: true\n  modules:\n    demod_profiling: info\n"
+elif re.search(r"(?m)^    demod_profiling:\s*", text):
+    text = re.sub(
+        r"(?m)^(    demod_profiling:)\s*.*$",
+        r"\1 info",
+        text,
+        count=1,
+    )
+else:
+    modules_line = r"(?m)^  modules:\s*(?:\{\})?\s*(?:#.*)?$"
+    if re.search(modules_line, text):
+        text = re.sub(modules_line, "  modules:\n    demod_profiling: info", text, count=1)
+    else:
+        text = re.sub(r"(?m)^(logging:\s*\n)", r"\1  modules:\n    demod_profiling: info\n", text, count=1)
+p.write_text(text)
+PY
 sed -i 's/^control_port:.*/control_port: 10044/' UE.yaml
 
 ./ChannelSimulator BS.yaml >"$OUT/sim_${TAG}.log" 2>&1 &

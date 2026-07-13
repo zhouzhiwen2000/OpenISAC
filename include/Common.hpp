@@ -1184,8 +1184,30 @@ struct CpuCoresConfig {
     int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
 };
 
-struct RuntimeConfig {
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, arq, demodulation, cfo, agc, align, snr, uplink, ertm, udp_egress, ue_recovery, or "all"
+/**
+ * @brief Hierarchical text-log filter (see plans/active/hierarchical_logging.md).
+ *
+ * YAML:
+ * @code
+ * logging:
+ *   default_level: warn
+ *   timestamps: false
+ *   force_error: true
+ *   modules:
+ *     demod.ldpc: debug
+ *     cuda.demod: warn
+ * @endcode
+ *
+ * Module paths match async_logger::LogModule registry (demod, cuda.ldpc, ...).
+ * Unlisted modules inherit their parent; root inherits default_level.
+ * Error is always printed when force_error is true.
+ */
+struct LoggingConfig {
+    std::string default_level = "warn";  // off|error|warn|info|debug
+    bool timestamps = false;
+    bool force_error = true;             // unrecoverable Error always emits
+    // path -> level name (off|error|warn|info|debug). Missing paths inherit.
+    std::map<std::string, std::string> modules;
 };
 
 struct MeasurementConfig {
@@ -1236,38 +1258,9 @@ struct Config {
     NetworkOutputConfig network_output;
     NetworkOutputConfig uplink_arq;
     CpuCoresConfig cpu_cores;
-    RuntimeConfig runtime;
+    LoggingConfig logging;
     ResourcePreviewConfig resource_preview;
     LdpcDecodeConfig ldpc;
-
-    // Check if a specific module should be profiled
-    bool should_profile(const std::string& module) const {
-        if (runtime.profiling_modules.empty()) return false;
-        if (runtime.profiling_modules == "all") return true;
-        size_t pos = 0;
-        while (pos < runtime.profiling_modules.size()) {
-            while (pos < runtime.profiling_modules.size() &&
-                   (runtime.profiling_modules[pos] == ',' ||
-                    std::isspace(static_cast<unsigned char>(runtime.profiling_modules[pos])))) {
-                ++pos;
-            }
-            const size_t token_start = pos;
-            while (pos < runtime.profiling_modules.size() && runtime.profiling_modules[pos] != ',') {
-                ++pos;
-            }
-            size_t token_end = pos;
-            while (token_end > token_start &&
-                   std::isspace(static_cast<unsigned char>(runtime.profiling_modules[token_end - 1]))) {
-                --token_end;
-            }
-            const size_t token_len = token_end - token_start;
-            if (token_len == module.size() &&
-                runtime.profiling_modules.compare(token_start, token_len, module) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     // Calculate total samples per frame
     size_t samples_per_frame() const { 
@@ -1567,7 +1560,7 @@ inline bool uplink_enabled(const Config& cfg) {
 inline void log_duplex_summary(const Config& cfg, const char* role) {
     const DuplexFrameLayout dl = build_duplex_frame_layout(cfg);
     if (!uplink_enabled(cfg)) {
-        LOG_G_INFO() << "[" << role << "] duplex: uplink DISABLED (downlink-only); "
+        LOG_G_INFO_M(Radio) << "[" << role << "] duplex: uplink DISABLED (downlink-only); "
                      << "num_symbols=" << cfg.ofdm.num_symbols;
         return;
     }
@@ -1586,7 +1579,7 @@ inline void log_duplex_summary(const Config& cfg, const char* role) {
         oss << ", UL=" << ul.ofdm.num_symbols << " (continuous), ul_center_freq="
             << cfg.uplink.duplex.ul_center_freq << " Hz";
     }
-    LOG_G_INFO() << oss.str();
+    LOG_G_INFO_M(Config) << oss.str();
 }
 
 inline bool validate_cfo_training_period(const Config& cfg, std::string* error = nullptr) {
@@ -2094,28 +2087,28 @@ inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
     const size_t required_range = required_sensing_range_bin_count(cfg);
     if (cfg.sensing.range_fft_size == 0) {
         const size_t fallback_range = (required_range > 0) ? required_range : std::max<size_t>(cfg.ofdm.fft_size, 1);
-        LOG_G_WARN() << "range_fft_size is unset or 0. Defaulting to " << fallback_range << '.';
+        LOG_G_WARN_M(Sensing) << "range_fft_size is unset or 0. Defaulting to " << fallback_range << '.';
         cfg.sensing.range_fft_size = fallback_range;
     }
     if (required_range > 0 && cfg.sensing.range_fft_size < required_range) {
-        LOG_G_WARN() << "range_fft_size=" << cfg.sensing.range_fft_size
+        LOG_G_WARN_M(Sensing) << "range_fft_size=" << cfg.sensing.range_fft_size
                      << " is smaller than the required sensing subcarrier count=" << required_range
                      << " for " << context_name
                      << ". Expanding range_fft_size to keep delay FFT buffers consistent.";
         cfg.sensing.range_fft_size = required_range;
     }
     if (cfg.sensing.doppler_fft_size == 0) {
-        LOG_G_WARN() << "doppler_fft_size=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Sensing) << "doppler_fft_size=0 is invalid. Clamping to 1.";
         cfg.sensing.doppler_fft_size = 1;
     }
     if (cfg.ofdm.sensing_symbol_num == 0) {
-        LOG_G_WARN() << "sensing_symbol_num=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Sensing) << "sensing_symbol_num=0 is invalid. Clamping to 1.";
         cfg.ofdm.sensing_symbol_num = 1;
     }
 
     const size_t required_doppler = required_sensing_doppler_symbol_count(cfg);
     if (cfg.sensing.doppler_fft_size < required_doppler) {
-        LOG_G_WARN() << "doppler_fft_size=" << cfg.sensing.doppler_fft_size
+        LOG_G_WARN_M(Sensing) << "doppler_fft_size=" << cfg.sensing.doppler_fft_size
                      << " is smaller than the required sensing symbol count=" << required_doppler
                      << " for " << context_name
                      << ". Expanding doppler_fft_size to keep sensing buffers consistent.";
@@ -2125,7 +2118,7 @@ inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
 
 inline void normalize_sensing_view_bins(Config& cfg, const char* context_name) {
     if (cfg.sensing.view_range_bins != 0 && cfg.sensing.view_range_bins > cfg.sensing.range_fft_size) {
-        LOG_G_WARN() << context_name
+        LOG_G_WARN_M(Sensing) << context_name
                      << " sensing_view_range_bins=" << cfg.sensing.view_range_bins
                      << " exceeds range_fft_size=" << cfg.sensing.range_fft_size
                      << ". Clamping backend view width to the configured range FFT size.";
@@ -2135,7 +2128,7 @@ inline void normalize_sensing_view_bins(Config& cfg, const char* context_name) {
     if (cfg.sensing.view_doppler_bins != 0) {
         const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
         if (cfg.sensing.view_doppler_bins < min_doppler_bins) {
-            LOG_G_WARN() << context_name
+            LOG_G_WARN_M(Sensing) << context_name
                          << " sensing_view_doppler_bins=" << cfg.sensing.view_doppler_bins
                          << " is smaller than the required slow-time symbol count="
                          << min_doppler_bins
@@ -2143,7 +2136,7 @@ inline void normalize_sensing_view_bins(Config& cfg, const char* context_name) {
             cfg.sensing.view_doppler_bins = min_doppler_bins;
         }
         if (cfg.sensing.view_doppler_bins > cfg.sensing.doppler_fft_size) {
-            LOG_G_WARN() << context_name
+            LOG_G_WARN_M(Sensing) << context_name
                          << " sensing_view_doppler_bins=" << cfg.sensing.view_doppler_bins
                          << " exceeds doppler_fft_size=" << cfg.sensing.doppler_fft_size
                          << ". Clamping backend view height to the configured Doppler FFT size.";
@@ -2198,21 +2191,21 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     for (auto sym : cfg.ofdm.midframe_pilot_symbols) {
         if (sym >= cfg.ofdm.num_symbols) {
             if (log_warnings) {
-                LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
+                LOG_G_WARN_M(Config) << "Ignoring midframe_pilot_symbols entry " << sym
                              << " outside num_symbols=" << cfg.ofdm.num_symbols << '.';
             }
             continue;
         }
         if (!duplex_layout.is_downlink(sym)) {
             if (log_warnings) {
-                LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
+                LOG_G_WARN_M(Config) << "Ignoring midframe_pilot_symbols entry " << sym
                              << " because it falls inside a TDD uplink/guard symbol.";
             }
             continue;
         }
         if (is_reserved_sync_symbol(cfg, sym)) {
             if (log_warnings) {
-                LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
+                LOG_G_WARN_M(Config) << "Ignoring midframe_pilot_symbols entry " << sym
                              << " because it overlaps a reserved sync symbol.";
             }
             continue;
@@ -2395,14 +2388,14 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
         (stripped_reserved_symbol_re > 0 ||
          stripped_non_downlink_symbol_re > 0 ||
          stripped_pilot_re > 0)) {
-        LOG_G_WARN() << "data_resource_blocks overlap stripped " << stripped_reserved_symbol_re
+        LOG_G_WARN_M(Config) << "data_resource_blocks overlap stripped " << stripped_reserved_symbol_re
                      << " sync/mid-frame-pilot symbol RE, "
                      << stripped_non_downlink_symbol_re
                      << " TDD uplink/guard symbol RE, and " << stripped_pilot_re
                      << " pilot RE. reserved sync symbols, pilot_positions, and midframe_pilot_symbols take precedence.";
     }
     if (log_warnings && payload_sensing_pilot_overlap_re > 0) {
-        LOG_G_WARN() << "data_resource_blocks contain " << payload_sensing_pilot_overlap_re
+        LOG_G_WARN_M(Sensing) << "data_resource_blocks contain " << payload_sensing_pilot_overlap_re
                      << " RE selected as both payload and sensing_pilot. sensing_pilot takes precedence.";
     }
 
@@ -2429,7 +2422,7 @@ inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
             cfg.sensing.symbol_stride,
             std::string(role_name) + " dense sensing stride");
         if (cfg.sensing.backend_processing_enabled && !backend_sensing_processing_supported(cfg)) {
-            LOG_G_WARN() << role_name
+            LOG_G_WARN_M(Sensing) << role_name
                          << " requested sensing.backend_processing_enabled=1, but the current sensing mode "
                          << "cannot provide dense backend RD output. Falling back to viewer-local processing.";
             cfg.sensing.backend_processing_enabled = false;
@@ -2443,7 +2436,7 @@ inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
             " compact_mask mode requires a non-empty sensing.mask_blocks selection.");
     }
     if (cfg.sensing.backend_processing_enabled && !backend_sensing_processing_supported(cfg)) {
-        LOG_G_WARN() << role_name
+        LOG_G_WARN_M(Sensing) << role_name
                      << " requested sensing.backend_processing_enabled=1 in compact_mask mode, but the mask "
                      << "is not regular local-DD compatible: "
                      << backend_sensing_processing_reason(cfg)
@@ -2943,6 +2936,51 @@ inline void prefault_thread_stack(size_t bytes = 512 * 1024) {
     }
 }
 
+/**
+ * @brief Convert Config.logging into AsyncLogger runtime filter and apply it.
+ *
+ * Safe to call after YAML load (and again if config is hot-reloaded later).
+ * Unknown module paths are ignored with a warning.
+ */
+inline void apply_logging_config(const LoggingConfig& logging) {
+    async_logger::LoggerRuntimeConfig rt;
+    async_logger::LogLevel default_level = async_logger::LogLevel::Warn;
+    if (!async_logger::parse_log_level(logging.default_level, default_level)) {
+        LOG_G_WARN_M(Config) << "logging.default_level='" << logging.default_level
+                             << "' is invalid; using warn.";
+        default_level = async_logger::LogLevel::Warn;
+    }
+    rt.default_level = default_level;
+    rt.timestamps = logging.timestamps;
+    rt.force_error = logging.force_error;
+
+    for (const auto& kv : logging.modules) {
+        const std::string& path = kv.first;
+        const std::string& level_text = kv.second;
+        std::string lower = level_text;
+        for (char& c : lower) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lower == "inherit" || lower == "default") {
+            continue; // leave as inherit
+        }
+        async_logger::LogLevel level = async_logger::LogLevel::Info;
+        if (!async_logger::parse_log_level(level_text, level)) {
+            LOG_G_WARN_M(Config) << "logging.modules['" << path << "']='" << level_text
+                                 << "' is invalid; ignoring.";
+            continue;
+        }
+        if (async_logger::find_log_module_by_path(path) == async_logger::LogModule::Count) {
+            LOG_G_WARN_M(Config) << "logging.modules path '" << path
+                                 << "' is not a known log module; ignoring.";
+            continue;
+        }
+        rt.module_levels[path] = level;
+    }
+
+    async_logger::AsyncLogger::instance().configure(rt);
+}
+
 namespace config_detail {
 inline YAML::Node section_node(const YAML::Node& config, const char* key) {
     const YAML::Node section = config[key];
@@ -2951,14 +2989,14 @@ inline YAML::Node section_node(const YAML::Node& config, const char* key) {
 
 inline bool reject_top_level_config_values(const YAML::Node& config, const char* context_name) {
     if (!config || !config.IsMap()) {
-        LOG_G_ERROR() << context_name << " root must be a YAML mapping of section maps.";
+        LOG_G_ERROR_M(Config) << context_name << " root must be a YAML mapping of section maps.";
         return false;
     }
     for (auto it = config.begin(); it != config.end(); ++it) {
         const std::string key = it->first.as<std::string>();
         const YAML::Node value = it->second;
         if (!value.IsMap()) {
-            LOG_G_ERROR() << context_name << " top-level key '" << key
+            LOG_G_ERROR_M(Config) << context_name << " top-level key '" << key
                           << "' is no longer supported. Move settings under their section.";
             return false;
         }
@@ -2970,6 +3008,25 @@ template <typename T>
 inline void load_value(const YAML::Node& section, const char* key, T& value) {
     if (section && section[key]) {
         value = section[key].as<T>();
+    }
+}
+
+inline void load_logging_config(const YAML::Node& config, LoggingConfig& logging) {
+    const YAML::Node section = section_node(config, "logging");
+    if (!section) {
+        return;
+    }
+    load_value(section, "default_level", logging.default_level);
+    load_value(section, "timestamps", logging.timestamps);
+    load_value(section, "force_error", logging.force_error);
+    if (section["modules"] && section["modules"].IsMap()) {
+        logging.modules.clear();
+        for (auto it = section["modules"].begin(); it != section["modules"].end(); ++it) {
+            if (!it->first || !it->second || !it->second.IsScalar()) {
+                continue;
+            }
+            logging.modules[it->first.as<std::string>()] = it->second.as<std::string>();
+        }
     }
 }
 
@@ -3036,7 +3093,7 @@ inline bool load_resource_blocks_from_yaml(
         return true;
     }
     if (!blocks.IsSequence()) {
-        LOG_G_ERROR() << context_name << " key '" << key << "' must be a YAML sequence.";
+        LOG_G_ERROR_M(Config) << context_name << " key '" << key << "' must be a YAML sequence.";
         return false;
     }
     if (key_present != nullptr) {
@@ -3048,13 +3105,13 @@ inline bool load_resource_blocks_from_yaml(
     for (size_t idx = 0; idx < blocks.size(); ++idx) {
         const YAML::Node& node = blocks[idx];
         if (!node.IsMap()) {
-            LOG_G_ERROR() << context_name << ' ' << key << "[" << idx
+            LOG_G_ERROR_M(Config) << context_name << ' ' << key << "[" << idx
                           << "] must be a YAML map.";
             return false;
         }
         if (!node["symbol_start"] || !node["symbol_count"] ||
             !node["subcarrier_start"] || !node["subcarrier_count"]) {
-            LOG_G_ERROR() << context_name << ' ' << key << "[" << idx
+            LOG_G_ERROR_M(Config) << context_name << ' ' << key << "[" << idx
                           << "] must define symbol_start, symbol_count, subcarrier_start, and subcarrier_count.";
             return false;
         }
@@ -3063,7 +3120,7 @@ inline bool load_resource_blocks_from_yaml(
         if (std::strcmp(key, "data_resource_blocks") == 0 && node["kind"]) {
             const std::string raw_kind = node["kind"].as<std::string>();
             if (!parse_data_resource_block_kind_string(raw_kind, block.kind)) {
-                LOG_G_ERROR() << context_name << ' ' << key << "[" << idx
+                LOG_G_ERROR_M(Sensing) << context_name << ' ' << key << "[" << idx
                               << "] kind must be '" << kDataResourceBlockKindPayload
                               << "' or '" << kDataResourceBlockKindSensingPilot << "'.";
                 return false;
@@ -3104,7 +3161,7 @@ inline bool load_sensing_mask_blocks_from_yaml(Config& cfg, const YAML::Node& co
 inline void normalize_equalizer_config(EqualizerConfig& equalizer) {
     if (equalizer.equalizer_mode != kEqualizerModeZf &&
         equalizer.equalizer_mode != kEqualizerModeMmse) {
-        LOG_G_WARN() << "Unsupported equalizer_mode='" << equalizer.equalizer_mode
+        LOG_G_WARN_M(Config) << "Unsupported equalizer_mode='" << equalizer.equalizer_mode
                      << "'. Falling back to '" << kEqualizerModeMmse << "'.";
         equalizer.equalizer_mode = kEqualizerModeMmse;
     }
@@ -3112,12 +3169,12 @@ inline void normalize_equalizer_config(EqualizerConfig& equalizer) {
         normalize_channel_tracking_mode_string(equalizer.channel_tracking_mode);
     if (equalizer.equalizer_mag_floor <= 0.0 ||
         !std::isfinite(equalizer.equalizer_mag_floor)) {
-        LOG_G_WARN() << "equalizer_mag_floor is invalid. Falling back to 1e-6.";
+        LOG_G_WARN_M(Config) << "equalizer_mag_floor is invalid. Falling back to 1e-6.";
         equalizer.equalizer_mag_floor = 1e-6;
     }
     if (equalizer.channel_tracking_min_pilot_snr <= 0.0 ||
         !std::isfinite(equalizer.channel_tracking_min_pilot_snr)) {
-        LOG_G_WARN() << "channel_tracking_min_pilot_snr is invalid. Falling back to 1e-4.";
+        LOG_G_WARN_M(Config) << "channel_tracking_min_pilot_snr is invalid. Falling back to 1e-4.";
         equalizer.channel_tracking_min_pilot_snr = 1e-4;
     }
 }
@@ -3183,11 +3240,11 @@ inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
         pacer.target_mbps = 0.0;
     }
     if (pacer.queue_packets == 0) {
-        LOG_G_WARN() << "udp_egress_pacer_queue_packets=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Config) << "udp_egress_pacer_queue_packets=0 is invalid. Clamping to 1.";
         pacer.queue_packets = 1;
     }
     if (pacer.max_delay_ms < 0.0) {
-        LOG_G_WARN() << "udp_egress_pacer_max_delay_ms<0 is invalid. Clamping to 0 ms.";
+        LOG_G_WARN_M(Config) << "udp_egress_pacer_max_delay_ms<0 is invalid. Clamping to 0 ms.";
         pacer.max_delay_ms = 0.0;
     }
 }
@@ -3195,16 +3252,16 @@ inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
 inline void normalize_arq_config(NetworkOutputConfig& net) {
     constexpr int kMaxArqWindowPackets = 256;
     if (net.arq_window_packets < 1) {
-        LOG_G_WARN() << "arq_window_packets < 1, clamping to 1.";
+        LOG_G_WARN_M(Arq) << "arq_window_packets < 1, clamping to 1.";
         net.arq_window_packets = 1;
     }
     if (net.arq_window_packets > kMaxArqWindowPackets) {
-        LOG_G_WARN() << "arq_window_packets exceeds the bounded ARQ runtime maximum; clamping to "
+        LOG_G_WARN_M(Arq) << "arq_window_packets exceeds the bounded ARQ runtime maximum; clamping to "
                      << kMaxArqWindowPackets << ".";
         net.arq_window_packets = kMaxArqWindowPackets;
     }
     if (net.arq_ack_bitmap_bits != 64) {
-        LOG_G_WARN() << "arq_ack_bitmap_bits must be 64 for first pass; overriding.";
+        LOG_G_WARN_M(Arq) << "arq_ack_bitmap_bits must be 64 for first pass; overriding.";
         net.arq_ack_bitmap_bits = 64;
     }
     if (net.arq_retransmit_timeout_ms < 0) {
@@ -3438,7 +3495,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
         config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
         config_detail::load_value(cpu, "main_cpu_core", cfg.cpu_cores.main_cpu_core);
-        config_detail::load_value(runtime, "profiling_modules", cfg.runtime.profiling_modules);
+        config_detail::load_logging_config(config, cfg.logging);
 
         if (!config_detail::load_data_resource_blocks_from_yaml(
                 cfg, resource_preview, "BS config")) {
@@ -3451,7 +3508,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);
         return true;
     } catch (const YAML::Exception& e) {
-        LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
+        LOG_G_ERROR_M(Config) << "Error parsing YAML config: " << e.what();
         return false;
     }
 }
@@ -3460,23 +3517,23 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "BS sensing");
     normalize_sensing_view_bins(cfg, "BS sensing");
     if (cfg.cuda.cuda_mod_pipeline_slots == 0) {
-        LOG_G_WARN() << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Cuda) << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda.cuda_mod_pipeline_slots = 1;
     }
     if (cfg.downlink_pipeline.tx_circular_buffer_size == 0) {
-        LOG_G_WARN() << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Config) << "tx_circular_buffer_size=0 is invalid. Clamping to 1.";
         cfg.downlink_pipeline.tx_circular_buffer_size = 1;
     }
     if (cfg.downlink_pipeline.data_packet_buffer_size == 0) {
-        LOG_G_WARN() << "data_packet_buffer_size=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Sensing) << "data_packet_buffer_size=0 is invalid. Clamping to 1.";
         cfg.downlink_pipeline.data_packet_buffer_size = 1;
     }
     if (cfg.sensing.paired_frame_queue_size == 0) {
-        LOG_G_WARN() << "paired_frame_queue_size=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Sensing) << "paired_frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.sensing.paired_frame_queue_size = 1;
     }
     if (cfg.sensing.symbol_stride == 0) {
-        LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Sensing) << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
         cfg.sensing.symbol_stride = 1;
     }
     if (cfg.measurement.measurement_enable) {
@@ -3484,18 +3541,18 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
             cfg.measurement.measurement_mode = "internal_prbs";
         }
         if (!measurement_mode_enabled(cfg)) {
-            LOG_G_WARN() << "Unsupported BS measurement_mode='"
+            LOG_G_WARN_M(Config) << "Unsupported BS measurement_mode='"
                          << cfg.measurement.measurement_mode << "'. Disabling measurement mode.";
             cfg.measurement.measurement_enable = false;
         }
         if (cfg.measurement.measurement_payload_bytes < measurement_payload_header_size()) {
-            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement.measurement_payload_bytes
+            LOG_G_WARN_M(Config) << "measurement_payload_bytes=" << cfg.measurement.measurement_payload_bytes
                          << " is smaller than the measurement header. Clamping to "
                          << measurement_payload_header_size() << '.';
             cfg.measurement.measurement_payload_bytes = measurement_payload_header_size();
         }
         if (cfg.measurement.measurement_packets_per_point == 0) {
-            LOG_G_WARN() << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
+            LOG_G_WARN_M(Config) << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
             cfg.measurement.measurement_packets_per_point = 1;
         }
     }
@@ -3563,12 +3620,12 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
         cfg.network_output.ertm_debug_ip = "0.0.0.0";
     }
     if (cfg.network_output.mono_sensing_port <= 0) {
-        LOG_G_WARN() << "mono_sensing_port=" << cfg.network_output.mono_sensing_port
+        LOG_G_WARN_M(Sensing) << "mono_sensing_port=" << cfg.network_output.mono_sensing_port
                      << " is invalid. Falling back to 8888.";
         cfg.network_output.mono_sensing_port = 8888;
     }
     if (cfg.network_output.ertm_debug_port <= 0 || cfg.network_output.ertm_debug_port > 65535) {
-        LOG_G_WARN() << "ertm_debug_port=" << cfg.network_output.ertm_debug_port
+        LOG_G_WARN_M(Ertm) << "ertm_debug_port=" << cfg.network_output.ertm_debug_port
                      << " is invalid. Falling back to 12362.";
         cfg.network_output.ertm_debug_port = 12362;
     }
@@ -3863,7 +3920,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(runtime, "default_out_ip", cfg.network_output.default_out_ip);
         config_detail::load_value(runtime, "vofa_debug_ip", cfg.network_output.vofa_debug_ip);
         config_detail::load_value(runtime, "vofa_debug_port", cfg.network_output.vofa_debug_port);
-        config_detail::load_value(runtime, "profiling_modules", cfg.runtime.profiling_modules);
+        config_detail::load_logging_config(config, cfg.logging);
 
         load_simulation_config(config, cfg);
         load_duplex_config(config, cfg);
@@ -3909,7 +3966,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);
         return true;
     } catch (const YAML::Exception& e) {
-        LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
+        LOG_G_ERROR_M(Config) << "Error parsing YAML config: " << e.what();
         return false;
     }
 }
@@ -3918,54 +3975,54 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "deBS sensing");
     normalize_sensing_view_bins(cfg, "deBS sensing");
     if (cfg.cuda.cuda_demod_pipeline_slots == 0) {
-        LOG_G_WARN() << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Cuda) << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda.cuda_demod_pipeline_slots = 1;
     }
     cfg.cuda.cuda_ldpc_decoder_backend =
         normalize_cuda_ldpc_decoder_backend_string(cfg.cuda.cuda_ldpc_decoder_backend);
     if (cfg.cuda.cuda_ldpc_worker_buffers < 2) {
-        LOG_G_WARN() << "cuda_ldpc_worker_buffers<2 is invalid. Clamping to 2.";
+        LOG_G_WARN_M(Cuda) << "cuda_ldpc_worker_buffers<2 is invalid. Clamping to 2.";
         cfg.cuda.cuda_ldpc_worker_buffers = 2;
     }
     if (cfg.cuda.cuda_ldpc_cross_frame_flush_frames == 0) {
-        LOG_G_WARN() << "cuda_ldpc_cross_frame_flush_frames=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Cuda) << "cuda_ldpc_cross_frame_flush_frames=0 is invalid. Clamping to 1.";
         cfg.cuda.cuda_ldpc_cross_frame_flush_frames = 1;
     }
     if (cfg.cuda.cuda_ldpc_cross_frame_flush_us < 0.0) {
-        LOG_G_WARN() << "cuda_ldpc_cross_frame_flush_us<0 is invalid. Clamping to 0 us.";
+        LOG_G_WARN_M(Cuda) << "cuda_ldpc_cross_frame_flush_us<0 is invalid. Clamping to 0 us.";
         cfg.cuda.cuda_ldpc_cross_frame_flush_us = 0.0;
     }
     if (cfg.ofdm.frame_queue_size == 0) {
-        LOG_G_WARN() << "frame_queue_size=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Config) << "frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.ofdm.frame_queue_size = 1;
     }
     if (cfg.sync_tracking.sync_queue_size == 0) {
-        LOG_G_WARN() << "sync_queue_size=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Config) << "sync_queue_size=0 is invalid. Clamping to 1.";
         cfg.sync_tracking.sync_queue_size = 1;
     }
     if (cfg.sync_tracking.sync_cfo_alias_search_range_hz < 0.0 ||
         !std::isfinite(cfg.sync_tracking.sync_cfo_alias_search_range_hz)) {
-        LOG_G_WARN() << "sync_cfo_alias_search_range_hz is invalid. Clamping to 0 Hz.";
+        LOG_G_WARN_M(Config) << "sync_cfo_alias_search_range_hz is invalid. Clamping to 0 Hz.";
         cfg.sync_tracking.sync_cfo_alias_search_range_hz = 0.0;
     }
     if (cfg.sync_tracking.reset_hold_s <= 0.0) {
-        LOG_G_WARN() << "reset_hold_s<=0 is invalid. Clamping to 0.5 s.";
+        LOG_G_WARN_M(Sensing) << "reset_hold_s<=0 is invalid. Clamping to 0.5 s.";
         cfg.sync_tracking.reset_hold_s = 0.5;
     }
     if (cfg.sensing.symbol_stride == 0) {
-        LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Sensing) << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
         cfg.sensing.symbol_stride = 1;
     }
     if (cfg.rf_sampling.rx_agc_update_frames == 0) {
-        LOG_G_WARN() << "rx_agc_update_frames=0 is invalid. Clamping to 1.";
+        LOG_G_WARN_M(Config) << "rx_agc_update_frames=0 is invalid. Clamping to 1.";
         cfg.rf_sampling.rx_agc_update_frames = 1;
     }
     if (cfg.rf_sampling.rx_agc_max_step_db <= 0.0) {
-        LOG_G_WARN() << "rx_agc_max_step_db<=0 is invalid. Clamping to 1 dB.";
+        LOG_G_WARN_M(Config) << "rx_agc_max_step_db<=0 is invalid. Clamping to 1 dB.";
         cfg.rf_sampling.rx_agc_max_step_db = 1.0;
     }
     if (cfg.rf_sampling.rx_agc_low_threshold_db >= cfg.rf_sampling.rx_agc_high_threshold_db) {
-        LOG_G_WARN() << "rx_agc_low_threshold_db>=rx_agc_high_threshold_db is invalid. Resetting to 11/13 dB.";
+        LOG_G_WARN_M(Config) << "rx_agc_low_threshold_db>=rx_agc_high_threshold_db is invalid. Resetting to 11/13 dB.";
         cfg.rf_sampling.rx_agc_low_threshold_db = 11.0;
         cfg.rf_sampling.rx_agc_high_threshold_db = 13.0;
     }
@@ -3981,18 +4038,18 @@ inline void finalize_ue_network_defaults(Config& cfg) {
             cfg.measurement.measurement_mode = "internal_prbs";
         }
         if (!measurement_mode_enabled(cfg)) {
-            LOG_G_WARN() << "Unsupported UE measurement_mode='"
+            LOG_G_WARN_M(Config) << "Unsupported UE measurement_mode='"
                          << cfg.measurement.measurement_mode << "'. Disabling measurement mode.";
             cfg.measurement.measurement_enable = false;
         }
         if (cfg.measurement.measurement_payload_bytes < measurement_payload_header_size()) {
-            LOG_G_WARN() << "measurement_payload_bytes=" << cfg.measurement.measurement_payload_bytes
+            LOG_G_WARN_M(Config) << "measurement_payload_bytes=" << cfg.measurement.measurement_payload_bytes
                          << " is smaller than the measurement header. Clamping to "
                          << measurement_payload_header_size() << '.';
             cfg.measurement.measurement_payload_bytes = measurement_payload_header_size();
         }
         if (cfg.measurement.measurement_packets_per_point == 0) {
-            LOG_G_WARN() << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
+            LOG_G_WARN_M(Config) << "measurement_packets_per_point=0 is invalid. Clamping to 1.";
             cfg.measurement.measurement_packets_per_point = 1;
         }
     }
@@ -4006,7 +4063,7 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     if (cfg.network_output.uplink_self_pdf_ip.empty()) cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
     if (cfg.network_output.ertm_debug_ip.empty()) cfg.network_output.ertm_debug_ip = "0.0.0.0";
     if (cfg.network_output.ertm_debug_port <= 0 || cfg.network_output.ertm_debug_port > 65535) {
-        LOG_G_WARN() << "ertm_debug_port=" << cfg.network_output.ertm_debug_port
+        LOG_G_WARN_M(Ertm) << "ertm_debug_port=" << cfg.network_output.ertm_debug_port
                      << " is invalid. Falling back to 12362.";
         cfg.network_output.ertm_debug_port = 12362;
     }
@@ -4017,24 +4074,24 @@ inline void finalize_ue_network_defaults(Config& cfg) {
 
 inline void log_ue_sync_mode(const Config& cfg) {
     if (cfg.sync_tracking.hardware_sync && cfg.sync_tracking.software_sync) {
-        LOG_G_INFO() << "Both software_sync and hardware_sync are enabled.";
+        LOG_G_INFO_M(Config) << "Both software_sync and hardware_sync are enabled.";
     } else if (cfg.sync_tracking.hardware_sync) {
-        LOG_G_INFO() << "Hardware sync enabled.";
+        LOG_G_INFO_M(Config) << "Hardware sync enabled.";
     } else if (cfg.sync_tracking.software_sync) {
-        LOG_G_INFO() << "Software sync enabled.";
+        LOG_G_INFO_M(Config) << "Software sync enabled.";
     } else {
-        LOG_G_WARN() << "Both software_sync and hardware_sync are disabled.";
+        LOG_G_WARN_M(Config) << "Both software_sync and hardware_sync are disabled.";
     }
-    LOG_G_INFO() << "Predictive delay compensation "
+    LOG_G_INFO_M(Config) << "Predictive delay compensation "
                  << (cfg.sync_tracking.predictive_delay ? "enabled." : "disabled.");
 }
 
 inline void log_ue_agc_mode(const Config& cfg) {
     if (!cfg.rf_sampling.rx_agc_enable) {
-        LOG_G_INFO() << "RX AGC disabled. Using fixed RX gain: " << cfg.rf_sampling.rx_gain << " dB";
+        LOG_G_INFO_M(Agc) << "RX AGC disabled. Using fixed RX gain: " << cfg.rf_sampling.rx_gain << " dB";
         return;
     }
-    LOG_G_INFO() << "RX AGC enabled. low_threshold_db=" << cfg.rf_sampling.rx_agc_low_threshold_db
+    LOG_G_INFO_M(Agc) << "RX AGC enabled. low_threshold_db=" << cfg.rf_sampling.rx_agc_low_threshold_db
                  << ", high_threshold_db=" << cfg.rf_sampling.rx_agc_high_threshold_db
                  << ", max_step_db=" << cfg.rf_sampling.rx_agc_max_step_db
                  << ", update_frames=" << cfg.rf_sampling.rx_agc_update_frames;
@@ -4966,7 +5023,7 @@ public:
         // Increase send buffer size to avoid dropped packets
         int sendbuff = 4 * 1024 * 1024; // 4MB
         if (setsockopt(sockfd_, SOL_SOCKET, SO_SNDBUF, &sendbuff, sizeof(sendbuff)) < 0) {
-            LOG_G_WARN() << "Warning: Failed to set send buffer size";
+            LOG_G_WARN_M(Config) << "Warning: Failed to set send buffer size";
         }
     }
 
@@ -5015,7 +5072,7 @@ public:
         if (pacer_cfg_.enabled) {
             pacer_running_ = true;
             pacer_thread_ = std::thread(&UdpSender::pacer_loop, this);
-            LOG_G_INFO() << "UDP egress pacer enabled: target_mbps="
+            LOG_G_INFO_M(Config) << "UDP egress pacer enabled: target_mbps="
                          << pacer_cfg_.target_mbps
                          << " (0=auto), queue_packets="
                          << pacer_cfg_.queue_packets
@@ -5143,7 +5200,7 @@ private:
                 pacer_queue_.pop_front();
                 ++pacer_dropped_oldest_;
                 if (pacer_dropped_oldest_ <= 5 || (pacer_dropped_oldest_ % 100) == 0) {
-                    LOG_G_WARN() << "UDP egress pacer dropped oldest packet: queue full, dropped="
+                    LOG_G_WARN_M(Config) << "UDP egress pacer dropped oldest packet: queue full, dropped="
                                  << pacer_dropped_oldest_;
                 }
             }
@@ -5266,7 +5323,7 @@ private:
         if (interval_send_failed > 0) {
             oss << " (+" << interval_send_failed << ")";
         }
-        LOG_G_INFO() << oss.str();
+        LOG_G_INFO_M(UdpEgressProfiling) << oss.str();
 
         pacer_stats_last_log_time_ = now;
         pacer_stats_last_enqueued_bytes_ = enqueued_bytes;
@@ -5297,7 +5354,7 @@ private:
             if (packet_is_stale(packet, now)) {
                 ++pacer_dropped_stale_;
                 if (pacer_dropped_stale_ <= 5 || (pacer_dropped_stale_ % 100) == 0) {
-                    LOG_G_WARN() << "UDP egress pacer dropped stale packet: dropped="
+                    LOG_G_WARN_M(Config) << "UDP egress pacer dropped stale packet: dropped="
                                  << pacer_dropped_stale_;
                 }
                 log_pacer_stats(now);
@@ -5324,7 +5381,7 @@ private:
                 pacer_sent_bytes_ += packet.bytes.size();
             } catch (const std::exception& e) {
                 ++pacer_send_failed_;
-                LOG_G_WARN() << "UDP egress pacer send failed: " << e.what();
+                LOG_G_WARN_M(Config) << "UDP egress pacer send failed: " << e.what();
             }
             log_pacer_stats(SteadyClock::now());
         }
@@ -6014,7 +6071,7 @@ private:
     void _queue_frame(uint32_t channel_id, FrameData&& frame_data) {
         const int32_t channel_index = _channel_index(channel_id);
         if (channel_index < 0) {
-            LOG_G_WARN() << "Ignoring aggregated sensing frame for unknown channel id=" << channel_id;
+            LOG_G_WARN_M(Sensing) << "Ignoring aggregated sensing frame for unknown channel id=" << channel_id;
             return;
         }
         auto& queue = _channel_queues[static_cast<size_t>(channel_index)];
@@ -6082,7 +6139,7 @@ private:
             return;
         }
         const auto it = _pending_frames.begin();
-        LOG_RT_WARN_HZ(5) << "[Sensing Aggregate] dropping incomplete frame start_symbol="
+        LOG_RT_WARN_HZ_M(SensingAggregate, 5) << "[Sensing Aggregate] dropping incomplete frame start_symbol="
                           << it->first << " after collecting "
                           << it->second.received_channels << "/" << _channel_ids.size()
                           << " channels";
@@ -6111,7 +6168,7 @@ private:
         for (size_t i = 0; i < channel_count; ++i) {
             const size_t payload_bytes = _wire_payload_bytes(pending.frames[i]);
             if (payload_bytes != channel_payload_bytes) {
-                LOG_G_WARN() << "[Sensing Aggregate] channel payload size mismatch for frame "
+                LOG_G_WARN_M(SensingAggregate) << "[Sensing Aggregate] channel payload size mismatch for frame "
                              << frame_start_symbol_index << ": expected " << channel_payload_bytes
                              << " bytes, got " << payload_bytes << " bytes on channel "
                              << _channel_ids[i];
@@ -6132,7 +6189,7 @@ private:
             have_all_metadata = have_all_metadata && has_metadata;
         }
         if (any_metadata && !have_all_metadata) {
-            LOG_G_WARN() << "[Sensing Aggregate] dropping metadata sidecar for frame "
+            LOG_G_WARN_M(SensingAggregate) << "[Sensing Aggregate] dropping metadata sidecar for frame "
                          << frame_start_symbol_index
                          << " because not all channels provided metadata";
         } else if (have_all_metadata) {
@@ -6476,7 +6533,7 @@ private:
                 try {
                     send_func_(latest);
                 } catch (const std::exception& e) {
-                    LOG_G_WARN() << "DataSender error: " << e.what();
+                    LOG_G_WARN_M(Config) << "DataSender error: " << e.what();
                 }
                 continue;
             }
@@ -6493,7 +6550,7 @@ private:
             try {
                 send_func_(data);
             } catch (const std::exception& e) {
-                LOG_G_WARN() << "DataSender error: " << e.what();
+                LOG_G_WARN_M(Config) << "DataSender error: " << e.what();
             }
 
             // Update next send time
@@ -6640,7 +6697,7 @@ public:
         int32_t value)
     {
         if (command.size() != 4) {
-            LOG_G_WARN() << "Control status command id must be exactly 4 bytes";
+            LOG_G_WARN_M(Config) << "Control status command id must be exactly 4 bytes";
             return;
         }
         ControlCommand reply;
@@ -6708,7 +6765,7 @@ private:
 
     void _dispatch(const ControlPeer& identity, const std::vector<uint8_t>& payload) {
         if (payload.size() != sizeof(ControlCommand)) {
-            LOG_G_WARN() << "Received malformed control command (" << payload.size() << " bytes)";
+            LOG_G_WARN_M(Config) << "Received malformed control command (" << payload.size() << " bytes)";
             return;
         }
         ControlCommand cmd;
@@ -6733,13 +6790,13 @@ private:
                 }
             }
             if (!callback) {
-                LOG_G_WARN() << "Unknown command: " << command_str;
+                LOG_G_WARN_M(Config) << "Unknown command: " << command_str;
                 return;
             }
             try {
                 callback(value);
             } catch (const std::exception& e) {
-                LOG_G_WARN() << "Error processing command '" << command_str
+                LOG_G_WARN_M(Config) << "Error processing command '" << command_str
                              << "': " << e.what();
             }
         } else if (header_str == "REQ ") {
@@ -6752,17 +6809,17 @@ private:
                 }
             }
             if (!callback) {
-                LOG_G_WARN() << "Unknown command: " << command_str;
+                LOG_G_WARN_M(Config) << "Unknown command: " << command_str;
                 return;
             }
             try {
                 callback(value, identity);
             } catch (const std::exception& e) {
-                LOG_G_WARN() << "Error processing command '" << command_str
+                LOG_G_WARN_M(Config) << "Error processing command '" << command_str
                              << "': " << e.what();
             }
         } else {
-            LOG_G_WARN() << "Invalid command header received";
+            LOG_G_WARN_M(Config) << "Invalid command header received";
         }
     }
 
@@ -6844,7 +6901,7 @@ public:
         // Open serial port in non-blocking mode
         serial_fd_ = open(device_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ == -1) {
-            LOG_G_ERROR() << "ERROR: Failed to open serial device: " << strerror(errno);
+            LOG_G_ERROR_M(Config) << "ERROR: Failed to open serial device: " << strerror(errno);
             throw std::runtime_error("Serial device open failed");
         }
         
@@ -6864,7 +6921,7 @@ public:
         options.c_cc[VTIME] = 0;    // Return immediately
         
         if (tcsetattr(serial_fd_, TCSANOW, &options) != 0) {
-            LOG_G_ERROR() << "ERROR: Failed to set serial attributes: " << strerror(errno);
+            LOG_G_ERROR_M(Config) << "ERROR: Failed to set serial attributes: " << strerror(errno);
             close(serial_fd_);
             throw std::runtime_error("Serial configuration failed");
         }
@@ -6988,7 +7045,7 @@ public:
         ocxo_pi_max_step_fast_ppm_ = std::max(max_step_fast_ppm, 0.0);
         ocxo_pi_max_step_slow_ppm_ = std::max(max_step_slow_ppm, 0.0);
         reset_ocxo_pi_state();
-        LOG_G_INFO() << "Configured OCXO PI: Kp_fast=" << ocxo_pi_kp_fast_
+        LOG_G_INFO_M(Ocxo) << "Configured OCXO PI: Kp_fast=" << ocxo_pi_kp_fast_
                      << ", Ki_fast=" << ocxo_pi_ki_fast_
                      << ", Kp_slow=" << ocxo_pi_kp_slow_
                      << ", Ki_slow=" << ocxo_pi_ki_slow_
@@ -7008,7 +7065,7 @@ public:
             const bool fast_stage = ocxo_pi_fast_mode_;
             const double kp = fast_stage ? ocxo_pi_kp_fast_ : ocxo_pi_kp_slow_;
             const double ki = fast_stage ? ocxo_pi_ki_fast_ : ocxo_pi_ki_slow_;
-            LOG_RT_INFO() << "OCXO PI initialized (stage="
+            LOG_RT_INFO_M(Ocxo) << "OCXO PI initialized (stage="
                           << (fast_stage ? "fast" : "slow")
                           << ", Kp=" << kp
                           << ", Ki=" << ki << ")";
@@ -7028,7 +7085,7 @@ public:
 
         if (ocxo_pi_fast_mode_ && ocxo_pi_stable_time_s_ >= ocxo_pi_switch_hold_s_) {
             ocxo_pi_fast_mode_ = false;
-            LOG_RT_INFO() << "OCXO PI switched to slow stage (Kp="
+            LOG_RT_INFO_M(Ocxo) << "OCXO PI switched to slow stage (Kp="
                           << ocxo_pi_kp_slow_ << ", Ki=" << ocxo_pi_ki_slow_ << ")";
         }
 
@@ -7042,7 +7099,7 @@ public:
 
         ++ocxo_pi_adjust_log_counter_;
         if (ocxo_pi_adjust_log_counter_ % OCXO_PI_ADJUST_LOG_INTERVAL == 0) {
-            LOG_RT_INFO() << "OCXO PI adjust: error_ppm=" << error_ppm
+            LOG_RT_INFO_M(Ocxo) << "OCXO PI adjust: error_ppm=" << error_ppm
                           << ", delta_ppm=" << delta_ppm
                           << ", stage=" << (fast_stage ? "fast" : "slow")
                           << ", Kp=" << kp
@@ -7158,7 +7215,7 @@ private:
                 retry_count++;
             } else {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    LOG_G_ERROR() << "ERROR: Serial write error: " << strerror(errno) 
+                    LOG_G_ERROR_M(Config) << "ERROR: Serial write error: " << strerror(errno)
                                   << " [command: " << command << "]";
                     return;
                 }
@@ -7168,7 +7225,7 @@ private:
         }
         
         if (remaining > 0) {
-            LOG_G_ERROR() << "ERROR: Failed to send full command after 3 attempts: " 
+            LOG_G_ERROR_M(Config) << "ERROR: Failed to send full command after 3 attempts: "
                           << command;
             return;
         }
@@ -7181,7 +7238,7 @@ private:
         while (true) {
             // Timeout check (500ms)
             if (std::chrono::steady_clock::now() - start_time > std::chrono::milliseconds(500)) {
-                LOG_G_ERROR() << "ERROR: Response timeout for command: " << command;
+                LOG_G_ERROR_M(Config) << "ERROR: Response timeout for command: " << command;
                 tcflush(serial_fd_, TCIFLUSH);
                 return;
             }
@@ -7201,7 +7258,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             } else {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    LOG_G_ERROR() << "ERROR: Serial read error: " << strerror(errno);
+                    LOG_G_ERROR_M(Config) << "ERROR: Serial read error: " << strerror(errno);
                     return;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -7213,16 +7270,16 @@ private:
             // Success response - silent handling
         } 
         else if (strncmp(response, "BAD DATA", 8) == 0) {
-            LOG_G_ERROR() << "ERROR: Device rejected command - BAD DATA: " << command;
+            LOG_G_ERROR_M(Config) << "ERROR: Device rejected command - BAD DATA: " << command;
         }
         else if (strncmp(response, "BAD CMD", 7) == 0) {
-            LOG_G_ERROR() << "ERROR: Device rejected command - BAD CMD: " << command;
+            LOG_G_ERROR_M(Config) << "ERROR: Device rejected command - BAD CMD: " << command;
         }
         else if (strncmp(response, "TIMEOUT", 7) == 0) {
-            LOG_G_ERROR() << "ERROR: Device operation timed out for command: " << command;
+            LOG_G_ERROR_M(Config) << "ERROR: Device operation timed out for command: " << command;
         }
         else {
-            LOG_G_ERROR() << "ERROR: Unexpected device response: " << response 
+            LOG_G_ERROR_M(Config) << "ERROR: Unexpected device response: " << response
                           << " for command: " << command;
         }
     }

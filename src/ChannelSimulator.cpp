@@ -304,7 +304,7 @@ bool load_steering_override(const std::string& path, size_t num_targets,
     if (path.empty()) return false;
     std::ifstream f(path, std::ios::binary);
     if (!f) {
-        LOG_G_WARN() << "[ChannelSim] steering_override_file '" << path
+        LOG_G_WARN_M(ChannelSim) << "[ChannelSim] steering_override_file '" << path
                      << "' not found; falling back to ULA model.";
         return false;
     }
@@ -312,13 +312,13 @@ bool load_steering_override(const std::string& path, size_t num_targets,
     out.resize(expected);
     f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(expected * sizeof(cf)));
     if (static_cast<size_t>(f.gcount()) != expected * sizeof(cf)) {
-        LOG_G_WARN() << "[ChannelSim] steering_override_file '" << path << "' has "
+        LOG_G_WARN_M(ChannelSim) << "[ChannelSim] steering_override_file '" << path << "' has "
                      << f.gcount() << " bytes, expected " << expected * sizeof(cf)
                      << "; falling back to ULA model.";
         out.clear();
         return false;
     }
-    LOG_G_INFO() << "[ChannelSim] Loaded steering override (" << num_targets << " targets x "
+    LOG_G_INFO_M(ChannelSim) << "[ChannelSim] Loaded steering override (" << num_targets << " targets x "
                  << num_channels << " channels) from " << path;
     return true;
 }
@@ -333,17 +333,18 @@ int main(int argc, char** argv) {
     const std::string config_file = (argc > 1) ? argv[1] : "BS.yaml";
     Config cfg = make_default_bs_config();
     if (!path_exists(config_file)) {
-        LOG_G_ERROR() << "[ChannelSim] Config file '" << config_file << "' not found.";
+        LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] Config file '" << config_file << "' not found.";
         return 1;
     }
     if (!load_bs_config_from_yaml(cfg, config_file)) {
-        LOG_G_ERROR() << "[ChannelSim] Failed to load config from '" << config_file << "'.";
+        LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] Failed to load config from '" << config_file << "'.";
         return 1;
     }
+    apply_logging_config(cfg.logging);
     normalize_bs_sensing_channels(cfg);
 
     if (!radio_is_sim(cfg)) {
-        LOG_G_WARN() << "[ChannelSim] radio_backend is not 'sim' in " << config_file
+        LOG_G_WARN_M(ChannelSim) << "[ChannelSim] radio_backend is not 'sim' in " << config_file
                      << "; running the simulator anyway.";
     }
 
@@ -351,12 +352,12 @@ int main(int argc, char** argv) {
     const double fs = cfg.rf_sampling.sample_rate;
     const double sample_rate_offset_ppm = sim.sample_rate_offset_ppm;
     if (!std::isfinite(sample_rate_offset_ppm)) {
-        LOG_G_ERROR() << "[ChannelSim] sample_rate_offset_ppm must be finite.";
+        LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] sample_rate_offset_ppm must be finite.";
         return 1;
     }
     const double ue_to_bs_sample_rate_ratio = 1.0 + sample_rate_offset_ppm * 1e-6;
     if (ue_to_bs_sample_rate_ratio < 0.9 || ue_to_bs_sample_rate_ratio > 1.1) {
-        LOG_G_ERROR() << "[ChannelSim] sample_rate_offset_ppm=" << sample_rate_offset_ppm
+        LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] sample_rate_offset_ppm=" << sample_rate_offset_ppm
                       << " is outside the supported +/-100000 ppm range.";
         return 1;
     }
@@ -378,7 +379,7 @@ int main(int argc, char** argv) {
         ? sim.array_spacing_m * cfg.downlink.center_freq / kSpeedOfLight
         : sim.array_spacing_lambda;
 
-    LOG_G_INFO() << "[ChannelSim] session=" << sim.session << " fs=" << fs
+    LOG_G_INFO_M(ChannelSim) << "[ChannelSim] session=" << sim.session << " fs=" << fs
                  << " Hz, center=" << cfg.downlink.center_freq
                  << " Hz, sample_rate_offset_ppm=" << sample_rate_offset_ppm
                  << " (UE/BS ratio=" << ue_to_bs_sample_rate_ratio << ")"
@@ -488,7 +489,7 @@ int main(int argc, char** argv) {
     std::atomic<int32_t> target_snr_centidb{
         sim.snr_control_enable ? snr_db_to_command_value(sim.target_snr_db) : kSnrControlDisabled};
     if (sim.snr_control_enable && !noise_on) {
-        LOG_G_WARN() << "[ChannelSim] target SNR control requested, but noise_power_dbfs <= -200 disables AWGN.";
+        LOG_G_WARN_M(ChannelSim) << "[ChannelSim] target SNR control requested, but noise_power_dbfs <= -200 disables AWGN.";
     }
 
     // --- Comm CFO ---
@@ -526,7 +527,7 @@ int main(int argc, char** argv) {
     if (enable_uplink) {
         ul_tx_ring.create(sim_shm::make_shm_name(sim.session, "ul.tx"), sim.ring_capacity_samples);
         ul_rx_ring.create(sim_shm::make_shm_name(sim.session, "rx.ul"), sim.ring_capacity_samples);
-        LOG_G_INFO() << "[ChannelSim] uplink enabled (UE ul.tx -> hub -> BS rx.ul), reciprocal comm channel, taps="
+        LOG_G_INFO_M(ChannelSim) << "[ChannelSim] uplink enabled (UE ul.tx -> hub -> BS rx.ul), reciprocal comm channel, taps="
                      << ul_taps.size()
                      << ", bistatic_targets=" << uplink_bistatic_targets.size();
     }
@@ -537,12 +538,12 @@ int main(int argc, char** argv) {
         control_handler->register_command("SNR ", [&target_snr_centidb, noise_on](int32_t value) {
             if (value == kSnrControlDisabled) {
                 target_snr_centidb.store(kSnrControlDisabled, std::memory_order_release);
-                LOG_G_INFO() << "[ChannelSim] target SNR scaling disabled";
+                LOG_G_INFO_M(ChannelSim) << "[ChannelSim] target SNR scaling disabled";
                 return;
             }
             const int32_t clamped = std::clamp<int32_t>(value, -20000, 20000);
             target_snr_centidb.store(clamped, std::memory_order_release);
-            LOG_G_INFO() << "[ChannelSim] target SNR set to "
+            LOG_G_INFO_M(ChannelSim) << "[ChannelSim] target SNR set to "
                          << command_value_to_snr_db(clamped) << " dB"
                          << (noise_on ? "" : " (AWGN is disabled)");
         });
@@ -556,13 +557,13 @@ int main(int argc, char** argv) {
                 target_snr_centidb.load(std::memory_order_acquire));
         });
         control_handler->start();
-        LOG_G_INFO() << "[ChannelSim] ZMQ control ready on port " << sim.control_port
+        LOG_G_INFO_M(ChannelSim) << "[ChannelSim] ZMQ control ready on port " << sim.control_port
                      << " (command SNR = dB*100; value INT32_MIN disables scaling)";
     } else {
-        LOG_G_INFO() << "[ChannelSim] ZMQ control disabled (simulation.control_port <= 0)";
+        LOG_G_INFO_M(ChannelSim) << "[ChannelSim] ZMQ control disabled (simulation.control_port <= 0)";
     }
 
-    LOG_G_INFO() << "[ChannelSim] Shared memory ready. Waiting for transmit samples... (Ctrl-C to stop)";
+    LOG_G_INFO_M(ChannelSim) << "[ChannelSim] Shared memory ready. Waiting for transmit samples... (Ctrl-C to stop)";
 
     // --- Processing buffers ---
     const size_t max_chunk = std::max<size_t>(cfg.samples_per_frame(), 4096);
@@ -697,7 +698,7 @@ int main(int argc, char** argv) {
             const double residual_cfo_hz = sim.cfo_hz + rx_freq_correction_hz;
             if (!have_logged_rx_freq_correction ||
                 std::abs(rx_freq_correction_hz - last_logged_rx_freq_correction_hz) > 1e-3) {
-                LOG_G_INFO() << "[ChannelSim] comm RX frequency correction="
+                LOG_G_INFO_M(ChannelSim) << "[ChannelSim] comm RX frequency correction="
                              << rx_freq_correction_hz << " Hz, residual CFO="
                              << residual_cfo_hz << " Hz";
                 last_logged_rx_freq_correction_hz = rx_freq_correction_hz;
@@ -722,9 +723,9 @@ int main(int argc, char** argv) {
         const int32_t snr_centidb = target_snr_centidb.load(std::memory_order_acquire);
         if (snr_centidb != last_logged_snr_centidb) {
             if (snr_centidb == kSnrControlDisabled) {
-                LOG_G_INFO() << "[ChannelSim] target SNR scaling is off";
+                LOG_G_INFO_M(ChannelSim) << "[ChannelSim] target SNR scaling is off";
             } else {
-                LOG_G_INFO() << "[ChannelSim] applying target SNR "
+                LOG_G_INFO_M(ChannelSim) << "[ChannelSim] applying target SNR "
                              << command_value_to_snr_db(snr_centidb) << " dB";
             }
             last_logged_snr_centidb = snr_centidb;
@@ -836,13 +837,13 @@ int main(int argc, char** argv) {
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_log > std::chrono::seconds(2)) {
-            LOG_G_INFO() << "[ChannelSim] produced " << total_produced << " samples ("
+            LOG_G_INFO_M(ChannelSim) << "[ChannelSim] produced " << total_produced << " samples ("
                          << static_cast<double>(total_produced) / fs << " s of air time)";
             last_log = now;
         }
     }
 
-    LOG_G_INFO() << "[ChannelSim] Stopping. Cleaning up shared memory.";
+    LOG_G_INFO_M(ChannelSim) << "[ChannelSim] Stopping. Cleaning up shared memory.";
     if (control_handler) {
         control_handler->stop();
     }

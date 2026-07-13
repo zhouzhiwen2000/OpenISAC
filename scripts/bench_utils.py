@@ -34,6 +34,28 @@ def save_yaml(path: Path, data: dict) -> None:
         yaml.safe_dump(data, handle, sort_keys=False)
 
 
+def configure_logging(
+    cfg: dict,
+    module_levels: dict[str, str] | None = None,
+    default_level: str = "warn",
+) -> None:
+    """Keep benchmark logs quiet while explicitly enabling required reports."""
+    logging_cfg = cfg.get("logging")
+    if not isinstance(logging_cfg, dict):
+        logging_cfg = {}
+        cfg["logging"] = logging_cfg
+    logging_cfg.setdefault("default_level", default_level)
+    logging_cfg.setdefault("timestamps", False)
+    logging_cfg.setdefault("force_error", True)
+
+    modules = logging_cfg.get("modules")
+    if not isinstance(modules, dict):
+        modules = {}
+        logging_cfg["modules"] = modules
+    if module_levels:
+        modules.update(module_levels)
+
+
 def configure_measurement(
     cfg: dict,
     run_id: str,

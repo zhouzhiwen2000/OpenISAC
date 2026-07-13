@@ -126,7 +126,7 @@ public:
             link_cfg.network_output.ul_udp_output_ip,
             static_cast<uint16_t>(link_cfg.network_output.ul_udp_output_port),
             link_cfg.network_output.udp_egress_pacer,
-            link_cfg.should_profile("udp_egress"));
+            LOG_MOD_ON(UdpEgressProfiling));
         _rx_frame_queue.reset(4, [this]() {
             UplinkRxFrame frame;
             frame.samples.resize(_period_samples);
@@ -198,7 +198,7 @@ public:
             _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
         }
         _restart_requested.store(true, std::memory_order_release);
-        LOG_G_WARN() << "[UL-RX] requested shared restart at "
+        LOG_G_WARN_M(UlRx) << "[UL-RX] requested shared restart at "
                      << start_time.get_real_secs()
                      << " s, aligned to BS TX restart";
     }
@@ -210,7 +210,7 @@ public:
             _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
         }
         _restart_requested.store(true, std::memory_order_release);
-        LOG_G_WARN() << "[UL-RX] requested restart without timed anchor";
+        LOG_G_WARN_M(UlRx) << "[UL-RX] requested restart without timed anchor";
     }
 
     // Provider for the BS TX frame index, used by the duplex-invariant health log
@@ -376,7 +376,7 @@ public:
             if (md.error_code != radio::RxError::None &&
                 md.error_code != radio::RxError::Timeout) {
                 _rx_error_count.fetch_add(1, std::memory_order_relaxed);
-                LOG_RT_WARN() << "[UL-RX] RX metadata error: " << md.strerror();
+                LOG_RT_WARN_M(UlRx) << "[UL-RX] RX metadata error: " << md.strerror();
                 // Match the sensing RX behavior: never stitch samples across an
                 // overflow/metadata gap into one frame. Drop any partial read and
                 // let the next successful metadata timestamp drive realignment.
@@ -501,7 +501,7 @@ public:
             _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
         }
         _restart_requested.store(true, std::memory_order_release);
-        LOG_RT_WARN() << "[UL-RX] requested restart after " << reason
+        LOG_RT_WARN_M(UlRx) << "[UL-RX] requested restart after " << reason
                       << " at " << start_time.get_real_secs() << " s";
     }
 
@@ -570,11 +570,11 @@ public:
             cmd.stream_now = !timed_start;
             if (timed_start) {
                 cmd.time_spec = stream_start_time;
-                LOG_G_INFO() << "[UL-RX] timed RX stream start at "
+                LOG_G_INFO_M(UlRx) << "[UL-RX] timed RX stream start at "
                              << stream_start_time.get_real_secs()
                              << " s, aligned to BS TX frame anchor";
             } else {
-                LOG_G_INFO() << "[UL-RX] immediate RX stream start (no timed anchor)";
+                LOG_G_INFO_M(UlRx) << "[UL-RX] immediate RX stream start (no timed anchor)";
             }
             _rx_stream->issue_stream_cmd(cmd);
         };
@@ -583,7 +583,7 @@ public:
             try {
                 _rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
             } catch (const std::exception& e) {
-                LOG_RT_WARN() << "[UL-RX] failed to stop RX stream before restart: " << e.what();
+                LOG_RT_WARN_M(UlRx) << "[UL-RX] failed to stop RX stream before restart: " << e.what();
             }
         };
 
@@ -605,7 +605,7 @@ public:
             discard(diff);
             base_frame_index = frame_base;
             fallback_frame_offset = 0;
-            LOG_RT_WARN() << "[UL-RX] stream generation " << generation
+            LOG_RT_WARN_M(UlRx) << "[UL-RX] stream generation " << generation
                           << " aligned after " << reason
                           << " with DUTI=" << diff
                           << " samples, base_frame=" << base_frame_index;
@@ -705,7 +705,7 @@ public:
                 if (needs_recovery_alignment) {
                     const int64_t correction = _normalize_alignment_samples(-residual_samples);
                     pending_boundary_correction = correction;
-                    LOG_RT_WARN() << "[UL-RX] RX frame boundary mismatch after "
+                    LOG_RT_WARN_M(UlRx) << "[UL-RX] RX frame boundary mismatch after "
                                   << (read.metadata_error ? "metadata error" : "metadata indexing")
                                   << ": residual=" << residual_samples
                                   << " samples, correction=" << correction
@@ -714,19 +714,19 @@ public:
                 frame->frame_index = base_frame_index + frame_offset;
                 fallback_frame_offset = frame_offset + 1;
                 if (std::llabs(residual_samples) > kMetadataJitterToleranceSamples) {
-                    LOG_RT_WARN_HZ(5) << "[UL-RX] frame boundary residual after "
+                    LOG_RT_WARN_HZ_M(UlRx, 5) << "[UL-RX] frame boundary residual after "
                                       << "metadata indexing: residual="
                                       << residual_samples << " samples"
                                       << ", frame_index=" << frame->frame_index;
                 }
             } else {
                 if (read.metadata_error) {
-                    LOG_RT_WARN_HZ(5) << "[UL-RX] dropping post-error RX frame without "
+                    LOG_RT_WARN_HZ_M(UlRx, 5) << "[UL-RX] dropping post-error RX frame without "
                                       << "metadata timestamp; cannot verify frame boundary";
                     continue;
                 }
                 if (first_sample_idx != std::numeric_limits<int64_t>::min()) {
-                    LOG_RT_WARN_HZ(5) << "[UL-RX] dropping stale RX frame before current "
+                    LOG_RT_WARN_HZ_M(UlRx, 5) << "[UL-RX] dropping stale RX frame before current "
                                       << "stream anchor: first_sample_idx="
                                       << first_sample_idx;
                     continue;
@@ -877,7 +877,7 @@ public:
                     << ", ul_rx-bs_tx_gap_frames=" << (static_cast<int64_t>(frame_index) -
                                                 static_cast<int64_t>(bs_frame));
             }
-            LOG_G_INFO() << "[UL-RX] health: ul_rx_frame=" << frame_index
+            LOG_G_INFO_M(UlRx) << "[UL-RX] health: ul_rx_frame=" << frame_index
                          << ", pilot_noise_var=" << noise_var
                          << ", decoded=" << _decoded_count.load(std::memory_order_relaxed)
                          << inv.str();
@@ -1006,7 +1006,7 @@ public:
             try {
                 _ldpc.decode_frame(payload_llr, decoded);
             } catch (const std::exception& e) {
-                LOG_RT_WARN_HZ(1) << "[UL-RX] LDPC decode failed: " << e.what();
+                LOG_RT_WARN_HZ_M(UlRx, 1) << "[UL-RX] LDPC decode failed: " << e.what();
                 symbol_offset = next_off;
                 continue;
             }
@@ -1135,8 +1135,8 @@ public:
             peak, avg, sync_time, _cfg.ofdm.fft_size, _host_now_ns(), _agc_gates,
             [this](double g) { if (_apply_gain) _apply_gain(g); },
             &agc_adjustment);
-        if (adjusted && _link_cfg.should_profile("agc")) {
-            LOG_RT_INFO() << "[UL-RX] RX AGC adjusted gain to " << agc_adjustment.next_gain_db
+        if (adjusted && LOG_MOD_ON(Agc)) {
+            LOG_RT_INFO_M(UlRx) << "[UL-RX] RX AGC adjusted gain to " << agc_adjustment.next_gain_db
                           << " dB (delta=" << agc_adjustment.delta_db
                           << " dB, delay_peak=" << agc_adjustment.observed_peak
                           << ", delay_peak_db=" << agc_adjustment.observed_peak_db
@@ -1167,7 +1167,7 @@ public:
             return;
         }
         if ((_self_debug_frame_counter++ % 4096) == 0) {
-            LOG_G_INFO() << "[UL-RX] self-channel debug: local BS ZC offset="
+            LOG_G_INFO_M(UlRx) << "[UL-RX] self-channel debug: local BS ZC offset="
                          << local_tx_zc_start
                          << ", rx_frame_start_offset=0"
                          << ", frame_period=" << frame.size();

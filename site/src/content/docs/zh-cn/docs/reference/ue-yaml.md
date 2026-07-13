@@ -257,7 +257,10 @@ description: UE 运行时配置的分组参考。
 | `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | 特定输出 IP 为空时，UDP 和 VOFA+ 输出使用的默认目标 IP。 |
 | `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug 目标 IP；空字符串使用 `default_out_ip`。 |
 | `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug 目标端口。 |
-| `runtime.profiling_modules` | `string` | `""` | 逗号分隔模块，如 `demodulation`、`cfo`、`sync`、`agc`、`align`、`snr`、`arq`、`uplink`、`ertm` 或 `all`。 |
+
+#### UE logging
+
+性能剖析与诊断日志共用层级化 `logging.*`。性能项路径以 `_profiling` 结尾（默认关闭，需显式打开，例如 `demod_profiling: info`）。
 
 资源映射说明：
 * `resource_preview.data_resource_blocks` 通常应在 BS 和 UE 之间保持一致，包括 `kind`。

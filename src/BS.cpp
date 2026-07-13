@@ -213,18 +213,18 @@ public:
             x = _qpsk_symbol_from_int(_dist(_gen));
         }
         _build_symbol_templates();
-        LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
+        LOG_G_INFO_M(Sensing) << "Payload resource grid: " << _data_resource_layout.payload_re_count
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
                      << " non-sync/non-pilot RE per frame, "
                      << _data_resource_layout.sensing_pilot_re_count << " sensing-pilot RE"
                      << (_cfg.resource_preview.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
         if (_data_resource_layout.sensing_pilot_re_count > 0) {
-            LOG_G_INFO() << "Sensing-pilot sequence uses alternate ZC root "
+            LOG_G_INFO_M(Sensing) << "Sensing-pilot sequence uses alternate ZC root "
                          << _sensing_pilot_zc_root
                          << " (sync root=" << _cfg.ofdm.zc_root << ").";
         }
         if (!_measurement_enabled && _data_resource_layout.payload_re_count == 0) {
-            LOG_G_WARN() << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
+            LOG_G_WARN_M(Config) << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
         }
 
         _register_commands();
@@ -250,14 +250,14 @@ public:
         if (_arq_enabled) {
             _dl_arq_tx.configure(_cfg.network_output);
             _dl_arq_tx.set_direction(0); // downlink
-            LOG_G_INFO() << "[BS ARQ] enabled: window=" << _cfg.network_output.arq_window_packets
+            LOG_G_INFO_M(Arq) << "[BS ARQ] enabled: window=" << _cfg.network_output.arq_window_packets
                          << " rto=" << _cfg.network_output.arq_retransmit_timeout_ms << "ms"
                          << " max_retries=" << _cfg.network_output.arq_max_retries;
         }
         if (_cfg.uplink_arq.arq_enabled) {
             _ul_arq_rx.configure(_cfg.uplink_arq);
             _ul_arq_rx.set_direction(1); // uplink
-            LOG_G_INFO() << "[BS UL ARQ] enabled: window=" << _cfg.uplink_arq.arq_window_packets
+            LOG_G_INFO_M(ArqUl) << "[BS UL ARQ] enabled: window=" << _cfg.uplink_arq.arq_window_packets
                          << " ordered=" << _cfg.uplink_arq.arq_ordered_delivery
                          << " feedback_interval=" << _cfg.uplink_arq.arq_feedback_interval_ms
                          << "ms";
@@ -290,11 +290,11 @@ public:
         }
         const size_t prefilled_frames = _circular_buffer.size();
         const size_t prefill_capacity = _circular_buffer.capacity();
-        LOG_G_INFO() << "[Start] Modulation prefilled "
+        LOG_G_INFO_M(Mod) << "[Start] Modulation prefilled "
                   << prefilled_frames << "/" << prefill_capacity
                   << " frames.";
         if (!prefilled_full && prefilled_frames < prefill_capacity) {
-            LOG_G_WARN() << "[Start] modulation prefill timeout before buffer became full, "
+            LOG_G_WARN_M(Mod) << "[Start] modulation prefill timeout before buffer became full, "
                          << "TX may underflow at startup.";
         }
 
@@ -303,7 +303,7 @@ public:
             const double now_s = _tx_dev->time_now().get_real_secs();
             const double scheduled_start_s = std::ceil(now_s + kStartLeadTimeSec);
             _start_time = radio::TimeSpec(scheduled_start_s);
-            LOG_G_INFO() << std::fixed << std::setprecision(6)
+            LOG_G_INFO_M(Mod) << std::fixed << std::setprecision(6)
                       << "[Start] Scheduled unified TX/RX start_time="
                       << scheduled_start_s << " s after prefill."
                       << std::defaultfloat;
@@ -328,12 +328,12 @@ public:
         _bs_dl_ul_timing_diff.store(_cfg.uplink.bs_dl_ul_timing_diff, std::memory_order_relaxed);
         log_duplex_summary(_cfg, "BS");
         if (_duplex_layout.mode == DuplexMode::TDD && _duplex_layout.uplink_enabled) {
-            LOG_G_INFO() << "[BS] TDD downlink blanking symbols ["
+            LOG_G_INFO_M(Radio) << "[BS] TDD downlink blanking symbols ["
                          << _duplex_layout.ul_start << ","
                          << (_duplex_layout.ul_start + _duplex_layout.ul_count)
                          << ") for guard/uplink.";
         } else if (_duplex_layout.mode == DuplexMode::FDD && _duplex_layout.uplink_enabled) {
-            LOG_G_INFO() << "[BS] FDD downlink remains active over the full frame.";
+            LOG_G_INFO_M(Radio) << "[BS] FDD downlink remains active over the full frame.";
         }
         if (_uplink_rx) {
             _uplink_channel_sender.start();
@@ -581,7 +581,7 @@ private:
     }
 
     void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
-        if (!_arq_enabled || !_cfg.should_profile("arq")) {
+        if (!_arq_enabled || !LOG_MOD_ON(Arq)) {
             return;
         }
         const uint64_t now = static_cast<uint64_t>(std::max<int64_t>(now_ms, 0));
@@ -711,7 +711,7 @@ private:
             << _arq_dl_window_drops.load(std::memory_order_relaxed)
             << " window_stalls="
             << _arq_dl_window_stalls.load(std::memory_order_relaxed);
-        LOG_G_INFO() << oss.str();
+        LOG_G_INFO_M(Arq) << oss.str();
     }
 
     LatencySnapshot _take_latency_snapshot_and_reset() {
@@ -736,7 +736,7 @@ private:
         _aggregated_sensing_sender.reset();
         if (radio_is_sim(_cfg) && !_cfg.simulation.enable_sensing_rx) {
             _sensing_channels.clear();
-            LOG_G_INFO() << "[Sensing] disabled in simulation (simulation.enable_sensing_rx=false).";
+            LOG_G_INFO_M(Sensing) << "[Sensing] disabled in simulation (simulation.enable_sensing_rx=false).";
             return;
         }
         std::vector<uint32_t> aggregate_channel_ids;
@@ -756,7 +756,7 @@ private:
                 true,
                 8,
                 _cfg.sensing.on_wire_format);
-            LOG_G_INFO() << "[Sensing Aggregate] enabled for "
+            LOG_G_INFO_M(SensingAggregate) << "[Sensing Aggregate] enabled for "
                          << _aggregated_sensing_sender->channel_count()
                          << " channels -> " << _cfg.network_output.mono_sensing_ip
                          << ':' << _cfg.network_output.mono_sensing_port;
@@ -786,7 +786,7 @@ private:
                            !_shared_batch_reset_symbol->compare_exchange_weak(
                                current, reset_symbol, std::memory_order_relaxed)) {
                     }
-                    LOG_G_WARN() << "[Sensing Aggregate] scheduled batch reset at symbol "
+                    LOG_G_WARN_M(SensingAggregate) << "[Sensing Aggregate] scheduled batch reset at symbol "
                                  << _shared_batch_reset_symbol->load(std::memory_order_relaxed);
                 },
                 [this](const std::string&, int) {
@@ -821,13 +821,13 @@ private:
             _uplink_self_pdf_pub = std::make_unique<ZmqByteSender>(
                 _cfg.network_output.uplink_self_pdf_ip, static_cast<uint16_t>(_cfg.network_output.uplink_self_pdf_port));
         }
-        LOG_G_INFO() << "[UL-RX] debug ZMQ streams: channel="
+        LOG_G_INFO_M(UlRx) << "[UL-RX] debug ZMQ streams: channel="
                      << _cfg.network_output.uplink_channel_ip << ':' << _cfg.network_output.uplink_channel_port
                      << ", pdf=" << _cfg.network_output.uplink_pdf_ip << ':' << _cfg.network_output.uplink_pdf_port
                      << ", constellation=" << _cfg.network_output.uplink_constellation_ip << ':'
                      << _cfg.network_output.uplink_constellation_port;
         if (uplink_self_channel_debug_enabled(_cfg)) {
-            LOG_G_INFO() << "[UL-RX] self-channel debug streams: channel="
+            LOG_G_INFO_M(UlRx) << "[UL-RX] self-channel debug streams: channel="
                          << _cfg.network_output.uplink_self_channel_ip << ':' << _cfg.network_output.uplink_self_channel_port
                          << ", pdf=" << _cfg.network_output.uplink_self_pdf_ip << ':'
                          << _cfg.network_output.uplink_self_pdf_port;
@@ -903,8 +903,8 @@ private:
                 channel_freq,
                 payload,
                 &pack_error)) {
-            if (_cfg.should_profile("ertm")) {
-                LOG_G_WARN() << "[eRTM] failed to pack TO payload: " << pack_error;
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] failed to pack TO payload: " << pack_error;
             }
             _ertm_last_injected_frame = current_frame;
             return false;
@@ -913,8 +913,8 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
         const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
         if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
-            if (_cfg.should_profile("ertm")) {
-                LOG_G_WARN() << "[eRTM] TO payload does not fit in one downlink frame: payload_bytes="
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload does not fit in one downlink frame: payload_bytes="
                              << payload.size()
                              << ", qpsk_syms=" << packet_qpsk_symbols
                              << ", frame_capacity=" << _data_resource_layout.payload_re_count;
@@ -929,8 +929,8 @@ private:
             LdpcPacketFraming::kFlagErtmTiming);
         if (enqueued) {
             _ertm_last_injected_frame = current_frame;
-            if (_cfg.should_profile("ertm") && (seq == 0 || (seq % 64u) == 0u)) {
-                LOG_G_INFO() << "[eRTM] injected TO payload seq=" << seq
+            if (LOG_MOD_ON(Ertm) && (seq == 0 || (seq % 64u) == 0u)) {
+                LOG_G_INFO_M(Ertm) << "[eRTM] injected TO payload seq=" << seq
                              << ", duti_samples=" << duti
                              << ", fft_size=" << _cfg.ofdm.fft_size
                              << ", payload_bytes=" << payload.size();
@@ -993,7 +993,7 @@ private:
 
     void _set_alignment_for_channel(uint32_t ch_id, int32_t value) {
         if (ch_id >= _sensing_channels.size()) {
-            LOG_G_WARN() << "Invalid sensing channel id for ALGN: " << ch_id;
+            LOG_G_WARN_M(Sensing) << "Invalid sensing channel id for ALGN: " << ch_id;
             return;
         }
         _sensing_channels[ch_id]->set_alignment(value);
@@ -1001,7 +1001,7 @@ private:
 
     void _set_target_alignment_for_channel(uint32_t ch_id, int32_t value) {
         if (ch_id >= _sensing_channels.size()) {
-            LOG_G_WARN() << "Invalid sensing channel id for target ALGN: " << ch_id;
+            LOG_G_WARN_M(Sensing) << "Invalid sensing channel id for target ALGN: " << ch_id;
             return;
         }
         _sensing_channels[ch_id]->set_target_alignment(value);
@@ -1009,7 +1009,7 @@ private:
 
     void _set_rx_gain_for_channel(uint32_t ch_id, double gain_db) {
         if (ch_id >= _sensing_channels.size()) {
-            LOG_G_WARN() << "Invalid sensing channel id for RXGN: " << ch_id;
+            LOG_G_WARN_M(Sensing) << "Invalid sensing channel id for RXGN: " << ch_id;
             return;
         }
         _sensing_channels[ch_id]->set_rx_gain(gain_db, nullptr);
@@ -1076,11 +1076,11 @@ private:
         _control_handler.register_command("ALCH", [this](int32_t value) {
             if (value < 0) {
                 _align_target_channel.store(-1);
-                LOG_G_INFO() << "ALCH set to ALL channels";
+                LOG_G_INFO_M(Sensing) << "ALCH set to ALL channels";
                 return;
             }
             _align_target_channel.store(static_cast<int64_t>(value));
-            LOG_G_INFO() << "ALCH set to channel " << value;
+            LOG_G_INFO_M(Sensing) << "ALCH set to channel " << value;
         });
 
         // DL/UL boundary timing difference (samples) for the BS.
@@ -1090,7 +1090,7 @@ private:
             const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             if (now - _last_duti_ns.load(std::memory_order_relaxed) < 50'000'000) {
-                LOG_G_WARN() << "DUTI rate-limited (<50ms since last); ignored " << value;
+                LOG_G_WARN_M(UlRx) << "DUTI rate-limited (<50ms since last); ignored " << value;
                 return;
             }
             _last_duti_ns.store(now, std::memory_order_relaxed);
@@ -1098,7 +1098,7 @@ private:
             if (_uplink_rx) {
                 _uplink_rx->dl_ul_timing_diff().store(value, std::memory_order_relaxed);
             }
-            LOG_G_INFO() << "DUTI (DL/UL timing difference) set to "
+            LOG_G_INFO_M(UlRx) << "DUTI (DL/UL timing difference) set to "
                          << value << " samples";
         });
         _control_handler.register_request("DUTI", [this](
@@ -1122,7 +1122,7 @@ private:
                 return;
             }
             if (static_cast<uint32_t>(target) >= _sensing_channels.size()) {
-                LOG_G_WARN() << "Invalid sensing channel id for target ALGN delta: " << target;
+                LOG_G_WARN_M(Sensing) << "Invalid sensing channel id for target ALGN delta: " << target;
                 return;
             }
             const int64_t next_target = std::clamp<int64_t>(
@@ -1137,11 +1137,11 @@ private:
 
         _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason, backend_processing_mode](int32_t value) {
             if (backend_processing_mode) {
-                LOG_G_INFO() << "Ignoring SKIP command in backend sensing processing mode";
+                LOG_G_INFO_M(Sensing) << "Ignoring SKIP command in backend sensing processing mode";
                 return;
             }
             if (compact_mask_mode && !compact_mask_fft_controls_supported) {
-                LOG_G_INFO() << "Ignoring SKIP command in compact_mask sensing mode: "
+                LOG_G_INFO_M(Sensing) << "Ignoring SKIP command in compact_mask sensing mode: "
                              << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
                 return;
             }
@@ -1149,12 +1149,12 @@ private:
             _schedule_shared_sensing_update([new_skip](SharedSensingRuntime& cfg) {
                 cfg.skip_sensing_fft = new_skip;
             });
-            LOG_G_INFO() << "Received SKIP command: " << (new_skip ? 1 : 0);
+            LOG_G_INFO_M(Sensing) << "Received SKIP command: " << (new_skip ? 1 : 0);
         });
 
         _control_handler.register_command("STRD", [this, compact_mask_mode](int32_t value) {
             if (compact_mask_mode) {
-                LOG_G_INFO() << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
+                LOG_G_INFO_M(Sensing) << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
                 return;
             }
             size_t stride = value <= 0 ? 1 : static_cast<size_t>(value);
@@ -1163,18 +1163,18 @@ private:
                 stride,
                 "Runtime STRD command");
             if (!stride_error.empty()) {
-                LOG_G_WARN() << "Ignoring STRD command: " << stride_error;
+                LOG_G_WARN_M(Sensing) << "Ignoring STRD command: " << stride_error;
                 return;
             }
             _schedule_shared_sensing_update([stride](SharedSensingRuntime& cfg) {
                 cfg.sensing_symbol_stride = stride;
             });
-            LOG_G_INFO() << "Received STRD command: " << stride;
+            LOG_G_INFO_M(Sensing) << "Received STRD command: " << stride;
         });
 
         _control_handler.register_command("MTI ", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
             if (compact_mask_mode && !compact_mask_fft_controls_supported) {
-                LOG_G_INFO() << "Ignoring MTI command in compact_mask sensing mode: "
+                LOG_G_INFO_M(Sensing) << "Ignoring MTI command in compact_mask sensing mode: "
                              << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
                 return;
             }
@@ -1182,7 +1182,7 @@ private:
             _schedule_shared_sensing_update([new_mti](SharedSensingRuntime& cfg) {
                 cfg.enable_mti = new_mti;
             });
-            LOG_G_INFO() << "Received MTI command: " << (new_mti ? "Enable" : "Disable");
+            LOG_G_INFO_M(Sensing) << "Received MTI command: " << (new_mti ? "Enable" : "Disable");
         });
 
         _control_handler.register_command("CFEN", [this](int32_t value) {
@@ -1190,7 +1190,7 @@ private:
             _schedule_shared_sensing_update([enabled](SharedSensingRuntime& cfg) {
                 cfg.cfar_enabled = enabled;
             });
-            LOG_G_INFO() << "Received CFEN command: " << (enabled ? 1 : 0);
+            LOG_G_INFO_M(Sensing) << "Received CFEN command: " << (enabled ? 1 : 0);
         });
 
         _control_handler.register_command("CFTD", [this](int32_t value) {
@@ -1272,7 +1272,7 @@ private:
 
         _control_handler.register_command("TXGN", [this](int32_t value) {
             if (!_tx_dev || !_tx_dev->supports(radio::Capability::HardwareGain)) {
-                LOG_G_WARN() << "TXGN ignored: hardware gain not supported on this backend";
+                LOG_G_WARN_M(Radio) << "TXGN ignored: hardware gain not supported on this backend";
                 return;
             }
             const double requested_gain = static_cast<double>(value) / 10.0;
@@ -1283,27 +1283,27 @@ private:
             _measurement_tx_gain_x10.store(
                 static_cast<int32_t>(std::llround(clamped_gain * 10.0)),
                 std::memory_order_relaxed);
-            LOG_G_INFO() << "Received TXGN command: " << requested_gain
+            LOG_G_INFO_M(Config) << "Received TXGN command: " << requested_gain
                          << " dB (applied " << clamped_gain << " dB)";
         });
 
         _control_handler.register_command("MRST", [this](int32_t value) {
             if (!_measurement_enabled) {
-                LOG_G_WARN() << "MRST ignored: measurement mode disabled";
+                LOG_G_WARN_M(Config) << "MRST ignored: measurement mode disabled";
                 return;
             }
             if (value <= 0) {
-                LOG_G_WARN() << "MRST ignored: invalid epoch id " << value;
+                LOG_G_WARN_M(Config) << "MRST ignored: invalid epoch id " << value;
                 return;
             }
             _measurement_requested_epoch.store(
                 static_cast<uint32_t>(value), std::memory_order_release);
-            LOG_G_INFO() << "Received MRST command: epoch=" << value;
+            LOG_G_INFO_M(Sensing) << "Received MRST command: epoch=" << value;
         });
 
         _control_handler.register_command("RXGN", [this](int32_t value) {
             if (_sensing_channels.empty()) {
-                LOG_G_WARN() << "RXGN ignored: no sensing RX channels configured";
+                LOG_G_WARN_M(Sensing) << "RXGN ignored: no sensing RX channels configured";
                 return;
             }
 
@@ -1312,7 +1312,7 @@ private:
 
             auto apply_one = [&](uint32_t ch_id) {
                 if (ch_id >= _sensing_channels.size()) {
-                    LOG_G_WARN() << "Invalid target channel for RXGN: " << ch_id;
+                    LOG_G_WARN_M(Sensing) << "Invalid target channel for RXGN: " << ch_id;
                     return;
                 }
                 _set_rx_gain_for_channel(ch_id, requested_gain);
@@ -1330,7 +1330,7 @@ private:
 
         _control_handler.register_command("CALB", [this](int32_t value) {
             if (_sensing_channels.empty()) {
-                LOG_G_WARN() << "CALB ignored: no sensing RX channels configured";
+                LOG_G_WARN_M(Sensing) << "CALB ignored: no sensing RX channels configured";
                 return;
             }
 
@@ -1339,7 +1339,7 @@ private:
 
             auto request_one = [&](uint32_t ch_id) {
                 if (ch_id >= _sensing_channels.size()) {
-                    LOG_G_WARN() << "Invalid target channel for CALB: " << ch_id;
+                    LOG_G_WARN_M(Sensing) << "Invalid target channel for CALB: " << ch_id;
                     return;
                 }
                 _sensing_channels[ch_id]->request_system_response_calibration(target_symbols);
@@ -1400,7 +1400,7 @@ private:
 
         const radio::TuneRequest tune_req(_cfg.downlink.center_freq);
         const radio::TuneResult tx_tune = _tx_dev->set_tx_freq(tune_req, _cfg.downlink.tx_channel);
-        LOG_G_INFO() << "Actual TX RF Freq: " << format_freq_hz(tx_tune.actual_rf_freq)
+        LOG_G_INFO_M(Radio) << "Actual TX RF Freq: " << format_freq_hz(tx_tune.actual_rf_freq)
                      << " Hz, DSP: " << format_freq_hz(tx_tune.actual_dsp_freq)
                      << " Hz";
         _tx_dev->set_tx_gain(_cfg.downlink.tx_gain, _cfg.downlink.tx_channel);
@@ -1414,13 +1414,13 @@ private:
         _tx_chunk_samps = is_sim ? _cfg.samples_per_frame() : _tx_stream->max_num_samps();
         if (_tx_chunk_samps == 0) {
             _tx_chunk_samps = _cfg.samples_per_frame();
-            LOG_G_WARN() << "TX streamer reported max_num_samps=0, falling back to frame-sized chunks: "
+            LOG_G_WARN_M(Config) << "TX streamer reported max_num_samps=0, falling back to frame-sized chunks: "
                          << _tx_chunk_samps;
         } else if (!is_sim) {
-            LOG_G_INFO() << "TX streamer chunk size: " << _tx_chunk_samps << " samples";
+            LOG_G_INFO_M(Radio) << "TX streamer chunk size: " << _tx_chunk_samps << " samples";
         }
         if (is_sim) {
-            LOG_G_INFO() << "TX radio backend: SIMULATION (session='" << _cfg.simulation.session
+            LOG_G_INFO_M(Sensing) << "TX radio backend: SIMULATION (session='" << _cfg.simulation.session
                          << "', no USRP). Sensing channels: " << _sensing_channels.size();
         }
 
@@ -1510,8 +1510,8 @@ private:
             _uplink_rx->configure_agc(
                 _cfg.uplink.rx_gain, gr.start, gr.stop,
                 [ul_rx_dev, ul_rx_ch](double g) { ul_rx_dev->set_rx_gain(g, ul_rx_ch); });
-            if (_cfg.rf_sampling.rx_agc_enable && _cfg.should_profile("agc")) {
-                LOG_G_INFO() << "[UL-RX] RX AGC enabled. initial_gain_db=" << _cfg.uplink.rx_gain
+            if (_cfg.rf_sampling.rx_agc_enable && LOG_MOD_ON(Agc)) {
+                LOG_G_INFO_M(UlRx) << "[UL-RX] RX AGC enabled. initial_gain_db=" << _cfg.uplink.rx_gain
                              << ", gain_range=[" << gr.start << ", " << gr.stop << "]"
                              << ", low_threshold_db=" << _cfg.rf_sampling.rx_agc_low_threshold_db
                              << ", high_threshold_db=" << _cfg.rf_sampling.rx_agc_high_threshold_db
@@ -1519,10 +1519,10 @@ private:
                              << ", update_frames=" << _cfg.rf_sampling.rx_agc_update_frames;
             }
         } else if (_cfg.rf_sampling.rx_agc_enable) {
-            LOG_G_WARN() << "[UL-RX] RX AGC requested but this radio backend has no hardware gain control; "
+            LOG_G_WARN_M(UlRx) << "[UL-RX] RX AGC requested but this radio backend has no hardware gain control; "
                          << "using fixed uplink RX gain " << _cfg.uplink.rx_gain << " dB";
         }
-        LOG_G_INFO() << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
+        LOG_G_INFO_M(UlRx) << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
                      << " @ " << format_freq_hz(ul_freq) << " Hz on "
                      << (is_sim ? "simulation" : (shared_tx_device ? "shared TX device" : "dedicated device")) << ", "
                      << _uplink_rx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
@@ -1584,7 +1584,7 @@ private:
                 got_event = _tx_stream->recv_async_msg(async_md, 0.1);
             } catch (const std::exception& e) {
                 if (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
-                    LOG_G_WARN() << "[TX Async] recv_async_msg failed: " << e.what();
+                    LOG_G_WARN_M(Mod) << "[TX Async] recv_async_msg failed: " << e.what();
                 }
                 continue;
             }
@@ -1605,12 +1605,12 @@ private:
 
             switch (async_md.event_code) {
             case radio::AsyncEvent::BurstAck:
-                log_event(LOG_G_INFO());
+                log_event(LOG_G_INFO_M(Mod));
                 break;
             case radio::AsyncEvent::Underflow:
             case radio::AsyncEvent::UnderflowInPacket:
                 _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
-                log_event(LOG_G_WARN());
+                log_event(LOG_G_WARN_M(Mod));
                 break;
             case radio::AsyncEvent::SeqError:
             case radio::AsyncEvent::SeqErrorInBurst:
@@ -1619,10 +1619,10 @@ private:
                     _tx_time_error_restart_requested.store(true, std::memory_order_relaxed);
                     _tx_time_error_count.fetch_add(1, std::memory_order_relaxed);
                 }
-                log_event(LOG_G_ERROR());
+                log_event(LOG_G_ERROR_M(Mod));
                 break;
             default:
-                log_event(LOG_G_INFO());
+                log_event(LOG_G_INFO_M(Mod));
                 break;
             }
         }
@@ -1774,7 +1774,7 @@ private:
             std::to_string(_cfg.measurement.measurement_prbs_seed),
         };
         if (!append_csv_row(_measurement_summary_path, header, row)) {
-            LOG_G_WARN() << "Failed to append measurement epoch row to "
+            LOG_G_WARN_M(Config) << "Failed to append measurement epoch row to "
                          << _measurement_summary_path;
         }
     }
@@ -1803,7 +1803,7 @@ private:
             static std::atomic<uint64_t> dropped_oversize_count{0};
             const uint64_t dropped = dropped_oversize_count.fetch_add(1, std::memory_order_relaxed) + 1;
             if (dropped <= 20 || (dropped % 100) == 0) {
-                LOG_G_WARN() << "Dropping UDP payload because mini-header supports at most "
+                LOG_G_WARN_M(Mod) << "Dropping UDP payload because mini-header supports at most "
                              << LdpcPacketFraming::max_payload_bytes()
                              << " bytes per packet: payload_bytes=" << payload_len
                              << ", dropped_packets=" << dropped;
@@ -1819,7 +1819,7 @@ private:
             static std::atomic<uint64_t> dropped_capacity_count{0};
             const uint64_t dropped = dropped_capacity_count.fetch_add(1, std::memory_order_relaxed) + 1;
             if (dropped <= 20 || (dropped % 100) == 0) {
-                LOG_G_WARN() << "Dropping UDP payload because one unified LDPC packet exceeds payload RE capacity: "
+                LOG_G_WARN_M(Mod) << "Dropping UDP payload because one unified LDPC packet exceeds payload RE capacity: "
                              << "payload_bytes=" << payload_len
                              << ", qpsk_syms=" << packet_qpsk_symbols
                              << ", frame_capacity=" << _data_resource_layout.payload_re_count
@@ -2008,7 +2008,7 @@ private:
         bind_current_thread_from_downlink_hint(_cfg, 2);
         prefault_thread_stack();
         const bool do_latency_profile =
-            _cfg.should_profile("modulation") && _cfg.should_profile("latency");
+            LOG_MOD_ON(ModProfiling);
 
         static double prof_header_encode_total = 0.0;
         static double prof_payload_encode_total = 0.0;
@@ -2022,7 +2022,7 @@ private:
             prof_enqueue_total += profile.enqueue_us;
             ++prof_packet_count;
             if (prof_packet_count >= PROF_REPORT_INTERVAL &&
-                _cfg.should_profile("ldpc_encode")) {
+                LOG_MOD_ON(ModLdpcProfiling)) {
                 const double total =
                     prof_header_encode_total + prof_payload_encode_total + prof_enqueue_total;
                 std::ostringstream oss;
@@ -2032,7 +2032,7 @@ private:
                     << "Enqueue:              " << prof_enqueue_total / prof_packet_count << " us\n"
                     << "TOTAL:                " << total / prof_packet_count << " us\n"
                     << "======================================================================\n";
-                LOG_G_INFO() << oss.str();
+                LOG_G_INFO_M(ModLdpcProfiling) << oss.str();
                 prof_header_encode_total = 0.0;
                 prof_payload_encode_total = 0.0;
                 prof_enqueue_total = 0.0;
@@ -2052,7 +2052,7 @@ private:
                     0, std::memory_order_acq_rel);
                 if (requested_epoch > 0) {
                     if (active_epoch_id > 0 && packets_sent_in_epoch < _cfg.measurement.measurement_packets_per_point) {
-                        LOG_G_WARN() << "Interrupting measurement epoch " << active_epoch_id
+                        LOG_G_WARN_M(Config) << "Interrupting measurement epoch " << active_epoch_id
                                      << " after " << packets_sent_in_epoch << " packets.";
                     }
                     active_epoch_id = requested_epoch;
@@ -2073,7 +2073,7 @@ private:
                 meta.prbs_seed = _cfg.measurement.measurement_prbs_seed;
                 meta.tx_gain_x10 = _measurement_tx_gain_x10.load(std::memory_order_relaxed);
                 if (!build_measurement_payload(payload, meta)) {
-                    LOG_G_ERROR() << "Failed to build measurement payload.";
+                    LOG_G_ERROR_M(Config) << "Failed to build measurement payload.";
                     break;
                 }
 
@@ -2117,7 +2117,7 @@ private:
         bind_current_thread_from_downlink_hint(_cfg, 3);
         const int sock = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock < 0) {
-            LOG_G_ERROR() << "UDP socket create failed";
+            LOG_G_ERROR_M(Mod) << "UDP socket create failed";
             return;
         }
         _udp_sock.store(sock, std::memory_order_release);
@@ -2139,12 +2139,12 @@ private:
         if (_cfg.network_output.udp_input_ip == "0.0.0.0") {
             _udp_addr.sin_addr.s_addr = INADDR_ANY;
         } else if (inet_pton(AF_INET, _cfg.network_output.udp_input_ip.c_str(), &_udp_addr.sin_addr) != 1) {
-            LOG_G_ERROR() << "Invalid BS UDP bind IP: " << _cfg.network_output.udp_input_ip;
+            LOG_G_ERROR_M(Config) << "Invalid BS UDP bind IP: " << _cfg.network_output.udp_input_ip;
             close_sock();
             return;
         }
         if (bind(sock, (sockaddr*)&_udp_addr, sizeof(_udp_addr)) < 0) {
-            LOG_G_ERROR() << "UDP bind failed";
+            LOG_G_ERROR_M(Mod) << "UDP bind failed";
             close_sock();
             return;
         }
@@ -2161,7 +2161,7 @@ private:
             if (_data_resource_layout.payload_re_count == 0) {
                 ++dropped_payload_warn_count;
                 if (dropped_payload_warn_count <= 20 || (dropped_payload_warn_count % 100) == 0) {
-                    LOG_G_WARN() << "Dropping UDP payload because data_resource_blocks select 0 payload RE per frame. "
+                    LOG_G_WARN_M(Mod) << "Dropping UDP payload because data_resource_blocks select 0 payload RE per frame. "
                                  << "dropped_packets=" << dropped_payload_warn_count;
                 }
                 continue;
@@ -2175,7 +2175,7 @@ private:
                     _log_arq_profile_if_due("raw_udp_full", arq_now_ms());
                 }
                 if (dc <= 20 || (dc % 100) == 0) {
-                    LOG_G_WARN() << "UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
+                    LOG_G_WARN_M(Mod) << "UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
                 }
                 continue;
             }
@@ -2289,7 +2289,7 @@ private:
                 const uint64_t drops =
                     _arq_dl_window_drops.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (drops <= 20 || (drops % 100) == 0) {
-                    LOG_G_WARN() << "[BS ARQ DL] TX window full, dropping new packet: dropped="
+                    LOG_G_WARN_M(ArqDl) << "[BS ARQ DL] TX window full, dropping new packet: dropped="
                                  << drops;
                 }
                 _log_arq_profile_if_due("window_full_drop", arq_now_ms());
@@ -2324,7 +2324,7 @@ private:
         bind_current_thread_from_downlink_hint(_cfg, 1);
         prefault_thread_stack();
         const bool do_latency_profile =
-            _cfg.should_profile("modulation") && _cfg.should_profile("latency");
+            LOG_MOD_ON(ModProfiling);
         // Frame processing time statistics
         using Clock = std::chrono::high_resolution_clock;
         Clock::time_point frame_start, frame_end;
@@ -2390,7 +2390,7 @@ private:
                         // Warn periodically because this can stall queue progress.
                         oversize_head_warn_count++;
                         if (oversize_head_warn_count <= 20 || (oversize_head_warn_count % 100) == 0) {
-                            LOG_RT_WARN() << "[LDPC] Queue head packet exceeds per-frame capacity, not fetched: qpsk_syms="
+                            LOG_RT_WARN_M(ModLdpc) << "[LDPC] Queue head packet exceeds per-frame capacity, not fetched: qpsk_syms="
                                           << pkt_size << ", max_qpsk_per_frame=" << max_data_syms_per_frame
                                           << ", warn_count=" << oversize_head_warn_count;
                         }
@@ -2414,7 +2414,7 @@ private:
             }
             prof_step_end = ProfileClock::now();
             prof_data_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
-            if (_arq_enabled && _cfg.should_profile("arq")) {
+            if (_arq_enabled && LOG_MOD_ON(Arq)) {
                 _arq_profile_frames.fetch_add(1, std::memory_order_relaxed);
                 _arq_profile_payload_re_used.fetch_add(data_pool.size(), std::memory_order_relaxed);
                 _arq_profile_packets_pulled.fetch_add(packets_pulled, std::memory_order_relaxed);
@@ -2514,7 +2514,7 @@ private:
                 oss << std::fixed << std::setprecision(2)
                     << "Average processing time: " << avg_time
                     << " ms, Load: " << load * 100.0 << "%";
-                LOG_RT_INFO() << oss.str();
+                LOG_RT_INFO_M(ModProfiling) << oss.str();
                 // Reset statistics
                 total_processing_time = 0.0;
                 frame_count = 0;
@@ -2546,7 +2546,7 @@ private:
             
             // ============== Profiling report ==============
             prof_frame_count++;
-            if (prof_frame_count >= PROF_REPORT_INTERVAL && _cfg.should_profile("modulation")) {
+            if (prof_frame_count >= PROF_REPORT_INTERVAL && LOG_MOD_ON(ModProfiling)) {
                 double total = prof_data_fetch_total + prof_symbol_gen_total + prof_ifft_total + prof_cp_write_total;
                 std::ostringstream oss;
                 oss << "\n========== _modulation_proc Profiling (avg per frame, us) ==========\n"
@@ -2571,7 +2571,7 @@ private:
                     }
                 }
                 oss << "===================================================================\n";
-                LOG_RT_INFO() << oss.str();
+                LOG_RT_INFO_M(ModProfiling) << oss.str();
                 
                 // Reset counters
                 prof_data_fetch_total = 0.0;
@@ -2596,7 +2596,7 @@ private:
         bind_current_thread_from_downlink_hint(_cfg, 0);
         prefault_thread_stack();
         const bool do_latency_profile =
-            _cfg.should_profile("modulation") && _cfg.should_profile("latency");
+            LOG_MOD_ON(ModProfiling);
         
         radio::TxMetadata md;
         md.start_of_burst = true;
@@ -2614,7 +2614,7 @@ private:
         const long long frame_ticks = std::llround(exact_frame_ticks);
         const double frame_tick_error = std::abs(exact_frame_ticks - static_cast<double>(frame_ticks));
         if (frame_tick_error > 1e-6) {
-            LOG_G_WARN() << std::fixed << std::setprecision(6)
+            LOG_G_WARN_M(Config) << std::fixed << std::setprecision(6)
                          << "[TX] Frame duration quantized to " << frame_ticks
                          << " ticks at tick_rate=" << tick_rate
                          << " Hz using tx_rate=" << tx_sample_rate
@@ -2659,7 +2659,7 @@ private:
             try {
                 _tx_stream->send(static_cast<const std::complex<float>*>(nullptr), 0, eob_md, 0.1);
             } catch (const std::exception& e) {
-                LOG_RT_WARN() << "[TX] Failed to terminate burst after " << reason
+                LOG_RT_WARN_M(Mod) << "[TX] Failed to terminate burst after " << reason
                               << ": " << e.what();
             }
 
@@ -2705,7 +2705,7 @@ private:
                 ch->request_reacquire(restart_time, restart_frame_seq);
             }
 
-            LOG_RT_WARN() << std::fixed << std::setprecision(6)
+            LOG_RT_WARN_M(Mod) << std::fixed << std::setprecision(6)
                           << "[TX] " << reason << " restart scheduled at "
                           << restart_time.get_real_secs()
                           << " s, skipped " << frames_to_skip
@@ -2763,7 +2763,7 @@ private:
                     const bool backend_shutting_down = !_tx_dev->running();
                     if (!backend_shutting_down) {
                         _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
-                        LOG_RT_WARN() << "TX Underflow: "
+                        LOG_RT_WARN_M(Mod) << "TX Underflow: "
                                       << (frame_to_send.samples.size() - sent) << " samples";
                     }
                 } else if (frame_to_send.symbols) {
@@ -2801,24 +2801,24 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     radio::set_thread_priority();
 #if defined(__linux__)
     if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
-        LOG_G_INFO() << "Locked current and future process memory with mlockall().";
+        LOG_G_INFO_M(Config) << "Locked current and future process memory with mlockall().";
     } else {
-        LOG_G_WARN() << "mlockall() failed: " << std::strerror(errno);
+        LOG_G_WARN_M(Config) << "mlockall() failed: " << std::strerror(errno);
     }
 #else
-    LOG_G_INFO() << "Skipping mlockall(): unsupported on this platform.";
+    LOG_G_INFO_M(Config) << "Skipping mlockall(): unsupported on this platform.";
 #endif
     const std::string default_config_file = "BS.yaml";
     Config cfg = make_default_bs_config();
 
     if (argc > 1) {
-        LOG_G_ERROR() << "CLI parameters are no longer supported. Please configure BS via "
+        LOG_G_ERROR_M(Config) << "CLI parameters are no longer supported. Please configure BS via "
                       << default_config_file << ".";
         return 1;
     }
 
     if (!path_exists(default_config_file)) {
-        LOG_G_ERROR() << "Config file '" << default_config_file
+        LOG_G_ERROR_M(Config) << "Config file '" << default_config_file
                       << "' not found. Copy a sample file from the repository config directory, "
                       << "such as 'BS_X310.yaml' or 'BS_B210.yaml', to '" << default_config_file
                       << "' and edit it before starting BS.";
@@ -2828,8 +2828,9 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     if (!load_bs_config_from_yaml(cfg, default_config_file)) {
         return 1;
     }
+    apply_logging_config(cfg.logging);
 
-    LOG_G_INFO() << "Loaded config from: " << default_config_file;
+    LOG_G_INFO_M(Sensing) << "Loaded config from: " << default_config_file;
     normalize_bs_sensing_channels(cfg);
 
     // Set main thread affinity to the last configured core.
@@ -2852,6 +2853,6 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     
     // Save FFTW wisdom
     FFTWManager::export_wisdom();
-    LOG_G_INFO() << "\nTransmission and sensing stopped.\n";
+    LOG_G_INFO_M(Sensing) << "\nTransmission and sensing stopped.\n";
     return 0;
 }

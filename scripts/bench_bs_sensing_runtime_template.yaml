@@ -86,4 +86,10 @@ network_output:
 # ===== Runtime / Debug =====
 runtime:
   main_cpu_core: 6  # Main-thread CPU core (-1 disables explicit binding)
-  profiling_modules: sensing_proc  # Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc), or "all"
+
+logging:
+  default_level: warn
+  timestamps: false
+  force_error: true
+  modules:
+    sensing_profiling: info

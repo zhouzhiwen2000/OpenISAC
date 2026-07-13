@@ -304,12 +304,12 @@ public:
         }
         _build_cfo_symbol_skip_mask();
         _build_compact_payload_indices();
-        LOG_G_INFO() << "Payload resource grid: " << _data_resource_layout.payload_re_count
+        LOG_G_INFO_M(Config) << "Payload resource grid: " << _data_resource_layout.payload_re_count
                      << " payload RE out of " << _data_resource_layout.non_pilot_re_count
                      << " non-sync/non-pilot RE per frame"
                      << (cfg_.resource_preview.data_resource_blocks_configured ? " (configured blocks)." : " (legacy full-grid mode).");
         if (_data_resource_layout.sensing_pilot_re_count > 0) {
-            LOG_G_INFO() << "Sensing-pilot sequence uses alternate ZC root "
+            LOG_G_INFO_M(Sensing) << "Sensing-pilot sequence uses alternate ZC root "
                          << _sensing_pilot_zc_root
                          << " (sync root=" << cfg_.ofdm.zc_root << ").";
         }
@@ -364,7 +364,7 @@ public:
                 stream_start_time,
                 dev_->master_clock_rate(),
                 dev_->get_tx_rate(cfg_.uplink.tx_channel));
-            LOG_G_INFO() << "[UE] timed RX/UL-TX stream start at "
+            LOG_G_INFO_M(Radio) << "[UE] timed RX/UL-TX stream start at "
                          << stream_start_time.get_real_secs()
                          << " s on the shared radio clock";
         }
@@ -533,8 +533,8 @@ private:
 
     void _request_stream_restart(const char* reason) {
         if (!dev_->supports(radio::Capability::StreamRestart) || !_uplink_tx) {
-            if (cfg_.should_profile("ue_recovery")) {
-                LOG_G_WARN() << "[UE recovery] restart_request_ignored reason=" << reason
+            if (LOG_MOD_ON(Recovery)) {
+                LOG_G_WARN_M(Recovery) << "[UE recovery] restart_request_ignored reason=" << reason
                              << ", stream_restart_supported="
                              << dev_->supports(radio::Capability::StreamRestart)
                              << ", has_uplink_tx=" << static_cast<bool>(_uplink_tx);
@@ -545,9 +545,9 @@ private:
             _stream_restart_count.fetch_add(1, std::memory_order_relaxed) + 1;
         _stream_restart_pending_epoch.store(restart_count, std::memory_order_release);
         _stream_restart_requested.store(true, std::memory_order_release);
-        LOG_G_WARN() << "[UE] requested shared RX/UL-TX stream restart: " << reason;
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_G_WARN() << "[UE recovery] restart_requested reason=" << reason
+        LOG_G_WARN_M(Recovery) << "[UE] requested shared RX/UL-TX stream restart: " << reason;
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_G_WARN_M(Recovery) << "[UE recovery] restart_requested reason=" << reason
                          << ", restart_epoch=" << restart_count
                          << ", state=" << static_cast<int>(state_.load(std::memory_order_relaxed))
                          << ", sync_generation=" << _sync_generation.load(std::memory_order_relaxed)
@@ -582,8 +582,8 @@ private:
         _set_uplink_waveform_enabled(false);
         sfo_estimator.reset();
         state_ = RxState::SYNC_SEARCH;
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_G_WARN() << "[UE recovery] reset_receive_state generation="
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_G_WARN_M(Recovery) << "[UE recovery] reset_receive_state generation="
                          << next_generation
                          << ", restart_epoch=" << restart_epoch
                          << ", pending_ertm_alignment="
@@ -608,7 +608,7 @@ private:
                 got_event = _uplink_tx->tx_stream()->recv_async_msg(async_md, 0.1);
             } catch (const std::exception& e) {
                 if (!_tx_async_exit_requested.load(std::memory_order_relaxed)) {
-                    LOG_G_WARN() << "[UL-TX Async] recv_async_msg failed: " << e.what();
+                    LOG_G_WARN_M(UlTx) << "[UL-TX Async] recv_async_msg failed: " << e.what();
                 }
                 continue;
             }
@@ -628,19 +628,19 @@ private:
 
             switch (async_md.event_code) {
             case radio::AsyncEvent::BurstAck:
-                log_event(LOG_G_INFO());
+                log_event(LOG_G_INFO_M(UlTx));
                 break;
             case radio::AsyncEvent::Underflow:
             case radio::AsyncEvent::UnderflowInPacket:
                 _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
-                log_event(LOG_G_WARN());
+                log_event(LOG_G_WARN_M(UlTx));
                 _request_stream_restart("UL-TX underflow");
                 break;
             case radio::AsyncEvent::SeqError:
             case radio::AsyncEvent::SeqErrorInBurst:
             case radio::AsyncEvent::TimeError:
                 _tx_async_error_count.fetch_add(1, std::memory_order_relaxed);
-                log_event(LOG_G_ERROR());
+                log_event(LOG_G_ERROR_M(UlTx));
                 {
                     // Coalesce async timing/sequence errors: a single stale or
                     // colliding burst emits thousands of these microseconds
@@ -661,7 +661,7 @@ private:
                 }
                 break;
             default:
-                log_event(LOG_G_INFO());
+                log_event(LOG_G_INFO_M(UlTx));
                 break;
             }
         }
@@ -681,7 +681,7 @@ private:
             *restart_current_read = true;
         }
 
-        LOG_RT_WARN() << "[UE RX] " << context << " metadata error "
+        LOG_RT_WARN_M(Sync) << "[UE RX] " << context << " metadata error "
                       << rx_error_code_to_string(md.error_code) << ": "
                       << md.strerror();
 
@@ -906,16 +906,16 @@ private:
         if (_uplink_tx) {
             _uplink_tx->store_rx_alignment_shift(next, alignment_id, restart_epoch);
         }
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_RT_WARN() << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_RT_WARN_M(UlTx) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
                           << " samples, ul_tx_effective_rx_delta="
                           << ul_tx_rx_alignment_delta_samples
                           << " samples, alignment_id=" << alignment_id
                           << ", restart_epoch=" << restart_epoch
                           << " -> TX timing delta=" << tx_alignment_delta_samples
                           << " samples, cumulative RX-alignment target=" << next;
-        } else if (cfg_.should_profile("uplink")) {
-            LOG_RT_WARN_HZ(2) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
+        } else if (LOG_MOD_ON(UlTx)) {
+            LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] RX alignment delta=" << rx_alignment_delta_samples
                               << " samples -> TX timing delta=" << tx_alignment_delta_samples
                               << " samples, cumulative RX-alignment target=" << next;
         }
@@ -952,8 +952,8 @@ private:
         if (_uplink_tx) {
             _uplink_tx->store_rx_alignment_shift(shift, alignment_id, restart_epoch);
         }
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_RT_WARN() << "[UL-TX] absolute reacquire: grid_phase="
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_RT_WARN_M(UlTx) << "[UL-TX] absolute reacquire: grid_phase="
                           << grid_phase_samples
                           << " samples, canonical_phase=" << canonical_phase
                           << " -> ul_tx_rx_shift=" << shift
@@ -990,8 +990,8 @@ private:
             _apply_uplink_tx_rx_alignment_delta(
                 alignment_samples, alignment_id, restart_epoch);
         }
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_RT_WARN() << "[UE recovery] schedule_receive_alignment alignment_id="
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] schedule_receive_alignment alignment_id="
                           << alignment_id
                           << ", alignment="
                           << alignment_samples
@@ -1015,8 +1015,8 @@ private:
         if (enabled) {
             _restore_uplink_tx_gain_after_sync();
         }
-        if (_uplink_tx->set_waveform_enabled(enabled) && cfg_.should_profile("uplink")) {
-            LOG_RT_INFO() << "[UL-TX] "
+        if (_uplink_tx->set_waveform_enabled(enabled) && LOG_MOD_ON(UlTx)) {
+            LOG_RT_INFO_M(UlTx) << "[UL-TX] "
                           << (enabled ? "enabled" : "muted")
                           << " uplink waveform transmission";
         }
@@ -1032,7 +1032,7 @@ private:
             dev_->set_tx_gain(_uplink_tx_gain_min_db, cfg_.uplink.tx_channel);
             _uplink_tx_gain_muted.store(true, std::memory_order_release);
         } catch (const std::exception& e) {
-            LOG_RT_WARN() << "[UL-TX] failed to mute TX gain during sync search: " << e.what();
+            LOG_RT_WARN_M(UlTx) << "[UL-TX] failed to mute TX gain during sync search: " << e.what();
         }
     }
 
@@ -1046,7 +1046,7 @@ private:
             dev_->set_tx_gain(_uplink_tx_gain_restore_db, cfg_.uplink.tx_channel);
             _uplink_tx_gain_muted.store(false, std::memory_order_release);
         } catch (const std::exception& e) {
-            LOG_RT_WARN() << "[UL-TX] failed to restore TX gain after sync: " << e.what();
+            LOG_RT_WARN_M(UlTx) << "[UL-TX] failed to restore TX gain after sync: " << e.what();
         }
     }
     std::unique_ptr<HardwareSyncController> _hw_sync;
@@ -1673,14 +1673,14 @@ private:
             return false;
         }
         if (!cfg_.uplink.ertm_to_enable) {
-            if (cfg_.should_profile("ertm")) {
-                LOG_G_INFO() << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_INFO_M(Ertm) << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
             }
             return true;
         }
         if (!_ertm_payload_queue.try_push(std::move(payload))) {
-            if (cfg_.should_profile("ertm")) {
-                LOG_G_WARN() << "[eRTM] TO payload queue full; dropping report";
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload queue full; dropping report";
             }
         }
         return true;
@@ -1699,16 +1699,16 @@ private:
                 static_cast<uint32_t>(cfg_.ofdm.fft_size),
                 bs_payload,
                 &unpack_error)) {
-            if (cfg_.should_profile("ertm")) {
-                LOG_G_WARN() << "[eRTM] invalid TO payload: " << unpack_error;
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] invalid TO payload: " << unpack_error;
             }
             return;
         }
 
         AlignedVector local_channel_freq;
         if (!_ertm_latest_dl_channel.load(local_channel_freq)) {
-            if (cfg_.should_profile("ertm") && !_ertm_missing_delay_warned) {
-                LOG_G_WARN() << "[eRTM] TO payload received before local downlink channel estimate is available";
+            if (LOG_MOD_ON(Ertm) && !_ertm_missing_delay_warned) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] TO payload received before local downlink channel estimate is available";
                 _ertm_missing_delay_warned = true;
             }
             return;
@@ -1718,8 +1718,8 @@ private:
         AlignedVector local_delay;
         if (!_compute_ertm_oversampled_delay_spectrum(bs_payload.channel_freq, 0.0, bs_uplink_delay) ||
             !_compute_ertm_oversampled_delay_spectrum(local_channel_freq, 0.0, local_delay)) {
-            if (cfg_.should_profile("ertm")) {
-                LOG_G_WARN() << "[eRTM] failed to compute oversampled delay spectra";
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute oversampled delay spectra";
             }
             return;
         }
@@ -1738,8 +1738,8 @@ private:
                 publish_debug ? &correlation_spectrum : nullptr,
                 &peak_index,
                 &centroid3_delta_bins)) {
-            if (cfg_.should_profile("ertm")) {
-                LOG_G_WARN() << "[eRTM] failed to correlate delay spectra";
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_WARN_M(Ertm) << "[eRTM] failed to correlate delay spectra";
             }
             return;
         }
@@ -1769,8 +1769,8 @@ private:
             if (had_previous_to_ue) {
                 const double to_ue_diff = to_ue_samples - previous_to_ue;
                 if (std::abs(to_ue_diff) > 0.1) {
-                    if (cfg_.should_profile("ertm")) {
-                        LOG_G_INFO() << "[eRTM] TO_UE diff"
+                    if (LOG_MOD_ON(Ertm)) {
+                        LOG_G_INFO_M(Ertm) << "[eRTM] TO_UE diff"
                                      << " seq=" << bs_payload.seq
                                      << ", previous_to_ue=" << previous_to_ue
                                      << " samples, current_to_ue=" << to_ue_samples
@@ -1787,7 +1787,7 @@ private:
             _ertm_absolute_delay_available.store(true, std::memory_order_release);
         }
 
-        if (cfg_.should_profile("ertm")) {
+        if (LOG_MOD_ON(Ertm)) {
             std::ostringstream oss;
             oss << std::fixed << std::setprecision(3)
                 << "[eRTM] TO(samples) seq=" << bs_payload.seq
@@ -1807,7 +1807,7 @@ private:
                 << ", TO_BS_samples=" << to_bs_samples
                 << ", rf_delay_samples_cfg=(" << cfg_.uplink.ertm_dl_rf_delay_samples
                 << "+" << cfg_.uplink.ertm_ul_rf_delay_samples << ")";
-            LOG_G_INFO() << oss.str();
+            LOG_G_INFO_M(Ertm) << oss.str();
         }
         if (publish_debug) {
             AlignedVector corrected_uplink_delay;
@@ -1816,8 +1816,8 @@ private:
                     bs_payload.channel_freq, correction_to_bs_samples, corrected_uplink_delay) ||
                 !_compute_ertm_oversampled_delay_spectrum(
                     local_channel_freq, correction_to_ue_samples, corrected_downlink_delay)) {
-                if (cfg_.should_profile("ertm")) {
-                    LOG_G_WARN() << "[eRTM] failed to compute TO-corrected debug spectra";
+                if (LOG_MOD_ON(Ertm)) {
+                    LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute TO-corrected debug spectra";
                 }
                 return;
             }
@@ -1852,8 +1852,8 @@ private:
             pending_alignment,
             std::memory_order_relaxed);
 
-        if (cfg_.should_profile("ertm")) {
-            LOG_G_INFO() << "[eRTM] pending sensing alignment compensation updated"
+        if (LOG_MOD_ON(Ertm)) {
+            LOG_G_INFO_M(Ertm) << "[eRTM] pending sensing alignment compensation updated"
                          << " alignment=" << alignment_samples
                          << " samples, pending_alignment=" << pending_alignment
                          << " samples";
@@ -1880,16 +1880,16 @@ private:
                 std::memory_order_relaxed,
                 std::memory_order_relaxed)) {
             if (stored_pending == 0.0) {
-                if (cfg_.should_profile("ertm")) {
-                    LOG_G_INFO() << "[eRTM] cleared pending sensing alignment compensation after TO_UE jump"
+                if (LOG_MOD_ON(Ertm)) {
+                    LOG_G_INFO_M(Ertm) << "[eRTM] cleared pending sensing alignment compensation after TO_UE jump"
                                  << " pending_alignment=" << pending
                                  << " samples, to_ue_diff=" << to_ue_diff
                                  << " samples, rounded_jump=" << rounded_jump
                                  << " samples";
                 }
             } else {
-                if (cfg_.should_profile("ertm")) {
-                    LOG_G_INFO() << "[eRTM] updated pending sensing alignment compensation after TO_UE jump"
+                if (LOG_MOD_ON(Ertm)) {
+                    LOG_G_INFO_M(Ertm) << "[eRTM] updated pending sensing alignment compensation after TO_UE jump"
                                  << " previous_pending_alignment=" << pending
                                  << " samples, to_ue_diff=" << to_ue_diff
                                  << " samples, rounded_jump=" << rounded_jump
@@ -1912,8 +1912,7 @@ private:
                 // phase correction, so positive TO_UE removes positive UE delay.
                 base_delay_offset = static_cast<float>(to_ue_samples + pending_alignment);
             } else {
-                LOG_RT_WARN_HZ(1)
-                    << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "
+                LOG_RT_WARN_HZ_M(Ertm, 1) << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "
                     << "but no valid TO_UE estimate is available yet; using los_tracking delay";
             }
         }
@@ -1937,7 +1936,7 @@ private:
     }
 
     void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
-        if (!cfg_.should_profile("arq")) {
+        if (!LOG_MOD_ON(Arq)) {
             return;
         }
         const uint64_t now = static_cast<uint64_t>(std::max<int64_t>(now_ms, 0));
@@ -1997,7 +1996,7 @@ private:
             << " drained=" << tx_feedback_drained
             << " pending=" << tx_feedback_pending
             << " dropped_disabled=" << tx_feedback_dropped_disabled;
-        LOG_G_INFO() << oss.str();
+        LOG_G_INFO_M(Arq) << oss.str();
     }
 
     // Noise/LLR estimation related
@@ -2538,7 +2537,7 @@ private:
             std::to_string(evm_slope_db_per_symbol_mean),
         };
         if (!append_csv_row(_measurement_summary_path, header, row)) {
-            LOG_G_WARN() << "Failed to append UE measurement row to "
+            LOG_G_WARN_M(Config) << "Failed to append UE measurement row to "
                          << _measurement_summary_path;
         }
     }
@@ -2589,7 +2588,7 @@ private:
         current_rx_tune_ = dev_->set_rx_freq(radio::TuneRequest(cfg_.downlink.center_freq), cfg_.downlink.rx_channel);
         tune_initialized_ = true;
         dev_->set_rx_freq_correction(0.0);  // reset comm correction (sim); no-op on real
-        LOG_G_INFO() << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
+        LOG_G_INFO_M(Radio) << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
                      << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
                      << " Hz";
 
@@ -2599,7 +2598,7 @@ private:
             _rx_gain_max_db = gain_range.stop;
             const double initial_rx_gain_db = std::clamp(cfg_.rf_sampling.rx_gain, _rx_gain_min_db, _rx_gain_max_db);
             if (initial_rx_gain_db != cfg_.rf_sampling.rx_gain) {
-                LOG_G_WARN() << "Configured rx_gain=" << cfg_.rf_sampling.rx_gain
+                LOG_G_WARN_M(Radio) << "Configured rx_gain=" << cfg_.rf_sampling.rx_gain
                              << " dB is outside hardware range ["
                              << _rx_gain_min_db << ", " << _rx_gain_max_db
                              << "] dB. Clamping to " << initial_rx_gain_db << " dB.";
@@ -2607,7 +2606,7 @@ private:
             dev_->set_rx_gain(initial_rx_gain_db, cfg_.downlink.rx_channel);
             _rx_agc.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
             _sync_search_gain_sweep.initialize(initial_rx_gain_db, _rx_gain_min_db, _rx_gain_max_db);
-            LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
+            LOG_G_INFO_M(Radio) << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
                          << "] dB, initial gain: " << initial_rx_gain_db << " dB";
         } else {
             // No hardware gain (simulation): benign zero range so AGC/sweep stay inert.
@@ -2624,7 +2623,7 @@ private:
         rx_stream_ = dev_->get_rx_stream(args);
 
         if (is_sim) {
-            LOG_G_INFO() << "RX radio backend: SIMULATION (session='" << cfg_.simulation.session
+            LOG_G_INFO_M(Radio) << "RX radio backend: SIMULATION (session='" << cfg_.simulation.session
                          << "', no USRP).";
         }
 
@@ -2652,7 +2651,7 @@ private:
                 _uplink_tx_gain_max_db);
             _uplink_tx_gain_range_initialized = true;
             if (_uplink_tx_gain_restore_db != cfg_.uplink.tx_gain) {
-                LOG_G_WARN() << "Configured tx_gain=" << cfg_.uplink.tx_gain
+                LOG_G_WARN_M(Radio) << "Configured tx_gain=" << cfg_.uplink.tx_gain
                              << " dB is outside hardware range ["
                              << _uplink_tx_gain_min_db << ", "
                              << _uplink_tx_gain_max_db
@@ -2669,8 +2668,8 @@ private:
         _uplink_tx = std::make_unique<UplinkTxEngine>(cfg_);
         _uplink_tx->set_tx_stream(dev_->get_tx_stream(tx_args));
         _uplink_tx->timing_advance().store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
-        if (cfg_.should_profile("uplink")) {
-            LOG_G_INFO() << "[UL-TX] uplink transmit enabled" << (is_sim ? " (sim ul.tx)" : "")
+        if (LOG_MOD_ON(UlTx)) {
+            LOG_G_INFO_M(UlTx) << "[UL-TX] uplink transmit enabled" << (is_sim ? " (sim ul.tx)" : "")
                          << " on TX ch " << cfg_.uplink.tx_channel
                          << " @ " << format_freq_hz(ul_freq) << " Hz, "
                          << _uplink_tx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
@@ -2711,11 +2710,11 @@ private:
 
         _control_handler.register_command("SKIP", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason, backend_processing_mode](int32_t value) {
             if (backend_processing_mode) {
-                LOG_G_INFO() << "Ignoring SKIP command in backend sensing processing mode";
+                LOG_G_INFO_M(Sensing) << "Ignoring SKIP command in backend sensing processing mode";
                 return;
             }
             if (compact_mask_mode && !compact_mask_fft_controls_supported) {
-                LOG_G_INFO() << "Ignoring SKIP command in compact_mask sensing mode: "
+                LOG_G_INFO_M(Sensing) << "Ignoring SKIP command in compact_mask sensing mode: "
                              << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
                 return;
             }
@@ -2723,12 +2722,12 @@ private:
             _schedule_shared_sensing_update([new_skip](SharedSensingRuntime& cfg) {
                 cfg.skip_sensing_fft = new_skip;
             });
-            LOG_G_INFO() << "Received skip sensing FFT command: " << value;
+            LOG_G_INFO_M(Sensing) << "Received skip sensing FFT command: " << value;
         });
 
         _control_handler.register_command("STRD", [this, compact_mask_mode](int32_t value) {
             if (compact_mask_mode) {
-                LOG_G_INFO() << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
+                LOG_G_INFO_M(Sensing) << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
                 return;
             }
             const size_t stride = value <= 0 ? 1 : static_cast<size_t>(value);
@@ -2737,13 +2736,13 @@ private:
                 stride,
                 "Runtime STRD command");
             if (!stride_error.empty()) {
-                LOG_G_WARN() << "Ignoring STRD command: " << stride_error;
+                LOG_G_WARN_M(Sensing) << "Ignoring STRD command: " << stride_error;
                 return;
             }
             _schedule_shared_sensing_update([stride](SharedSensingRuntime& cfg) {
                 cfg.sensing_symbol_stride = stride;
             });
-            LOG_G_INFO() << "Set sensing stride to: " << stride;
+            LOG_G_INFO_M(Sensing) << "Set sensing stride to: " << stride;
         });
 
         // Register alignment command
@@ -2756,7 +2755,7 @@ private:
             );
             const int32_t adjusted_value = static_cast<int32_t>(clamped_value);
             _user_delay_offset = _user_delay_offset - static_cast<float>(adjusted_value);
-            LOG_G_INFO() << "Received alignment command: " << adjusted_value << " samples";
+            LOG_G_INFO_M(UlTx) << "Received alignment command: " << adjusted_value << " samples";
         });
 
         // Timing Advance — pulls the UE uplink TX window earlier on the shared
@@ -2766,7 +2765,7 @@ private:
             const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             if (now - _last_tadv_ns.load(std::memory_order_relaxed) < 50'000'000) {
-                LOG_G_WARN() << "TADV rate-limited (<50ms since last); ignored " << value;
+                LOG_G_WARN_M(UlTx) << "TADV rate-limited (<50ms since last); ignored " << value;
                 return;
             }
             _last_tadv_ns.store(now, std::memory_order_relaxed);
@@ -2774,7 +2773,7 @@ private:
             if (_uplink_tx) {
                 _uplink_tx->timing_advance().store(value, std::memory_order_relaxed);
             }
-            LOG_G_INFO() << "TADV (Timing Advance) set to " << value << " samples";
+            LOG_G_INFO_M(UlTx) << "TADV (Timing Advance) set to " << value << " samples";
         });
         _control_handler.register_request("TADV", [this](
             int32_t, const ControlCommandHandler::ControlPeer& peer) {
@@ -2784,7 +2783,7 @@ private:
 
         _control_handler.register_command("MTI ", [this, compact_mask_mode, compact_mask_fft_controls_supported, compact_mask_reason](int32_t value) {
             if (compact_mask_mode && !compact_mask_fft_controls_supported) {
-                LOG_G_INFO() << "Ignoring MTI command in compact_mask sensing mode: "
+                LOG_G_INFO_M(Sensing) << "Ignoring MTI command in compact_mask sensing mode: "
                              << (compact_mask_reason.empty() ? "mask is not local-DD compatible" : compact_mask_reason);
                 return;
             }
@@ -2792,7 +2791,7 @@ private:
             _schedule_shared_sensing_update([enable](SharedSensingRuntime& cfg) {
                 cfg.enable_mti = enable;
             });
-            LOG_G_INFO() << "MTI " << (enable ? "Enabled" : "Disabled");
+            LOG_G_INFO_M(Sensing) << "MTI " << (enable ? "Enabled" : "Disabled");
         });
 
         _control_handler.register_command("CFEN", [this](int32_t value) {
@@ -2871,20 +2870,20 @@ private:
 
         _control_handler.register_command("MRST", [this](int32_t value) {
             if (!_measurement_enabled) {
-                LOG_G_WARN() << "MRST ignored: measurement mode disabled";
+                LOG_G_WARN_M(Config) << "MRST ignored: measurement mode disabled";
                 return;
             }
             if (value <= 0) {
-                LOG_G_WARN() << "MRST ignored: invalid epoch id " << value;
+                LOG_G_WARN_M(Config) << "MRST ignored: invalid epoch id " << value;
                 return;
             }
             _switch_measurement_epoch(static_cast<uint32_t>(value));
-            LOG_G_INFO() << "Measurement epoch reset to " << value;
+            LOG_G_INFO_M(Config) << "Measurement epoch reset to " << value;
         });
 
         _control_handler.register_command("CALB", [this](int32_t value) {
             if (!_bistatic_sensing_channel) {
-                LOG_G_WARN() << "CALB ignored: bistatic sensing channel is not initialized";
+                LOG_G_WARN_M(Sensing) << "CALB ignored: bistatic sensing channel is not initialized";
                 return;
             }
             const size_t target_symbols = value <= 0 ? 0u : static_cast<size_t>(value);
@@ -2925,7 +2924,7 @@ private:
         }
 
         if (!cfg_.sensing.bi_enabled) {
-            LOG_G_INFO() << "Bistatic sensing disabled by config.";
+            LOG_G_INFO_M(Sensing) << "Bistatic sensing disabled by config.";
             return;
         }
 
@@ -2976,14 +2975,14 @@ private:
             cfg_.network_output.udp_output_ip,
             static_cast<uint16_t>(cfg_.network_output.udp_output_port),
             cfg_.network_output.udp_egress_pacer,
-            cfg_.should_profile("udp_egress"));
+            LOG_MOD_ON(UdpEgressProfiling));
 
         // ARQ: configure DL RX window if enabled
         _arq_enabled = cfg_.network_output.arq_enabled;
         if (_arq_enabled) {
             _dl_arq_rx.configure(cfg_.network_output);
             _dl_arq_rx.set_direction(0); // downlink direction
-            LOG_G_INFO() << "[UE ARQ] DL RX enabled: window="
+            LOG_G_INFO_M(ArqDl) << "[UE ARQ] DL RX enabled: window="
                          << cfg_.network_output.arq_window_packets
                          << " ordered=" << cfg_.network_output.arq_ordered_delivery;
         }
@@ -3033,8 +3032,8 @@ private:
         tx_tune_req.rf_freq_policy = radio::TunePolicy::Manual;
         tx_tune_req.dsp_freq_policy = radio::TunePolicy::Manual;
         current_ul_tx_tune_ = dev_->set_tx_freq(tx_tune_req, cfg_.uplink.tx_channel);
-        if (cfg_.should_profile("uplink")) {
-            LOG_RT_INFO() << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
+        if (LOG_MOD_ON(UlTx)) {
+            LOG_RT_INFO_M(UlTx) << "[UL-TX] adjusted TX frequency with RX CFO correction: base="
                           << format_freq_hz(ul_base_freq)
                           << " Hz, target correction=" << format_freq_hz(tx_target_correction_hz)
                           << " Hz, requested TX DSP=" << format_freq_hz(tx_dsp_correction_hz)
@@ -3103,7 +3102,7 @@ private:
             uplink_self_pdf_pub_ = std::make_unique<ZmqByteSender>(
                 cfg_.network_output.uplink_self_pdf_ip,
                 static_cast<uint16_t>(cfg_.network_output.uplink_self_pdf_port));
-            LOG_G_INFO() << "[UL-TX] self-channel debug streams: channel="
+            LOG_G_INFO_M(UlTx) << "[UL-TX] self-channel debug streams: channel="
                          << cfg_.network_output.uplink_self_channel_ip << ':' << cfg_.network_output.uplink_self_channel_port
                          << ", pdf=" << cfg_.network_output.uplink_self_pdf_ip << ':'
                          << cfg_.network_output.uplink_self_pdf_port;
@@ -3117,7 +3116,7 @@ private:
                 uplink_self_scan_pub_ = std::make_unique<ZmqByteSender>(
                     cfg_.network_output.uplink_self_scan_ip,
                     static_cast<uint16_t>(cfg_.network_output.uplink_self_scan_port));
-                LOG_G_INFO() << "[UL-TX] self-scan spectrum stream: "
+                LOG_G_INFO_M(UlTx) << "[UL-TX] self-scan spectrum stream: "
                              << cfg_.network_output.uplink_self_scan_ip << ':'
                              << cfg_.network_output.uplink_self_scan_port;
             }
@@ -3126,8 +3125,8 @@ private:
             ertm_debug_pub_ = std::make_unique<ZmqByteSender>(
                 cfg_.network_output.ertm_debug_ip,
                 static_cast<uint16_t>(cfg_.network_output.ertm_debug_port));
-            if (cfg_.should_profile("ertm")) {
-                LOG_G_INFO() << "[eRTM] debug stream: "
+            if (LOG_MOD_ON(Ertm)) {
+                LOG_G_INFO_M(Ertm) << "[eRTM] debug stream: "
                              << cfg_.network_output.ertm_debug_ip << ':'
                              << cfg_.network_output.ertm_debug_port;
             }
@@ -3145,8 +3144,8 @@ private:
     void _clear_recovery_queues_from_process_thread() {
         _clear_frame_queue();
         sync_queue_.clear();
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_RT_WARN() << "[UE recovery] cleared queued RX/sync batches for generation="
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] cleared queued RX/sync batches for generation="
                           << _sync_generation.load(std::memory_order_acquire);
         }
     }
@@ -3168,7 +3167,7 @@ private:
         int64_t sample_adjust,
         bool update_previous_delta)
     {
-        if (!cfg_.should_profile("ue_recovery")) {
+        if (!LOG_MOD_ON(Recovery)) {
             return;
         }
         const int64_t start_ns =
@@ -3177,7 +3176,7 @@ private:
             static_cast<int64_t>(cfg_.samples_per_frame());
         if (timestamp_ns < 0 || start_ns < 0 || frame_samples <= 0 ||
             !(cfg_.rf_sampling.sample_rate > 0.0)) {
-            LOG_RT_WARN() << "[UE recovery] rx_timestamp_boundary context=" << context
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] rx_timestamp_boundary context=" << context
                           << ", valid=0"
                           << ", timestamp_ns=" << timestamp_ns
                           << ", stream_start_ns=" << start_ns
@@ -3210,7 +3209,7 @@ private:
             }
         }
 
-        LOG_RT_WARN() << "[UE recovery] rx_timestamp_boundary context=" << context
+        LOG_RT_WARN_M(Recovery) << "[UE recovery] rx_timestamp_boundary context=" << context
                       << ", valid=1"
                       << ", restart_epoch="
                       << _rx_stream_start_restart_epoch.load(std::memory_order_acquire)
@@ -3243,7 +3242,7 @@ private:
         _set_uplink_waveform_enabled(false);
         _llr_snr_linear_filtered = 1.0;
         _llr_snr_filter_initialized = false;
-        const bool log_agc = cfg_.should_profile("agc");
+        const bool log_agc = LOG_MOD_ON(Agc);
         double search_gain_db = 0.0;
         const bool reset_search_gain = _sync_search_gain_sweep.reset_to_default(
             [this](double gain_db) {
@@ -3255,7 +3254,7 @@ private:
             &search_gain_db
         );
         if (reset_search_gain && log_agc) {
-            LOG_RT_INFO() << "Search RX AGC reset gain to default: " << search_gain_db << " dB";
+            LOG_RT_INFO_M(Agc) << "Search RX AGC reset gain to default: " << search_gain_db << " dB";
         }
         // Only the queues consumed by THIS thread may be drained here:
         // frame_queue_ and sync_queue_ (process_proc is their sole consumer).
@@ -3297,11 +3296,11 @@ private:
                 _last_rx_boundary_offset_samples.store(
                     std::numeric_limits<int64_t>::min(),
                     std::memory_order_release);
-                LOG_G_INFO() << "[UE] timed RX stream start at "
+                LOG_G_INFO_M(Radio) << "[UE] timed RX stream start at "
                              << start_time.get_real_secs()
                              << " s, shared with UL-TX";
-                if (cfg_.should_profile("ue_recovery")) {
-                    LOG_RT_WARN() << "[UE recovery] rx_stream_anchor start_time="
+                if (LOG_MOD_ON(Recovery)) {
+                    LOG_RT_WARN_M(Recovery) << "[UE recovery] rx_stream_anchor start_time="
                                   << start_time.get_real_secs()
                                   << ", start_time_ns=" << start_time_ns
                                   << ", restart_epoch=" << restart_epoch
@@ -3314,7 +3313,7 @@ private:
                 _rx_stream_start_restart_epoch.store(
                     _stream_restart_count.load(std::memory_order_acquire),
                     std::memory_order_release);
-                LOG_G_INFO() << "[UE] immediate RX stream start";
+                LOG_G_INFO_M(Radio) << "[UE] immediate RX stream start";
             }
             rx_stream_->issue_stream_cmd(cmd);
         };
@@ -3322,7 +3321,7 @@ private:
             try {
                 rx_stream_->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
             } catch (const std::exception& e) {
-                LOG_RT_WARN() << "[UE RX] failed to stop stream before restart: " << e.what();
+                LOG_RT_WARN_M(Sync) << "[UE RX] failed to stop stream before restart: " << e.what();
             }
         };
 
@@ -3345,8 +3344,8 @@ private:
                     restart_epoch =
                         _stream_restart_count.fetch_add(1, std::memory_order_relaxed) + 1;
                 }
-                if (cfg_.should_profile("ue_recovery")) {
-                    LOG_RT_WARN() << "[UE recovery] shared_restart_begin restart_epoch="
+                if (LOG_MOD_ON(Recovery)) {
+                    LOG_RT_WARN_M(Recovery) << "[UE recovery] shared_restart_begin restart_epoch="
                                   << restart_epoch
                                   << ", stream_restart_requested="
                                   << stream_restart_requested
@@ -3373,20 +3372,20 @@ private:
                     const bool tx_restart_submitted =
                         _uplink_tx->wait_for_restart_submitted(restart_epoch);
                     if (!tx_restart_submitted) {
-                        LOG_RT_WARN() << "[UE recovery] timed UL-TX restart was not submitted "
+                        LOG_RT_WARN_M(Recovery) << "[UE recovery] timed UL-TX restart was not submitted "
                                       << "before RX restart; restart_epoch=" << restart_epoch
                                       << ", start_time=" << stream_start_time.get_real_secs();
-                    } else if (cfg_.should_profile("ue_recovery")) {
-                        LOG_RT_WARN() << "[UE recovery] timed UL-TX restart submitted before RX start"
+                    } else if (LOG_MOD_ON(Recovery)) {
+                        LOG_RT_WARN_M(Recovery) << "[UE recovery] timed UL-TX restart submitted before RX start"
                                       << ", restart_epoch=" << restart_epoch
                                       << ", start_time=" << stream_start_time.get_real_secs();
                     }
                 }
                 issue_start(stream_start_time);
-                LOG_RT_WARN() << "[UE] shared RX/UL-TX restart at "
+                LOG_RT_WARN_M(Recovery) << "[UE] shared RX/UL-TX restart at "
                               << stream_start_time.get_real_secs() << " s";
-                if (cfg_.should_profile("ue_recovery")) {
-                    LOG_RT_WARN() << "[UE recovery] shared_restart_applied start_time="
+                if (LOG_MOD_ON(Recovery)) {
+                    LOG_RT_WARN_M(Recovery) << "[UE recovery] shared_restart_applied start_time="
                                   << stream_start_time.get_real_secs()
                                   << ", restart_epoch=" << restart_epoch
                                   << ", stream_restart_requested="
@@ -3472,7 +3471,7 @@ private:
      */
     void handle_alignment(radio::RxMetadata& md) {
         const bool do_latency_profile =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+            LOG_MOD_ON(DemodProfiling);
         const int alignment_samples = discard_samples_.load(std::memory_order_relaxed);
         const uint64_t alignment_id =
             _pending_alignment_id.load(std::memory_order_relaxed);
@@ -3503,8 +3502,8 @@ private:
             received += got;
         }
         if (received < total_read) {
-            if (cfg_.should_profile("ue_recovery")) {
-                LOG_RT_WARN() << "[UE recovery] alignment_rx_abort alignment_id="
+            if (LOG_MOD_ON(Recovery)) {
+                LOG_RT_WARN_M(Recovery) << "[UE recovery] alignment_rx_abort alignment_id="
                               << alignment_id
                               << ", alignment=" << alignment_samples
                               << ", restart_epoch=" << alignment_restart_epoch
@@ -3570,8 +3569,8 @@ private:
             LOG_RT_WARN_HZ(5) << "RX frame queue full during alignment, dropping newest frame";
             _rx_frame_pool.release(std::move(frame));
         }
-        if (cfg_.should_profile("ue_recovery")) {
-            LOG_RT_WARN() << "[UE recovery] alignment_rx_commit alignment_id="
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_RT_WARN_M(Recovery) << "[UE recovery] alignment_rx_commit alignment_id="
                           << alignment_id
                           << ", alignment=" << alignment_samples
                           << ", restart_epoch=" << alignment_restart_epoch
@@ -3595,8 +3594,8 @@ private:
                 static_cast<int64_t>(alignment_samples),
                 true);
         }
-//        LOG_G_INFO() << "Alignment done, moving "<< discard_samples_<< " samples" << std::endl;
-//        LOG_G_INFO() <<  discard_samples_<< std::endl;
+//        LOG_G_INFO_M(Root) << "Alignment done, moving "<< discard_samples_<< " samples" << std::endl;
+//        LOG_G_INFO_M(Root) <<  discard_samples_<< std::endl;
         _set_uplink_waveform_enabled(true);
         state_ = RxState::NORMAL;
     }
@@ -3609,7 +3608,7 @@ private:
      */
     void handle_normal_rx(radio::RxMetadata& md) {
         const bool do_latency_profile =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+            LOG_MOD_ON(DemodProfiling);
         // Acquire pre-allocated RX frame from pool
         RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = 0;
@@ -3679,7 +3678,7 @@ private:
         constexpr float kSecSyncMetricThreshold = 0.10f;
         constexpr float kCfoTrainingMetricThreshold = 0.10f;
         const size_t local_zc_search_radius = 2 * cfg_.ofdm.cp_length;
-        const bool log_sync_profile = cfg_.should_profile("sync");
+        const bool log_sync_profile = LOG_MOD_ON(Sync);
         const bool collect_alias_candidates =
             log_sync_profile || cfo_training_sequence_enabled(cfg_);
 
@@ -3704,7 +3703,7 @@ private:
                 cfg_.ofdm.cfo_training_period_samples,
                 cfg_.rf_sampling.sample_rate);
             if (log_sync_profile) {
-                LOG_RT_INFO() << "CFO training field estimate: metric="
+                LOG_RT_INFO_M(Sync) << "CFO training field estimate: metric="
                               << estimate.metric
                               << ", cfo=" << estimate.cfo_hz << " Hz"
                               << ", symbol_start=" << cfo_symbol_start;
@@ -3755,7 +3754,7 @@ private:
                         refine_result,
                         cfo_training_est.cfo_hz);
                 if (log_sync_profile) {
-                    LOG_RT_INFO() << format_sync_alias_candidates(
+                    LOG_RT_INFO_M(Sync) << format_sync_alias_candidates(
                         "Second sync ZC refine",
                         refine_result);
                 }
@@ -3771,14 +3770,14 @@ private:
                         cfg_.rf_sampling.sample_rate,
                         initial_cfo_hz,
                         _sync_cfo_compensated_buffer);
-                    LOG_RT_INFO() << "Second sync symbol coarse metric: " << sec_result.max_metric
+                    LOG_RT_INFO_M(Sync) << "Second sync symbol coarse metric: " << sec_result.max_metric
                                   << ", coarse symbol start: " << sec_result.coarse_symbol_start
                                   << ", modulo CFO: " << sec_result.coarse_cfo_hz
                                   << " Hz, alias index: " << refine_result.alias_index
                                   << ", refined CFO: " << initial_cfo_hz << " Hz"
                                   << (cfo_training_alias_selected ? " (CFO field deambiguated)" : "");
                 } else {
-                    LOG_RT_WARN() << "Second sync symbol coarse sync detected but local ZC refine failed."
+                    LOG_RT_WARN_M(Sync) << "Second sync symbol coarse sync detected but local ZC refine failed."
                                   << " metric=" << sec_result.max_metric
                                   << " local_peak_ratio=" << (avg_corr > 0.0f ? (max_corr / avg_corr) : 0.0f)
                                   << ". Falling back to legacy ZC sync search.";
@@ -3794,7 +3793,7 @@ private:
         if (sync_found) {
             _restore_uplink_tx_gain_after_sync();
             _sync_search_gain_sweep.note_sync_found();
-            LOG_RT_INFO() << "Sync found at pos: " << max_pos
+            LOG_RT_INFO_M(Sync) << "Sync found at pos: " << max_pos
                           << " with peak/avg: " << peak_ratio_db(max_corr, avg_corr)
                           << " dB (peak=" << power_to_db(max_corr)
                           << " dB, avg=" << power_to_db(avg_corr)
@@ -3855,7 +3854,7 @@ private:
                             cp_refine,
                             cfo_training_est.cfo_hz);
                     if (log_sync_profile) {
-                        LOG_RT_INFO() << format_sync_alias_candidates(
+                        LOG_RT_INFO_M(Sync) << format_sync_alias_candidates(
                             "CP CFO ZC refine",
                             cp_refine);
                     }
@@ -3863,14 +3862,14 @@ private:
                         (cp_refine.max_corr / cp_refine.avg_corr) > kZcEnergyThreshold) {
                         cfo = cp_refine.cfo_hz;
                         max_pos = cp_refine.max_pos;
-                        LOG_RT_INFO() << "CP CFO alias refine: modulo CFO=" << residual_cfo_hz
+                        LOG_RT_INFO_M(Sync) << "CP CFO alias refine: modulo CFO=" << residual_cfo_hz
                                       << " Hz, alias index=" << cp_refine.alias_index
                                       << ", refined CFO=" << cfo << " Hz"
                                       << (cfo_training_alias_selected ? " (CFO field deambiguated)" : "");
                     }
                 }
                 
-                LOG_RT_INFO() << "CFO estimate: " << cfo << " Hz (using " << available_symbols
+                LOG_RT_INFO_M(Sync) << "CFO estimate: " << cfo << " Hz (using " << available_symbols
                               << " symbols)";
 
                 int predictive_delay_samples = 0;
@@ -3906,8 +3905,8 @@ private:
                 if (sync_offset_ > 0) {
                     sync_offset_ = sync_offset_ % cfg_.samples_per_frame();
                 }
-                if (cfg_.should_profile("ue_recovery")) {
-                    LOG_RT_WARN() << "[UE recovery] sync_alignment_candidate max_pos="
+                if (LOG_MOD_ON(Recovery)) {
+                    LOG_RT_WARN_M(Recovery) << "[UE recovery] sync_alignment_candidate max_pos="
                                   << max_pos
                                   << ", sync_pos_samples="
                                   << (cfg_.ofdm.sync_pos * symbol_len)
@@ -3927,7 +3926,7 @@ private:
                 _schedule_receive_alignment(static_cast<int32_t>(sync_offset_));
                 issued_alignment = true;
             } else {
-                LOG_RT_WARN() << "No valid symbols for CFO estimation";
+                LOG_RT_WARN_M(Sync) << "No valid symbols for CFO estimation";
             }
             if (issued_freq_adjust) {
                 _control_time_gates.mark_freq_adjust_now(radio_time_now());
@@ -3950,8 +3949,8 @@ private:
                 },
                 &search_gain_db
             );
-            if (stepped_search_gain && cfg_.should_profile("agc")) {
-                LOG_RT_INFO() << "Search RX AGC stepped gain to " << search_gain_db
+            if (stepped_search_gain && LOG_MOD_ON(Agc)) {
+                LOG_RT_INFO_M(Agc) << "Search RX AGC stepped gain to " << search_gain_db
                               << " dB after sync miss";
             }
         }
@@ -3972,9 +3971,9 @@ private:
         size_t collect_slot_idx = 0;
         SPSCBackoff sync_backoff;
         const bool do_latency_profile =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+            LOG_MOD_ON(DemodProfiling);
         const bool do_eq_breakdown =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("breakdown_eq");
+            LOG_MOD_ON(DemodEqProfiling);
         CpuDemodProfile demod_profile;
 
         _start_cpu_demod_workers();
@@ -3983,7 +3982,7 @@ private:
             if (frame_count < REPORT_INTERVAL) {
                 return;
             }
-            if (!cfg_.should_profile("demodulation")) {
+            if (!LOG_MOD_ON(DemodProfiling)) {
                 total_collect_wall_ms = 0.0;
                 total_launch_wait_ms = 0.0;
                 total_worker_dsp_ms = 0.0;
@@ -4030,7 +4029,7 @@ private:
                         << "No valid latency samples in this interval.\n";
                 }
             }
-            LOG_RT_INFO() << oss.str();
+            LOG_RT_INFO_M(DemodProfiling) << oss.str();
             total_collect_wall_ms = 0.0;
             total_launch_wait_ms = 0.0;
             total_worker_dsp_ms = 0.0;
@@ -4099,8 +4098,8 @@ private:
                 sync_backoff.reset();
                 if (sync_batch->generation !=
                     _sync_generation.load(std::memory_order_acquire)) {
-                    if (cfg_.should_profile("ue_recovery")) {
-                        LOG_RT_WARN() << "[UE recovery] dropped stale sync batch generation="
+                    if (LOG_MOD_ON(Recovery)) {
+                        LOG_RT_WARN_M(Recovery) << "[UE recovery] dropped stale sync batch generation="
                                       << sync_batch->generation
                                       << ", current_generation="
                                       << _sync_generation.load(std::memory_order_acquire);
@@ -4313,7 +4312,7 @@ private:
         // normal run pays nothing.
         constexpr uint64_t kUplinkSelfScanStride = 128;
         const bool scan_log =
-            cfg_.should_profile("ue_recovery") || cfg_.should_profile("uplink");
+            (LOG_MOD_ON(Recovery) || LOG_MOD_ON(UlTx));
         const bool scan_publish =
             uplink_self_scan_spectrum_enabled(cfg_) && uplink_self_scan_pub_;
         if (_uplink_self_scan_processor && (scan_log || scan_publish) &&
@@ -4338,7 +4337,7 @@ private:
             const int32_t timing_advance =
                 _uplink_tx->timing_advance().load(std::memory_order_relaxed);
             if (scan_log) {
-                LOG_G_WARN() << "[UL-TX self-scan] measured_zc_pos=" << scan_pos
+                LOG_G_WARN_M(UlTx) << "[UL-TX self-scan] measured_zc_pos=" << scan_pos
                              << ", expected_zc_pos=" << local_tx_zc_start
                              << ", offset=" << offset
                              << " samples, peak/avg=" << peak_avg_db
@@ -4378,7 +4377,7 @@ private:
             AlignedVector(_uplink_self_delay_spectrum.begin(), _uplink_self_delay_spectrum.end()));
 
         if ((_uplink_self_debug_frame_counter++ % 4096) == 0) {
-            LOG_G_INFO() << "[UL-TX] self-channel debug: local UE UL ZC offset="
+            LOG_G_INFO_M(UlTx) << "[UL-TX] self-channel debug: local UE UL ZC offset="
                          << local_tx_zc_start
                          << ", rx_frame_start_offset=0"
                          << ", frame_period=" << frame.frame_data.size();
@@ -4526,7 +4525,7 @@ private:
         uint64_t prof_eq_pilot_phase_attempt = 0;
         uint64_t prof_eq_pilot_phase_success = 0;
         const bool do_eq_breakdown =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("breakdown_eq");
+            LOG_MOD_ON(DemodEqProfiling);
         const auto eq_tick = [do_eq_breakdown]() {
             return do_eq_breakdown ? ProfileClock::now() : ProfileClock::time_point{};
         };
@@ -4812,7 +4811,7 @@ private:
         auto prof_step_start = ProfileClock::now();
         auto prof_step_end = prof_step_start;
         const bool do_latency_profile =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
+            LOG_MOD_ON(DemodProfiling);
         const RxFrame& frame = result.frame;
         const bool allow_freq_adjust = _control_time_gates.allow_freq_adjust(frame.usrp_time_ns);
         bool issued_freq_adjust = false;
@@ -4858,7 +4857,7 @@ private:
                 _freq_offset_count = 0;
                 if (std::abs(_avg_freq_offset) > 2.0f &&
                     cfg_.sync_tracking.software_sync && allow_freq_adjust) {
-                    LOG_RT_INFO() << "Adjusting RX frequency by: " << _avg_freq_offset << " Hz";
+                    LOG_RT_INFO_M(Sync) << "Adjusting RX frequency by: " << _avg_freq_offset << " Hz";
                     adjust_rx_freq(-_avg_freq_offset, false);
                     issued_freq_adjust = true;
                 }
@@ -4932,7 +4931,7 @@ private:
         const bool allow_reset = _control_time_gates.allow_reset(frame.usrp_time_ns);
         const bool allow_alignment = _control_time_gates.allow_alignment(frame.usrp_time_ns);
         const bool allow_rx_gain_adjust = _control_time_gates.allow_rx_gain_adjust(frame.usrp_time_ns);
-        const bool log_agc = cfg_.should_profile("agc");
+        const bool log_agc = LOG_MOD_ON(Agc);
         bool issued_alignment = false;
         bool issued_rx_gain_adjust = false;
         if (allow_rx_gain_adjust) {
@@ -4949,7 +4948,7 @@ private:
                 },
                 &agc_adjustment);
             if (issued_rx_gain_adjust && log_agc) {
-                LOG_RT_INFO() << "RX AGC adjusted gain to " << agc_adjustment.next_gain_db
+                LOG_RT_INFO_M(Agc) << "RX AGC adjusted gain to " << agc_adjustment.next_gain_db
                               << " dB (delta=" << agc_adjustment.delta_db
                               << " dB, delay_peak=" << agc_adjustment.observed_peak
                               << ", delay_peak_db=" << agc_adjustment.observed_peak_db
@@ -4968,7 +4967,7 @@ private:
             _reset_count++;
             if (_reset_count >= _reset_hold_frames) {
                 _reset_count = 0;
-                LOG_RT_WARN() << "No valid delay found, resetting state.";
+                LOG_RT_WARN_M(Sync) << "No valid delay found, resetting state.";
                 adjust_rx_freq(0.0, true);
                 sfo_estimator.reset();
                 _akf.reset();
@@ -4979,7 +4978,7 @@ private:
                 if (cfg_.sync_tracking.hardware_sync) {
                     _hw_sync->reset_frequency_control();
                     _hw_sync->reset_ocxo_pi_state();
-                    LOG_RT_INFO() << "OCXO PI state reset to fast stage after sync reset.";
+                    LOG_RT_INFO_M(Ocxo) << "OCXO PI state reset to fast stage after sync reset.";
                 }
                 _enter_sync_search_state();
                 _mute_uplink_tx_gain_for_sync_search();
@@ -5205,11 +5204,11 @@ private:
             _cpu_demod_slots[i]->thread = std::thread(&UEEngine::_cpu_demod_worker_proc, this, i);
         }
         if (cfg_.cpu_cores.demod_worker_cpu_cores.empty()) {
-            LOG_G_WARN() << "[UE CPU demod] cpu_cores.demod_worker_cpu_cores is empty; "
+            LOG_G_WARN_M(Demod) << "[UE CPU demod] cpu_cores.demod_worker_cpu_cores is empty; "
                          << "running 1 unbound demod worker. Configure dedicated cores "
                          << "for stable real-time performance.";
         }
-        LOG_G_INFO() << "[UE CPU demod] started " << _cpu_demod_slots.size()
+        LOG_G_INFO_M(Demod) << "[UE CPU demod] started " << _cpu_demod_slots.size()
                      << " OFDM/LLR worker thread(s), pipeline depth "
                      << CpuDemodSlot::kPipelineDepth;
     }
@@ -5243,7 +5242,7 @@ private:
 
     void _report_cpu_demod_profile_if_needed(CpuDemodProfile& prof, bool do_eq_breakdown) {
         constexpr int PROF_REPORT_INTERVAL = 434;
-        if (prof.frame_count < PROF_REPORT_INTERVAL || !cfg_.should_profile("demodulation")) {
+        if (prof.frame_count < PROF_REPORT_INTERVAL || !LOG_MOD_ON(DemodProfiling)) {
             return;
         }
         const double total = prof.fft_total + prof.channel_est_total + prof.cfo_sfo_est_total +
@@ -5285,7 +5284,7 @@ private:
             << "LLR Calculation:      " << prof.llr_total / n << " us\n"
             << "TOTAL:                " << total / n << " us\n"
             << "====================================================================\n";
-        LOG_RT_INFO() << oss.str();
+        LOG_RT_INFO_M(DemodProfiling) << oss.str();
         prof.reset();
     }
 
@@ -5346,7 +5345,7 @@ private:
         const size_t bytes_per_ldpc_block = (ctx.decoder.get_K() + 7) / 8;
         if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
             bytes_per_ldpc_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock) {
-            LOG_G_WARN() << "[Demod] LDPC codec dimensions do not match unified framing.";
+            LOG_G_WARN_M(Demod) << "[Demod] LDPC codec dimensions do not match unified framing.";
             return;
         }
 
@@ -5363,8 +5362,8 @@ private:
             if (!LdpcPacketFraming::decode_mini_header_llrs(
                     llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
                     mini_header)) {
-                if (cfg_.should_profile("demodulation")) {
-                    LOG_G_WARN() << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
+                if (LOG_MOD_ON(Demod)) {
+                    LOG_G_WARN_M(Demod) << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
                 }
                 break;
             }
@@ -5378,7 +5377,7 @@ private:
                 symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
 
             if (payload_llr_offset + required_llr > llr.size()) {
-                LOG_G_WARN() << "[Demod] Mini-header requested payload beyond frame: blocks="
+                LOG_G_WARN_M(Demod) << "[Demod] Mini-header requested payload beyond frame: blocks="
                              << payload_blocks << ", seq=" << mini_header.seq;
                 break;
             }
@@ -5399,7 +5398,7 @@ private:
             try {
                 ctx.decoder.decode_frame(payload_scratch, ctx.decoded_payload);
                 if (ctx.decoded_payload.size() < mini_header.payload_len) {
-                    LOG_G_WARN() << "[Demod] Decoded payload shorter than mini-header length.";
+                    LOG_G_WARN_M(Demod) << "[Demod] Decoded payload shorter than mini-header length.";
                 } else {
                     CpuLdpcPacketRef ref;
                     ref.mini_header = mini_header;
@@ -5413,7 +5412,7 @@ private:
                     result.packets.push_back(ref);
                 }
             } catch (const std::exception& e) {
-                LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
+                LOG_G_WARN_M(Demod) << "[Demod] Payload LDPC decode failed: " << e.what();
             }
             symbol_offset = next_symbol_offset;
         }
@@ -5464,7 +5463,7 @@ private:
                                     _measurement_epoch_tx_gain_x10.store(
                                         meta.tx_gain_x10, std::memory_order_relaxed);
                                 } else {
-                                    LOG_G_WARN() << "[Demod] Failed to rebuild expected measurement payload"
+                                    LOG_G_WARN_M(Demod) << "[Demod] Failed to rebuild expected measurement payload"
                                                  << " for epoch " << meta.epoch_id
                                                  << " seq " << meta.seq_in_epoch;
                                 }
@@ -5604,7 +5603,7 @@ private:
             const size_t available = pool.available();
             if (target > available) {
                 pool.prefill(target - available);
-                LOG_G_INFO() << "[UE pools] prefilled " << name << " to "
+                LOG_G_INFO_M(Config) << "[UE pools] prefilled " << name << " to "
                              << target << " buffers";
             }
         };
@@ -5699,10 +5698,10 @@ private:
             _cpu_ldpc_slots[i]->thread = std::thread(&UEEngine::_cpu_ldpc_worker_proc, this, i);
         }
         if (cfg_.cpu_cores.ldpc_worker_cpu_cores.empty()) {
-            LOG_G_INFO() << "[UE CPU LDPC] cpu_cores.ldpc_worker_cpu_cores is empty; "
+            LOG_G_INFO_M(DemodLdpc) << "[UE CPU LDPC] cpu_cores.ldpc_worker_cpu_cores is empty; "
                          << "running 1 unbound LDPC decode worker.";
         }
-        LOG_G_INFO() << "[UE CPU LDPC] started " << _cpu_ldpc_slots.size()
+        LOG_G_INFO_M(DemodLdpc) << "[UE CPU LDPC] started " << _cpu_ldpc_slots.size()
                      << " LDPC decode worker thread(s), pipeline depth "
                      << CpuLdpcSlot::kPipelineDepth;
     }
@@ -5734,15 +5733,15 @@ private:
         bind_current_thread_from_ue_downlink_role(cfg_, 2);
         SPSCBackoff llr_backoff;
         const bool do_latency_profile =
-            cfg_.should_profile("demodulation") && cfg_.should_profile("latency");
-        const bool log_snr = cfg_.should_profile("snr");
+            LOG_MOD_ON(DemodProfiling);
+        const bool log_snr = LOG_MOD_ON(DemodSnr);
         std::vector<uint8_t> expected_measurement_payload;
         size_t snr_print_counter = 0;
 
         auto maybe_log_snr = [&]() {
             if (log_snr && ((snr_print_counter++ & 0x3F) == 0)) {
                 const double llr_snr_db = 10.0 * std::log10(std::max(1.0 / _noise_var, 1e-6));
-                LOG_G_INFO() << "[LLR] SNR(dB): " << _snr_db
+                LOG_G_INFO_M(DemodLlr) << "[LLR] SNR(dB): " << _snr_db
                              << " llr_snr(dB): " << llr_snr_db
                              << " noise_var: " << _noise_var
                              << " llr_scale: " << _llr_scale;
@@ -5885,13 +5884,13 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     Config cfg = make_default_ue_config();
 
     if (argc > 1) {
-        LOG_G_ERROR() << "CLI parameters are no longer supported. Please configure UE via "
+        LOG_G_ERROR_M(Config) << "CLI parameters are no longer supported. Please configure UE via "
                       << default_config_file << ".";
         return 1;
     }
 
     if (!path_exists(default_config_file)) {
-        LOG_G_ERROR() << "Config file '" << default_config_file
+        LOG_G_ERROR_M(Config) << "Config file '" << default_config_file
                       << "' not found. Copy a sample file from the repository config directory, "
                       << "such as 'UE_X310.yaml' or 'UE_B210.yaml', to '" << default_config_file
                       << "' and edit it before starting UE.";
@@ -5901,8 +5900,9 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     if (!load_ue_config_from_yaml(cfg, default_config_file)) {
         return 1;
     }
+    apply_logging_config(cfg.logging);
 
-    LOG_G_INFO() << "Loaded config from: " << default_config_file;
+    LOG_G_INFO_M(Config) << "Loaded config from: " << default_config_file;
     finalize_ue_network_defaults(cfg);
     log_ue_sync_mode(cfg);
     log_ue_agc_mode(cfg);

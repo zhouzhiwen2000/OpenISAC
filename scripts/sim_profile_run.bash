@@ -18,12 +18,48 @@ cd "$BUILD" || exit 1
 cp "$ROOT/config/BS_Sim.yaml"   "$BUILD/BS.yaml"
 cp "$ROOT/config/UE_Sim.yaml" "$BUILD/UE.yaml"
 
-# Enable demodulation profiling in the demod config.
-if grep -q '^profiling_modules:' "$BUILD/UE.yaml"; then
-    sed -i 's/^profiling_modules:.*/profiling_modules: "demodulation"/' "$BUILD/UE.yaml"
-else
-    echo 'profiling_modules: "demodulation"' >> "$BUILD/UE.yaml"
-fi
+# Enable demod profile reports via hierarchical logging (replaces profiling_modules).
+# logging.modules.demod_profiling: info turns on LOG_MOD_ON(DemodProfiling) timing dumps.
+python3 - <<'PY'
+from pathlib import Path
+import re
+p = Path("UE.yaml")
+text = p.read_text()
+if not re.search(r'(?m)^logging:\s*$', text) and 'logging:' not in text:
+    text += (
+        "\nlogging:\n"
+        "  default_level: warn\n"
+        "  force_error: true\n"
+        "  modules:\n"
+        "    demod_profiling: info\n"
+    )
+else:
+    # Ensure modules.demod_profiling: info exists under logging
+    if re.search(r'(?m)^    demod_profiling:\s*', text):
+        text = re.sub(
+            r'(?m)^(    demod_profiling:)\s*.*$',
+            r'\1 info',
+            text,
+            count=1,
+        )
+    else:
+        modules_line = r'(?m)^  modules:\s*(?:\{\})?\s*(?:#.*)?$'
+        if re.search(modules_line, text):
+            text = re.sub(
+                modules_line,
+                '  modules:\n    demod_profiling: info',
+                text,
+                count=1,
+            )
+        else:
+            text = re.sub(
+                r'(?m)^(logging:\s*\n)',
+                r'\1  modules:\n    demod_profiling: info\n',
+                text,
+                count=1,
+            )
+p.write_text(text)
+PY
 
 # Port 10000 is held by a stale/invisible process in this WSL2 env; move the
 # demod control ROUTER aside so the bind succeeds for measurement runs.

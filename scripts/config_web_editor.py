@@ -25,28 +25,6 @@ CSS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.css")
 JS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.js")
 SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
-PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
-    "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc", "agc", "arq", "ertm", "udp_egress"),
-    "ue": ("all", "demodulation", "cfo", "agc", "align", "uplink", "arq", "ertm", "udp_egress", "ue_recovery"),
-}
-
-PROFILING_DESCRIPTIONS: dict[str, str] = {
-    "all": "Enable every profiling and diagnostic module for this tab.",
-    "modulation": "Show BS frame processing breakdown and load statistics.",
-    "latency": "Enable BS end-to-end latency tracking. Requires modulation too.",
-    "ldpc_encode": "Profile LDPC encode and enqueue cost in the BS path.",
-    "sensing_proc": "Profile sensing processing in the BS path, including per-channel sensing work.",
-    "arq": "Show ARQ ACK, retransmission, queue, and feedback-carrier diagnostics.",
-    "demodulation": "Show UE per-frame processing breakdown and load statistics.",
-    "cfo": "Enable UE CUDA CFO tracking diagnostics and CPU mirror comparison logs.",
-    "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",
-    "align": "Enable runtime alignment diagnostics, including ALGN logs.",
-    "uplink": "Enable UE uplink TX runtime diagnostics, including UL-TX timing and waveform logs.",
-    "ertm": "Enable eRTM timing report and pending-alignment diagnostics.",
-    "udp_egress": "Show UDP egress pacer throughput, queue, and drop statistics.",
-    "ue_recovery": "Show UE RX/UL-TX shared restart and alignment-coupling diagnostics.",
-}
-
 def field_data_key(field: dict[str, Any]) -> str:
     return str(field.get("data_key") or field.get("key") or "")
 
@@ -298,52 +276,6 @@ def non_negative_cpu_values(values: list[Any]) -> list[int]:
             parsed_values.append(parsed)
     return parsed_values
 
-
-def profiling_options_for_tab(tab_name: str, value: Any) -> list[str]:
-    options = list(PROFILING_OPTIONS.get(tab_name, ()))
-    extra_tokens = []
-    if isinstance(value, str):
-        extra_tokens = [token.strip() for token in value.split(",") if token.strip()]
-    for token in extra_tokens:
-        if token not in options:
-            options.append(token)
-    return options
-
-
-def parse_profiling_modules(value: Any) -> list[str]:
-    if not isinstance(value, str):
-        return []
-    tokens = [token.strip() for token in value.split(",") if token.strip()]
-    if "all" in tokens:
-        return ["all"]
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for token in tokens:
-        if token in seen:
-            continue
-        seen.add(token)
-        ordered.append(token)
-    return ordered
-
-
-def encode_profiling_modules(tokens: Any, tab_name: str, fallback: Any) -> str:
-    if not isinstance(tokens, list):
-        return str(fallback or "")
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for token in tokens:
-        text = str(token).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        cleaned.append(text)
-    if "all" in cleaned:
-        return "all"
-    option_order = profiling_options_for_tab(tab_name, fallback)
-    ordered = [token for token in option_order if token in cleaned and token != "all"]
-    extras = [token for token in cleaned if token not in ordered and token != "all"]
-    ordered.extend(extras)
-    return ",".join(ordered)
 
 
 def format_mapping_text(value: Any) -> str:
@@ -609,6 +541,153 @@ def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_valu
     return build_structured_mapping_payload(value, field, has_value, "simulation_mapping")
 
 
+def build_logging_mapping_payload(value: Any, field: dict[str, Any], has_value: bool) -> dict[str, Any]:
+    """Payload for hierarchical logging filter UI."""
+    value_map = copy.deepcopy(value) if isinstance(value, dict) else {}
+    if not has_value and isinstance(field.get("default"), dict):
+        value_map = copy.deepcopy(field.get("default") or {})
+        has_value = True
+
+    scalar_fields_payload: list[dict[str, Any]] = []
+    for scalar_field in field.get("scalar_fields", []):
+        key = str(scalar_field.get("key", ""))
+        if not key:
+            continue
+        field_has_value = has_value and key in value_map
+        raw_value = value_map.get(key)
+        kind = str(scalar_field.get("kind") or detect_kind(raw_value))
+        default_value = scalar_field.get("default")
+        form_value, value_text = scalar_form_value(key, kind, raw_value, default_value, field_has_value)
+        scalar_fields_payload.append({
+            "key": key,
+            "comment": scalar_field.get("comment", ""),
+            "display_comment": display_comment_override(key, scalar_field.get("comment", "")),
+            "kind": kind,
+            "optional": bool(scalar_field.get("optional", False)),
+            "default_text": scalar_field_default_text(key, kind, default_value),
+            "value": form_value,
+            "value_text": value_text,
+            "options": copy.deepcopy(scalar_field.get("options", [])),
+            "is_set": field_has_value or default_value is not None,
+        })
+
+    modules_map = value_map.get("modules", {}) if isinstance(value_map.get("modules"), dict) else {}
+    level_options = ["inherit", "off", "error", "warn", "info", "debug"]
+    module_fields_payload: list[dict[str, Any]] = []
+    for module_field in field.get("module_fields", []):
+        path = str(module_field.get("path", "")).strip()
+        if not path:
+            continue
+        raw_level = modules_map.get(path, "inherit")
+        level = str(raw_level).strip().lower() if raw_level is not None else "inherit"
+        if level not in level_options:
+            level = "inherit"
+        module_fields_payload.append({
+            "path": path,
+            "title": module_field.get("title", path),
+            "comment": module_field.get("comment", ""),
+            "depth": int(module_field.get("depth", 0) or 0),
+            "level": level,
+            "options": list(level_options),
+        })
+
+    return {
+        "type": "logging_mapping",
+        "key": field["key"],
+        "comment": field.get("comment", ""),
+        "display_comment": display_comment_override(field["key"], field.get("comment", "")),
+        "optional": bool(field.get("optional", False)),
+        "is_set": has_value,
+        "scalar_fields": scalar_fields_payload,
+        "module_fields": module_fields_payload,
+    }
+
+
+def normalize_logging_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(raw, str):
+        parsed = parse_mapping_text(raw)
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Invalid logging payload.")
+        raw = {"scalars": {}, "modules": parsed.get("modules", {}), "extra": parsed}
+
+    if not isinstance(raw, dict):
+        raise RuntimeError("Invalid logging payload.")
+
+    result: dict[str, Any] = {}
+    scalars = raw.get("scalars", {})
+    if not isinstance(scalars, dict):
+        raise RuntimeError("Invalid logging scalar payload.")
+
+    for scalar_field in field.get("scalar_fields", []):
+        key = str(scalar_field.get("key", ""))
+        if not key or key not in scalars:
+            # Keep defaults when UI omitted optional scalars
+            if "default" in scalar_field and not scalar_field.get("optional", False):
+                result[key] = copy.deepcopy(scalar_field.get("default"))
+            continue
+        kind = str(scalar_field.get("kind") or "string")
+        raw_value = scalars.get(key)
+        is_set = True
+        if isinstance(raw_value, dict):
+            is_set = bool(raw_value.get("is_set", False))
+            raw_value = raw_value.get("value", "")
+        if kind == "bool":
+            if scalar_field.get("optional") and not is_set:
+                continue
+            raw_text = str(raw_value).strip().lower()
+            result[key] = raw_text == "true" if isinstance(raw_value, str) else bool(raw_value)
+            continue
+        raw_text = str(raw_value)
+        if scalar_field.get("optional") and not is_set and not raw_text.strip():
+            if "default" in scalar_field:
+                result[key] = copy.deepcopy(scalar_field.get("default"))
+            continue
+        result[key] = parse_display_value(key, raw_text, kind)
+
+    modules_raw = raw.get("modules", {})
+    modules: dict[str, str] = {}
+    if isinstance(modules_raw, dict):
+        known_paths = {
+            str(mf.get("path", "")).strip()
+            for mf in field.get("module_fields", [])
+            if str(mf.get("path", "")).strip()
+        }
+        for path, level in modules_raw.items():
+            path_s = str(path).strip()
+            level_s = str(level).strip().lower()
+            if not path_s or path_s not in known_paths:
+                continue
+            if level_s in {"", "inherit", "default"}:
+                continue
+            if level_s not in {"off", "error", "warn", "info", "debug"}:
+                continue
+            modules[path_s] = level_s
+    result["modules"] = modules
+    return result
+
+
+def append_logging_mapping_content_lines(
+    lines: list[str], field: dict[str, Any], value: Any
+) -> None:
+    if not isinstance(value, dict):
+        return
+    for scalar_field in field.get("scalar_fields", []):
+        key = str(scalar_field.get("key", ""))
+        if not key or key not in value:
+            continue
+        comment = scalar_field.get("comment", "")
+        suffix = f"  # {comment}" if comment else ""
+        lines.append(f"{key}: {format_scalar(value.get(key))}{suffix}")
+    modules = value.get("modules", {})
+    comment = "Optional per-module overrides (inherit parent when omitted)"
+    if not isinstance(modules, dict) or not modules:
+        lines.append(f"modules: {{}}  # {comment}")
+        return
+    lines.append(f"modules:  # {comment}")
+    for path in sorted(modules.keys()):
+        lines.append(f"  {path}: {format_scalar(modules[path])}")
+
+
 def normalize_simulation_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw, str):
         return parse_mapping_text(raw)
@@ -858,7 +937,9 @@ def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str,
             yaml_key = field_yaml_key(field)
             if not data_key or not yaml_key:
                 continue
-            if yaml_key == section_key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}:
+            if yaml_key == section_key and field.get("type") in {
+                "mapping", "simulation_mapping", "uplink_mapping", "logging_mapping"
+            }:
                 if field.get("type") == "uplink_mapping":
                     child_keys = field_mapping_child_keys(field)
                     data[data_key] = {
@@ -1368,6 +1449,10 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 section_payload["fields"].append(build_simulation_mapping_payload(value, field, has_value))
                 continue
 
+            if field["type"] == "logging_mapping":
+                section_payload["fields"].append(build_logging_mapping_payload(value, field, has_value))
+                continue
+
             if field["type"] == "uplink_mapping":
                 section_payload["fields"].append(build_uplink_mapping_payload(value, field, has_value))
                 continue
@@ -1389,23 +1474,6 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 })
                 continue
 
-            if key == "profiling_modules":
-                section_payload["fields"].append({
-                    "type": "profiling_modules",
-                    "key": key,
-                    "yaml_key": yaml_key,
-                    "comment": field.get("comment", ""),
-                    "display_comment": display_comment_override(yaml_key, field.get("comment", "")),
-                    "options": [
-                        {
-                            "key": option,
-                            "description": PROFILING_DESCRIPTIONS.get(option, ""),
-                        }
-                        for option in profiling_options_for_tab(tab_name, value)
-                    ],
-                    "selected": parse_profiling_modules(value),
-                })
-                continue
             if field["type"] == "flow_list":
                 item_kind = detect_kind(value[0], "int") if isinstance(value, list) and value else "int"
                 if field.get("item_kind"):
@@ -1507,7 +1575,7 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                         section_lines.append(f"{prefix}{item_key}: {format_scalar(value)}{item_suffix}")
                 continue
 
-            if field["type"] in {"mapping", "simulation_mapping", "uplink_mapping"}:
+            if field["type"] in {"mapping", "simulation_mapping", "uplink_mapping", "logging_mapping"}:
                 value = data.get(key, {})
                 if field["type"] == "uplink_mapping":
                     value = schema_mapping_value(field, value, include_extra=False, enabled_data=data)
@@ -1518,8 +1586,17 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                     if data.get("radio.radio_backend", data.get("radio_backend", "uhd")) != "sim":
                         continue
                     value = schema_mapping_value(field, value, include_extra=True, enabled_data=data)
+                elif field["type"] == "logging_mapping":
+                    if not isinstance(value, dict):
+                        value = copy.deepcopy(field.get("default") or {})
+                    # Always emit logging section defaults when present in schema.
+                    if not value and isinstance(field.get("default"), dict):
+                        value = copy.deepcopy(field.get("default") or {})
                 if yaml_key == section_key:
-                    append_structured_mapping_content_lines(section_lines, field, value)
+                    if field["type"] == "logging_mapping":
+                        append_logging_mapping_content_lines(section_lines, field, value)
+                    else:
+                        append_structured_mapping_content_lines(section_lines, field, value)
                 else:
                     append_mapping_lines(section_lines, yaml_key, value, suffix)
                 continue
@@ -1563,10 +1640,8 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             data_key = field_data_key(field)
             if field["type"] == "mapping_list":
                 mapping_layouts[data_key] = field["item_fields"]
-            elif field["type"] in {"mapping", "simulation_mapping", "uplink_mapping"}:
+            elif field["type"] in {"mapping", "simulation_mapping", "uplink_mapping", "logging_mapping"}:
                 mapping_optionals[data_key] = bool(field.get("optional", False))
-            elif field_yaml_key(field) == "profiling_modules":
-                kind_map[data_key] = ("profiling_modules", "", bool(field.get("optional", False)))
             elif field["type"] == "flow_list":
                 existing = current_data.get(data_key, [])
                 item_kind = detect_kind(existing[0], "int") if isinstance(existing, list) and existing else "int"
@@ -1582,13 +1657,7 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
 
     for key, raw in scalars.items():
         field_kind, extra, optional = kind_map.get(key, ("string", "", False))
-        if field_kind == "profiling_modules":
-            encoded = encode_profiling_modules(raw, tab_name, current_data.get(key, ""))
-            if optional and not encoded:
-                result.pop(key, None)
-            else:
-                result[key] = encoded
-        elif field_kind == "flow_list":
+        if field_kind == "flow_list":
             raw_text = str(raw).strip()
             if optional and not raw_text:
                 result.pop(key, None)
@@ -1611,7 +1680,9 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
                 field
                 for section in layout
                 for field in section["fields"]
-                if field_data_key(field) == key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}
+                if field_data_key(field) == key and field.get("type") in {
+                    "mapping", "simulation_mapping", "uplink_mapping", "logging_mapping"
+                }
             ),
             {},
         )
@@ -1621,11 +1692,16 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             raw_text = str(raw_mapping_text or "")
         if optional and (
             (isinstance(raw_mapping_text, str) and not raw_text.strip()) or
-            (isinstance(raw_mapping_text, dict) and not raw_mapping_text.get("scalars") and not raw_mapping_text.get("lists") and not raw_mapping_text.get("extra_text"))
+            (isinstance(raw_mapping_text, dict) and not raw_mapping_text.get("scalars")
+             and not raw_mapping_text.get("lists") and not raw_mapping_text.get("extra_text")
+             and not raw_mapping_text.get("modules")
+             and mapping_field.get("type") != "logging_mapping")
         ):
             result.pop(key, None)
         elif mapping_field.get("type") == "simulation_mapping":
             result[key] = normalize_simulation_mapping_payload(raw_mapping_text, mapping_field)
+        elif mapping_field.get("type") == "logging_mapping":
+            result[key] = normalize_logging_mapping_payload(raw_mapping_text, mapping_field)
         elif mapping_field.get("type") == "uplink_mapping":
             normalized = normalize_uplink_mapping_payload(
                 raw_mapping_text,

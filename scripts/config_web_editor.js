@@ -2508,6 +2508,79 @@ const APP = window.__APP_STATE__;
       return fragment;
     }
 
+    function renderLoggingMappingRows(field) {
+      const fragment = document.createDocumentFragment();
+      for (const sub of (field.scalar_fields || [])) {
+        const row = document.createElement('div');
+        row.className = 'kv-row';
+        row.innerHTML = `
+          <div class="key-col">
+            <code>logging.${sub.key}</code>
+            <div class="hint">${fieldHintText(sub)}</div>
+          </div>
+          <div class="value-col"></div>
+        `;
+        renderScalarControl(row.querySelector('.value-col'), sub);
+        fragment.appendChild(row);
+      }
+
+      const treeRow = document.createElement('div');
+      treeRow.className = 'kv-row';
+      treeRow.innerHTML = `
+        <div class="key-col">
+          <code>logging.modules</code>
+          <div class="hint">Per-module overrides. inherit = use parent (or default_level at root).</div>
+        </div>
+        <div class="value-col"></div>
+      `;
+      const host = treeRow.querySelector('.value-col');
+      const tree = document.createElement('div');
+      tree.className = 'log-module-tree';
+      for (const mod of (field.module_fields || [])) {
+        const item = document.createElement('div');
+        item.className = 'log-module-item';
+        item.style.paddingLeft = `${8 + (Number(mod.depth) || 0) * 16}px`;
+        const label = document.createElement('div');
+        label.className = 'log-module-label';
+        const code = document.createElement('code');
+        code.textContent = mod.path;
+        label.appendChild(code);
+        if (mod.title) {
+          const title = document.createElement('span');
+          title.className = 'log-module-title';
+          title.textContent = mod.title;
+          label.appendChild(title);
+        }
+        if (mod.comment) {
+          const hint = document.createElement('div');
+          hint.className = 'hint';
+          hint.textContent = mod.comment;
+          label.appendChild(hint);
+        }
+        const select = document.createElement('select');
+        select.className = 'log-module-level';
+        const options = Array.isArray(mod.options) && mod.options.length
+          ? mod.options
+          : ['inherit', 'off', 'error', 'warn', 'info', 'debug'];
+        for (const opt of options) {
+          const option = document.createElement('option');
+          option.value = opt;
+          option.textContent = opt;
+          if ((mod.level || 'inherit') === opt) option.selected = true;
+          select.appendChild(option);
+        }
+        select.addEventListener('change', () => {
+          mod.level = select.value;
+        });
+        item.appendChild(label);
+        item.appendChild(select);
+        tree.appendChild(item);
+      }
+      host.appendChild(tree);
+      fragment.appendChild(treeRow);
+      return fragment;
+    }
+
     function renderSections() {
       const model = currentModel();
       if (!model) return;
@@ -2656,6 +2729,11 @@ const APP = window.__APP_STATE__;
             continue;
           }
 
+          if (field.type === 'logging_mapping') {
+            kv.appendChild(renderLoggingMappingRows(field));
+            continue;
+          }
+
           if (field.type === 'mapping') {
             const row = document.createElement('div');
             row.className = 'kv-row';
@@ -2681,64 +2759,6 @@ const APP = window.__APP_STATE__;
             continue;
           }
 
-          if (field.type === 'profiling_modules') {
-            const row = document.createElement('div');
-            row.className = 'kv-row';
-            row.innerHTML = `
-              <div class="key-col">
-                <code>${fieldDisplayKey(field)}</code>
-                <div class="hint">${fieldHintText(field)}</div>
-              </div>
-              <div class="value-col"></div>
-            `;
-            const controlHost = row.querySelector('.value-col');
-            const checklist = document.createElement('div');
-            checklist.className = 'checklist-grid';
-            const selected = new Set(Array.isArray(field.selected) ? field.selected : []);
-            for (const optionItem of (field.options || [])) {
-              const option = typeof optionItem === 'string' ? optionItem : optionItem.key;
-              const description = typeof optionItem === 'string' ? '' : (optionItem.description || '');
-              const label = document.createElement('label');
-              label.className = 'checklist-item';
-              const input = document.createElement('input');
-              input.type = 'checkbox';
-              input.checked = selected.has(option);
-              input.addEventListener('change', () => {
-                const current = new Set(Array.isArray(field.selected) ? field.selected : []);
-                if (option === 'all') {
-                  field.selected = input.checked ? ['all'] : [];
-                } else {
-                  current.delete('all');
-                  if (input.checked) {
-                    current.add(option);
-                  } else {
-                    current.delete(option);
-                  }
-                  field.selected = (field.options || [])
-                    .map((item) => (typeof item === 'string' ? item : item.key))
-                    .filter((item) => current.has(item) && item !== 'all');
-                }
-                renderSections();
-              });
-              label.appendChild(input);
-              const copy = document.createElement('div');
-              copy.className = 'checklist-copy';
-              const code = document.createElement('code');
-              code.textContent = option;
-              copy.appendChild(code);
-              if (description) {
-                const hint = document.createElement('div');
-                hint.className = 'hint';
-                hint.textContent = description;
-                copy.appendChild(hint);
-              }
-              label.appendChild(copy);
-              checklist.appendChild(label);
-            }
-            controlHost.appendChild(checklist);
-            kv.appendChild(row);
-            continue;
-          }
 
           const row = document.createElement('div');
           row.className = 'kv-row';
@@ -2904,10 +2924,24 @@ const APP = window.__APP_STATE__;
               lists: structuredLists,
               extra_text: field.extra_text || '',
             };
+          } else if (field.type === 'logging_mapping') {
+            const structuredScalars = {};
+            for (const sub of (field.scalar_fields || [])) {
+              structuredScalars[sub.key] = {
+                value: sub.kind === 'bool' ? Boolean(sub.value) : (sub.value_text ?? ''),
+                is_set: Boolean(sub.is_set),
+              };
+            }
+            const modules = {};
+            for (const mod of (field.module_fields || [])) {
+              modules[mod.path] = mod.level || 'inherit';
+            }
+            mappings[field.key] = {
+              scalars: structuredScalars,
+              modules,
+            };
           } else if (field.type === 'mapping') {
             mappings[field.key] = field.value_text ?? '';
-          } else if (field.type === 'profiling_modules') {
-            scalars[field.key] = Array.isArray(field.selected) ? field.selected : [];
           } else if (field.kind === 'bool') {
             scalars[field.key] = field.value;
           } else {

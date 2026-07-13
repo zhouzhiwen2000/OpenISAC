@@ -1148,6 +1148,37 @@
     .toast.err .toast-icon { background: var(--err); color: #fff; }
     .toast.info .toast-icon { background: var(--primary-color); color: var(--on-primary); }
 
+    .log-module-tree {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 420px;
+      overflow: auto;
+      padding: 8px;
+      border: 1px solid var(--border-color, #333);
+      border-radius: 8px;
+      background: rgba(127, 127, 127, 0.06);
+    }
+    .log-module-item {
+      display: grid;
+      grid-template-columns: 1fr minmax(110px, 140px);
+      gap: 10px;
+      align-items: center;
+    }
+    .log-module-label {
+      min-width: 0;
+    }
+    .log-module-label code {
+      margin-right: 8px;
+    }
+    .log-module-title {
+      color: var(--muted-color, #888);
+      font-size: 0.9em;
+    }
+    .log-module-level {
+      width: 100%;
+    }
+
     .toast-body { flex: 1 1 auto; min-width: 0; word-break: break-word; }
 
     @media (prefers-reduced-motion: reduce) {

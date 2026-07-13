@@ -378,7 +378,7 @@ private:
                 static std::atomic<uint64_t> arq_drop_count{0};
                 const uint64_t dc = arq_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (dc <= 20 || (dc % 100) == 0) {
-                    LOG_G_WARN() << "[UL-TX ARQ] TX window full, dropping new packet: dropped=" << dc;
+                    LOG_G_WARN_M(ArqUl) << "[UL-TX ARQ] TX window full, dropping new packet: dropped=" << dc;
                 }
                 _raw_udp_buffer.consumer_pop();
                 continue;
@@ -392,7 +392,7 @@ private:
         bind_current_thread_from_uplink_hint(_link_cfg, 3);
         const int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (sock < 0) {
-            LOG_G_ERROR() << "[UL-TX] UDP socket create failed";
+            LOG_G_ERROR_M(UlTx) << "[UL-TX] UDP socket create failed";
             return;
         }
         _udp_sock.store(sock, std::memory_order_release);
@@ -414,19 +414,19 @@ private:
         if (_link_cfg.network_output.ul_udp_input_ip == "0.0.0.0") {
             addr.sin_addr.s_addr = INADDR_ANY;
         } else if (inet_pton(AF_INET, _link_cfg.network_output.ul_udp_input_ip.c_str(), &addr.sin_addr) != 1) {
-            LOG_G_ERROR() << "[UL-TX] Invalid ul_udp_input_ip: " << _link_cfg.network_output.ul_udp_input_ip;
+            LOG_G_ERROR_M(UlTx) << "[UL-TX] Invalid ul_udp_input_ip: " << _link_cfg.network_output.ul_udp_input_ip;
             close_sock();
             return;
         }
         if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            LOG_G_ERROR() << "[UL-TX] UDP bind failed on " << _link_cfg.network_output.ul_udp_input_ip << ":"
+            LOG_G_ERROR_M(UlTx) << "[UL-TX] UDP bind failed on " << _link_cfg.network_output.ul_udp_input_ip << ":"
                           << _link_cfg.network_output.ul_udp_input_port;
             close_sock();
             return;
         }
         ::fcntl(sock, F_SETFL, O_NONBLOCK);
-        if (_link_cfg.should_profile("uplink")) {
-            LOG_G_INFO() << "[UL-TX] uplink payload UDP input on " << _link_cfg.network_output.ul_udp_input_ip << ":"
+        if (LOG_MOD_ON(UlTx)) {
+            LOG_G_INFO_M(UlTx) << "[UL-TX] uplink payload UDP input on " << _link_cfg.network_output.ul_udp_input_ip << ":"
                          << _link_cfg.network_output.ul_udp_input_port;
         }
 
@@ -443,7 +443,7 @@ private:
                 static std::atomic<uint64_t> drop_count{0};
                 const uint64_t dc = drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (dc <= 20 || (dc % 100) == 0) {
-                    LOG_G_WARN() << "[UL-TX] UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
+                    LOG_G_WARN_M(UlTx) << "[UL-TX] UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
                 }
                 continue;
             }
@@ -465,8 +465,8 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(len);
         const size_t packet_qpsk = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
         if (packet_qpsk > _layout.payload_re_count) {
-            if (_link_cfg.should_profile("uplink")) {
-                LOG_RT_WARN_HZ(2) << "[UL-TX] dropping payload: " << packet_qpsk
+            if (LOG_MOD_ON(UlTx)) {
+                LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] dropping payload: " << packet_qpsk
                                   << " qpsk syms > capacity " << _layout.payload_re_count;
             }
             return;
@@ -632,8 +632,8 @@ private:
                 try {
                     _tx_stream->send(&_eob_sample, 0, eob_md, 0.1);
                 } catch (const std::exception& e) {
-                    if (_link_cfg.should_profile("uplink")) {
-                        LOG_RT_WARN() << "[UL-TX] failed to terminate burst before restart: " << e.what();
+                    if (LOG_MOD_ON(UlTx)) {
+                        LOG_RT_WARN_M(UlTx) << "[UL-TX] failed to terminate burst before restart: " << e.what();
                     }
                 }
                 {
@@ -646,13 +646,13 @@ private:
                 active_restart_epoch =
                     _scheduled_restart_epoch.load(std::memory_order_acquire);
                 recovery_log_periods_remaining = 8;
-                if (_link_cfg.should_profile("uplink")) {
-                    LOG_RT_WARN() << "[UL-TX] timed TX restart scheduled at "
+                if (LOG_MOD_ON(UlTx)) {
+                    LOG_RT_WARN_M(UlTx) << "[UL-TX] timed TX restart scheduled at "
                                   << radio::TimeSpec::from_ticks(next_ticks, _tick_rate).get_real_secs()
                                   << " s";
                 }
-                if (_link_cfg.should_profile("ue_recovery")) {
-                    LOG_RT_WARN() << "[UL-TX recovery] restart_seen restart_epoch="
+                if (LOG_MOD_ON(Recovery)) {
+                    LOG_RT_WARN_M(Recovery) << "[UL-TX recovery] restart_seen restart_epoch="
                                   << active_restart_epoch
                                   << ", next_tx_time="
                                   << radio::TimeSpec::from_ticks(next_ticks, _tick_rate).get_real_secs()
@@ -711,7 +711,7 @@ private:
                 md,
                 target_shift_samples,
                 applied_shift_samples);
-            if (_link_cfg.should_profile("ue_recovery")) {
+            if (LOG_MOD_ON(Recovery)) {
                 const bool log_period =
                     first ||
                     recovery_log_periods_remaining > 0 ||
@@ -719,7 +719,7 @@ private:
                     rx_alignment_id != last_logged_alignment_id ||
                     !result.complete;
                 if (log_period) {
-                    LOG_RT_WARN() << "[UL-TX recovery] period period_seq=" << period_seq
+                    LOG_RT_WARN_M(Recovery) << "[UL-TX recovery] period period_seq=" << period_seq
                                   << ", restart_epoch=" << active_restart_epoch
                                   << ", first=" << first
                                   << ", md_time="
@@ -746,8 +746,8 @@ private:
             }
             if (!result.complete && _running.load(std::memory_order_relaxed)) {
                 _tx_error_count.fetch_add(1, std::memory_order_relaxed);
-                if (_link_cfg.should_profile("uplink")) {
-                    LOG_RT_WARN() << "[UL-TX] short send/underflow: "
+                if (LOG_MOD_ON(UlTx)) {
+                    LOG_RT_WARN_M(UlTx) << "[UL-TX] short send/underflow: "
                                   << (result.expected_samples - result.sent_samples)
                                   << " samples not sent";
                 }
@@ -864,8 +864,8 @@ private:
             const size_t insert_samples = static_cast<size_t>(-delta);
             result.expected_samples += insert_samples;
             if (insert_samples > 0) {
-                if (_link_cfg.should_profile("uplink")) {
-                    LOG_RT_WARN_HZ(2) << "[UL-TX] delaying stream by lengthening this period by "
+                if (LOG_MOD_ON(UlTx)) {
+                    LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] delaying stream by lengthening this period by "
                                       << insert_samples << " samples (target_shift="
                                       << target_shift_samples << ", applied_shift="
                                       << target_shift_samples << ")";
@@ -893,8 +893,8 @@ private:
                 frame.size());
             result.expected_samples -= skip_samples;
             if (skip_samples > 0) {
-                if (_link_cfg.should_profile("uplink")) {
-                    LOG_RT_WARN_HZ(2) << "[UL-TX] advancing stream by shortening this period by "
+                if (LOG_MOD_ON(UlTx)) {
+                    LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] advancing stream by shortening this period by "
                                       << skip_samples << " samples (target_shift="
                                       << target_shift_samples << ", applied_shift="
                                       << (applied_shift_samples + static_cast<int64_t>(skip_samples))

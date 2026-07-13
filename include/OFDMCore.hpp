@@ -939,9 +939,9 @@ public:
         if (FILE* f = std::fopen(filename.c_str(), "r")) {
             fftwf_import_wisdom_from_file(f);
             std::fclose(f);
-            LOG_G_INFO() << "Imported FFTW wisdom from " << filename;
+            LOG_G_INFO_M(Config) << "Imported FFTW wisdom from " << filename;
         } else {
-            LOG_G_INFO() << "No existing FFTW wisdom found (will act as cold start).";
+            LOG_G_INFO_M(Config) << "No existing FFTW wisdom found (will act as cold start).";
         }
     }
 
@@ -949,9 +949,9 @@ public:
         if (FILE* f = std::fopen(filename.c_str(), "w")) {
             fftwf_export_wisdom_to_file(f);
             std::fclose(f);
-            LOG_G_INFO() << "Exported FFTW wisdom to " << filename;
+            LOG_G_INFO_M(Config) << "Exported FFTW wisdom to " << filename;
         } else {
-            LOG_G_ERROR() << "Failed to export FFTW wisdom to " << filename;
+            LOG_G_ERROR_M(Config) << "Failed to export FFTW wisdom to " << filename;
         }
     }
 };

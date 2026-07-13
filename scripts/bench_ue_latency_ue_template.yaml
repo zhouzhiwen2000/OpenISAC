@@ -117,4 +117,10 @@ runtime:
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
   main_cpu_core: 13  # Main-thread CPU core (-1 disables explicit binding)
-  profiling_modules: "demodulation,latency"  # Comma-separated modules to profile, or "all"
+
+logging:
+  default_level: warn
+  timestamps: false
+  force_error: true
+  modules:
+    demod_profiling: info

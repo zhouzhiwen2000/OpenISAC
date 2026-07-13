@@ -257,7 +257,10 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP and VOFA+ outputs when specific IP fields are empty. |
 | `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug destination IP; empty uses `default_out_ip`. |
 | `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug destination port. |
-| `runtime.profiling_modules` | `string` | `""` | Comma-separated modules such as `demodulation`, `cfo`, `sync`, `agc`, `align`, `snr`, `arq`, `uplink`, `ertm`, or `all`. |
+
+#### UE logging
+
+Same hierarchical filter as BS (`logging.*`). **Debug** examples: `ertm: debug`, `recovery: info`, `demod.snr: info`. **Performance** (paths end with `_profiling`, off until set): `demod_profiling: info`, `demod_eq_profiling: info`.
 
 Resource-map notes:
 * `resource_preview.data_resource_blocks` should normally match between BS and UE, including `kind`.

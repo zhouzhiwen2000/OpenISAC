@@ -14,9 +14,9 @@
 
 namespace {
 
-inline bool should_profile_sensing(const Config& cfg) {
-    return cfg.should_profile("sensing") ||
-           cfg.should_profile("sensing_proc");
+inline bool should_profile_sensing(const Config& /*cfg*/) {
+    // Gated explicitly by logging.modules.sensing_profiling.
+    return LOG_MOD_ON(SensingProfiling);
 }
 
 // Apply per-subcarrier CFO/SFO/delay phase compensation to a contiguous symbol row.
@@ -203,7 +203,7 @@ void save_system_response_calibration_async(
                     async_logger::LoggerThreadMode::NonRealtime);
                 std::ofstream out(file_path, std::ios::binary | std::ios::trunc);
                 if (!out) {
-                    LOG_G_WARN() << "[Sensing Hsys " << header_mode_string(header)
+                    LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << header_mode_string(header)
                                  << " CH " << header.logical_id
                                  << "] failed to open calibration file for write: "
                                  << file_path;
@@ -221,14 +221,14 @@ void save_system_response_calibration_async(
                 }
 
                 if (!out) {
-                    LOG_G_WARN() << "[Sensing Hsys " << header_mode_string(header)
+                    LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << header_mode_string(header)
                                  << " CH " << header.logical_id
                                  << "] failed while writing calibration file: "
                                  << file_path;
                     return;
                 }
 
-                LOG_G_INFO() << "[Sensing Hsys " << header_mode_string(header)
+                LOG_G_INFO_M(Sensing) << "[Sensing Hsys " << header_mode_string(header)
                              << " CH " << header.logical_id
                              << "] saved system response calibration: "
                              << file_path
@@ -236,7 +236,7 @@ void save_system_response_calibration_async(
             })
             .detach();
     } catch (const std::exception& e) {
-        LOG_G_WARN() << "[Sensing Hsys " << header_mode_string(header)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << header_mode_string(header)
                      << " CH " << header.logical_id
                      << "] failed to start calibration save worker: "
                      << e.what();
@@ -699,7 +699,7 @@ private:
         const int64_t signed_gap = static_cast<int64_t>(tx_seq) - static_cast<int64_t>(rx_seq);
         _track_gap(signed_gap);
         if (_rx_drop_count <= 20 || (_rx_drop_count % 100) == 0 || gap_frames >= 2) {
-            LOG_RT_WARN() << "[Sensing CH " << _logical_id
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _logical_id
                           << "] drop RX frame due to seq mismatch: rx_seq="
                           << rx_seq << ", tx_seq=" << tx_seq
                           << ", gap_frames=" << gap_frames
@@ -714,7 +714,7 @@ private:
         const int64_t signed_gap = static_cast<int64_t>(tx_seq) - static_cast<int64_t>(rx_seq);
         _track_gap(signed_gap);
         if (_tx_drop_count <= 20 || (_tx_drop_count % 100) == 0 || gap_frames >= 2) {
-            LOG_RT_WARN() << "[Sensing CH " << _logical_id
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _logical_id
                           << "] drop TX frame due to seq mismatch: rx_seq="
                           << rx_seq << ", tx_seq=" << tx_seq
                           << ", gap_frames=" << gap_frames
@@ -734,7 +734,7 @@ private:
         const uint64_t abs_gap = static_cast<uint64_t>(std::llabs(signed_gap));
         if (abs_gap == 0) return;
         if (_same_gap_streak == 8 || (_same_gap_streak % 200) == 0) {
-            LOG_RT_WARN() << "[Sensing CH " << _logical_id
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _logical_id
                           << "] stable TX/RX seq gap detected: signed_gap_frames="
                           << signed_gap
                           << ", abs_gap_samples=" << (abs_gap * _frame_samples)
@@ -955,7 +955,7 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
     sensing_pipeline_disabled_by_mode = delay_estimation_enabled;
     if (delay_estimation_enabled) {
         if (cfg.ofdm.num_symbols == 0 || cfg.ofdm.sync_pos >= cfg.ofdm.num_symbols) {
-            LOG_G_WARN() << "[Sensing] system delay estimation disabled due to invalid sync config: "
+            LOG_G_WARN_M(Sensing) << "[Sensing] system delay estimation disabled due to invalid sync config: "
                       << "num_symbols=" << cfg.ofdm.num_symbols
                       << ", sync_pos=" << cfg.ofdm.sync_pos;
             delay_estimation_enabled = false;
@@ -1017,7 +1017,7 @@ SensingChannel::SensingChannel(
 
     if (sensing_output_mode_is_compact_mask(_cfg)) {
         if (_compute.compact_mask_local_delay_doppler_supported) {
-            LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
+            LOG_G_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                          << "] compact_mask regular sampling enables MTI/local Delay-Doppler"
                          << " (symbols=" << _compute.compact_mask_analysis.selected_symbol_count
                          << ", stride=" << _compute.compact_mask_analysis.implicit_symbol_stride
@@ -1025,7 +1025,7 @@ SensingChannel::SensingChannel(
                          << ")";
         } else {
             const std::string reason = _compute.compact_mask_analysis.effective_reason();
-            LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
+            LOG_G_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                          << "] compact_mask stays in raw compact-only mode: "
                          << (reason.empty() ? "mask is not regular-sampling compatible" : reason);
         }
@@ -1034,13 +1034,13 @@ SensingChannel::SensingChannel(
     _load_system_response_calibration();
 
     if (_compute.delay_estimation_enabled && _compute.sensing_pipeline_disabled_by_mode) {
-        LOG_G_INFO() << "[Sensing CH " << _rx_io.logical_id
+        LOG_G_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] enable_system_delay_estimation=1, sensing pipeline disabled; "
                   << "system delay estimation runs every "
                   << kSystemDelayEstimationFrameInterval << " frames."
                   ;
     } else if (_rx_io.channel_cfg.enable_system_delay_estimation && !_compute.delay_estimation_enabled) {
-        LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
+        LOG_G_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] enable_system_delay_estimation requested but disabled due to invalid config."
                   ;
     }
@@ -1102,7 +1102,7 @@ void SensingChannel::request_reacquire(const radio::TimeSpec& start_time, uint64
         _rx_io.pending_restart_frame_seq = frame_seq;
     }
     _rx_io.restart_requested.store(true, std::memory_order_release);
-    LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+    LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] requested RX restart at " << start_time.get_real_secs()
                   << " s, frame_seq_base=" << frame_seq
                   << ", generation=" << generation;
@@ -1120,7 +1120,7 @@ bool SensingChannel::enqueue_tx_symbols(
     tx_frame.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     const bool pushed = _rx_io.paired_queue->push_tx(std::move(tx_frame));
     if (!pushed) {
-        LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
+        LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
                           << "] paired TX queue full, dropping newest TX sensing frame";
     }
     return pushed;
@@ -1209,20 +1209,20 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
 void SensingChannel::set_target_alignment(int32_t samples) {
     const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());
     if (frame_samples > 0 && samples != 0 && (samples % frame_samples) == 0) {
-        LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
+        LOG_G_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] target ALGN equals an integer number of frames: samples="
                   << samples << ", frame_samples=" << frame_samples
                   << ", frame_shift=" << (samples / frame_samples);
     }
     _rx_io.target_alignment.store(samples);
-    LOG_G_INFO() << "Set target ALGN for channel " << _rx_io.logical_id
+    LOG_G_INFO_M(Sensing) << "Set target ALGN for channel " << _rx_io.logical_id
               << ": " << samples << " samples";
 }
 
 void SensingChannel::set_alignment(int32_t samples) {
     const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());
     if (frame_samples > 0 && samples != 0 && (samples % frame_samples) == 0) {
-        LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
+        LOG_G_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] ALGN equals an integer number of frames: samples="
                   << samples << ", frame_samples=" << frame_samples
                   << ", frame_shift=" << (samples / frame_samples);
@@ -1230,13 +1230,13 @@ void SensingChannel::set_alignment(int32_t samples) {
     _rx_io.discard_samples.store(samples);
     _rx_io.rx_state.store(RxState::ALIGNMENT);
     _request_shared_batch_reset();
-    LOG_G_INFO() << "Set ALGN for channel " << _rx_io.logical_id
+    LOG_G_INFO_M(Sensing) << "Set ALGN for channel " << _rx_io.logical_id
               << ": " << samples << " samples";
 }
 
 bool SensingChannel::set_rx_gain(double requested_gain_db, double* applied_gain_db) {
     if (!_rx_io.rx_device || !_rx_io.rx_device->supports(radio::Capability::HardwareGain)) {
-        LOG_G_WARN() << "RXGN ignored for channel " << _rx_io.logical_id
+        LOG_G_WARN_M(Sensing) << "RXGN ignored for channel " << _rx_io.logical_id
                      << ": hardware gain not supported on this backend";
         return false;
     }
@@ -1249,7 +1249,7 @@ bool SensingChannel::set_rx_gain(double requested_gain_db, double* applied_gain_
     if (applied_gain_db != nullptr) {
         *applied_gain_db = clamped_gain;
     }
-    LOG_G_INFO() << "Set RXGN for channel " << _rx_io.logical_id
+    LOG_G_INFO_M(Sensing) << "Set RXGN for channel " << _rx_io.logical_id
               << " (USRP ch " << _rx_io.channel_cfg.usrp_channel
               << "): " << clamped_gain << " dB";
     return true;
@@ -1269,13 +1269,13 @@ void SensingChannel::request_system_response_calibration(size_t target_symbols) 
     }
 
     if (_compute.sensing_pipeline_disabled_by_mode) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] CALB ignored: sensing pipeline is disabled for this channel";
         return;
     }
     if (!_can_capture_full_band_system_response()) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] CALB ignored: full-band system-response capture requires dense mode "
                      << "or a full-band regular compact mask";
@@ -1296,7 +1296,7 @@ void SensingChannel::request_system_response_calibration(size_t target_symbols) 
         cal.capture_active = true;
     }
 
-    LOG_G_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+    LOG_G_INFO_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                  << " CH " << _rx_io.logical_id
                  << "] started system response calibration: target_symbols="
                  << resolved_target
@@ -1329,7 +1329,7 @@ void SensingChannel::_load_system_response_calibration() {
 
     std::ifstream in(file_path, std::ios::binary);
     if (!in) {
-        LOG_G_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_INFO_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] calibration file not found: " << file_path
                      << "; system-response correction skipped";
@@ -1341,7 +1341,7 @@ void SensingChannel::_load_system_response_calibration() {
     if (!in ||
         std::memcmp(header.magic, kSystemResponseMagic, sizeof(header.magic)) != 0 ||
         header.version != kSystemResponseCalibrationVersion) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] invalid calibration header in " << file_path
                      << "; system-response correction skipped";
@@ -1357,7 +1357,7 @@ void SensingChannel::_load_system_response_calibration() {
         !nearly_equal_config_value(header.sample_rate, _cfg.rf_sampling.sample_rate) ||
         !nearly_equal_config_value(header.center_freq, _cfg.downlink.center_freq) ||
         !nearly_equal_config_value(header.bandwidth, _cfg.rf_sampling.bandwidth)) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] calibration file does not match current runtime config: "
                      << file_path
@@ -1373,7 +1373,7 @@ void SensingChannel::_load_system_response_calibration() {
         reinterpret_cast<char*>(response.data()),
         static_cast<std::streamsize>(response.size() * sizeof(std::complex<float>)));
     if (!in) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] calibration file is truncated: " << file_path
                      << "; system-response correction skipped";
@@ -1381,7 +1381,7 @@ void SensingChannel::_load_system_response_calibration() {
     }
 
     if (!normalize_system_response(response)) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] calibration response has no usable normalization power: "
                      << file_path
@@ -1391,7 +1391,7 @@ void SensingChannel::_load_system_response_calibration() {
 
     const float min_valid_power = compute_system_response_min_power(response);
     if (!std::isfinite(min_valid_power)) {
-        LOG_G_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_G_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                      << " CH " << _rx_io.logical_id
                      << "] calibration response has no usable bins: " << file_path
                      << "; system-response correction skipped";
@@ -1407,7 +1407,7 @@ void SensingChannel::_load_system_response_calibration() {
         cal.loaded = cal.inverse_response.size() == _cfg.ofdm.fft_size;
     }
 
-    LOG_G_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+    LOG_G_INFO_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                  << " CH " << _rx_io.logical_id
                  << "] loaded system response calibration: "
                  << file_path
@@ -1479,7 +1479,7 @@ void SensingChannel::_accumulate_system_response_calibration(
     }
 
     if (failed_response) {
-        LOG_RT_WARN() << "[Sensing Hsys " << sensing_role_label(_role)
+        LOG_RT_WARN_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                       << " CH " << _rx_io.logical_id
                       << "] completed calibration but response has no usable normalization power; "
                       << "system-response correction skipped";
@@ -1494,7 +1494,7 @@ void SensingChannel::_accumulate_system_response_calibration(
         _role,
         _rx_io.logical_id,
         completed_symbols);
-    LOG_RT_INFO() << "[Sensing Hsys " << sensing_role_label(_role)
+    LOG_RT_INFO_M(Sensing) << "[Sensing Hsys " << sensing_role_label(_role)
                   << " CH " << _rx_io.logical_id
                   << "] completed system response calibration from "
                   << completed_symbols << " symbols; saving "
@@ -1647,7 +1647,7 @@ void SensingChannel::_apply_batch_reset_if_due(uint64_t frame_start_symbol_index
     }
 
     _applied_batch_reset_symbol = reset_symbol;
-    LOG_G_WARN() << "[Sensing CH " << _rx_io.logical_id
+    LOG_G_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                  << "] applied shared batch reset at frame_start_symbol="
                  << frame_start_symbol_index;
 }
@@ -1800,11 +1800,11 @@ void SensingChannel::initialize_rx_and_sync(
 
     auto print_last_pps_status = [&](const std::string& title, const std::vector<SyncSnapshot>& snapshots) {
         if (sync_devices.empty()) return;
-        LOG_G_INFO() << title;
+        LOG_G_INFO_M(Sensing) << title;
         for (size_t i = 0; i < sync_devices.size(); ++i) {
             const auto& entry = sync_devices[i];
             const double pps_s = snapshots[i].last_pps_s;
-            LOG_G_INFO() << std::fixed << std::setprecision(9)
+            LOG_G_INFO_M(Radio) << std::fixed << std::setprecision(9)
                       << "  [USRP " << i << "] args='" << entry.args
                       << "', time_last_pps=" << pps_s << " s"
                       << std::defaultfloat;
@@ -1820,7 +1820,7 @@ void SensingChannel::initialize_rx_and_sync(
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1100));
             latest_sync_snapshot = collect_sync_snapshot();
-            LOG_G_INFO() << "Time synchronized across " << sync_devices.size()
+            LOG_G_INFO_M(Radio) << "Time synchronized across " << sync_devices.size()
                          << " USRPs using next PPS.";
             print_last_pps_status("Post-sync USRP PPS status:", latest_sync_snapshot);
 
@@ -1832,13 +1832,13 @@ void SensingChannel::initialize_rx_and_sync(
                 }
             }
             if (all_zero_last_pps) {
-                LOG_G_INFO() << "PPS verification success: all USRPs report time_last_pps == 0.";
+                LOG_G_INFO_M(Radio) << "PPS verification success: all USRPs report time_last_pps == 0.";
             } else {
-                LOG_G_WARN() << "Warning: PPS verification failed: not all USRPs report time_last_pps == 0."
+                LOG_G_WARN_M(Radio) << "Warning: PPS verification failed: not all USRPs report time_last_pps == 0."
                              ;
             }
         } catch (const std::exception& e) {
-            LOG_G_WARN() << "PPS time sync failed (" << e.what()
+            LOG_G_WARN_M(Sensing) << "PPS time sync failed (" << e.what()
                          << "), fallback to set_time_now per device.";
             for (const auto& entry : sync_devices) {
                 entry.device->set_time_now(radio::TimeSpec(0.0));
@@ -1878,7 +1878,7 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
         try {
             _rx_io.rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
         } catch (const std::exception& e) {
-            LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                           << "] failed to stop RX stream before restart: " << e.what();
         }
     };
@@ -1901,7 +1901,7 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
         const uint64_t generation =
             _rx_io.pairing_generation.load(std::memory_order_acquire);
         issue_start(restart_time);
-        LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                       << "] RX stream generation " << generation
                       << " restarted at " << restart_time.get_real_secs()
                       << " s, frame_seq_base=" << restart_frame_seq;
@@ -1931,7 +1931,7 @@ void SensingChannel::_handle_alignment() {
     const int32_t discard = _rx_io.discard_samples.load();
     const int64_t frame_samples = static_cast<int64_t>(_cfg.samples_per_frame());
     if (frame_samples > 0 && discard != 0 && (discard % frame_samples) == 0) {
-        LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                       << "] applying ALGN with integer-frame shift: discard="
                       << discard << ", frame_samples=" << frame_samples
                       << ", frame_shift=" << (discard / frame_samples);
@@ -1939,7 +1939,7 @@ void SensingChannel::_handle_alignment() {
     const int64_t total_read_signed =
         static_cast<int64_t>(_cfg.samples_per_frame()) + static_cast<int64_t>(discard);
     if (total_read_signed <= 0) {
-        LOG_RT_WARN() << "[Sensing CH " << _rx_io.logical_id
+        LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                       << "] alignment total_read <= 0 (discard=" << discard
                       << ", frame_samples=" << _cfg.samples_per_frame()
                       << "). This can manifest as integer-frame TX/RX offset.";
@@ -1962,7 +1962,7 @@ void SensingChannel::_handle_alignment() {
 
         if (md.error_code != radio::RxError::None) {
             if (md.error_code != radio::RxError::Timeout) {
-                LOG_RT_WARN() << "RX alignment error: " << md.strerror();
+                LOG_RT_WARN_M(Sensing) << "RX alignment error: " << md.strerror();
                 received = 0;
                 have_first_time = false;
             }
@@ -2016,7 +2016,7 @@ void SensingChannel::_handle_alignment() {
     rx_item.frame_seq = frame_seq;
     rx_item.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     if (!_rx_io.paired_queue->push_rx(std::move(rx_item))) {
-        LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
+        LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
                           << "] paired RX queue full during alignment, dropping newest RX frame";
         _rx_io.next_rx_frame_seq = frame_seq + 1;
         _rx_io.rx_frame_pool.release(std::move(rx_item.samples));
@@ -2025,7 +2025,7 @@ void SensingChannel::_handle_alignment() {
     _rx_io.next_rx_frame_seq = frame_seq + 1;
 
     _rx_io.rx_state.store(RxState::NORMAL);
-    LOG_RT_INFO() << "[Sensing CH " << _rx_io.logical_id << "] aligned. ALGN="
+    LOG_RT_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id << "] aligned. ALGN="
                   << discard << " samples.";
 }
 
@@ -2047,7 +2047,7 @@ void SensingChannel::_handle_normal_rx() {
 
         if (md.error_code != radio::RxError::None) {
             if (md.error_code != radio::RxError::Timeout) {
-                LOG_RT_WARN() << "RX error: " << md.strerror();
+                LOG_RT_WARN_M(Sensing) << "RX error: " << md.strerror();
                 received = 0;
                 have_first_time = false;
             }
@@ -2087,7 +2087,7 @@ void SensingChannel::_handle_normal_rx() {
             static_cast<int64_t>(desired_alignment) - static_cast<int64_t>(frame_offset),
             frame_samples);
         if (correction != 0) {
-            LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
+            LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
                               << "] RX frame boundary mismatch: offset=" << frame_offset
                               << ", target_ALGN=" << desired_alignment
                               << ", last_ALGN=" << current_alignment
@@ -2113,7 +2113,7 @@ void SensingChannel::_handle_normal_rx() {
     rx_item.frame_seq = frame_seq;
     rx_item.generation = _rx_io.pairing_generation.load(std::memory_order_acquire);
     if (!_rx_io.paired_queue->push_rx(std::move(rx_item))) {
-        LOG_RT_WARN_HZ(5) << "[Sensing CH " << _rx_io.logical_id
+        LOG_RT_WARN_HZ_M(Sensing, 5) << "[Sensing CH " << _rx_io.logical_id
                           << "] paired RX queue full, dropping newest RX frame";
         _rx_io.next_rx_frame_seq = frame_seq + 1;
         _rx_io.rx_frame_pool.release(std::move(rx_item.samples));
@@ -2277,7 +2277,7 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
 
     _compute.next_delay_estimation_frame_seq = frame_seq + kSystemDelayEstimationFrameInterval;
 
-    LOG_RT_INFO() << "[SYSDLY CH " << _rx_io.logical_id
+    LOG_RT_INFO_M(Sensing) << "[SYSDLY CH " << _rx_io.logical_id
                   << "] frame_seq=" << frame_seq
                   << ", delay=" << delay_samples << " samp (" << delay_us << " us)"
                   << ", peak=" << max_pos
@@ -2952,7 +2952,7 @@ void SensingChannel::_sensing_process_finalize(
                 << "TOTAL LATENCY (excl. gather/send): " << total_latency_us / n << " us\n"
                 << "Profile batch count:     " << _compute.prof_batch_count << "\n"
                 << "========================================================\n";
-            LOG_RT_INFO() << oss.str();
+            LOG_RT_INFO_M(SensingProfiling) << oss.str();
             _compute.prof_gather_total_us = 0.0;
             _compute.prof_prep_total_us = 0.0;
             _compute.prof_chest_shift_total_us = 0.0;
@@ -3073,7 +3073,7 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
         _compute.next_symbol_to_sample = snapshot.apply_symbol_index;
     }
 
-    LOG_RT_INFO() << "[Sensing CH " << _rx_io.logical_id
+    LOG_RT_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] applied shared params at OFDM symbol "
                   << snapshot.apply_symbol_index
                   << " (stride=" << _compute.active_stride

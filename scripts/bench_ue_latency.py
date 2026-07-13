@@ -24,6 +24,7 @@ from pathlib import Path
 
 from bench_utils import (
     apply_fft_sample_rate_sweep,
+    configure_logging,
     load_yaml,
     safe_stem,
     save_yaml,
@@ -187,6 +188,8 @@ def main() -> None:
 
                 mod_cfg = dict(base_mod_cfg)
                 demod_cfg = dict(base_demod_cfg)
+                configure_logging(mod_cfg)
+                configure_logging(demod_cfg, {"demod_profiling": "info"})
                 apply_fft_sample_rate_sweep(mod_cfg, demod_cfg, sample_rate=sample_rate, fft_size=fft_size)
                 mod_cfg["num_symbols"] = num_symbols
                 mod_cfg["sensing_symbol_num"] = num_symbols

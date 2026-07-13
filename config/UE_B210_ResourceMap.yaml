@@ -210,8 +210,14 @@ cpu_cores:
   main_cpu_core: 5  # Main-thread CPU core (-1 disables explicit binding)
 
 # ===== Runtime / Debug =====
+# ===== Logging (hierarchical module filter) =====
+logging:
+  default_level: warn  # off|error|warn|info|debug — global default; Error always prints when force_error=true
+  timestamps: false  # Prefix each line with local HH:MM:SS.uuuuuu
+  force_error: true  # Always emit Error (unrecoverable failures only)
+  modules: {}  # Optional overrides, e.g. demod.ldpc: debug, cuda.demod: warn, ul_rx: warn
+
 runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
-  profiling_modules: ""  # Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm, udp_egress, ue_recovery), or "all"

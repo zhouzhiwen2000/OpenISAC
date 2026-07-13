@@ -21,6 +21,7 @@ from pathlib import Path
 
 from bench_utils import (
     apply_fft_sample_rate_sweep,
+    configure_logging,
     load_yaml,
     safe_stem,
     save_yaml,
@@ -150,6 +151,7 @@ def main() -> None:
                 run_dir.mkdir(parents=True, exist_ok=True)
 
                 cfg = dict(base_cfg)
+                configure_logging(cfg, {"mod_profiling": "info"})
                 apply_fft_sample_rate_sweep(cfg, cfg, sample_rate=sample_rate, fft_size=fft_size)
                 cfg["num_symbols"] = num_symbols
                 save_yaml(run_dir / "BS.yaml", cfg)

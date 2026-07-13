@@ -243,8 +243,13 @@ The runtime config is hierarchical YAML. The tables below use full YAML paths so
 | `cpu_cores.uplink_cpu_cores` | `int[]` | `[]` | BS uplink cores: RX ingest, OFDM/LLR processing, LDPC decode + UDP output. |
 | `cpu_cores.main_cpu_core` | `int` | `-1` | Main-thread CPU core; `-1` disables binding. |
 
-#### BS runtime
+#### BS logging
+
+Profile timing dumps and diagnostic logs are gated by the hierarchical logging filter (not a separate `profiling_modules` key).
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `runtime.profiling_modules` | `string` | `""` | Comma-separated profiling modules such as `modulation`, `latency`, `ldpc_encode`, `sensing_proc`, `agc`, `arq`, `uplink`, `ertm`, or `all`. |
+| `logging.default_level` | `string` | `warn` | Global verbosity: `off` / `error` / `warn` / `info` / `debug`. |
+| `logging.force_error` | `bool` | `true` | Always emit unrecoverable `Error` lines. |
+| `logging.timestamps` | `bool` | `false` | Prefix lines with local `HH:MM:SS.uuuuuu`. |
+| `logging.modules` | `map` | `{}` | Per-module overrides. **Debug** modules inherit parents (e.g. `mod`, `sensing`, `ertm`). **Performance** modules end with `_profiling` (e.g. `mod_profiling`, `sensing_profiling`) and stay **off** until set explicitly. |
