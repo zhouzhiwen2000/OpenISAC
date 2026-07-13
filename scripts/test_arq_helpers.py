@@ -404,17 +404,17 @@ void test_feedback_frame_skips_data_window() {
     printf("  test_feedback_frame_skips_data_window: OK\n");
 }
 
-// ---- Test ARQ window is clamped below the 16-bit sequence half-space ----
-void test_window_clamp_sequence_half_space() {
+// ---- Test ARQ window is clamped to the bounded runtime maximum ----
+void test_window_clamp_runtime_maximum() {
     NetworkOutputConfig net;
     net.arq_window_packets = 65536;
     net.arq_ack_bitmap_bits = 64;
     normalize_arq_config(net);
-    CHECK(net.arq_window_packets == 32767, "normalize clamps ARQ window to 32767");
+    CHECK(net.arq_window_packets == 256, "normalize clamps ARQ window to 256");
 
     ArqTxWindow tx;
     tx.configure(net);
-    CHECK(tx.window_size() == 32767, "tx window size 32767");
+    CHECK(tx.window_size() == 256, "tx window size 256");
 
     ArqRxWindow rx;
     rx.configure(net);
@@ -426,7 +426,7 @@ void test_window_clamp_sequence_half_space() {
     ArqFeedback ack = rx.generate_ack();
     CHECK(ack.ack_base == 2, "rx skip keeps ACK bitmap within 64 bits");
 
-    printf("  test_window_clamp_sequence_half_space: OK\n");
+    printf("  test_window_clamp_runtime_maximum: OK\n");
 }
 
 // ---- Test sequence diff helpers ----
@@ -511,7 +511,7 @@ int main() {
     test_rx_window_nonzero_first_seq();
     test_rx_window_skip_ahead();
     test_feedback_frame_skips_data_window();
-    test_window_clamp_sequence_half_space();
+    test_window_clamp_runtime_maximum();
     test_drop_abandoned();
 
     printf("\nResults: %d passed, %d failed\n", tests_passed, tests_failed);
