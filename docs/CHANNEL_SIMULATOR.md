@@ -127,7 +127,7 @@ configuration key.
 
 ## Channel model
 
-The model is applied to transmitted samples \(x[n]\) in this order.
+The model is applied to transmitted samples $x[n]$ in this order.
 
 1. For each scatterer, compute integer propagation delay, Doppler, and complex gain; the monostatic sensing path also applies the array manifold vector.
 2. The communication/bistatic path first adds the LoS path and static multipath paths, then adds the scatterer-return components.
@@ -138,82 +138,69 @@ The model is applied to transmitted samples \(x[n]\) in this order.
 Target round-trip delay, sample delay, and Doppler are:
 
 $$
-\tau_i = \frac{2 R_i}{c}, \qquad
-\ell_i = \operatorname{round}(\tau_i f_s) + n_0, \qquad
-f_{D,i} = \frac{2 v_i}{\lambda}, \qquad
-\lambda = \frac{c}{f_c}
+\tau_i = \frac{2 R_i}{c}, \qquad \ell_i = \mathrm{round}(\tau_i f_s) + n_0, \qquad f_{D,i} = \frac{2 v_i}{\lambda}, \qquad \lambda = \frac{c}{f_c}
 $$
 
-Here \(R_i\) is `range_m`, \(v_i\) is `velocity_mps`, \(f_s\) is the BS
-`sample_rate`, \(f_c\) is `center_freq`, and \(n_0\) is `timing_offset_samples`.
-The \(n_0\) term is a fixed integer sample offset; SFO is modeled separately by
+Here $R_i$ is `range_m`, $v_i$ is `velocity_mps`, $f_s$ is the BS
+`sample_rate`, $f_c$ is `center_freq`, and $n_0$ is `timing_offset_samples`.
+The $n_0$ term is a fixed integer sample offset; SFO is modeled separately by
 the communication-path resampler.
 
 The ULA array manifold is:
 
 $$
-a_{i,k}(\theta_i) =
-\exp\!\left(j 2\pi \frac{d}{\lambda} k \sin\theta_i\right)
+a_{i,k}(\theta_i) = \exp\!\left(j 2\pi \frac{d}{\lambda} k \sin\theta_i\right)
 $$
 
-where \(k\) is the antenna index. The electrical spacing is:
+where $k$ is the antenna index. The electrical spacing is:
 
 $$
-\frac{d}{\lambda} = \frac{\texttt{array\_spacing\_m}\, f_c}{c}
+d_\lambda = \frac{d_m f_c}{c}
 $$
 
-It is derived from the physical spacing and carrier frequency, so the recovered angle
-remains correct at any `center_freq`; the viewers invert the phase slope using the
-same physical spacing. With `array_spacing_m <= 0`, the frequency-independent legacy
-parameter `array_spacing_lambda` is used instead. If `steering_override_file` is set,
-the simulator reads \(a_{i,k}\) directly from the array manifold matrix.
+where $d_m$ is `array_spacing_m` and $d_\lambda$ is the spacing in wavelengths.
+It is derived from the physical spacing and carrier frequency, so the recovered
+angle remains correct at any `center_freq`; the viewers invert the phase slope using
+the same physical spacing. With `array_spacing_m <= 0`, the frequency-independent
+legacy parameter `array_spacing_lambda` is used instead. If `steering_override_file`
+is set, the simulator reads $a_{i,k}$ directly from the array manifold matrix.
 
-For monostatic sensing RX antenna \(k\):
+For monostatic sensing RX antenna $k$:
 
 $$
-y_{\mathrm{mono},k}[n]
-= \sum_i g_i\, a_{i,k}(\theta_i)\, x[n-\ell_i]\,
-  e^{j 2\pi f_{D,i} n / f_s}
-  + w_k[n]
+y_{\mathrm{mono},k}[n] = \sum_i g_i\, a_{i,k}(\theta_i)\, x[n-\ell_i]\, e^{j 2\pi f_{D,i} n / f_s} + w_k[n]
 $$
 
 The monostatic sensing channel shares the simulator clock with the transmitter and
 does not apply relative CFO or UE sample-clock offset. In the equation above,
-\(w_k[n]\) is AWGN.
+$w_k[n]$ is AWGN.
 
 The communication/bistatic RX is single-antenna. The LoS/static multipath paths first
 form the communication multipath component:
 
 $$
-u_{\mathrm{LoS}}[n] =
-\sum_p h_p\, x[n-\ell_p],
-\qquad
-\ell_p = d_p + n_0
+u_{\mathrm{LoS}}[n] = \sum_p h_p\, x[n-\ell_p], \qquad \ell_p = d_p + n_0
 $$
 
-Here \(d_p\) comes from `comm_multipath_taps[].delay_samples`, and \(h_p\) is determined
+Here $d_p$ comes from `comm_multipath_taps[].delay_samples`, and $h_p$ is determined
 by `gain_db` and `phase_deg`. Scatterer-return components are added to the same
 communication channel:
 
 $$
-u[n] =
-u_{\mathrm{LoS}}[n]
-+ \sum_i g_i\, x[n-\ell_i]\, e^{j 2\pi f_{D,i} n / f_s}
+u[n] = u_{\mathrm{LoS}}[n] + \sum_i g_i\, x[n-\ell_i]\, e^{j 2\pi f_{D,i} n / f_s}
 $$
 
 With SFO disabled, the communication/bistatic chain then applies relative CFO and AWGN:
 
 $$
-y_{\mathrm{comm}}[n] =
-u[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_s}
-+ w_{\mathrm{comm}}[n]
+y_{\mathrm{comm}}[n] = u[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_s} + w_{\mathrm{comm}}[n]
 $$
 
-With `sample_rate_offset_ppm` enabled, the simulator first forms \(u[n]\) on the
+With `sample_rate_offset_ppm` enabled, the simulator first forms $u[n]$ on the
 source clock and passes it through a 32-tap, 1024-phase Kaiser-windowed sinc
 polyphase resampler. Positive ppm means the UE clock is faster than the BS clock,
 so BS->UE communication produces samples at
-\(f_{s,\mathrm{UE}} = f_{s,\mathrm{BS}}(1+\mathrm{ppm}\cdot10^{-6})\). The CFO
+$f_{s,\mathrm{UE}} = f_{s,\mathrm{BS}}(1+\mathrm{ppm}\cdot10^{-6})$. The CFO
 phasor step uses that UE-side sample rate. The reciprocal resampler is used for
 UE->BS uplink output back onto the BS clock.
 

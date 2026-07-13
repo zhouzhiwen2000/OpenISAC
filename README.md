@@ -37,6 +37,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - Setup and installation: [Hardware Setup](#hardware-setup), [Software Installation](#software-installation)
 - First end-to-end run: [Typical Usage Example](#typical-usage-example)
 - Runtime configuration: [BS](#bs), [UE](#ue)
+- USRP-free simulation: [Channel Simulator](docs/CHANNEL_SIMULATOR.md)
 - Web control UI: [Web Config Console](#9-web-config-console)
 - Recent updates: [Changelog](CHANGELOG.md)
 
@@ -56,6 +57,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 | :--- | :--- | :--- | :--- |
 | Run the BS side | `BS` | `config/BS_X310.yaml` or `config/BS_B210.yaml` | `plot_sensing_fast.py` |
 | Run the UE side | `UE` | `config/UE_X310.yaml` or `config/UE_B210.yaml` | `plot_bi_sensing_fast.py` |
+| Run without USRPs | `ChannelSimulator`, `BS`, `UE` | `config/BS_Sim.yaml` and `config/UE_Sim.yaml` | See [Channel Simulator](docs/CHANNEL_SIMULATOR.md) |
 | Tune parameters from a browser | `scripts/config_web_editor.py` | Reads `build/BS.yaml` and `build/UE.yaml` | Browser at `http://<host>:8765` |
 
 ## Before the First OTA Run
