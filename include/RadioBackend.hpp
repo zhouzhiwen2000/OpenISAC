@@ -76,6 +76,7 @@ using IRxStreamPtr = std::shared_ptr<IRxStream>;
 // backend, so every "is this the simulator?" check becomes a capability query.
 enum class Capability {
     TimedTx,        // honors tx_metadata time_spec / timed bursts (real radio)
+    FreeRunningClock, // device time advances independently of streamed samples
     AsyncTxEvents,  // produces TX async messages (underflow / seq error / ...)
     StreamRestart,  // RX stream can be stopped + timed-restarted
     HardwareGain,   // set_*_gain / get_*_gain_range act on real hardware
@@ -152,6 +153,7 @@ struct DeviceConfig {
     std::string sim_session;      // ChannelSimulator session name
     double sim_tick_rate = 0.0;   // sample rate (Hz) reported as the radio clock
     double sim_center_freq = 0.0; // center freq used to synthesize tune results
+    bool sim_predictive_delay = false; // validate simulator CFO/SRO consistency for UE prediction
 };
 
 // Create (or return a shared, cached) device for the given config. Devices are

@@ -9,7 +9,9 @@
 // make_device() when DeviceConfig::backend == "sim".
 
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "RadioBackend.hpp"
 #include "ShmRing.hpp"
@@ -21,8 +23,9 @@ namespace radio {
 // timeout. Caching/identity is handled by make_device(); this always constructs.
 IDevicePtr make_sim_device(const DeviceConfig& cfg);
 
-// TX stream: producer into a named shared-memory ring. Timed-burst metadata is
-// ignored (the stream is continuous; RX recovers framing from the waveform).
+// TX stream: producer into a named shared-memory ring. The first timed sample
+// establishes the ring's absolute position on the shared simulator clock;
+// later samples in the same burst remain continuous, like a USRP TX streamer.
 class SimTxStream : public ITxStream {
 public:
     SimTxStream(std::shared_ptr<sim_shm::ShmRing> ring,
@@ -35,13 +38,18 @@ public:
     bool recv_async_msg(AsyncMetadata& metadata, double timeout) override;
 
 private:
+    size_t _write_gap(uint64_t sample_count, double timeout);
+
     std::shared_ptr<sim_shm::ShmRing> _ring;
     std::shared_ptr<sim_shm::ShmControl> _ctrl;
     size_t _max_samps;
+    std::vector<sample_t> _zero_buffer;
+    bool _in_burst = false;
 };
 
-// RX stream: consumer of a named shared-memory ring. Synthesizes RX metadata
-// (timestamp) from the per-stream sample clock and the hub tick rate.
+// RX stream: consumer of a named shared-memory ring. Timed stream commands seek
+// the consumer to an absolute sample index, and metadata reports that same
+// shared-clock position rather than an independent per-ring zero point.
 class SimRxStream : public IRxStream {
 public:
     SimRxStream(std::shared_ptr<sim_shm::ShmRing> ring,
@@ -54,9 +62,16 @@ public:
     void issue_stream_cmd(const StreamCmd& cmd) override;
 
 private:
+    bool _apply_pending_start(std::atomic<int>* running, double timeout,
+                              RxError& start_error);
+
     std::shared_ptr<sim_shm::ShmRing> _ring;
     std::shared_ptr<sim_shm::ShmControl> _ctrl;
     size_t _max_samps;
+    std::mutex _stream_mutex;
+    bool _streaming = false;
+    bool _start_pending = false;
+    int64_t _requested_start_sample = 0;
 };
 
 // Simulation device. One per hub session; opens the hub control block and

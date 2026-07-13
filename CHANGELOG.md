@@ -23,6 +23,9 @@
 - 双工仿真模板显式将 BS 上行 RX 窗口偏移和 UE 上行 TX timing advance 设为零，避免继承真实硬件校准默认值而移动仿真直达径。
 - 将 latest-only 调试发送队列的正常丢帧与旧帧替换日志降为 `debug`；真正的发送异常仍保留为 `warning`。
 - eRTM 新增 `uplink.ertm_timing_metric`，可在原有 `delay_magnitude` 指标与复信道相干相关的 `maximum_likelihood` 指标之间切换；CPU/CUDA UE、配置模板、Web Editor 与中英文文档使用一致的选项语义。
+- 仿真 radio backend 改用统一的绝对样本时间轴：共享内存流记录绝对起点，模拟设备时钟随已处理的空中样本推进，TX/RX 执行 timed start，尚未开始的上行区间按空口静默继续推进 BS RX。首个 TX 前时钟保持为零，使不同启动顺序下的 BS/UE 选择相同起点；RX 请求早于实际 TX 原点时会对齐到该原点。UE 下行接收对齐与上行发送窗口因此共享同一时钟参考，且仿真低于实时速度时不会产生墙钟驱动的虚假预测时延。
+- 启用仿真 `predictive_delay` 时，UE 会比较 `cfo_hz` 对应的同源晶振 ppm 与 `sample_rate_offset_ppm`；两者不一致时输出配置警告，避免将独立注入的 CFO 错当成采样时钟漂移。
+- 新增成对的 `BS_Sim_eRTM.yaml` / `UE_Sim_eRTM.yaml` 专用仿真模板：默认启用最大似然定时指标、eRTM debug 与绝对时延校正，并关闭单站感知、CFO/SRO 和 predictive delay，提供可直接运行的 eRTM 基线。
 
 ## 2026-07-12 - 信号处理文档定时与同步模型重构
 

@@ -2730,7 +2730,8 @@ private:
         uint64_t handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
         bool next_frame_starts_burst = true;
 
-        if (_tx_dev->supports(radio::Capability::TimedTx)) {
+        if (_tx_dev->supports(radio::Capability::TimedTx) &&
+            _tx_dev->supports(radio::Capability::FreeRunningClock)) {
             constexpr double kTxSubmitLeadSec = 0.25;
             while (_running.load(std::memory_order_relaxed)) {
                 const radio::TimeSpec next_frame_time =

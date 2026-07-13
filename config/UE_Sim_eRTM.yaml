@@ -1,10 +1,13 @@
+# eRTM-focused simulator preset. Pair with BS_Sim_eRTM.yaml.
+# Launch order: ChannelSimulator -> BS -> UE.
+
 # ===== Radio backend =====
 radio:
   radio_backend: sim  # Radio I/O backend; uhd = real USRP, sim = channel simulator
 
 # ===== Channel simulator =====
 simulation:
-  session: oisac_sim  # Shared-memory namespace used by BS, UE, and ChannelSimulator
+  session: oisac_ertm_sim  # Dedicated shared-memory namespace for the eRTM simulator preset
   sample_rate_offset_ppm: 0  # UE sample-clock offset relative to the BS clock in ppm
   pacing_enabled: true  # Pace simulator output to wall-clock sample time
 
@@ -58,13 +61,13 @@ uplink:
   symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
   guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
   ue_timing_advance: -10  # Simulation timing calibration: delay uplink TX by 10 samples
-  ertm_to_enable: false  # Enable eRTM TO estimation payloads and UE-side TO logs
-  ertm_timing_metric: delay_magnitude  # Differential-TO metric: delay_magnitude or maximum_likelihood
+  ertm_to_enable: true  # Enable eRTM TO estimation payloads and UE-side TO logs
+  ertm_timing_metric: maximum_likelihood  # Use the eRTM maximum-likelihood timing metric
   ertm_delay_oversample_factor: 10  # eRTM delay-spectrum IFFT oversampling factor
   ertm_dl_rf_delay_samples: 0.0  # Calibrated downlink RF-chain delay for eRTM TO estimation (samples)
   ertm_ul_rf_delay_samples: 0.0  # Calibrated uplink RF-chain delay for eRTM TO estimation (samples)
-  ertm_debug_output_enabled: false  # Enable UE-side eRTM debug ZMQ output
-  ertm_report_interval_frames: 32  # BS eRTM payload/report cadence in downlink frames
+  ertm_debug_output_enabled: true  # Enable UE-side eRTM debug ZMQ output for plot_ertm_debug.py
+  ertm_report_interval_frames: 8  # Must match the BS eRTM report cadence
   debug_self_channel: false  # Estimate UE self-TX leakage channel from the RX window using current TADV
   debug_self_scan_spectrum: false  # Publish peak-centered self-ZC matched-filter slice + metadata (needs debug_self_channel); see scripts/plot_uplink_self_scan.py
   debug_self_scan_slice_samples: 0  # Correlation samples around the peak; 0 = one OFDM symbol (fft_size + cp_length)
@@ -80,14 +83,14 @@ sync_tracking:
   sync_cfo_alias_search_range_hz: 800000.0  # Max absolute CFO range covered by sync alias search (Hz)
   reset_hold_s: 0.5  # Persistent invalid-delay duration before forcing a hard reset (s)
   software_sync: true  # Enable software sync tracking
-  predictive_delay: true  # Enable CFO-based predictive delay compensation during alignment/tracking
+  predictive_delay: false  # Isolate eRTM timing from CFO-based predictive delay compensation
   hardware_sync: false  # Enable hardware sync mode
   akf_enable: true  # Enable adaptive Kalman filter for hardware error_ppm
-  desired_peak_pos: 20  # Target delay-peak index for alignment
+  desired_peak_pos: 10  # Match the simulator timing calibration used by this preset
 
 # ===== Sensing =====
 sensing:
-  sensing_delay_correction_mode: los_tracking  # Sensing delay correction source: los_tracking or ertm_absolute
+  sensing_delay_correction_mode: ertm_absolute  # Correct bistatic sensing delay with the absolute eRTM TO estimate
   bi_enabled: true  # Enable bistatic sensing processing pipeline
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
@@ -142,7 +145,9 @@ logging:
   default_level: warn  # off|error|warn|info|debug — global default; Error always prints when force_error=true
   timestamps: false  # Prefix each line with local HH:MM:SS.uuuuuu
   force_error: true  # Always emit Error (unrecoverable failures only)
-  modules: {}  # Optional overrides, e.g. demod.ldpc: debug, cuda.demod: warn, ul_rx: warn
+  modules:
+    ertm: info  # Show eRTM TO estimation, alignment, and correction updates
+    ul_tx: info  # Show UE uplink transmit timing adjustments
 
 runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs

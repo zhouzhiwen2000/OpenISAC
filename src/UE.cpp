@@ -2605,6 +2605,7 @@ private:
         dcfg.sim_session = cfg_.simulation.session;
         dcfg.sim_tick_rate = cfg_.rf_sampling.sample_rate;
         dcfg.sim_center_freq = cfg_.downlink.center_freq;
+        dcfg.sim_predictive_delay = cfg_.sync_tracking.predictive_delay;
         return radio::make_device(dcfg);
     }
 

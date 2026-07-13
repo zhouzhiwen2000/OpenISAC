@@ -520,7 +520,12 @@ int main(int argc, char** argv) {
 
     // --- Create shared-memory segments (hub is the creator) ---
     sim_shm::ShmControl ctrl;
-    ctrl.create(sim_shm::make_shm_name(sim.session, "ctrl"), fs, static_cast<uint32_t>(num_channels));
+    ctrl.create(
+        sim_shm::make_shm_name(sim.session, "ctrl"),
+        fs,
+        static_cast<uint32_t>(num_channels),
+        sim.cfo_hz,
+        sample_rate_offset_ppm);
     std::atomic<int>* running = &ctrl.block()->running;
     g_run_flag.store(running); // let the signal handler break blocking ring ops
 
@@ -620,8 +625,42 @@ int main(int argc, char** argv) {
     int32_t last_logged_snr_centidb = std::numeric_limits<int32_t>::max();
 
     while (!g_stop.load() && running->load(std::memory_order_acquire) != 0) {
+        if (!tx_ring.wait_for_timeline_origin(running, -1.0)) break;
+        const uint64_t tx_read_before = tx_ring.consumed();
         const size_t M = tx_ring.pop_upto(in_chunk.data(), max_chunk, running);
         if (M == 0) break; // running cleared
+        const int64_t tx_origin = tx_ring.timeline_origin();
+        if (tx_origin == sim_shm::kShmTimelineUnset || tx_origin < 0 ||
+            tx_read_before > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+            tx_origin > std::numeric_limits<int64_t>::max() - static_cast<int64_t>(tx_read_before)) {
+            LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] invalid downlink TX timeline origin/read position";
+            break;
+        }
+        const int64_t chunk_start_sample =
+            tx_origin + static_cast<int64_t>(tx_read_before);
+        ctrl.set_sample_index(static_cast<uint64_t>(chunk_start_sample));
+
+        // Every simulated RX stream uses the same absolute origin as the first
+        // downlink air sample. Consumers may seek forward from this point using
+        // timed stream commands, exactly like device-clock anchored UHD RX.
+        for (auto& r : sens_rings) {
+            if (!r->timeline_origin_is_set() &&
+                !r->set_timeline_origin(chunk_start_sample)) {
+                LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] failed to establish sensing RX timeline";
+                running->store(0, std::memory_order_release);
+                break;
+            }
+        }
+        if (enable_comm && !comm_ring.timeline_origin_is_set() &&
+            !comm_ring.set_timeline_origin(chunk_start_sample)) {
+            LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] failed to establish communication RX timeline";
+            break;
+        }
+        if (enable_uplink && !ul_rx_ring.timeline_origin_is_set() &&
+            !ul_rx_ring.set_timeline_origin(chunk_start_sample)) {
+            LOG_G_ERROR_M(ChannelSim) << "[ChannelSim] failed to establish uplink RX timeline";
+            break;
+        }
 
         // Build extended buffer: history (L) followed by the new chunk (M).
         std::copy(in_chunk.begin(), in_chunk.begin() + M, ext.begin() + L);
@@ -793,87 +832,140 @@ int main(int argc, char** argv) {
         // --- Uplink (UE->BS): drain UE TX for this BS-clock chunk, apply TDL + AWGN ---
         // When SRO is enabled, the UE sample stream advances at UE/BS ratio relative
         // to the BS clock, then the reciprocal resampler publishes rx.ul on the BS
-        // clock. When the UE has nothing, nothing is forwarded (the BS recv simply
-        // waits), and the hub still makes downlink progress.
+        // clock. The output timeline never pauses: before/after available UE TX
+        // samples the BS receives silence plus configured AWGN, matching a running
+        // radio clock instead of giving rx.ul an unrelated ring-local epoch.
         if (enable_uplink) {
             const size_t desired_ul_input = sro_on
                 ? std::max<size_t>(
                       1,
                       static_cast<size_t>(std::ceil(static_cast<double>(M) * ue_to_bs_sample_rate_ratio)))
                 : M;
-            const size_t got = ul_tx_ring.pop_block(ul_in.data(), desired_ul_input, running, 0.0);
-            if (got > 0) {
-                std::copy(ul_in.begin(), ul_in.begin() + got, ul_ext.begin() + ul_L);
-                for (size_t n = 0; n < got; ++n) {
-                    cf acc(0.0f, 0.0f);
-                    for (const auto& tap : ul_taps) {
-                        const size_t d = static_cast<size_t>(tap.delay_samples);
-                        acc += tap.gain * ul_ext[ul_L + n - d];
+            std::fill_n(ul_in.data(), desired_ul_input, sample_t(0.0f, 0.0f));
+
+            // Map this BS-clock interval to the corresponding UE-stream sample
+            // offset. A future UE timed start leaves a zero prefix; a late reader
+            // discards stale samples so the two streams cannot silently acquire
+            // independent time origins.
+            size_t ul_insert_offset = 0;
+            bool ul_aligned_for_read = false;
+            if (ul_tx_ring.timeline_origin_is_set()) {
+                const int64_t ul_origin = ul_tx_ring.timeline_origin();
+                const long double relative_ue_samples =
+                    (static_cast<long double>(chunk_start_sample) -
+                     static_cast<long double>(ul_origin)) *
+                    static_cast<long double>(ue_to_bs_sample_rate_ratio);
+                if (relative_ue_samples < 0.0L) {
+                    const long double prefix = std::clamp<long double>(
+                        -relative_ue_samples,
+                        0.0L,
+                        static_cast<long double>(desired_ul_input));
+                    ul_insert_offset = static_cast<size_t>(std::llround(prefix));
+                    ul_aligned_for_read = true;
+                } else {
+                    const uint64_t target = static_cast<uint64_t>(std::llround(
+                        std::min<long double>(
+                            relative_ue_samples,
+                            static_cast<long double>(std::numeric_limits<int64_t>::max()))));
+                    const uint64_t consumed = ul_tx_ring.consumed();
+                    if (consumed <= target) {
+                        const uint64_t stale = target - consumed;
+                        const size_t stale_bounded = static_cast<size_t>(std::min<uint64_t>(
+                            stale, static_cast<uint64_t>(std::numeric_limits<size_t>::max())));
+                        const size_t skipped = ul_tx_ring.skip_block(
+                            stale_bounded, running, 0.0);
+                        ul_aligned_for_read = skipped == stale;
+                    } else {
+                        // Rounding at a non-zero SRO can put the consumer one
+                        // sample ahead of the ideal mapping. Keep the stream
+                        // continuous rather than attempting to un-read.
+                        ul_aligned_for_read = true;
                     }
-                    ul_out[n] = acc;
                 }
-                for (auto& tg : uplink_bistatic_targets) {
-                    cf phasor = tg.doppler_phasor;
-                    const size_t d = static_cast<size_t>(tg.delay_samples);
-                    for (size_t n = 0; n < got; ++n) {
-                        ul_out[n] += tg.gain * ul_ext[ul_L + n - d] * phasor;
-                        phasor *= tg.doppler_step;
-                    }
-                    const float mag = std::abs(phasor);
-                    if (mag > 1e-6f) phasor /= mag;
-                    tg.doppler_phasor = phasor;
-                }
-                size_t ul_count = got;
-                if (sro_on) {
-                    ul_sro_resampler.append(ul_out.data(), got);
-                    ul_sro_resampler.produce(ul_sro_out);
-                    ul_count = ul_sro_out.size();
-                    if (ul_out.size() < ul_count) {
-                        ul_out.resize(ul_count);
-                    }
-                    std::copy(ul_sro_out.begin(), ul_sro_out.end(), ul_out.begin());
-                }
-                // Apply reciprocal-link residual CFO on the BS-clock output. The
-                // UE publishes its logical TX carrier correction through the sim
-                // control block whenever downlink tracking retunes the uplink TX.
-                const double uplink_tx_correction_hz = ctrl.uplink_tx_freq_correction_hz();
-                const double residual_uplink_cfo_hz =
-                    initial_uplink_cfo_hz - uplink_tx_correction_hz;
-                if (!have_logged_uplink_tx_correction ||
-                    std::abs(uplink_tx_correction_hz - last_logged_uplink_tx_correction_hz) > 1e-3) {
-                    LOG_G_INFO_M(ChannelSim) << "[ChannelSim] uplink TX frequency correction="
-                                 << uplink_tx_correction_hz << " Hz, residual CFO="
-                                 << residual_uplink_cfo_hz << " Hz";
-                    last_logged_uplink_tx_correction_hz = uplink_tx_correction_hz;
-                    have_logged_uplink_tx_correction = true;
-                }
-                const double uplink_cfo_dphi =
-                    (fs > 0.0) ? (kTwoPi * residual_uplink_cfo_hz / fs) : 0.0;
-                const cf uplink_cfo_step(
-                    static_cast<float>(std::cos(uplink_cfo_dphi)),
-                    static_cast<float>(std::sin(uplink_cfo_dphi)));
-                for (size_t n = 0; n < ul_count; ++n) {
-                    ul_out[n] *= uplink_cfo_phasor;
-                    uplink_cfo_phasor *= uplink_cfo_step;
-                }
-                const float uplink_cfo_mag = std::abs(uplink_cfo_phasor);
-                if (uplink_cfo_mag > 1e-6f) uplink_cfo_phasor /= uplink_cfo_mag;
-                // NOTE: no per-chunk SNR-control scaling on the uplink — the uplink
-                // frame is zero-padded within the DL period, so chunk-wise power
-                // normalization would vary the signal level across the frame and
-                // break the BS equalization. Uplink SNR = tap gain vs AWGN.
-                if (noise_on && ul_count > 0) {
-                    noise_gen.add(ul_out.data(), ul_count, static_cast<float>(noise_sigma));
-                }
-                if (ul_count > 0) {
-                    ul_rx_ring.push_block(ul_out.data(), ul_count, running);
-                }
-                // Slide uplink history (last ul_L samples of the extended buffer).
-                std::copy(ul_ext.begin() + got, ul_ext.begin() + got + ul_L, ul_ext.begin());
             }
+
+            if (ul_aligned_for_read && ul_insert_offset < desired_ul_input) {
+                (void)ul_tx_ring.pop_block(
+                    ul_in.data() + ul_insert_offset,
+                    desired_ul_input - ul_insert_offset,
+                    running,
+                    0.0);
+            }
+
+            std::copy(
+                ul_in.begin(), ul_in.begin() + desired_ul_input, ul_ext.begin() + ul_L);
+            for (size_t n = 0; n < desired_ul_input; ++n) {
+                cf acc(0.0f, 0.0f);
+                for (const auto& tap : ul_taps) {
+                    const size_t d = static_cast<size_t>(tap.delay_samples);
+                    acc += tap.gain * ul_ext[ul_L + n - d];
+                }
+                ul_out[n] = acc;
+            }
+            for (auto& tg : uplink_bistatic_targets) {
+                cf phasor = tg.doppler_phasor;
+                const size_t d = static_cast<size_t>(tg.delay_samples);
+                for (size_t n = 0; n < desired_ul_input; ++n) {
+                    ul_out[n] += tg.gain * ul_ext[ul_L + n - d] * phasor;
+                    phasor *= tg.doppler_step;
+                }
+                const float mag = std::abs(phasor);
+                if (mag > 1e-6f) phasor /= mag;
+                tg.doppler_phasor = phasor;
+            }
+            size_t ul_count = desired_ul_input;
+            if (sro_on) {
+                ul_sro_resampler.append(ul_out.data(), desired_ul_input);
+                ul_sro_resampler.produce(ul_sro_out);
+                ul_count = ul_sro_out.size();
+                if (ul_out.size() < ul_count) {
+                    ul_out.resize(ul_count);
+                }
+                std::copy(ul_sro_out.begin(), ul_sro_out.end(), ul_out.begin());
+            }
+            // Apply reciprocal-link residual CFO on the BS-clock output. The
+            // UE publishes its logical TX carrier correction through the sim
+            // control block whenever downlink tracking retunes the uplink TX.
+            const double uplink_tx_correction_hz = ctrl.uplink_tx_freq_correction_hz();
+            const double residual_uplink_cfo_hz =
+                initial_uplink_cfo_hz - uplink_tx_correction_hz;
+            if (!have_logged_uplink_tx_correction ||
+                std::abs(uplink_tx_correction_hz - last_logged_uplink_tx_correction_hz) > 1e-3) {
+                LOG_G_INFO_M(ChannelSim) << "[ChannelSim] uplink TX frequency correction="
+                             << uplink_tx_correction_hz << " Hz, residual CFO="
+                             << residual_uplink_cfo_hz << " Hz";
+                last_logged_uplink_tx_correction_hz = uplink_tx_correction_hz;
+                have_logged_uplink_tx_correction = true;
+            }
+            const double uplink_cfo_dphi =
+                (fs > 0.0) ? (kTwoPi * residual_uplink_cfo_hz / fs) : 0.0;
+            const cf uplink_cfo_step(
+                static_cast<float>(std::cos(uplink_cfo_dphi)),
+                static_cast<float>(std::sin(uplink_cfo_dphi)));
+            for (size_t n = 0; n < ul_count; ++n) {
+                ul_out[n] *= uplink_cfo_phasor;
+                uplink_cfo_phasor *= uplink_cfo_step;
+            }
+            const float uplink_cfo_mag = std::abs(uplink_cfo_phasor);
+            if (uplink_cfo_mag > 1e-6f) uplink_cfo_phasor /= uplink_cfo_mag;
+            // NOTE: no per-chunk SNR-control scaling on the uplink — the uplink
+            // frame is zero-padded within the DL period, so chunk-wise power
+            // normalization would vary the signal level across the frame and
+            // break the BS equalization. Uplink SNR = tap gain vs AWGN.
+            if (noise_on && ul_count > 0) {
+                noise_gen.add(ul_out.data(), ul_count, static_cast<float>(noise_sigma));
+            }
+            if (ul_count > 0) {
+                ul_rx_ring.push_block(ul_out.data(), ul_count, running);
+            }
+            // Slide uplink history (last ul_L samples of the extended buffer).
+            std::copy(
+                ul_ext.begin() + desired_ul_input,
+                ul_ext.begin() + desired_ul_input + ul_L,
+                ul_ext.begin());
         }
 
-        ctrl.advance(M);
+        ctrl.set_sample_index(static_cast<uint64_t>(chunk_start_sample) + M);
         total_produced += M;
 
         // Slide history: last L samples of ext become the new history.

@@ -49,14 +49,21 @@ inline std::string make_shm_name(const std::string& session, const std::string& 
 struct ShmRingHeader {
     std::atomic<uint64_t> magic;       // 0 until fully initialized by the creator
     uint64_t capacity;                 // number of sample_t slots
-    char pad0[48];                     // keep head/tail on separate cache lines
+    // Absolute sample index represented by ring position zero.  A stream sets
+    // this once, before publishing its first sample, so independent TX/RX rings
+    // share the simulator's global sample clock without materializing leading
+    // silence from time zero.
+    std::atomic<int64_t> timeline_origin;
+    char pad0[40];                     // keep head/tail on separate cache lines
     std::atomic<uint64_t> write_pos;   // total samples ever written (producer owns)
     char pad1[56];
     std::atomic<uint64_t> read_pos;    // total samples ever read (consumer owns)
     char pad2[56];
 };
 
-static constexpr uint64_t kShmRingMagic = 0x4F49534143524E47ull; // "OISACRNG"
+static constexpr int64_t kShmTimelineUnset = std::numeric_limits<int64_t>::min();
+// Versioned from the original header layout when timeline_origin was added.
+static constexpr uint64_t kShmRingMagic = 0x4F49534143524E48ull; // "OISACRNH"
 
 class ShmRing {
 public:
@@ -82,6 +89,7 @@ public:
         _map(fd, bytes);
         ::close(fd);
         _header->capacity = capacity;
+        _header->timeline_origin.store(kShmTimelineUnset, std::memory_order_relaxed);
         _header->write_pos.store(0, std::memory_order_relaxed);
         _header->read_pos.store(0, std::memory_order_relaxed);
         _capacity = capacity;
@@ -137,6 +145,76 @@ public:
     uint64_t consumed() const { return _header->read_pos.load(std::memory_order_acquire); }
     // Total samples produced so far.
     uint64_t produced() const { return _header->write_pos.load(std::memory_order_acquire); }
+
+    bool timeline_origin_is_set() const {
+        return _header &&
+               _header->timeline_origin.load(std::memory_order_acquire) != kShmTimelineUnset;
+    }
+
+    int64_t timeline_origin() const {
+        return _header
+            ? _header->timeline_origin.load(std::memory_order_acquire)
+            : kShmTimelineUnset;
+    }
+
+    /**
+     * @brief Establish the absolute sample index represented by ring position 0.
+     *
+     * The first caller wins. Repeating the same origin is harmless; attempting
+     * to rebase a live ring is rejected because unread samples would otherwise
+     * change meaning underneath the consumer.
+     */
+    bool set_timeline_origin(int64_t origin) {
+        if (!_header || origin == kShmTimelineUnset) return false;
+        int64_t expected = kShmTimelineUnset;
+        if (_header->timeline_origin.compare_exchange_strong(
+                expected, origin, std::memory_order_release, std::memory_order_acquire)) {
+            return true;
+        }
+        return expected == origin;
+    }
+
+    int64_t absolute_consumed() const {
+        const int64_t origin = timeline_origin();
+        if (origin == kShmTimelineUnset) return kShmTimelineUnset;
+        const uint64_t pos = consumed();
+        if (pos > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        const int64_t pos_i = static_cast<int64_t>(pos);
+        if (origin > std::numeric_limits<int64_t>::max() - pos_i) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return origin + pos_i;
+    }
+
+    int64_t absolute_produced() const {
+        const int64_t origin = timeline_origin();
+        if (origin == kShmTimelineUnset) return kShmTimelineUnset;
+        const uint64_t pos = produced();
+        if (pos > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        const int64_t pos_i = static_cast<int64_t>(pos);
+        if (origin > std::numeric_limits<int64_t>::max() - pos_i) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return origin + pos_i;
+    }
+
+    bool wait_for_timeline_origin(std::atomic<int>* running, double timeout_s) const {
+        Backoff backoff;
+        const bool has_deadline = timeout_s >= 0.0;
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(has_deadline ? timeout_s : 0.0));
+        while (!timeline_origin_is_set()) {
+            if (running && running->load(std::memory_order_acquire) == 0) return false;
+            if (has_deadline && std::chrono::steady_clock::now() >= deadline) return false;
+            backoff.pause();
+        }
+        return true;
+    }
 
     // Producer: write `count` samples, blocking until space is available.
     // Returns the number written (== count unless `running` was cleared or `timeout_s`
@@ -208,6 +286,35 @@ public:
             read += chunk;
         }
         return read;
+    }
+
+    // Consumer: discard exactly `count` samples without copying them. This is
+    // used by timed simulated RX starts to seek to an absolute sample index.
+    size_t skip_block(size_t count, std::atomic<int>* running,
+                      double timeout_s = -1.0) {
+        size_t skipped = 0;
+        Backoff backoff;
+        const bool has_deadline = timeout_s >= 0.0;
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(has_deadline ? timeout_s : 0.0));
+        while (skipped < count) {
+            const uint64_t r = _header->read_pos.load(std::memory_order_relaxed);
+            const uint64_t w = _header->write_pos.load(std::memory_order_acquire);
+            const uint64_t avail = w - r;
+            if (avail == 0) {
+                if (running && running->load(std::memory_order_acquire) == 0) break;
+                if (has_deadline && std::chrono::steady_clock::now() >= deadline) break;
+                backoff.pause();
+                continue;
+            }
+            backoff.reset();
+            const uint64_t remaining = static_cast<uint64_t>(count - skipped);
+            const uint64_t chunk = std::min(avail, remaining);
+            _header->read_pos.store(r + chunk, std::memory_order_release);
+            skipped += static_cast<size_t>(chunk);
+        }
+        return skipped;
     }
 
     // Consumer: block until at least one sample is available, then read up to
@@ -293,13 +400,15 @@ struct SimControlBlock {
     std::atomic<int> running;                 // 1 = simulation active, 0 = shutting down
     std::atomic<uint64_t> global_sample_index; // hub's sample clock (RX timeline)
     double tick_rate;                          // sample rate (Hz) for time conversions
+    double configured_cfo_hz;                  // ChannelSimulator BS->UE CFO
+    double configured_sample_rate_offset_ppm;  // ChannelSimulator UE/BS SRO
     uint32_t num_sensing_channels;
     std::atomic<int64_t> comm_rx_freq_correction_millihz; // Receiver-side comm RX tune correction
     std::atomic<int64_t> uplink_tx_freq_correction_millihz; // UE TX target-frequency correction
     char pad[8];
 };
 
-static constexpr uint64_t kShmCtrlMagic = 0x4F49534143435452ull; // "OISACCTR"
+static constexpr uint64_t kShmCtrlMagic = 0x4F49534143435454ull; // "OISACCTT"
 
 class ShmControl {
 public:
@@ -309,7 +418,11 @@ public:
     ShmControl(const ShmControl&) = delete;
     ShmControl& operator=(const ShmControl&) = delete;
 
-    void create(const std::string& name, double tick_rate, uint32_t num_sensing_channels) {
+    void create(const std::string& name,
+                double tick_rate,
+                uint32_t num_sensing_channels,
+                double configured_cfo_hz,
+                double configured_sample_rate_offset_ppm) {
         _name = name;
         ::shm_unlink(name.c_str()); // remove stale segment from a previous run if present
         int fd = ::shm_open(name.c_str(), O_CREAT | O_RDWR, 0666);
@@ -323,6 +436,8 @@ public:
         _blk->running.store(1, std::memory_order_relaxed);
         _blk->global_sample_index.store(0, std::memory_order_relaxed);
         _blk->tick_rate = tick_rate;
+        _blk->configured_cfo_hz = configured_cfo_hz;
+        _blk->configured_sample_rate_offset_ppm = configured_sample_rate_offset_ppm;
         _blk->num_sensing_channels = num_sensing_channels;
         _blk->comm_rx_freq_correction_millihz.store(0, std::memory_order_relaxed);
         _blk->uplink_tx_freq_correction_millihz.store(0, std::memory_order_relaxed);
@@ -356,10 +471,25 @@ public:
     uint64_t sample_index() const {
         return _blk ? _blk->global_sample_index.load(std::memory_order_acquire) : 0;
     }
+    // Simulation time follows processed air samples. Before the first timed TX
+    // establishes an origin it remains at zero, so independently started BS/UE
+    // processes choose the same deterministic initial start time.
+    uint64_t clock_sample_index() const {
+        return sample_index();
+    }
+    void set_sample_index(uint64_t value) {
+        if (_blk) _blk->global_sample_index.store(value, std::memory_order_release);
+    }
     void advance(uint64_t n) {
         if (_blk) _blk->global_sample_index.fetch_add(n, std::memory_order_release);
     }
     double tick_rate() const { return _blk ? _blk->tick_rate : 0.0; }
+    double configured_cfo_hz() const {
+        return _blk ? _blk->configured_cfo_hz : 0.0;
+    }
+    double configured_sample_rate_offset_ppm() const {
+        return _blk ? _blk->configured_sample_rate_offset_ppm : 0.0;
+    }
     void set_comm_rx_freq_correction_hz(double value_hz) {
         if (!_blk || !std::isfinite(value_hz)) return;
         const double scaled = value_hz * 1000.0;

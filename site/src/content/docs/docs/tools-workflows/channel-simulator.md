@@ -13,6 +13,8 @@ Each sensing RX channel is treated as one antenna. The array response can be gen
 
 All three processes attach to POSIX shared-memory rings named by `simulation.session`. The engines select the backend with `radio_backend: sim` in their YAML. The `radio::SimBackend` implements the same OpenISAC radio HAL used by the UHD backend, so the BS/UE/sensing hot paths drive `radio::ITxStream` / `radio::IRxStream` interfaces regardless of whether the underlying transport is shared memory or a USRP. `radio_backend: uhd` (the default) keeps the hardware behaviour.
 
+The shared-memory streams use one absolute sample timeline. The simulated device clock runs before the first sample is transmitted, timed TX metadata places the first burst sample on that clock, and timed RX commands seek to the requested absolute sample. The BS uplink RX timeline continues through silence before the UE starts transmitting instead of beginning at an unrelated ring-local zero. Consequently, UE downlink RX alignment and uplink TX window movement retain the same clock relationship as timed USRP streams. Changing `sync_tracking.desired_peak_pos` changes the local delay/`TO_UE` reference coordinate, but an eRTM-corrected physical delay peak remains at the same position.
+
 ## Build
 
 ```bash
@@ -37,6 +39,25 @@ cp ../config/UE_Sim.yaml UE.yaml
 # 3) start the receiver / comm demod
 ./UE
 ```
+
+### eRTM simulation preset
+
+Use the dedicated pair when validating bidirectional timing and absolute eRTM delay correction:
+
+```bash
+cd build
+cp ../config/BS_Sim_eRTM.yaml BS.yaml
+cp ../config/UE_Sim_eRTM.yaml UE.yaml
+
+./ChannelSimulator  # terminal 1
+./BS                # terminal 2
+./UE                # terminal 3
+
+# Optional: inspect the uplink/downlink spectra and eRTM correlation result.
+python3 ../scripts/plot_ertm_debug.py
+```
+
+This preset enables the duplex simulator, the `maximum_likelihood` timing metric, eRTM debug output, and `ertm_absolute` bistatic delay correction. It disables BS monostatic sensing RX, CFO, SRO, and UE predictive-delay tracking so the first run isolates eRTM timing behavior. Both files use the dedicated `oisac_ertm_sim` session and must be copied as a pair.
 
 Start `ChannelSimulator` first. By default the hub paces output to wall-clock sample time and still uses shared-memory backpressure: if communication RX or sensing RX is enabled but the corresponding consumer process is not reading from shared memory, the related ring buffer will fill and the whole simulation will wait. Start every enabled receiver; if you only need one side, disable the unused output in the `simulation:` block:
 
@@ -167,4 +188,6 @@ By default, `targets` drives both the monostatic sensing antennas (with array ma
 - The hub is paced by default: each processed BS-clock chunk is released after `chunk_samples / sample_rate` wall-clock time. Set `simulation.pacing_enabled: false` for fastest-possible batch simulation.
 - Keep `ring_capacity_samples` small, around a couple of frames, so the transmitter cannot race far ahead of the hub and overflow the monostatic TX/RX pairing queue.
 - `sample_rate_offset_ppm` models one endpoint-level UE/BS SFO. `timing_offset_samples` remains only a fixed integer sample offset and does not drift over time.
+- Timed simulated streams share an absolute sample clock. The clock remains at zero before the first TX, so a UE started before the BS still selects the same initial timed start. After the first TX establishes the origin, time advances only with processed air samples and is independent of whether the simulation keeps up with wall time. An RX request before the actual TX origin is aligned to that origin.
+- With `sync_tracking.predictive_delay: true`, the UE checks whether the shared-oscillator ppm implied by `cfo_hz / center_freq` matches `sample_rate_offset_ppm`. The simulator permits CFO and SRO to be configured independently, so it warns on a mismatch; disable predictive delay when the mismatch is intentional to avoid interpreting CFO as sample-clock drift.
 - The simulator does not model fractional delay; all propagation delays and configured timing offsets are quantized to integer samples.
