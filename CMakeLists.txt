@@ -574,6 +574,21 @@ if(CUDA_AVAILABLE)
 endif()
 
 #===========================================================
+# Standalone CPU LDPC fixed-point precision benchmark (no CUDA)
+#===========================================================
+add_executable(LDPCFixedBench tools/ldpc_fixed_bench.cpp)
+target_include_directories(LDPCFixedBench PRIVATE
+    ${OPENISAC_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(LDPCFixedBench PRIVATE
+    Threads::Threads
+    aff3ct::aff3ct-shared-lib
+)
+target_compile_options(LDPCFixedBench PRIVATE ${COMMON_COMPILE_OPTIONS})
+message(STATUS "CPU target: LDPCFixedBench")
+
+#===========================================================
 # Installation Rules
 #===========================================================
 set(INSTALL_TARGETS BS UE)

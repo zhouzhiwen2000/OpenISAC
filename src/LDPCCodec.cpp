@@ -8,6 +8,10 @@ struct LDPCCodec::Impl {
     LDPCConfig cfg;
     std::unique_ptr<aff3ct::factory::Codec_LDPC> codec_factory;
     std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>> codec;
+    // Optional int16 (Q16) decoder, built only when cfg.fixed_point is set.
+    // AFF3CT NMS supports 16-bit fixed point; INTER SIMD packs 32 frames/AVX-512
+    // register at int16 (vs 16 at float), so its n_frames is doubled.
+    std::unique_ptr<aff3ct::tools::Codec_LDPC<short, short>> codec_q16;
     std::unique_ptr<LDPC5041008SIMD> custom_encoder;
 
     explicit Impl(const LDPCConfig& config)
@@ -47,6 +51,12 @@ struct LDPCCodec::Impl {
         init_aff3ct_params();
         codec = std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>>(codec_factory->build<int, float>());
         codec->set_n_frames(cfg.n_frames);
+
+        if (cfg.fixed_point) {
+            codec_q16 = std::unique_ptr<aff3ct::tools::Codec_LDPC<short, short>>(
+                codec_factory->build<short, short>());
+            codec_q16->set_n_frames(cfg.n_frames * 2);
+        }
     }
 
     void init_aff3ct_params() {
@@ -159,6 +169,40 @@ void LDPCCodec::decode_frame(const AlignedFloatVector& llr_input, AlignedByteVec
 
     decoded_bytes.resize(decoded_bits.size() / 8);
     pack_bits(decoded_bits, decoded_bytes);
+}
+
+void LDPCCodec::decode_frame(const AlignedShortVector& llr_input, AlignedByteVector& decoded_bytes) {
+    if (!impl_->codec_q16) {
+        throw std::runtime_error(
+            "LDPCCodec::decode_frame(int16) requires LDPCConfig::fixed_point = true");
+    }
+    auto& decoder = impl_->codec_q16->get_decoder_siho();
+    const size_t N = decoder.get_N();
+    const size_t K = decoder.get_K();
+    const size_t batch = decoder.get_n_frames();
+    const size_t total_frames = llr_input.size() / N;
+
+    // decode_siho writes short hard bits; collect them, then pack to bytes via
+    // an int view (pack_bits takes AlignedIntVector).
+    std::vector<short> decoded_bits(total_frames * K, 0);
+
+    size_t i = 0;
+    for (; i + batch <= total_frames; i += batch) {
+        decoder.decode_siho(llr_input.data() + i * N, decoded_bits.data() + i * K, -1, false);
+    }
+
+    const size_t remaining = total_frames - i;
+    if (remaining > 0) {
+        AlignedShortVector tmp_in(batch * N, 0);
+        std::vector<short> tmp_out(batch * K, 0);
+        std::memcpy(tmp_in.data(), llr_input.data() + i * N, remaining * N * sizeof(int16_t));
+        decoder.decode_siho(tmp_in.data(), tmp_out.data(), -1, false);
+        std::memcpy(decoded_bits.data() + i * K, tmp_out.data(), remaining * K * sizeof(short));
+    }
+
+    AlignedIntVector decoded_bits_int(decoded_bits.begin(), decoded_bits.end());
+    decoded_bytes.resize(decoded_bits_int.size() / 8);
+    pack_bits(decoded_bits_int, decoded_bytes);
 }
 
 size_t LDPCCodec::get_K() const {

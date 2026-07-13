@@ -1080,6 +1080,13 @@ struct ResourcePreviewConfig {
  * Mirrors the sectioned YAML layout. YAML is parsed once into this structure;
  * hot paths use typed fields instead of querying YAML nodes.
  */
+// CPU LDPC decode precision options. Applies to both UE downlink RX and BS
+// uplink RX. Default reproduces the float32 decode path exactly.
+struct LdpcDecodeConfig {
+    bool fixed_point = false;     // use int16 (Q16) layered-NMS decoder instead of float32
+    int fixed_point_scale = 16;   // pow2 multiplier applied at the demapper before int16 saturation
+};
+
 struct Config {
     RadioConfig radio;
     SimConfig simulation;               // Channel simulator parameters (used when radio.radio_backend == "sim")
@@ -1098,6 +1105,7 @@ struct Config {
     CpuCoresConfig cpu_cores;
     RuntimeConfig runtime;
     ResourcePreviewConfig resource_preview;
+    LdpcDecodeConfig ldpc;
 
     // Check if a specific module should be profiled
     bool should_profile(const std::string& module) const {
@@ -3006,6 +3014,10 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node cpu = config_detail::section_node(config, "cpu_cores");
         const YAML::Node runtime = config_detail::section_node(config, "runtime");
         const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
+        const YAML::Node ldpc = config_detail::section_node(config, "ldpc");
+
+        config_detail::load_value(ldpc, "fixed_point", cfg.ldpc.fixed_point);
+        config_detail::load_value(ldpc, "fixed_point_scale", cfg.ldpc.fixed_point_scale);
 
         config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
         config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);
@@ -3401,6 +3413,10 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node cpu = config_detail::section_node(config, "cpu_cores");
         const YAML::Node runtime = config_detail::section_node(config, "runtime");
         const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
+        const YAML::Node ldpc = config_detail::section_node(config, "ldpc");
+
+        config_detail::load_value(ldpc, "fixed_point", cfg.ldpc.fixed_point);
+        config_detail::load_value(ldpc, "fixed_point_scale", cfg.ldpc.fixed_point_scale);
 
         config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
         config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);

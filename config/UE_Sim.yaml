@@ -108,3 +108,8 @@ runtime:
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
   profiling_modules: ""  # Comma-separated modules to profile, or "all"
+
+# ===== LDPC decode =====
+ldpc:
+  fixed_point: false  # true = int16 (Q16) layered-NMS CPU decoder (~1.6x faster, quant fused into demap); false = float32
+  fixed_point_scale: 16  # pow2 multiplier applied to LLRs before int16 saturation (Q16 path only)

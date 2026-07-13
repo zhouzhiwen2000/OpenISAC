@@ -18,6 +18,7 @@ public:
     using AlignedByteVector = std::vector<int8_t, AlignedAllocator<int8_t, 64>>;
     using AlignedIntVector = std::vector<int32_t, AlignedAllocator<int32_t, 64>>;
     using AlignedFloatVector = std::vector<float, AlignedAllocator<float, 64>>;
+    using AlignedShortVector = std::vector<int16_t, AlignedAllocator<int16_t, 64>>;
 
     struct LDPCConfig {
         std::string h_matrix_path = "../LDPC_504_1008.alist";
@@ -30,6 +31,10 @@ public:
         std::string dec_implem = "NMS";
         std::string dec_simd = "INTER";
         bool use_custom_encoder = true;
+        // When true, additionally build an int16 (Q16) layered-NMS decoder so the
+        // AlignedShortVector decode_frame overload can be used. The float decoder
+        // is always built; the float decode path is unaffected.
+        bool fixed_point = false;
     };
 
     explicit LDPCCodec(const LDPCConfig& config);
@@ -41,6 +46,9 @@ public:
 
     void encode_frame(const AlignedByteVector& input, AlignedIntVector& encoded_bits);
     void decode_frame(const AlignedFloatVector& llr_input, AlignedByteVector& decoded_bytes);
+    // int16 (Q16) decode path. Requires LDPCConfig::fixed_point = true at
+    // construction. Input LLRs are quantized int16 (pow2 scaled at the demapper).
+    void decode_frame(const AlignedShortVector& llr_input, AlignedByteVector& decoded_bytes);
 
     size_t get_K() const;
     size_t get_N() const;

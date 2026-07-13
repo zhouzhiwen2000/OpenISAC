@@ -52,6 +52,27 @@ private:
         double noise_var = 0.0;
     };
 
+    // int16 (Q16) variant used when _link_cfg.ldpc.fixed_point is set.
+    struct UplinkLlrFrameI16 {
+        LDPCCodec::AlignedShortVector llr;
+        uint64_t frame_index = 0;
+        uint64_t generation = 0;
+        double noise_var = 0.0;
+    };
+
+    static LDPCCodec::LDPCConfig _ldpc_cfg(const Config& c) {
+        LDPCCodec::LDPCConfig cfg = make_ldpc_5041008_cfg();
+        cfg.fixed_point = c.ldpc.fixed_point;
+        return cfg;
+    }
+
+    static inline int16_t sat16_llr(float v) {
+        long q = std::lroundf(v);
+        if (q > 32767) q = 32767;
+        else if (q < -32767) q = -32767;
+        return static_cast<int16_t>(q);
+    }
+
 public:
     explicit UplinkRxEngine(const Config& link_cfg)
         : _link_cfg(link_cfg),
@@ -95,11 +116,19 @@ public:
             frame.samples.resize(_period_samples);
             return frame;
         });
-        _llr_queue.reset(8, [this]() {
-            UplinkLlrFrame frame;
-            frame.llr.resize(_layout.payload_re_count * 2);
-            return frame;
-        });
+        if (_ldpc_fixed_point) {
+            _llr_queue_i16.reset(8, [this]() {
+                UplinkLlrFrameI16 frame;
+                frame.llr.resize(_layout.payload_re_count * 2);
+                return frame;
+            });
+        } else {
+            _llr_queue.reset(8, [this]() {
+                UplinkLlrFrame frame;
+                frame.llr.resize(_layout.payload_re_count * 2);
+                return frame;
+            });
+        }
         _data_symbols.assign(_layout.data_symbol_count, AlignedVector(_cfg.ofdm.fft_size));
     }
 
@@ -470,17 +499,32 @@ public:
         uhd::set_thread_priority_safe();
         bind_current_thread_from_uplink_hint(_link_cfg, 2);
         SPSCBackoff backoff;
-        while (_running.load(std::memory_order_relaxed) || !_llr_queue.empty()) {
-            UplinkLlrFrame* frame = _llr_queue.consumer_slot();
-            if (frame == nullptr) {
-                backoff.pause();
-                continue;
+        if (_ldpc_fixed_point) {
+            while (_running.load(std::memory_order_relaxed) || !_llr_queue_i16.empty()) {
+                UplinkLlrFrameI16* frame = _llr_queue_i16.consumer_slot();
+                if (frame == nullptr) {
+                    backoff.pause();
+                    continue;
+                }
+                backoff.reset();
+                if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
+                    _decode_llr_stream(frame->llr, _deint_scratch_i16, _payload_llr_scratch_i16);
+                }
+                _llr_queue_i16.consumer_pop();
             }
-            backoff.reset();
-            if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
-                _decode_llr_stream(frame->llr);
+        } else {
+            while (_running.load(std::memory_order_relaxed) || !_llr_queue.empty()) {
+                UplinkLlrFrame* frame = _llr_queue.consumer_slot();
+                if (frame == nullptr) {
+                    backoff.pause();
+                    continue;
+                }
+                backoff.reset();
+                if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
+                    _decode_llr_stream(frame->llr, _deint_scratch, _payload_llr_scratch);
+                }
+                _llr_queue.consumer_pop();
             }
-            _llr_queue.consumer_pop();
         }
     }
 
@@ -575,7 +619,38 @@ public:
             static_cast<float>((4.0 / std::max(noise_var, 1e-6)) * M_SQRT1_2), 500.0f);
 
         // 7) Build the matched payload-RE LLR stream (symbol-major, flat order).
-        if (_layout.payload_re_count > 0) {
+        if (_layout.payload_re_count > 0 && _ldpc_fixed_point) {
+            // Fused pow2 quantization: write int16 LLRs directly (no extra pass).
+            const float scale_llr_q =
+                scale_llr * static_cast<float>(_link_cfg.ldpc.fixed_point_scale);
+            UplinkLlrFrameI16* llr_frame = nullptr;
+            SPSCBackoff llr_backoff;
+            while (_running.load(std::memory_order_relaxed)) {
+                llr_frame = _llr_queue_i16.producer_slot();
+                if (llr_frame != nullptr) break;
+                llr_backoff.pause();
+            }
+            if (llr_frame == nullptr) {
+                return;
+            }
+            llr_frame->frame_index = _frame_count;
+            llr_frame->generation = generation;
+            llr_frame->noise_var = noise_var;
+            llr_frame->llr.resize(_layout.payload_re_count * 2);
+            int16_t* __restrict__ llr = llr_frame->llr.data();
+            for (size_t s = 0; s < _data_symbols.size(); ++s) {
+                const auto* __restrict__ sym_ptr = _data_symbols[s].data();
+                const size_t begin = _layout.payload_offsets[s];
+                const size_t end = _layout.payload_offsets[s + 1];
+                size_t off = begin * 2;
+                for (size_t idx = begin; idx < end; ++idx) {
+                    const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                    llr[off++] = sat16_llr(sym_ptr[k].real() * scale_llr_q);
+                    llr[off++] = sat16_llr(sym_ptr[k].imag() * scale_llr_q);
+                }
+            }
+            _llr_queue_i16.producer_commit();
+        } else if (_layout.payload_re_count > 0) {
             UplinkLlrFrame* llr_frame = nullptr;
             SPSCBackoff llr_backoff;
             while (_running.load(std::memory_order_relaxed)) {
@@ -624,7 +699,11 @@ public:
     }
 
     // Parse LdpcPacketFraming packets out of the frame LLR stream and decode.
-    void _decode_llr_stream(const LDPCCodec::AlignedFloatVector& frame_llr) {
+    // Templated on the LLR sample type so the float and int16 (Q16) paths share
+    // one body; decode_frame() is overload-resolved by the payload vector type.
+    template <typename LlrVec, typename ScratchVec>
+    void _decode_llr_stream(const LlrVec& frame_llr, ScratchVec& deint_scratch,
+                            LlrVec& payload_scratch) {
         const size_t bits_per_block = _ldpc.get_N();
         const size_t bytes_per_block = (_ldpc.get_K() + 7) / 8;
         if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
@@ -650,11 +729,11 @@ public:
 
             // Reuse scratch buffers across packets (decode thread, but still on
             // the hot per-frame path) — std::copy fully overwrites payload_llr.
-            LDPCCodec::AlignedFloatVector& payload_llr = _payload_llr_scratch;
+            LlrVec& payload_llr = payload_scratch;
             payload_llr.resize(required);
             std::copy(frame_llr.begin() + payload_off,
                       frame_llr.begin() + payload_off + required, payload_llr.begin());
-            _bit_interleaver->deinterleave_inplace(payload_llr, _deint_scratch);
+            _bit_interleaver->deinterleave_inplace(payload_llr, deint_scratch);
             _descrambler.soft_descramble(payload_llr);
             LDPCCodec::AlignedByteVector& decoded = _decoded_scratch;
             try {
@@ -808,11 +887,15 @@ public:
     const double _link_sample_rate;
     SPSCRingBuffer<UplinkRxFrame> _rx_frame_queue;
     SPSCRingBuffer<UplinkLlrFrame> _llr_queue;
+    SPSCRingBuffer<UplinkLlrFrameI16> _llr_queue_i16;     // used when _ldpc_fixed_point
 
-    LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
+    const bool _ldpc_fixed_point{_link_cfg.ldpc.fixed_point};
+    LDPCCodec _ldpc{_ldpc_cfg(_link_cfg)};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
     LDPCCodec::AlignedFloatVector _deint_scratch;
     LDPCCodec::AlignedFloatVector _payload_llr_scratch;   // reused per-packet LDPC input
+    LDPCCodec::AlignedShortVector _deint_scratch_i16;     // int16 path scratch
+    LDPCCodec::AlignedShortVector _payload_llr_scratch_i16; // int16 path per-packet input
     LDPCCodec::AlignedByteVector _decoded_scratch;        // reused per-packet LDPC output
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_out;

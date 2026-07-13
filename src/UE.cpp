@@ -264,6 +264,10 @@ public:
               const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg);
               return AlignedFloatVector(layout.payload_re_count * 2);
           }),
+          _llr_pool_i16(32, [&cfg]() {
+              const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg);
+              return LDPCCodec::AlignedShortVector(layout.payload_re_count * 2);
+          }),
           _sensing_frame_pool(32, [&cfg]() {
               SensingFrame frame;
               frame.rx_symbols.resize(cfg.ofdm.num_symbols);
@@ -406,6 +410,19 @@ public:
 
 private:
 private:
+    static LDPCCodec::LDPCConfig ldpc_cfg_from_config(const Config& cfg) {
+        LDPCCodec::LDPCConfig c = make_ldpc_5041008_cfg();
+        c.fixed_point = cfg.ldpc.fixed_point;
+        return c;
+    }
+
+    static inline int16_t sat16_llr(float v) {
+        long q = std::lroundf(v);
+        if (q > 32767) q = 32767;
+        else if (q < -32767) q = -32767;
+        return static_cast<int16_t>(q);
+    }
+
     static AdaptiveCFOAKF::Params make_akf_params(const Config& cfg) {
         AdaptiveCFOAKF::Params p;
         p.enable = cfg.sync_tracking.akf_enable;
@@ -786,6 +803,15 @@ private:
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
     };
+    // int16 (Q16) variant used when cfg_.ldpc.fixed_point is set. The demapper
+    // quantizes LLRs directly into this so the whole pipeline runs int16.
+    struct LlrFrameI16 {
+        LDPCCodec::AlignedShortVector llr;
+        uint64_t generation = 0;
+        int64_t rx_enqueue_time_ns = 0;
+        int64_t process_dequeue_time_ns = 0;
+        int64_t demod_done_time_ns = 0;
+    };
     struct LatencyAccumulator {
         std::atomic<int64_t> rx_queue_total_ns{0};
         std::atomic<int64_t> demod_total_ns{0};
@@ -800,14 +826,17 @@ private:
         int64_t e2e_total_ns{0};
         int count{0};
     };
-    SPSCRingBuffer<LlrFrame> _data_llr_buffer{128};  // LLR data buffer
+    SPSCRingBuffer<LlrFrame> _data_llr_buffer{128};  // LLR data buffer (float path)
+    SPSCRingBuffer<LlrFrameI16> _data_llr_buffer_i16{128};  // LLR data buffer (int16 path)
     std::thread _bit_processing_thread;
     std::atomic<bool> _bit_processing_running{false};
     LatencyAccumulator _latency_accumulator;
-    
-    LDPCCodec _ldpc_decoder{make_ldpc_5041008_cfg()};
+
+    const bool _ldpc_fixed_point{cfg_.ldpc.fixed_point};
+    LDPCCodec _ldpc_decoder{ldpc_cfg_from_config(cfg_)};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
     LDPCCodec::AlignedFloatVector _deinterleaver_llr_scratch;
+    LDPCCodec::AlignedShortVector _deinterleaver_llr_scratch_i16;
     Scrambler _descrambler{201600, 0x5A};
     std::unique_ptr<UdpSender> _udp_output_sender;
 
@@ -821,7 +850,8 @@ private:
     
     // Object pools for memory reuse (eliminates per-frame memory allocations)
     ObjectPool<RxFrame> _rx_frame_pool;           // Pool for RX frame buffers
-    ObjectPool<AlignedFloatVector> _llr_pool;     // Pool for LLR data
+    ObjectPool<AlignedFloatVector> _llr_pool;     // Pool for LLR data (float path)
+    ObjectPool<LDPCCodec::AlignedShortVector> _llr_pool_i16;  // Pool for LLR data (int16 path)
     ObjectPool<SensingFrame> _sensing_frame_pool; // Pool for sensing frames
 
     // Core computation classes (hardware-independent)
@@ -1918,6 +1948,10 @@ private:
         LlrFrame frame_llr;
         while (_data_llr_buffer.try_pop(frame_llr)) {
             _llr_pool.release(std::move(frame_llr.llr));
+        }
+        LlrFrameI16 frame_llr_i16;
+        while (_data_llr_buffer_i16.try_pop(frame_llr_i16)) {
+            _llr_pool_i16.release(std::move(frame_llr_i16.llr));
         }
     }
 
@@ -3245,32 +3279,63 @@ private:
         }
 
         if (_data_resource_layout.payload_re_count > 0) {
-            AlignedFloatVector frame_llr = _llr_pool.acquire();
-            float* __restrict__ llr_ptr = frame_llr.data();
-            for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
-                const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
-                const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
-                const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
-                size_t llr_offset = payload_begin * 2;
-                for (size_t idx = payload_begin; idx < payload_end; ++idx) {
-                    const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
-                    llr_ptr[llr_offset++] = sym_ptr[k].real() * scale_llr;
-                    llr_ptr[llr_offset++] = sym_ptr[k].imag() * scale_llr;
+            if (_ldpc_fixed_point) {
+                // Fused pow2 quantization: write int16 LLRs directly (no extra pass).
+                const float scale_llr_q =
+                    scale_llr * static_cast<float>(cfg_.ldpc.fixed_point_scale);
+                LDPCCodec::AlignedShortVector frame_llr = _llr_pool_i16.acquire();
+                int16_t* __restrict__ llr_ptr = frame_llr.data();
+                for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
+                    const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
+                    const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
+                    const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+                    size_t llr_offset = payload_begin * 2;
+                    for (size_t idx = payload_begin; idx < payload_end; ++idx) {
+                        const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                        llr_ptr[llr_offset++] = sat16_llr(sym_ptr[k].real() * scale_llr_q);
+                        llr_ptr[llr_offset++] = sat16_llr(sym_ptr[k].imag() * scale_llr_q);
+                    }
                 }
-            }
+                const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
+                if (!spsc_wait_push(_data_llr_buffer_i16, LlrFrameI16{
+                        std::move(frame_llr),
+                        frame.generation,
+                        frame.host_enqueue_time_ns,
+                        frame_dequeue_time_ns,
+                        demod_done_time_ns,
+                    }, [this]() {
+                        return !_bit_processing_running.load(std::memory_order_acquire);
+                    })) {
+                    _llr_pool_i16.release(std::move(frame_llr));
+                }
+            } else {
+                AlignedFloatVector frame_llr = _llr_pool.acquire();
+                float* __restrict__ llr_ptr = frame_llr.data();
+                for (size_t sym_idx = 0; sym_idx < symbols.size(); ++sym_idx) {
+                    const auto* __restrict__ sym_ptr = symbols[sym_idx].data();
+                    const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
+                    const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
+                    size_t llr_offset = payload_begin * 2;
+                    for (size_t idx = payload_begin; idx < payload_end; ++idx) {
+                        const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                        llr_ptr[llr_offset++] = sym_ptr[k].real() * scale_llr;
+                        llr_ptr[llr_offset++] = sym_ptr[k].imag() * scale_llr;
+                    }
+                }
 
-            // Put LLR data into circular buffer
-            const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
-            if (!spsc_wait_push(_data_llr_buffer, LlrFrame{
-                    std::move(frame_llr),
-                    frame.generation,
-                    frame.host_enqueue_time_ns,
-                    frame_dequeue_time_ns,
-                    demod_done_time_ns,
-                }, [this]() {
-                    return !_bit_processing_running.load(std::memory_order_acquire);
-                })) {
-                _llr_pool.release(std::move(frame_llr));
+                // Put LLR data into circular buffer
+                const int64_t demod_done_time_ns = do_latency_profile ? host_now_ns() : 0;
+                if (!spsc_wait_push(_data_llr_buffer, LlrFrame{
+                        std::move(frame_llr),
+                        frame.generation,
+                        frame.host_enqueue_time_ns,
+                        frame_dequeue_time_ns,
+                        demod_done_time_ns,
+                    }, [this]() {
+                        return !_bit_processing_running.load(std::memory_order_acquire);
+                    })) {
+                    _llr_pool.release(std::move(frame_llr));
+                }
             }
         }
         prof_step_end = ProfileClock::now();
@@ -3391,6 +3456,146 @@ private:
      * 3. Payload Extraction and Validation (Length check, CRC).
      * 4. UDP Output of decoded user data.
      */
+    // Parse and decode all LDPC packets in one demodulated LLR frame. Templated
+    // on the LLR sample type so the float and int16 (Q16) paths share one body;
+    // the decode_frame() overload is selected by the payload vector type.
+    template <typename LlrVec, typename ScratchVec>
+    void process_payload_llr(const LlrVec& llr, ScratchVec& deint_scratch,
+                             int64_t rx_enqueue_time_ns, int64_t process_dequeue_time_ns,
+                             int64_t demod_done_time_ns, bool do_latency_profile,
+                             std::vector<uint8_t>& expected_measurement_payload) {
+        const size_t bits_per_block = _ldpc_decoder.get_N();
+        const size_t bytes_per_ldpc_block = (_ldpc_decoder.get_K() + 7) / 8;
+        if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
+            bytes_per_ldpc_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock) {
+            LOG_G_WARN() << "[Demod] LDPC codec dimensions do not match unified framing.";
+            return;
+        }
+
+        size_t symbol_offset = 0;
+        bool latency_recorded = false;
+        while ((symbol_offset + LdpcPacketFraming::kControlSymbols) * 2 <= llr.size()) {
+            const size_t control_llr_offset = symbol_offset * 2;
+            float marker_metric = 0.0f;
+            if (!LdpcPacketFraming::detect_marker_llrs(
+                    llr.data() + control_llr_offset, &marker_metric)) {
+                break;
+            }
+
+            LdpcMiniHeader mini_header;
+            if (!LdpcPacketFraming::decode_mini_header_llrs(
+                    llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
+                    mini_header)) {
+                LOG_G_WARN() << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
+                break;
+            }
+
+            const size_t payload_blocks =
+                LdpcPacketFraming::payload_blocks_for_len(mini_header.payload_len);
+            const size_t required_llr = payload_blocks * bits_per_block;
+            const size_t payload_llr_offset =
+                control_llr_offset + LdpcPacketFraming::kControlBits;
+            const size_t next_symbol_offset =
+                symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+
+            if (payload_llr_offset + required_llr > llr.size()) {
+                LOG_G_WARN() << "[Demod] Mini-header requested payload beyond frame: blocks="
+                             << payload_blocks << ", seq=" << mini_header.seq;
+                break;
+            }
+
+            if (payload_blocks == 0) {
+                symbol_offset = next_symbol_offset;
+                continue;
+            }
+
+            LlrVec payload_llr(required_llr);
+            std::copy(llr.begin() + payload_llr_offset,
+                      llr.begin() + payload_llr_offset + required_llr,
+                      payload_llr.begin());
+
+            _bit_interleaver->deinterleave_inplace(payload_llr, deint_scratch);
+            _descrambler.soft_descramble(payload_llr);
+
+            LDPCCodec::AlignedByteVector decoded_payload;
+            try {
+                _ldpc_decoder.decode_frame(payload_llr, decoded_payload);
+                if (decoded_payload.size() < mini_header.payload_len) {
+                    LOG_G_WARN() << "[Demod] Decoded payload shorter than mini-header length.";
+                    symbol_offset = next_symbol_offset;
+                    continue;
+                }
+
+                std::vector<uint8_t> udp_data(
+                    decoded_payload.begin(),
+                    decoded_payload.begin() + mini_header.payload_len);
+
+                bool handled_measurement_payload = false;
+                if (_measurement_enabled) {
+                    MeasurementPayloadMetadata meta;
+                    if (parse_measurement_payload(udp_data.data(), udp_data.size(), meta)) {
+                        handled_measurement_payload = true;
+                        if (meta.epoch_id != 0) {
+                            const uint32_t active_epoch =
+                                _measurement_active_epoch_id.load(std::memory_order_relaxed);
+                            if (active_epoch != 0 && meta.epoch_id == active_epoch) {
+                                if (build_measurement_payload(expected_measurement_payload, meta)) {
+                                    const auto compare = compare_measurement_payload(
+                                        expected_measurement_payload,
+                                        udp_data.data(),
+                                        udp_data.size());
+                                    _measurement_compared_bits.fetch_add(
+                                        compare.compared_bits, std::memory_order_relaxed);
+                                    _measurement_bit_errors.fetch_add(
+                                        compare.bit_errors, std::memory_order_relaxed);
+                                    if (compare.exact_match) {
+                                        _measurement_successful_packets.fetch_add(
+                                            1, std::memory_order_relaxed);
+                                    }
+                                    _measurement_epoch_tx_gain_x10.store(
+                                        meta.tx_gain_x10, std::memory_order_relaxed);
+                                } else {
+                                    LOG_G_WARN() << "[Demod] Failed to rebuild expected measurement payload"
+                                                 << " for epoch " << meta.epoch_id
+                                                 << " seq " << meta.seq_in_epoch;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!handled_measurement_payload) {
+                    _udp_output_sender->send(udp_data.data(), udp_data.size());
+                    if (!latency_recorded &&
+                        do_latency_profile &&
+                        rx_enqueue_time_ns > 0 &&
+                        process_dequeue_time_ns > 0 &&
+                        demod_done_time_ns > 0) {
+                        const int64_t udp_done_time_ns = host_now_ns();
+                        _latency_accumulator.rx_queue_total_ns.fetch_add(
+                            process_dequeue_time_ns - rx_enqueue_time_ns,
+                            std::memory_order_relaxed);
+                        _latency_accumulator.demod_total_ns.fetch_add(
+                            demod_done_time_ns - process_dequeue_time_ns,
+                            std::memory_order_relaxed);
+                        _latency_accumulator.bit_total_ns.fetch_add(
+                            udp_done_time_ns - demod_done_time_ns,
+                            std::memory_order_relaxed);
+                        _latency_accumulator.e2e_total_ns.fetch_add(
+                            udp_done_time_ns - process_dequeue_time_ns,
+                            std::memory_order_relaxed);
+                        _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
+                        latency_recorded = true;
+                    }
+                }
+
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
+            }
+            symbol_offset = next_symbol_offset;
+        }
+    }
+
     void bit_processing_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe();
@@ -3401,22 +3606,8 @@ private:
         const bool log_snr = cfg_.should_profile("snr");
         std::vector<uint8_t> expected_measurement_payload;
         size_t snr_print_counter = 0;
-        
-        while (_bit_processing_running.load()) {
-            LlrFrame frame_llr;
 
-            if (!_data_llr_buffer.try_pop(frame_llr)) {
-                llr_backoff.pause();
-                continue;
-            }
-            llr_backoff.reset();
-            
-            if (frame_llr.llr.empty()) continue;
-            if (frame_llr.generation != _sync_generation.load(std::memory_order_acquire)) {
-                _llr_pool.release(std::move(frame_llr.llr));
-                continue;
-            }
-
+        auto maybe_log_snr = [&]() {
             if (log_snr && ((snr_print_counter++ & 0x3F) == 0)) {
                 const double llr_snr_db = 10.0 * std::log10(std::max(1.0 / _noise_var, 1e-6));
                 LOG_G_INFO() << "[LLR] SNR(dB): " << _snr_db
@@ -3424,143 +3615,46 @@ private:
                              << " noise_var: " << _noise_var
                              << " llr_scale: " << _llr_scale;
             }
-            
-            const size_t bits_per_block = _ldpc_decoder.get_N();
-            const size_t bytes_per_ldpc_block = (_ldpc_decoder.get_K() + 7) / 8;
-            if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
-                bytes_per_ldpc_block != LdpcPacketFraming::kLdpcInfoBytesPerBlock) {
-                LOG_G_WARN() << "[Demod] LDPC codec dimensions do not match unified framing.";
-                _llr_pool.release(std::move(frame_llr.llr));
-                continue;
-            }
+        };
 
-            size_t symbol_offset = 0;
-            bool latency_recorded = false;
-            while ((symbol_offset + LdpcPacketFraming::kControlSymbols) * 2 <= frame_llr.llr.size()) {
-                const size_t control_llr_offset = symbol_offset * 2;
-                float marker_metric = 0.0f;
-                if (!LdpcPacketFraming::detect_marker_llrs(
-                        frame_llr.llr.data() + control_llr_offset,
-                        &marker_metric)) {
-                    break;
-                }
-
-                LdpcMiniHeader mini_header;
-                if (!LdpcPacketFraming::decode_mini_header_llrs(
-                        frame_llr.llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
-                        mini_header)) {
-                    LOG_G_WARN() << "[Demod] Mini-header CRC/version check failed; stop parsing frame.";
-                    break;
-                }
-
-                const size_t payload_blocks =
-                    LdpcPacketFraming::payload_blocks_for_len(mini_header.payload_len);
-                const size_t required_llr = payload_blocks * bits_per_block;
-                const size_t payload_llr_offset =
-                    control_llr_offset + LdpcPacketFraming::kControlBits;
-                const size_t next_symbol_offset =
-                    symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
-
-                if (payload_llr_offset + required_llr > frame_llr.llr.size()) {
-                    LOG_G_WARN() << "[Demod] Mini-header requested payload beyond frame: blocks="
-                                 << payload_blocks
-                                 << ", seq=" << mini_header.seq;
-                    break;
-                }
-
-                if (payload_blocks == 0) {
-                    symbol_offset = next_symbol_offset;
+        while (_bit_processing_running.load()) {
+            if (_ldpc_fixed_point) {
+                LlrFrameI16 frame_llr;
+                if (!_data_llr_buffer_i16.try_pop(frame_llr)) {
+                    llr_backoff.pause();
                     continue;
                 }
-
-                LDPCCodec::AlignedFloatVector payload_llr(required_llr);
-                std::copy(frame_llr.llr.begin() + payload_llr_offset,
-                          frame_llr.llr.begin() + payload_llr_offset + required_llr,
-                          payload_llr.begin());
-
-                _bit_interleaver->deinterleave_inplace(payload_llr, _deinterleaver_llr_scratch);
-                _descrambler.soft_descramble(payload_llr);
-
-                LDPCCodec::AlignedByteVector decoded_payload;
-                try {
-                    _ldpc_decoder.decode_frame(payload_llr, decoded_payload);
-                    if (decoded_payload.size() < mini_header.payload_len) {
-                        LOG_G_WARN() << "[Demod] Decoded payload shorter than mini-header length.";
-                        symbol_offset = next_symbol_offset;
-                        continue;
-                    }
-
-                    std::vector<uint8_t> udp_data(
-                        decoded_payload.begin(),
-                        decoded_payload.begin() + mini_header.payload_len);
-
-                            bool handled_measurement_payload = false;
-                            if (_measurement_enabled) {
-                                MeasurementPayloadMetadata meta;
-                                if (parse_measurement_payload(udp_data.data(), udp_data.size(), meta)) {
-                                    handled_measurement_payload = true;
-                                    if (meta.epoch_id != 0) {
-                                        const uint32_t active_epoch =
-                                            _measurement_active_epoch_id.load(std::memory_order_relaxed);
-                                        if (active_epoch != 0 && meta.epoch_id == active_epoch) {
-                                            if (build_measurement_payload(expected_measurement_payload, meta)) {
-                                                const auto compare = compare_measurement_payload(
-                                                    expected_measurement_payload,
-                                                    udp_data.data(),
-                                                    udp_data.size());
-                                                _measurement_compared_bits.fetch_add(
-                                                    compare.compared_bits, std::memory_order_relaxed);
-                                                _measurement_bit_errors.fetch_add(
-                                                    compare.bit_errors, std::memory_order_relaxed);
-                                                if (compare.exact_match) {
-                                                    _measurement_successful_packets.fetch_add(
-                                                        1, std::memory_order_relaxed);
-                                                }
-                                                _measurement_epoch_tx_gain_x10.store(
-                                                    meta.tx_gain_x10, std::memory_order_relaxed);
-                                            } else {
-                                                LOG_G_WARN() << "[Demod] Failed to rebuild expected measurement payload"
-                                                             << " for epoch " << meta.epoch_id
-                                                             << " seq " << meta.seq_in_epoch;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (!handled_measurement_payload) {
-                                _udp_output_sender->send(udp_data.data(), udp_data.size());
-                                if (!latency_recorded &&
-                                    do_latency_profile &&
-                                    frame_llr.rx_enqueue_time_ns > 0 &&
-                                    frame_llr.process_dequeue_time_ns > 0 &&
-                                    frame_llr.demod_done_time_ns > 0) {
-                                    const int64_t udp_done_time_ns = host_now_ns();
-                                    _latency_accumulator.rx_queue_total_ns.fetch_add(
-                                        frame_llr.process_dequeue_time_ns - frame_llr.rx_enqueue_time_ns,
-                                        std::memory_order_relaxed);
-                                    _latency_accumulator.demod_total_ns.fetch_add(
-                                        frame_llr.demod_done_time_ns - frame_llr.process_dequeue_time_ns,
-                                        std::memory_order_relaxed);
-                                    _latency_accumulator.bit_total_ns.fetch_add(
-                                        udp_done_time_ns - frame_llr.demod_done_time_ns,
-                                        std::memory_order_relaxed);
-                                    _latency_accumulator.e2e_total_ns.fetch_add(
-                                        udp_done_time_ns - frame_llr.process_dequeue_time_ns,
-                                        std::memory_order_relaxed);
-                                    _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
-                                    latency_recorded = true;
-                                }
-                            }
-                            // LOG_G_INFO() << "[Demod] Successfully reconstructed and sent UDP packet, size: " << udp_data.size() << " bytes" << std::endl;
-
-                } catch (const std::exception& e) {
-                    LOG_G_WARN() << "[Demod] Payload LDPC decode failed: " << e.what();
+                llr_backoff.reset();
+                if (frame_llr.llr.empty()) continue;
+                if (frame_llr.generation != _sync_generation.load(std::memory_order_acquire)) {
+                    _llr_pool_i16.release(std::move(frame_llr.llr));
+                    continue;
                 }
-                symbol_offset = next_symbol_offset;
+                maybe_log_snr();
+                process_payload_llr(frame_llr.llr, _deinterleaver_llr_scratch_i16,
+                                    frame_llr.rx_enqueue_time_ns, frame_llr.process_dequeue_time_ns,
+                                    frame_llr.demod_done_time_ns, do_latency_profile,
+                                    expected_measurement_payload);
+                _llr_pool_i16.release(std::move(frame_llr.llr));
+            } else {
+                LlrFrame frame_llr;
+                if (!_data_llr_buffer.try_pop(frame_llr)) {
+                    llr_backoff.pause();
+                    continue;
+                }
+                llr_backoff.reset();
+                if (frame_llr.llr.empty()) continue;
+                if (frame_llr.generation != _sync_generation.load(std::memory_order_acquire)) {
+                    _llr_pool.release(std::move(frame_llr.llr));
+                    continue;
+                }
+                maybe_log_snr();
+                process_payload_llr(frame_llr.llr, _deinterleaver_llr_scratch,
+                                    frame_llr.rx_enqueue_time_ns, frame_llr.process_dequeue_time_ns,
+                                    frame_llr.demod_done_time_ns, do_latency_profile,
+                                    expected_measurement_payload);
+                _llr_pool.release(std::move(frame_llr.llr));
             }
-            // Return LLR buffer to pool for reuse
-            _llr_pool.release(std::move(frame_llr.llr));
         }
     }
 };

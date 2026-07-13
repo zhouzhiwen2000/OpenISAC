@@ -176,3 +176,8 @@ cpu_cores:
 # ===== Runtime / Debug =====
 runtime:
   profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, data_ingest, sensing_proc), or "all"
+
+# ===== LDPC decode =====
+ldpc:
+  fixed_point: false  # true = int16 (Q16) layered-NMS CPU decoder for uplink RX (~1.6x faster, quant fused into demap); false = float32
+  fixed_point_scale: 16  # pow2 multiplier applied to LLRs before int16 saturation (Q16 path only)

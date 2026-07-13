@@ -1,7 +1,7 @@
 common:
 - title: Radio backend
   yaml_key: radio
-  order: 0
+  order: 10
   fields:
   - type: scalar
     key: radio_backend
@@ -14,7 +14,7 @@ common:
     - sim
 - title: Channel simulator
   yaml_key: simulation
-  order: 1
+  order: 11
   fields:
   - type: simulation_mapping
     key: simulation
@@ -152,7 +152,7 @@ common:
         default: 0.0
 - title: Measurement mode
   yaml_key: measurement
-  order: 12
+  order: 80
   fields:
   - type: scalar
     key: measurement_enable
@@ -207,7 +207,7 @@ common:
     optional: true
 - title: Resource Preview
   yaml_key: resource_preview
-  order: 16
+  order: 70
   fields:
   - type: mapping_list
     key: data_resource_blocks
@@ -265,10 +265,26 @@ common:
       comment: Number of contiguous subcarriers in this block
       kind: int
       default: 1
+- title: LDPC decode
+  yaml_key: ldpc
+  order: 60
+  fields:
+  - type: scalar
+    key: fixed_point
+    kind: bool
+    comment: int16 (Q16) layered-NMS CPU decoder (~1.6x faster, quant fused into demap); false = float32
+    default: false
+    optional: true
+  - type: scalar
+    key: fixed_point_scale
+    kind: int
+    comment: pow2 multiplier applied to LLRs before int16 saturation (Q16 path only)
+    default: 16
+    optional: true
 bs:
 - title: OFDM Frame
   yaml_key: ofdm_frame
-  order: 2
+  order: 20
   fields:
   - type: scalar
     key: fft_size
@@ -360,7 +376,7 @@ bs:
     optional: true
 - title: CUDA
   yaml_key: cuda
-  order: 3
+  order: 25
   fields:
   - type: scalar
     key: cuda_mod_pipeline_slots
@@ -370,7 +386,7 @@ bs:
     optional: true
 - title: Sensing
   yaml_key: sensing
-  order: 4
+  order: 50
   fields:
   - type: scalar
     key: rx_wire_format
@@ -556,7 +572,7 @@ bs:
     optional: true
 - title: RF / Sampling
   yaml_key: rf_sampling
-  order: 5
+  order: 12
   fields:
   - type: scalar
     key: sample_rate
@@ -572,7 +588,7 @@ bs:
     optional: true
 - title: USRP Device Args
   yaml_key: usrp_device
-  order: 6
+  order: 13
   fields:
   - type: scalar
     key: device_args
@@ -582,7 +598,7 @@ bs:
     optional: true
 - title: Clock / Time Sources
   yaml_key: clock_time
-  order: 7
+  order: 14
   fields:
   - type: scalar
     key: clock_source
@@ -607,7 +623,7 @@ bs:
     - gpsdo
 - title: Downlink
   yaml_key: downlink
-  order: 9
+  order: 30
   fields:
   - type: scalar
     key: center_freq
@@ -678,7 +694,7 @@ bs:
     optional: true
 - title: Uplink
   yaml_key: uplink
-  order: 10
+  order: 40
   fields:
   - type: scalar
     key: enabled
@@ -825,7 +841,7 @@ bs:
     optional: true
 - title: Network
   yaml_key: network_output
-  order: 13
+  order: 90
   fields:
   - type: scalar
     key: self_channel_ip
@@ -988,7 +1004,7 @@ bs:
     optional: true
 - title: CPU Cores
   yaml_key: cpu_cores
-  order: 14
+  order: 91
   fields:
   - type: flow_list
     key: downlink_cpu_cores
@@ -1013,7 +1029,7 @@ bs:
     optional: true
 - title: Runtime / Debug
   yaml_key: runtime
-  order: 15
+  order: 100
   fields:
   - type: scalar
     key: profiling_modules
@@ -1024,7 +1040,7 @@ bs:
 ue:
 - title: OFDM Frame
   yaml_key: ofdm_frame
-  order: 2
+  order: 20
   fields:
   - type: scalar
     key: fft_size
@@ -1122,7 +1138,7 @@ ue:
     optional: true
 - title: CUDA
   yaml_key: cuda
-  order: 3
+  order: 25
   fields:
   - type: scalar
     key: cuda_demod_pipeline_slots
@@ -1159,7 +1175,7 @@ ue:
     optional: true
 - title: Sensing
   yaml_key: sensing
-  order: 4
+  order: 50
   fields:
   - type: scalar
     key: bi_enabled
@@ -1230,7 +1246,7 @@ ue:
     optional: true
 - title: RF / Sampling
   yaml_key: rf_sampling
-  order: 5
+  order: 12
   fields:
   - type: scalar
     key: sample_rate
@@ -1282,7 +1298,7 @@ ue:
     optional: true
 - title: USRP Device / Link
   yaml_key: usrp_device
-  order: 8
+  order: 13
   fields:
   - type: scalar
     key: device_args
@@ -1302,7 +1318,7 @@ ue:
     - gpsdo
 - title: Downlink
   yaml_key: downlink
-  order: 9
+  order: 30
   fields:
   - type: scalar
     key: center_freq
@@ -1358,7 +1374,7 @@ ue:
     optional: true
 - title: Uplink
   yaml_key: uplink
-  order: 10
+  order: 40
   fields:
   - type: scalar
     key: enabled
@@ -1452,7 +1468,7 @@ ue:
     optional: true
 - title: Sync / Tracking
   yaml_key: sync_tracking
-  order: 11
+  order: 45
   fields:
   - type: scalar
     key: sync_queue_size
@@ -1636,7 +1652,7 @@ ue:
     optional: true
 - title: Network
   yaml_key: network_output
-  order: 13
+  order: 90
   fields:
   - type: scalar
     key: udp_input_ip
@@ -1781,7 +1797,7 @@ ue:
     optional: true
 - title: CPU Cores
   yaml_key: cpu_cores
-  order: 14
+  order: 91
   fields:
   - type: flow_list
     key: downlink_cpu_cores
@@ -1807,7 +1823,7 @@ ue:
     optional: true
 - title: Runtime / Debug
   yaml_key: runtime
-  order: 15
+  order: 100
   fields:
   - type: scalar
     key: default_out_ip
