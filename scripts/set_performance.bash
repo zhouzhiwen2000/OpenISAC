@@ -217,15 +217,19 @@ get_high_speed_ifaces() {
         done
     fi
 
-    while IFS= read -r iface; do
+    # Use glob instead of ls for more reliable enumeration
+    for iface_path in /sys/class/net/*; do
+        [[ -e "$iface_path" ]] || continue
+        iface="${iface_path##*/}"
         [[ "$iface" == "lo" ]] && continue
+        [[ -z "$iface" ]] && continue
         [[ -n "$TARGET_IFACES" && -z "${target_map[$iface]:-}" ]] && continue
         [[ ! -r "/sys/class/net/$iface/speed" ]] && continue
         speed="$(<"/sys/class/net/$iface/speed")"
         if [[ "$speed" =~ ^[0-9]+$ ]] && (( speed >= MIN_NIC_SPEED_MBPS )); then
             selected+=("$iface")
         fi
-    done < <(ls /sys/class/net)
+    done
 
     printf '%s\n' "${selected[@]}"
 }
@@ -308,10 +312,10 @@ configure_iface() {
     echo "  Found high-speed interface: $iface (${speed} Mbps)"
 
     echo "    Setting ring buffers to ${NIC_RING_SIZE}..."
-    run_priv ethtool -G "$iface" tx "$NIC_RING_SIZE" rx "$NIC_RING_SIZE"
+    run_priv ethtool -G "$iface" tx "$NIC_RING_SIZE" rx "$NIC_RING_SIZE" 2>/dev/null || echo "      (ring buffer setting failed, continuing anyway)"
 
     echo "    Setting MTU to ${NIC_MTU}..."
-    run_priv ip link set dev "$iface" mtu "$NIC_MTU"
+    run_priv ip link set dev "$iface" mtu "$NIC_MTU" 2>/dev/null || echo "      (MTU setting failed, continuing anyway)"
 
     if [[ "$PIN_NIC_IRQS" == "1" && "${HAVE_DEDICATED_IRQ_CPU_POOL:-0}" == "1" ]]; then
         can_pin_irqs=1
@@ -328,7 +332,7 @@ configure_iface() {
                 combined_target="$combined_max"
             fi
             echo "    Setting combined queues to ${combined_target}..."
-            run_priv ethtool -L "$iface" combined "$combined_target"
+            run_priv ethtool -L "$iface" combined "$combined_target" 2>/dev/null || echo "      (combined queue setting failed, continuing anyway)"
         else
             echo "    Interface does not expose configurable combined channels, skipping ethtool -L."
         fi
