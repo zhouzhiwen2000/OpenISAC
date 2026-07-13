@@ -76,12 +76,16 @@ public:
             reinterpret_cast<fftwf_complex*>(_fft_in.data()),
             reinterpret_cast<fftwf_complex*>(_fft_out.data()),
             FFTW_BACKWARD, FFTW_MEASURE);
-        _period_queue.reset(2, [this]() {
+        // Deeper queue than the historical depth-2 design: absorb modulation
+        // jitter so the TX thread can keep the USRP continuously fed (mirrors
+        // BS _circular_buffer prefill philosophy).
+        _period_queue.reset(kPeriodQueueDepth, [this]() {
             AlignedVector frame;
             frame.resize(_period_samples);
             return frame;
         });
         _timing_pad_buffer.assign(_period_samples, std::complex<float>(0.0f, 0.0f));
+        _blank_period_frame.assign(_period_samples, std::complex<float>(0.0f, 0.0f));
     }
 
     ~UplinkTxEngine() {
@@ -212,9 +216,15 @@ public:
         }
         _waveform_enabled.store(false, std::memory_order_release);
         _running.store(true);
-        if (AlignedVector* first_frame = _period_queue.producer_slot()) {
-            _build_period_buffer(*first_frame);
-            _period_queue.producer_commit();
+        // Prefill the entire period queue before TX starts so the first timed
+        // bursts are not starved while modulation warms up.
+        const size_t prefilled = _prefill_period_queue();
+        LOG_G_INFO_M(UlTx) << "[UL-TX] period queue prefilled "
+                           << prefilled << "/" << _period_queue.capacity()
+                           << " frames before stream start";
+        if (prefilled < _period_queue.capacity()) {
+            LOG_G_WARN_M(UlTx) << "[UL-TX] period queue not fully prefilled; "
+                               << "TX may inject blank periods until modulation catches up";
         }
         _ldpc_encode_thread = std::thread(&UplinkTxEngine::_ldpc_encode_proc, this);
         _udp_recv_thread = std::thread(&UplinkTxEngine::_udp_recv_proc, this);
@@ -583,9 +593,31 @@ private:
         }
     }
 
+    /**
+     * @brief Prefill period queue with fully-built frames (single-threaded producer).
+     * @return Number of frames placed into the queue.
+     */
+    size_t _prefill_period_queue() {
+        size_t filled = 0;
+        while (AlignedVector* slot = _period_queue.producer_slot()) {
+            _build_period_buffer(*slot);
+            _period_queue.producer_commit();
+            ++filled;
+        }
+        return filled;
+    }
+
     void _mod_proc() {
-        radio::set_thread_priority();
-        bind_current_thread_from_uplink_hint(_link_cfg, 1);
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
+        // Below TX priority so IFFT work cannot starve USRP send (mirrors BS).
+        radio::set_thread_priority(0.6f, true);
+        if (!bind_current_thread_from_uplink_hint(_link_cfg, 1)) {
+            LOG_G_WARN_M(UlTx) << "[UL-TX] modulation thread unbound "
+                               << "(set uplink_cpu_cores[1] for a dedicated mod core)";
+        }
+        prefault_thread_stack();
+        // period_queue (depth 8) cushions modulation; cooperative backoff OK.
+        // Hard-RT is _tx_proc sample send only.
         SPSCBackoff backoff;
         while (_running.load(std::memory_order_relaxed)) {
             AlignedVector* frame = _period_queue.producer_slot();
@@ -600,8 +632,14 @@ private:
     }
 
     void _tx_proc() {
-        radio::set_thread_priority();
-        bind_current_thread_from_uplink_hint(_link_cfg, 2);
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
+        // Highest RT priority among UL threads — keep the radio continuously fed.
+        radio::set_thread_priority(1.0f, true);
+        if (!bind_current_thread_from_uplink_hint(_link_cfg, 2)) {
+            LOG_G_WARN_M(UlTx) << "[UL-TX] TX send thread unbound "
+                               << "(set uplink_cpu_cores[2] to a dedicated isolated core)";
+        }
+        prefault_thread_stack();
         radio::TxMetadata md;
         md.start_of_burst = true;
         md.end_of_burst = false;
@@ -622,7 +660,6 @@ private:
             next_ticks = _start_time.to_ticks(_tick_rate);
         }
 
-        SPSCBackoff frame_backoff;
         while (_running.load(std::memory_order_relaxed)) {
             if (_use_timed_tx && _restart_requested.exchange(false, std::memory_order_acq_rel)) {
                 radio::TxMetadata eob_md;
@@ -642,6 +679,8 @@ private:
                 }
                 applied_shift_samples = 0;
                 first = true;
+                // Drop stale periods; TX will inject blank periods until mod refills.
+                // Only the mod thread may produce into the queue (SPSC contract).
                 _period_queue.clear();
                 active_restart_epoch =
                     _scheduled_restart_epoch.load(std::memory_order_acquire);
@@ -668,11 +707,14 @@ private:
             }
 
             AlignedVector* frame = _period_queue.consumer_slot();
-            if (frame == nullptr) {
-                frame_backoff.pause();
-                continue;
+            const bool has_frame = (frame != nullptr);
+            // Like BS blank-frame path: if the queue is empty, still submit one
+            // full period (zeros) so the USRP never starves. Modulation may be
+            // catching up after restart or under load.
+            const AlignedVector& period_src = has_frame ? *frame : _blank_period_frame;
+            if (!has_frame && LOG_MOD_ON(UlTx)) {
+                LOG_RT_WARN_HZ_M(UlTx, 5) << "[UL-TX] blank period injected (period queue empty)";
             }
-            frame_backoff.reset();
 
             const int32_t timing_advance_samples =
                 _timing_advance.load(std::memory_order_relaxed);
@@ -707,7 +749,7 @@ private:
             }
 
             const SendResult result = _send_period_with_stream_shift(
-                *frame,
+                period_src,
                 md,
                 target_shift_samples,
                 applied_shift_samples);
@@ -717,11 +759,13 @@ private:
                     recovery_log_periods_remaining > 0 ||
                     target_shift_samples != last_logged_target_shift ||
                     rx_alignment_id != last_logged_alignment_id ||
-                    !result.complete;
+                    !result.complete ||
+                    !has_frame;
                 if (log_period) {
                     LOG_RT_WARN_M(Recovery) << "[UL-TX recovery] period period_seq=" << period_seq
                                   << ", restart_epoch=" << active_restart_epoch
                                   << ", first=" << first
+                                  << ", blank=" << !has_frame
                                   << ", md_time="
                                   << (md.has_time_spec ? md.time_spec.get_real_secs() : -1.0)
                                   << ", target_shift=" << target_shift_samples
@@ -749,7 +793,8 @@ private:
                 if (LOG_MOD_ON(UlTx)) {
                     LOG_RT_WARN_M(UlTx) << "[UL-TX] short send/underflow: "
                                   << (result.expected_samples - result.sent_samples)
-                                  << " samples not sent";
+                                  << " samples not sent"
+                                  << (has_frame ? "" : " (blank period)");
                 }
             }
             if (first && active_restart_epoch != 0 && result.sent_samples > 0) {
@@ -758,7 +803,9 @@ private:
             if (result.sent_samples > 0) {
                 first = false;
             }
-            _period_queue.consumer_pop();
+            if (has_frame) {
+                _period_queue.consumer_pop();
+            }
         }
         radio::TxMetadata eob_md;
         eob_md.start_of_burst = false;
@@ -793,18 +840,28 @@ private:
     {
         size_t sent_total = 0;
         radio::TxMetadata md = first_md;
-        SPSCBackoff backoff;
+        // Hard-RT TX path: never yield/sleep on short send. UHD may block inside
+        // send() up to the timeout while waiting for device buffer space; when it
+        // returns 0 we stay on-core and retry with a CPU relax only.
+        SPSCBusySpin spin;
         while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
             const size_t sent = _tx_stream->send(
                 data + sent_total,
                 sample_count - sent_total,
                 md,
-                1.0);
+                0.1);
             if (sent == 0) {
-                backoff.pause();
+                spin.pause();
+                // Safety valve: if the device never accepts samples, surface a
+                // short-send rather than spinning forever (caller increments
+                // tx_error_count / recovery). Bound is large enough that normal
+                // buffer-full waits still retry many times.
+                if (spin.spins() >= 10'000'000u) {
+                    break;
+                }
                 continue;
             }
-            backoff.reset();
+            spin.reset();
             sent_total += sent;
             md.has_time_spec = false;
             md.start_of_burst = false;
@@ -939,12 +996,16 @@ private:
     AlignedVector _mod_pool;
     AlignedIntVector _data_pool;   // reused per-frame payload symbol scratch
 
+    // Match BS-style multi-frame TX cushion (was 2; too shallow under load).
+    static constexpr size_t kPeriodQueueDepth = 8;
+
     const size_t _period_samples;
     const size_t _window_offset;
     const size_t _window_samples;
     SPSCRingBuffer<AlignedVector> _period_queue;
     std::complex<float> _eob_sample{0.0f, 0.0f};
     AlignedVector _timing_pad_buffer;
+    AlignedVector _blank_period_frame;  // zeros; injected when period queue is empty
 
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;

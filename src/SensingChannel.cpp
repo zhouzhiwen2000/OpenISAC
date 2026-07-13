@@ -660,6 +660,8 @@ public:
 
 private:
     bool _pop_next_rx(RxSymbolsFrame& out) {
+        // Processing side has paired_queue depth as cushion — backoff is fine.
+        // (Hard-RT is sensing _rx_loop sample ingest, not this pairing wait.)
         SPSCBackoff backoff;
         while (true) {
             if (_rx_q.try_pop(out)) {

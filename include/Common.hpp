@@ -899,11 +899,55 @@ private:
 };
 
 /**
+ * @brief Relax the CPU without leaving the core (hard real-time safe).
+ *
+ * Prefer this over yield/sleep on TX/RX sample paths: once a SCHED_FIFO thread
+ * sleeps or yields, wake latency is unbounded under load.
+ */
+inline void rt_cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield" ::: "memory");
+#else
+    // compiler barrier only
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+}
+
+/**
+ * @brief Busy-spin helper for hard real-time SPSC polling / short-send retry.
+ *
+ * Never yields or sleeps — the thread keeps the CPU. Use on USRP TX/RX threads
+ * that must meet timed deadlines. Prefer @ref SPSCBackoff on best-effort
+ * workers (UDP, LDPC, etc.) where burning a core is undesirable.
+ */
+class SPSCBusySpin {
+public:
+    void reset() {
+        _spins = 0;
+    }
+
+    void pause() {
+        ++_spins;
+        rt_cpu_relax();
+    }
+
+    uint32_t spins() const { return _spins; }
+
+private:
+    uint32_t _spins = 0;
+};
+
+/**
  * @brief Cooperative backoff helper for lock-free SPSC queue polling.
  *
  * Starts with a few scheduler yields, then falls back to short sleeps if the
  * queue stays empty/full. This avoids mutex blocking on the hot path while
  * keeping idle CPU burn bounded.
+ *
+ * @warning Not for hard real-time sample TX/RX threads — yield/sleep can
+ *          postpone the next wake indefinitely. Use @ref SPSCBusySpin there.
  */
 class SPSCBackoff {
 public:

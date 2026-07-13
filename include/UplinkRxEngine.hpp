@@ -561,8 +561,12 @@ public:
     }
 
     void _rx_ingest_proc(radio::TimeSpec start_time) {
-        radio::set_thread_priority();
+        async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
+        // Hard-RT sample ingest: must keep up with USRP RX continuous stream.
+        // Downstream signal/decode have queue cushions and may backoff.
+        radio::set_thread_priority(1.0f, true);
         bind_current_thread_from_uplink_hint(_link_cfg, 0);
+        prefault_thread_stack();
         auto issue_start = [&](const radio::TimeSpec& stream_start_time) {
             if (!_rx_stream) return;
             radio::StreamCmd cmd(radio::StreamMode::StartContinuous);
@@ -653,7 +657,8 @@ public:
             }
 
             UplinkRxFrame* frame = nullptr;
-            SPSCBackoff queue_backoff;
+            // Hard-RT ingest: busy-spin if the processing queue is full; never sleep.
+            SPSCBusySpin queue_spin;
             bool restarted = false;
             while (_running.load(std::memory_order_relaxed)) {
                 frame = _rx_frame_queue.producer_slot();
@@ -662,7 +667,7 @@ public:
                     restarted = true;
                     break;
                 }
-                queue_backoff.pause();
+                queue_spin.pause();
             }
             if (restarted) {
                 continue;
@@ -741,6 +746,7 @@ public:
     }
 
     void _signal_proc() {
+        // Downstream of ingest with _rx_frame_queue cushion — jitter OK.
         radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 1);
         SPSCBackoff backoff;
@@ -760,6 +766,7 @@ public:
     }
 
     void _decode_proc() {
+        // LDPC path with LLR queue cushion — cooperative backoff is fine.
         radio::set_thread_priority();
         bind_current_thread_from_uplink_hint(_link_cfg, 2);
         SPSCBackoff backoff;
@@ -891,6 +898,7 @@ public:
             const float scale_llr_q =
                 scale_llr * static_cast<float>(_link_cfg.ldpc.fixed_point_scale);
             UplinkLlrFrameI16* llr_frame = nullptr;
+            // LLR queue cushions decode; signal_proc may backoff if full.
             SPSCBackoff llr_backoff;
             while (_running.load(std::memory_order_relaxed)) {
                 llr_frame = _llr_queue_i16.producer_slot();

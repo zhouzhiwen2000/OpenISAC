@@ -2521,6 +2521,8 @@ private:
             }
             {
                 QueuedTxFrame queued_frame;
+                // TX circular buffer cushions modulation; backoff when full is OK.
+                // (Hard-RT is _tx_proc sample send, which never sleeps on empty.)
                 SPSCBackoff queue_backoff;
                 bool queued = false;
                 queued_frame.samples = std::move(current_frame);

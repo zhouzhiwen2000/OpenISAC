@@ -8,6 +8,12 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-10 - eRTM TO 校正谱连续化
+
+### Summary
+
+eRTM debug 的上行/下行 TO 校正谱复用 Sensing 的 pending alignment 补偿：UE 侧使用 `TO_UE + pending_alignment`，BS 侧使用相反的 pending 项，在整数接收对齐前后保持两幅校正谱连续。
+
 ## 2026-07-10 - Config console runtime CPU plan panel
 
 ### Summary

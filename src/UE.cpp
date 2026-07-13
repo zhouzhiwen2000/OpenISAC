@@ -571,6 +571,7 @@ private:
             _sync_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
         _recovery_queue_clear_requested.store(true, std::memory_order_release);
         _sync_in_progress = false;
+        _sync_in_progress_hold_frames = 0;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
         _reset_count = 0;
@@ -824,6 +825,7 @@ private:
     std::vector<int> _actual_subcarrier_indices;
     SFOEstimator sfo_estimator{1000};
     bool _sync_in_progress = false; // Flag to indicate if sync is in progress in process_proc
+    uint32_t _sync_in_progress_hold_frames = 0; // Frames spent waiting for Alignment feedback
     int _last_delay_index_err = 0; // Last adjusted index
     uint32_t _delay_adjustment_count = 0;
     std::atomic<float> _user_delay_offset = 0.0f;
@@ -1757,10 +1759,6 @@ private:
             shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
         const double to_ue_samples = 0.5 * (tau_c_samples - to_bs_ue_samples);
         const double to_bs_samples = 0.5 * (tau_c_samples + to_bs_ue_samples);
-        // Delay-spectrum debug correction shifts spectra in delay domain, so it
-        // uses the opposite sign of the estimated timing offset.
-        const double correction_to_ue_samples = -to_ue_samples;
-        const double correction_to_bs_samples = -to_bs_samples;
         if (std::isfinite(to_ue_samples)) {
             const bool had_previous_to_ue =
                 _ertm_absolute_delay_available.load(std::memory_order_acquire);
@@ -1810,6 +1808,17 @@ private:
             LOG_G_INFO_M(Ertm) << oss.str();
         }
         if (publish_debug) {
+            // Match the sensing path's continuity compensation across integer
+            // receive alignments.  The pending term is applied to TO_UE there;
+            // TO_BS gets the opposite term so their sum remains tau_c.
+            const double pending_alignment =
+                _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
+            const double continuous_to_ue_samples = to_ue_samples + pending_alignment;
+            const double continuous_to_bs_samples = to_bs_samples - pending_alignment;
+            // Delay-spectrum shifting uses the opposite sign of the effective
+            // timing offset (SensingChannel applies the inverse phase directly).
+            const double correction_to_ue_samples = -continuous_to_ue_samples;
+            const double correction_to_bs_samples = -continuous_to_bs_samples;
             AlignedVector corrected_uplink_delay;
             AlignedVector corrected_downlink_delay;
             if (!_compute_ertm_oversampled_delay_spectrum(
@@ -3237,6 +3246,7 @@ private:
     void _enter_sync_search_state() {
         _sync_generation.fetch_add(1, std::memory_order_acq_rel);
         _sync_in_progress = false;
+        _sync_in_progress_hold_frames = 0;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
         _set_uplink_waveform_enabled(false);
@@ -3566,7 +3576,13 @@ private:
         }
 
         if (!frame_queue_.try_push(std::move(frame))) {
-            LOG_RT_WARN_HZ(5) << "RX frame queue full during alignment, dropping newest frame";
+            // Alignment frames carry Alignment!=0 used to clear _sync_in_progress.
+            // Dropping them can leave the tracking latch stuck until a hard reset.
+            LOG_RT_WARN_HZ_M(Sync, 5)
+                << "[delay_track] alignment_frame_drop queue_full alignment="
+                << alignment_samples
+                << " alignment_id=" << alignment_id
+                << " (sync_in_progress latch may stick until reset)";
             _rx_frame_pool.release(std::move(frame));
         }
         if (LOG_MOD_ON(Recovery)) {
@@ -3969,6 +3985,8 @@ private:
         constexpr size_t REPORT_INTERVAL = 434;
         size_t launch_slot_idx = 0;
         size_t collect_slot_idx = 0;
+        // process_proc has frame queues / pipeline slots as cushion — cooperative
+        // backoff is acceptable (only USRP sample ingest is hard-RT).
         SPSCBackoff sync_backoff;
         const bool do_latency_profile =
             LOG_MOD_ON(DemodProfiling);
@@ -4128,7 +4146,7 @@ private:
                 }
                 // Wait for the next RX frame, draining finished results in the
                 // meantime so in-flight frames are not stranded when the RX
-                // stream stalls.
+                // stream stalls. Queue depth cushions jitter — backoff is fine.
                 RxFrame frame;
                 bool have_frame = false;
                 SPSCBackoff frame_backoff;
@@ -4932,6 +4950,24 @@ private:
         const bool allow_alignment = _control_time_gates.allow_alignment(frame.usrp_time_ns);
         const bool allow_rx_gain_adjust = _control_time_gates.allow_rx_gain_adjust(frame.usrp_time_ns);
         const bool log_agc = LOG_MOD_ON(Agc);
+        const bool log_sync = LOG_MOD_ON(Sync);
+        const bool log_sync_debug = LOG_MOD_DEBUG_ON(Sync);
+        const int abs_delay_err = std::abs(delay_index_err);
+        const int delay_adjust_step = cfg_.sync_tracking.delay_adjust_step;
+        const int delay_reset_err_thresh = delay_adjust_step + 5;
+        const int cp_length = static_cast<int>(cfg_.ofdm.cp_length);
+        const float peak_ratio =
+            (result.delay_average_mag > 0.0f)
+                ? (result.delay_max_mag / result.delay_average_mag)
+                : 0.0f;
+        const bool bad_peak =
+            (result.delay_average_mag > 0.0f) && (peak_ratio < 20.0f);
+        const bool large_delay_err = abs_delay_err > delay_reset_err_thresh;
+        const bool sync_enabled =
+            cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync;
+        const bool err_in_align_window =
+            abs_delay_err >= delay_adjust_step && abs_delay_err < cp_length;
+        const bool err_beyond_cp = abs_delay_err >= cp_length;
         bool issued_alignment = false;
         bool issued_rx_gain_adjust = false;
         if (allow_rx_gain_adjust) {
@@ -4961,13 +4997,58 @@ private:
             }
         }
         if ((result.delay_average_mag > 0.0f) &&
-            (result.delay_max_mag / result.delay_average_mag < 20.0f ||
-             (std::abs(delay_index_err) > cfg_.sync_tracking.delay_adjust_step + 5)) &&
-            (cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync) && allow_reset) {
+            (bad_peak || large_delay_err) &&
+            sync_enabled && allow_reset) {
             _reset_count++;
+            if (log_sync &&
+                (_reset_count == 1 ||
+                 _reset_count == _reset_hold_frames ||
+                 (_reset_count % 32u) == 0u)) {
+                LOG_RT_INFO_M(Sync)
+                    << "[delay_track] reset_pending count=" << _reset_count
+                    << "/" << _reset_hold_frames
+                    << " reasons="
+                    << (bad_peak ? "bad_peak," : "")
+                    << (large_delay_err ? "large_err," : "")
+                    << " peak_ratio=" << peak_ratio
+                    << " delay_err=" << delay_index_err
+                    << " adj_idx=" << result.adjusted_delay_index
+                    << " desired=" << cfg_.sync_tracking.desired_peak_pos
+                    << " predictive=" << predictive_delay_samples
+                    << " frac_delay=" << result.fractional_delay
+                    << " align_win=" << (err_in_align_window ? 1 : 0)
+                    << " beyond_cp=" << (err_beyond_cp ? 1 : 0)
+                    << " sync_in_progress=" << (_sync_in_progress ? 1 : 0)
+                    << " hold_frames=" << _sync_in_progress_hold_frames
+                    << " allow_align=" << (allow_alignment ? 1 : 0)
+                    << " confirm=" << _delay_adjustment_count
+                    << " frame_align=" << frame.Alignment
+                    << " sfo_per_frame=" << sfo_per_frame;
+            }
             if (_reset_count >= _reset_hold_frames) {
                 _reset_count = 0;
-                LOG_RT_WARN_M(Sync) << "No valid delay found, resetting state.";
+                LOG_RT_WARN_M(Sync)
+                    << "[delay_track] RESET No valid delay found"
+                    << " reasons="
+                    << (bad_peak ? "bad_peak," : "")
+                    << (large_delay_err ? "large_err," : "")
+                    << " peak_ratio=" << peak_ratio
+                    << " delay_err=" << delay_index_err
+                    << " thresh=" << delay_reset_err_thresh
+                    << " adj_idx=" << result.adjusted_delay_index
+                    << " desired=" << cfg_.sync_tracking.desired_peak_pos
+                    << " predictive=" << predictive_delay_samples
+                    << " frac_delay=" << result.fractional_delay
+                    << " align_win=" << (err_in_align_window ? 1 : 0)
+                    << " beyond_cp=" << (err_beyond_cp ? 1 : 0)
+                    << " sync_in_progress=" << (_sync_in_progress ? 1 : 0)
+                    << " hold_frames=" << _sync_in_progress_hold_frames
+                    << " allow_align=" << (allow_alignment ? 1 : 0)
+                    << " confirm=" << _delay_adjustment_count
+                    << " frame_align=" << frame.Alignment
+                    << " sfo_per_frame=" << sfo_per_frame
+                    << " max_mag=" << result.delay_max_mag
+                    << " avg_mag=" << result.delay_average_mag;
                 adjust_rx_freq(0.0, true);
                 sfo_estimator.reset();
                 _akf.reset();
@@ -4989,25 +5070,143 @@ private:
         } else {
             _reset_count = 0;
         }
-        if (allow_alignment && _sync_in_progress && frame.Alignment != 0) {
+        // Alignment feedback: only the RX alignment frame carries Alignment!=0.
+        // Always clear the latch on that committed frame. allow_alignment gates
+        // *issuing* new corrections from measurement frames (stale pipeline
+        // protection); it must not reject the one-shot feedback of a schedule we
+        // already applied. mark_alignment_now(radio_time_now()) can land after
+        // the alignment frame's usrp_time_ns, which previously left the latch
+        // stuck until hard reset while delay slowly drifted.
+        if (_sync_in_progress && frame.Alignment != 0) {
             _sync_in_progress = false;
-        }
-        if (std::abs(delay_index_err) >= cfg_.sync_tracking.delay_adjust_step &&
-            std::abs(delay_index_err) < static_cast<int>(cfg_.ofdm.cp_length) &&
-            (cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync) &&
-            !_sync_in_progress &&
-            allow_alignment) {
-            if (_delay_adjustment_count++ >= 1) {
-                _delay_adjustment_count = 0;
-                _schedule_receive_alignment(static_cast<int32_t>(delay_index_err));
-                _sync_in_progress = true;
-                issued_alignment = true;
+            _sync_in_progress_hold_frames = 0;
+            if (log_sync) {
+                LOG_RT_INFO_M(Sync)
+                    << "[delay_track] alignment_feedback_clear"
+                    << " frame_align=" << frame.Alignment
+                    << " delay_err=" << delay_index_err
+                    << " adj_idx=" << result.adjusted_delay_index
+                    << " peak_ratio=" << peak_ratio
+                    << " predictive=" << predictive_delay_samples
+                    << " allow_align=" << (allow_alignment ? 1 : 0)
+                    << (allow_alignment ? "" : " (cleared despite allow_align=0)");
             }
-            if (delay_index_err * _last_delay_index_err < 0) {
-                _delay_adjustment_count = 0;
+        }
+        if (_sync_in_progress) {
+            ++_sync_in_progress_hold_frames;
+            if (_sync_in_progress_hold_frames == 8u ||
+                _sync_in_progress_hold_frames == 32u ||
+                (_sync_in_progress_hold_frames % 64u) == 0u) {
+                LOG_RT_WARN_M(Sync)
+                    << "[delay_track] sync_in_progress_held"
+                    << " hold_frames=" << _sync_in_progress_hold_frames
+                    << " delay_err=" << delay_index_err
+                    << " frame_align=" << frame.Alignment
+                    << " allow_align=" << (allow_alignment ? 1 : 0)
+                    << " peak_ratio=" << peak_ratio
+                    << " (no Alignment!=0 feedback yet; small align blocked)";
             }
         } else {
+            _sync_in_progress_hold_frames = 0;
+        }
+        if (err_beyond_cp && sync_enabled) {
+            LOG_RT_WARN_HZ_M(Sync, 2)
+                << "[delay_track] err_beyond_cp delay_err=" << delay_index_err
+                << " cp=" << cp_length
+                << " adj_idx=" << result.adjusted_delay_index
+                << " peak_ratio=" << peak_ratio
+                << " (tracking alignment disabled; only hard reset can recover)";
+        }
+        if (err_in_align_window && sync_enabled) {
+            if (!_sync_in_progress && allow_alignment) {
+                const uint32_t confirm_before = _delay_adjustment_count;
+                if (_delay_adjustment_count++ >= 1) {
+                    _delay_adjustment_count = 0;
+                    _schedule_receive_alignment(static_cast<int32_t>(delay_index_err));
+                    _sync_in_progress = true;
+                    _sync_in_progress_hold_frames = 0;
+                    issued_alignment = true;
+                    if (log_sync) {
+                        LOG_RT_INFO_M(Sync)
+                            << "[delay_track] schedule_alignment"
+                            << " samples=" << delay_index_err
+                            << " adj_idx=" << result.adjusted_delay_index
+                            << " desired=" << cfg_.sync_tracking.desired_peak_pos
+                            << " predictive=" << predictive_delay_samples
+                            << " frac_delay=" << result.fractional_delay
+                            << " peak_ratio=" << peak_ratio
+                            << " confirm_was=" << confirm_before;
+                    }
+                } else if (log_sync) {
+                    LOG_RT_INFO_HZ_M(Sync, 10)
+                        << "[delay_track] confirm_wait"
+                        << " delay_err=" << delay_index_err
+                        << " confirm=" << _delay_adjustment_count
+                        << " need=2"
+                        << " adj_idx=" << result.adjusted_delay_index
+                        << " peak_ratio=" << peak_ratio;
+                }
+                if (delay_index_err * _last_delay_index_err < 0) {
+                    if (log_sync && _delay_adjustment_count != 0) {
+                        LOG_RT_INFO_HZ_M(Sync, 5)
+                            << "[delay_track] confirm_reset sign_flip"
+                            << " prev_err=" << _last_delay_index_err
+                            << " err=" << delay_index_err;
+                    }
+                    _delay_adjustment_count = 0;
+                }
+            } else {
+                _delay_adjustment_count = 0;
+                if (log_sync) {
+                    LOG_RT_INFO_HZ_M(Sync, 5)
+                        << "[delay_track] align_blocked"
+                        << " delay_err=" << delay_index_err
+                        << " reasons="
+                        << (_sync_in_progress ? "sync_in_progress," : "")
+                        << (!allow_alignment ? "allow_align=0," : "")
+                        << " hold_frames=" << _sync_in_progress_hold_frames
+                        << " frame_align=" << frame.Alignment
+                        << " peak_ratio=" << peak_ratio
+                        << " adj_idx=" << result.adjusted_delay_index;
+                }
+            }
+        } else {
+            if (log_sync &&
+                abs_delay_err > 0 &&
+                abs_delay_err < delay_adjust_step &&
+                sync_enabled) {
+                LOG_RT_INFO_HZ_M(Sync, 2)
+                    << "[delay_track] dead_zone"
+                    << " delay_err=" << delay_index_err
+                    << " step=" << delay_adjust_step
+                    << " adj_idx=" << result.adjusted_delay_index
+                    << " peak_ratio=" << peak_ratio
+                    << " (no sample alignment below step)";
+            }
             _delay_adjustment_count = 0;
+        }
+        if (log_sync_debug &&
+            (abs_delay_err > 0 || _sync_in_progress || _reset_count > 0)) {
+            LOG_RT_DEBUG_HZ_M(Sync, 5)
+                << "[delay_track] heartbeat"
+                << " delay_err=" << delay_index_err
+                << " adj_idx=" << result.adjusted_delay_index
+                << " desired=" << cfg_.sync_tracking.desired_peak_pos
+                << " predictive=" << predictive_delay_samples
+                << " frac_delay=" << result.fractional_delay
+                << " peak_ratio=" << peak_ratio
+                << " bad_peak=" << (bad_peak ? 1 : 0)
+                << " large_err=" << (large_delay_err ? 1 : 0)
+                << " align_win=" << (err_in_align_window ? 1 : 0)
+                << " beyond_cp=" << (err_beyond_cp ? 1 : 0)
+                << " sync_in_progress=" << (_sync_in_progress ? 1 : 0)
+                << " hold_frames=" << _sync_in_progress_hold_frames
+                << " allow_align=" << (allow_alignment ? 1 : 0)
+                << " allow_reset=" << (allow_reset ? 1 : 0)
+                << " confirm=" << _delay_adjustment_count
+                << " reset_count=" << _reset_count
+                << " frame_align=" << frame.Alignment
+                << " sfo_per_frame=" << sfo_per_frame;
         }
         _last_delay_index_err = delay_index_err;
         if (issued_alignment) {
@@ -5124,6 +5323,7 @@ private:
 
         CpuDemodWorkerContext& ctx = *_cpu_demod_contexts[worker_idx];
         auto& slot = *_cpu_demod_slots[worker_idx];
+        // Pipeline depth cushions workers — cooperative backoff is acceptable.
         SPSCBackoff backoff;
         while (running_.load(std::memory_order_acquire)) {
             CpuDemodTask task;
@@ -5297,6 +5497,7 @@ private:
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         radio::set_thread_priority(1);
         bind_current_thread_from_sensing_hint(cfg_, 0);
+        // sensing_queue_ cushions DSP; not a sample-ingest deadline path.
         SPSCBackoff sensing_backoff;
         while (sensing_running_.load()) {
             SensingFrame frame;
