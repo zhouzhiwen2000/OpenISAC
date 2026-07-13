@@ -610,19 +610,7 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left"><code>ertm_to_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU-path eRTM TO estimation. BS embeds its latest uplink delay spectrum and runtime <code>DUTI</code> into internal downlink LDPC payloads; UE consumes those payloads and logs TO estimates instead of forwarding them to UDP.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_dl_rf_delay_s</code></td>
-<td style="text-align:left"><code>float</code> / seconds</td>
-<td style="text-align:left"><code>0.0</code></td>
-<td style="text-align:left">Calibrated downlink RF-chain delay term used in the eRTM TO equations.</td>
-</tr>
-<tr>
-<td style="text-align:left"><code>ertm_ul_rf_delay_s</code></td>
-<td style="text-align:left"><code>float</code> / seconds</td>
-<td style="text-align:left"><code>0.0</code></td>
-<td style="text-align:left">Calibrated uplink RF-chain delay term used in the eRTM TO equations.</td>
+<td style="text-align:left">Enable CPU-path eRTM TO estimation. BS embeds its latest frequency-domain uplink channel estimate and runtime <code>DUTI</code> into internal downlink LDPC payloads; UE consumes those payloads and logs centroid3-refined TO estimates instead of forwarding them to UDP.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ertm_report_interval_frames</code></td>
@@ -1051,19 +1039,31 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>ertm_to_enable</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>false</code></td>
-<td style="text-align:left">Enable CPU-path eRTM TO estimation payload consumption and TO logs.</td>
+<td style="text-align:left">Enable CPU-path eRTM TO estimation payload consumption and TO logs. UE computes configured-oversample zero-padded IFFT delay spectra from the BS-provided uplink channel and its local downlink channel before eRTM correlation, then applies centroid3 fractional-bin refinement to the correlation peak.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ertm_dl_rf_delay_s</code></td>
-<td style="text-align:left"><code>float</code> / seconds</td>
+<td style="text-align:left"><code>ertm_delay_oversample_factor</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>10</code></td>
+<td style="text-align:left">eRTM delay-spectrum IFFT oversampling factor. Values below <code>1</code> are clamped to <code>1</code>; values above <code>128</code> are clamped to <code>128</code>. Higher values improve delay-grid resolution at higher CPU/FFTW/memory cost.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_dl_rf_delay_ns</code></td>
+<td style="text-align:left"><code>float</code> / ns</td>
 <td style="text-align:left"><code>0.0</code></td>
 <td style="text-align:left">Calibrated downlink RF-chain delay term used in the eRTM TO equations.</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>ertm_ul_rf_delay_s</code></td>
-<td style="text-align:left"><code>float</code> / seconds</td>
+<td style="text-align:left"><code>ertm_ul_rf_delay_ns</code></td>
+<td style="text-align:left"><code>float</code> / ns</td>
 <td style="text-align:left"><code>0.0</code></td>
 <td style="text-align:left">Calibrated uplink RF-chain delay term used in the eRTM TO equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_debug_output_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable UE-side eRTM debug ZeroMQ output for the center window of the configured-oversample BS uplink delay spectrum, UE downlink delay spectrum, eRTM correlation spectrum, TO-corrected debug spectra, and peak metadata. View with <code>scripts/plot_ertm_debug.py</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ertm_report_interval_frames</code></td>
@@ -1328,6 +1328,18 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>8889</code></td>
 <td style="text-align:left">ZeroMQ PUB bind port for the bistatic sensing data stream.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_debug_ip</code></td>
+<td style="text-align:left"><code>string</code> / IPv4</td>
+<td style="text-align:left"><code>0.0.0.0</code></td>
+<td style="text-align:left">ZeroMQ PUB listen IP for UE eRTM debug output.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_debug_port</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>12362</code></td>
+<td style="text-align:left">ZeroMQ PUB bind port for UE eRTM debug output.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>channel_ip</code></td>

@@ -1,14 +1,19 @@
 #include <uhd/utils/safe_main.hpp>  // UHD_SAFE_MAIN entry macro only
+#include <algorithm>
 #include <complex>
 #include <vector>
 #include <atomic>
 #include <thread>
 #include <mutex>
 #include <fftw3.h>
+#include <cmath>
 #include <csignal>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <limits>
+#include <cstdint>
+#include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -328,7 +333,11 @@ public:
         stop();
         
         
-        fftwf_destroy_plan(fft_plan_);
+        if (fft_plan_) fftwf_destroy_plan(fft_plan_);
+        if (_ertm_os_ifft_plan) fftwf_destroy_plan(_ertm_os_ifft_plan);
+        if (_ertm_corr_fft_a_plan) fftwf_destroy_plan(_ertm_corr_fft_a_plan);
+        if (_ertm_corr_fft_b_plan) fftwf_destroy_plan(_ertm_corr_fft_b_plan);
+        if (_ertm_corr_ifft_plan) fftwf_destroy_plan(_ertm_corr_ifft_plan);
         // Note: _channel_estimator, _delay_processor
         // manage their own FFT plans and clean them up in their destructors
     }
@@ -373,6 +382,11 @@ public:
         // Start data processing thread
         _bit_processing_running.store(true);
         _bit_processing_thread = std::thread(&UEEngine::bit_processing_proc, this);
+
+        if (cfg_.uplink.ertm_to_enable) {
+            _ertm_thread_running.store(true, std::memory_order_release);
+            _ertm_process_thread = std::thread(&UEEngine::_ertm_process_proc, this);
+        }
     }
 
     void stop() {
@@ -393,6 +407,8 @@ public:
         // Stop data processing thread
         _bit_processing_running.store(false);
         if (_bit_processing_thread.joinable()) _bit_processing_thread.join();
+        _ertm_thread_running.store(false, std::memory_order_release);
+        if (_ertm_process_thread.joinable()) _ertm_process_thread.join();
         if (_measurement_enabled) {
             _switch_measurement_epoch(0);
         }
@@ -612,7 +628,20 @@ private:
 
     AlignedVector fft_input_;
     AlignedVector fft_output_;
-    fftwf_plan fft_plan_;
+    fftwf_plan fft_plan_ = nullptr;
+    size_t _ertm_delay_oversample_factor = 1;
+    size_t _ertm_oversampled_fft_size = 0;
+    AlignedVector _ertm_os_ifft_in;
+    AlignedVector _ertm_os_ifft_out;
+    fftwf_plan _ertm_os_ifft_plan = nullptr;
+    AlignedVector _ertm_corr_a;
+    AlignedVector _ertm_corr_b;
+    AlignedVector _ertm_corr_a_freq;
+    AlignedVector _ertm_corr_b_freq;
+    AlignedVector _ertm_corr_out;
+    fftwf_plan _ertm_corr_fft_a_plan = nullptr;
+    fftwf_plan _ertm_corr_fft_b_plan = nullptr;
+    fftwf_plan _ertm_corr_ifft_plan = nullptr;
 
     // Persistent per-frame symbol storage (reused across frames to avoid
     // per-symbol heap allocation in the hot path). Sized once in prepare_fftw().
@@ -639,10 +668,15 @@ private:
     std::vector<AlignedVector> _channel_anchor_h_bufs;
     std::vector<int> _channel_anchor_symbols_buf;
     AlignedVector _delay_spectrum_buf;           // delay (time-domain) spectrum
-    std::mutex _ertm_delay_mutex;
-    AlignedVector _ertm_latest_dl_delay_spectrum;
-    bool _ertm_latest_dl_delay_valid = false;
+    SeqlockedChannelEstimate _ertm_latest_dl_channel;
     bool _ertm_missing_delay_warned = false;
+    // eRTM TO payloads are processed off the RT demod/decode threads: the
+    // decode thread only classifies+enqueues (cheap), a plain (non-pinned,
+    // non-RT-priority) background thread does the unpack/FFT/correlate/log/
+    // debug-publish work so its periodic FFT bursts never stall LDPC decode.
+    SPSCRingBuffer<std::vector<uint8_t>> _ertm_payload_queue{8};
+    std::thread _ertm_process_thread;
+    std::atomic<bool> _ertm_thread_running{false};
 
     // Core computation instances (manage their own FFT plans)
     ChannelEstimator _channel_estimator;
@@ -669,6 +703,7 @@ private:
     std::unique_ptr<ZmqByteSender> constellation_pub_;
     std::unique_ptr<ZmqByteSender> uplink_self_channel_pub_;
     std::unique_ptr<ZmqByteSender> uplink_self_pdf_pub_;
+    std::unique_ptr<ZmqByteSender> ertm_debug_pub_;
     std::unique_ptr<VofaPlusDebugSender> vofa_debug_sender_;
     // Control handler
     ControlCommandHandler _control_handler;
@@ -857,64 +892,313 @@ private:
     std::atomic<uint64_t> _arq_dl_ack_no_uplink_tx{0};
     std::atomic<uint64_t> _arq_dl_ack_inject_failed{0};
 
-    void _store_ertm_downlink_delay_spectrum(const AlignedVector& delay_spectrum) {
-        if (!cfg_.uplink.ertm_to_enable || delay_spectrum.size() != cfg_.ofdm.fft_size) {
+    void _store_ertm_downlink_channel_freq(const AlignedVector& channel_freq) {
+        if (!cfg_.uplink.ertm_to_enable || channel_freq.size() != cfg_.ofdm.fft_size) {
             return;
         }
-        std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
-        _ertm_latest_dl_delay_spectrum = delay_spectrum;
-        _ertm_latest_dl_delay_valid = true;
+        _ertm_latest_dl_channel.store(channel_freq);
     }
 
-    static bool _estimate_ertm_delay_shift(
-        const AlignedVector& bs_uplink_delay,
-        const AlignedVector& ue_downlink_delay,
-        int64_t& signed_shift_bins,
-        double& metric_out)
+    bool _compute_ertm_oversampled_delay_spectrum(
+        const AlignedVector& channel_freq,
+        double shift_samples,
+        AlignedVector& delay_spectrum)
     {
-        const size_t n = bs_uplink_delay.size();
-        if (n == 0 || ue_downlink_delay.size() != n) {
+        const size_t n = cfg_.ofdm.fft_size;
+        const size_t os_n = _ertm_oversampled_fft_size;
+        if (n == 0 || os_n == 0 || channel_freq.size() != n || !_ertm_os_ifft_plan) {
             return false;
         }
 
-        std::vector<float> bs_mag(n);
-        std::vector<float> ue_mag(n);
+        std::fill(_ertm_os_ifft_in.begin(), _ertm_os_ifft_in.end(), std::complex<float>(0.0f, 0.0f));
+        const size_t half = n / 2;
+        static constexpr double kTwoPi = 6.283185307179586476925286766559;
+        const double inv_n = 1.0 / static_cast<double>(n);
+        const bool apply_shift = std::isfinite(shift_samples) && shift_samples != 0.0;
+        for (size_t i = 0; i < half; ++i) {
+            auto rotate = [&](std::complex<float> value, int64_t signed_k) {
+                if (!apply_shift) {
+                    return value;
+                }
+                const double phase = -kTwoPi * static_cast<double>(signed_k) * shift_samples * inv_n;
+                const std::complex<float> rot(
+                    static_cast<float>(std::cos(phase)),
+                    static_cast<float>(std::sin(phase)));
+                return value * rot;
+            };
+            // `channel_freq` is the FFTW-native H_est order produced by the demod FFT:
+            // bins [0, N/2) are DC/positive frequencies, bins [N/2, N) are negative.
+            _ertm_os_ifft_in[i] = rotate(channel_freq[i], static_cast<int64_t>(i));
+            _ertm_os_ifft_in[os_n - half + i] = rotate(
+                channel_freq[i + half],
+                static_cast<int64_t>(i) - static_cast<int64_t>(half));
+        }
+
+        fftwf_execute(_ertm_os_ifft_plan);
+
+        const float scale = 1.0f / std::sqrt(static_cast<float>(n));
+        delay_spectrum.resize(os_n);
+        for (size_t i = 0; i < os_n; ++i) {
+            delay_spectrum[i] = _ertm_os_ifft_out[i] * scale;
+        }
+        return true;
+    }
+
+    static double _ertm_centroid3_delta(double y_left, double y_center, double y_right) {
+        const double min_y = std::min(y_left, std::min(y_center, y_right));
+        double w_left = std::max(0.0, y_left - min_y);
+        double w_center = std::max(0.0, y_center - min_y);
+        double w_right = std::max(0.0, y_right - min_y);
+        double total = w_left + w_center + w_right;
+        if (!(total > 0.0) || !std::isfinite(total)) {
+            w_left = std::max(0.0, y_left);
+            w_center = std::max(0.0, y_center);
+            w_right = std::max(0.0, y_right);
+            total = w_left + w_center + w_right;
+        }
+        if (!(total > 0.0) || !std::isfinite(total)) {
+            return 0.0;
+        }
+        const double delta = (w_right - w_left) / total;
+        if (!std::isfinite(delta)) {
+            return 0.0;
+        }
+        return std::max(-0.5, std::min(0.5, delta));
+    }
+
+    bool _estimate_ertm_delay_shift(
+        const AlignedVector& bs_uplink_delay,
+        const AlignedVector& ue_downlink_delay,
+        int64_t& signed_shift_bins,
+        double& metric_out,
+        std::vector<float>* correlation_out = nullptr,
+        size_t* peak_index_out = nullptr,
+        double* centroid3_delta_bins_out = nullptr
+    ) {
+        const size_t n = bs_uplink_delay.size();
+        if (n == 0 || ue_downlink_delay.size() != n ||
+            n != _ertm_oversampled_fft_size ||
+            !_ertm_corr_fft_a_plan || !_ertm_corr_fft_b_plan || !_ertm_corr_ifft_plan) {
+            return false;
+        }
+        if (correlation_out) {
+            correlation_out->assign(n, 0.0f);
+        }
+
         double bs_energy = 0.0;
         double ue_energy = 0.0;
         for (size_t i = 0; i < n; ++i) {
-            bs_mag[i] = std::abs(bs_uplink_delay[i]);
-            ue_mag[i] = std::abs(ue_downlink_delay[i]);
-            bs_energy += static_cast<double>(bs_mag[i]) * static_cast<double>(bs_mag[i]);
-            ue_energy += static_cast<double>(ue_mag[i]) * static_cast<double>(ue_mag[i]);
+            const float bs_mag = std::abs(bs_uplink_delay[i]);
+            const float ue_mag = std::abs(ue_downlink_delay[i]);
+            _ertm_corr_a[i] = std::complex<float>(bs_mag, 0.0f);
+            _ertm_corr_b[i] = std::complex<float>(ue_mag, 0.0f);
+            bs_energy += static_cast<double>(bs_mag) * static_cast<double>(bs_mag);
+            ue_energy += static_cast<double>(ue_mag) * static_cast<double>(ue_mag);
         }
         const double denom = std::sqrt(bs_energy * ue_energy);
         if (!(denom > 0.0) || !std::isfinite(denom)) {
             return false;
         }
 
+        fftwf_execute(_ertm_corr_fft_a_plan);
+        fftwf_execute(_ertm_corr_fft_b_plan);
+        for (size_t i = 0; i < n; ++i) {
+            _ertm_corr_a_freq[i] = std::conj(_ertm_corr_a_freq[i]) * _ertm_corr_b_freq[i];
+        }
+        fftwf_execute(_ertm_corr_ifft_plan);
+
         size_t best_shift = 0;
         double best_metric = -std::numeric_limits<double>::infinity();
         for (size_t shift = 0; shift < n; ++shift) {
-            double acc = 0.0;
-            for (size_t i = 0; i < n; ++i) {
-                const size_t j = (i + shift) % n;
-                acc += static_cast<double>(bs_mag[i]) * static_cast<double>(ue_mag[j]);
+            const double metric =
+                static_cast<double>(_ertm_corr_out[shift].real()) /
+                (static_cast<double>(n) * denom);
+            if (correlation_out) {
+                (*correlation_out)[shift] = static_cast<float>(metric);
             }
-            const double metric = acc / denom;
             if (metric > best_metric) {
                 best_metric = metric;
                 best_shift = shift;
             }
         }
 
-        signed_shift_bins = (best_shift <= n / 2)
+        auto metric_at = [&](size_t shift) {
+            return static_cast<double>(_ertm_corr_out[shift].real()) /
+                   (static_cast<double>(n) * denom);
+        };
+        double centroid3_delta_bins = 0.0;
+        if (n >= 3) {
+            const double y_left = metric_at((best_shift + n - 1) % n);
+            const double y_center = metric_at(best_shift);
+            const double y_right = metric_at((best_shift + 1) % n);
+            centroid3_delta_bins = _ertm_centroid3_delta(y_left, y_center, y_right);
+        }
+        if (centroid3_delta_bins_out) {
+            *centroid3_delta_bins_out = centroid3_delta_bins;
+        }
+        if (peak_index_out) {
+            *peak_index_out = best_shift;
+        }
+        signed_shift_bins = (best_shift < (n + 1) / 2)
             ? static_cast<int64_t>(best_shift)
             : static_cast<int64_t>(best_shift) - static_cast<int64_t>(n);
         metric_out = best_metric;
         return true;
     }
 
-    bool _handle_ertm_payload(const std::vector<uint8_t>& payload, uint8_t flags) {
+    static void _append_u32_le(std::vector<uint8_t>& out, uint32_t value) {
+        out.push_back(static_cast<uint8_t>(value & 0xFFu));
+        out.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+    }
+
+    static void _append_i32_le(std::vector<uint8_t>& out, int32_t value) {
+        _append_u32_le(out, static_cast<uint32_t>(value));
+    }
+
+    static void _append_u64_le(std::vector<uint8_t>& out, uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            out.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFFu));
+        }
+    }
+
+    static void _append_i64_le(std::vector<uint8_t>& out, int64_t value) {
+        _append_u64_le(out, static_cast<uint64_t>(value));
+    }
+
+    static void _append_double_le(std::vector<uint8_t>& out, double value) {
+        uint64_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value), "Unexpected double size");
+        std::memcpy(&bits, &value, sizeof(bits));
+        _append_u64_le(out, bits);
+    }
+
+    size_t _ertm_debug_window_bins(size_t full_bins) const {
+        if (full_bins == 0) {
+            return 0;
+        }
+        size_t window = std::max(
+            cfg_.ofdm.fft_size,
+            2 * cfg_.ofdm.cp_length * _ertm_delay_oversample_factor);
+        window = std::min(window, full_bins);
+        if ((window & 1u) != 0u && window > 1) {
+            --window;
+        }
+        return std::max<size_t>(window, 1);
+    }
+
+    static void _copy_center_delay_window(
+        const AlignedVector& input,
+        size_t window_bins,
+        AlignedVector& output)
+    {
+        const size_t n = input.size();
+        if (window_bins == 0 || window_bins >= n) {
+            output = input;
+            return;
+        }
+        const size_t positive_bins = window_bins / 2;
+        const size_t negative_bins = window_bins - positive_bins;
+        output.resize(window_bins);
+        std::copy(input.begin(), input.begin() + positive_bins, output.begin());
+        std::copy(input.end() - negative_bins, input.end(), output.begin() + positive_bins);
+    }
+
+    static void _copy_center_delay_window(
+        const std::vector<float>& input,
+        size_t window_bins,
+        std::vector<float>& output)
+    {
+        const size_t n = input.size();
+        if (window_bins == 0 || window_bins >= n) {
+            output = input;
+            return;
+        }
+        const size_t positive_bins = window_bins / 2;
+        const size_t negative_bins = window_bins - positive_bins;
+        output.resize(window_bins);
+        std::copy(input.begin(), input.begin() + positive_bins, output.begin());
+        std::copy(input.end() - negative_bins, input.end(), output.begin() + positive_bins);
+    }
+
+    void _publish_ertm_debug_frame(
+        const ErtmTimingPayloadView& bs_payload,
+        const AlignedVector& bs_uplink_delay,
+        const AlignedVector& ue_downlink_delay,
+        const std::vector<float>& correlation,
+        const AlignedVector& corrected_uplink_delay,
+        const AlignedVector& corrected_downlink_delay,
+        size_t peak_index,
+        int64_t signed_shift_bins,
+        double metric,
+        int32_t tadv_samples,
+        double rf_delay_samples,
+        double tau_c_samples,
+        double to_bs_ue_samples,
+        double to_ue_samples,
+        double to_bs_samples)
+    {
+        if (!cfg_.uplink.ertm_debug_output_enabled || !ertm_debug_pub_) {
+            return;
+        }
+        const size_t n = bs_uplink_delay.size();
+        if (n == 0 || ue_downlink_delay.size() != n || correlation.size() != n ||
+            corrected_uplink_delay.size() != n || corrected_downlink_delay.size() != n) {
+            return;
+        }
+
+        const size_t wire_bins = _ertm_debug_window_bins(n);
+        AlignedVector wire_uplink_delay;
+        AlignedVector wire_downlink_delay;
+        AlignedVector wire_corrected_uplink_delay;
+        AlignedVector wire_corrected_downlink_delay;
+        std::vector<float> wire_correlation;
+        _copy_center_delay_window(bs_uplink_delay, wire_bins, wire_uplink_delay);
+        _copy_center_delay_window(ue_downlink_delay, wire_bins, wire_downlink_delay);
+        _copy_center_delay_window(corrected_uplink_delay, wire_bins, wire_corrected_uplink_delay);
+        _copy_center_delay_window(corrected_downlink_delay, wire_bins, wire_corrected_downlink_delay);
+        _copy_center_delay_window(correlation, wire_bins, wire_correlation);
+
+        std::vector<uint8_t> header;
+        header.reserve(112);
+        static constexpr uint8_t kMagic[8] = {'E', 'R', 'T', 'M', 'D', 'B', 'G', '1'};
+        header.insert(header.end(), kMagic, kMagic + sizeof(kMagic));
+        _append_u32_le(header, 3);  // format version
+        _append_u32_le(header, static_cast<uint32_t>(wire_bins));
+        _append_u32_le(header, static_cast<uint32_t>(cfg_.ofdm.fft_size));
+        _append_u32_le(header, static_cast<uint32_t>(_ertm_delay_oversample_factor));
+        _append_u32_le(header, bs_payload.seq);
+        _append_u32_le(header, static_cast<uint32_t>(peak_index));
+        _append_i64_le(header, signed_shift_bins);
+        _append_i32_le(header, bs_payload.duti_samples);
+        _append_i32_le(header, tadv_samples);
+        _append_double_le(header, bs_payload.sample_rate);
+        _append_double_le(header, metric);
+        _append_double_le(header, rf_delay_samples);
+        _append_double_le(header, tau_c_samples);
+        _append_double_le(header, to_bs_ue_samples);
+        _append_double_le(header, to_ue_samples);
+        _append_double_le(header, to_bs_samples);
+
+        const size_t spectrum_bytes = wire_bins * sizeof(std::complex<float>);
+        const size_t corr_bytes = wire_bins * sizeof(float);
+        std::vector<zmq_transport::MsgPart> parts{
+            {header.data(), header.size()},
+            {wire_uplink_delay.data(), spectrum_bytes},
+            {wire_downlink_delay.data(), spectrum_bytes},
+            {wire_correlation.data(), corr_bytes},
+            {wire_corrected_uplink_delay.data(), spectrum_bytes},
+            {wire_corrected_downlink_delay.data(), spectrum_bytes},
+        };
+        ertm_debug_pub_->send_frame(parts);
+    }
+
+    // Fast-path classifier, called inline from the LDPC decode/bit-processing
+    // thread. Only cheap checks happen here; the actual unpack/FFT/correlate/
+    // log/debug-publish work is handed off to _ertm_process_proc() on a plain
+    // background thread so it never stalls real-time decode.
+    bool _handle_ertm_payload(std::vector<uint8_t>& payload, uint8_t flags) {
         if (!LdpcPacketFraming::is_ertm_timing_flags(flags)) {
             return false;
         }
@@ -922,7 +1206,17 @@ private:
             LOG_G_INFO() << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
             return true;
         }
+        if (!_ertm_payload_queue.try_push(std::move(payload))) {
+            LOG_G_WARN() << "[eRTM] TO payload queue full; dropping report";
+        }
+        return true;
+    }
 
+    // Runs on the background _ertm_process_thread. Unpacks the BS TO payload,
+    // pulls the latest local downlink channel snapshot, computes the
+    // oversampled delay spectra + cross-correlation, logs the derived
+    // one-way delays, and (if enabled) publishes the debug frame.
+    void _process_ertm_payload(const std::vector<uint8_t>& payload) {
         ErtmTimingPayloadView bs_payload;
         std::string unpack_error;
         if (!ErtmTimingPayload::unpack(
@@ -932,57 +1226,123 @@ private:
                 bs_payload,
                 &unpack_error)) {
             LOG_G_WARN() << "[eRTM] invalid TO payload: " << unpack_error;
-            return true;
+            return;
         }
 
-        AlignedVector local_delay;
-        {
-            std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
-            if (!_ertm_latest_dl_delay_valid) {
-                if (!_ertm_missing_delay_warned) {
-                    LOG_G_WARN() << "[eRTM] TO payload received before local downlink delay spectrum is available";
-                    _ertm_missing_delay_warned = true;
-                }
-                return true;
+        AlignedVector local_channel_freq;
+        if (!_ertm_latest_dl_channel.load(local_channel_freq)) {
+            if (!_ertm_missing_delay_warned) {
+                LOG_G_WARN() << "[eRTM] TO payload received before local downlink channel estimate is available";
+                _ertm_missing_delay_warned = true;
             }
-            local_delay = _ertm_latest_dl_delay_spectrum;
+            return;
+        }
+
+        AlignedVector bs_uplink_delay;
+        AlignedVector local_delay;
+        if (!_compute_ertm_oversampled_delay_spectrum(bs_payload.channel_freq, 0.0, bs_uplink_delay) ||
+            !_compute_ertm_oversampled_delay_spectrum(local_channel_freq, 0.0, local_delay)) {
+            LOG_G_WARN() << "[eRTM] failed to compute oversampled delay spectra";
+            return;
         }
 
         int64_t signed_shift_bins = 0;
         double metric = 0.0;
+        std::vector<float> correlation_spectrum;
+        size_t peak_index = 0;
+        double centroid3_delta_bins = 0.0;
+        const bool publish_debug = cfg_.uplink.ertm_debug_output_enabled;
         if (!_estimate_ertm_delay_shift(
-                bs_payload.delay_spectrum,
+                bs_uplink_delay,
                 local_delay,
                 signed_shift_bins,
-                metric)) {
+                metric,
+                publish_debug ? &correlation_spectrum : nullptr,
+                &peak_index,
+                &centroid3_delta_bins)) {
             LOG_G_WARN() << "[eRTM] failed to correlate delay spectra";
-            return true;
+            return;
         }
 
         const double sample_rate = bs_payload.sample_rate;
         const int32_t tadv_samples = _ue_timing_advance.load(std::memory_order_relaxed);
-        const double tau_c =
-            cfg_.uplink.ertm_dl_rf_delay_s +
-            cfg_.uplink.ertm_ul_rf_delay_s -
-            static_cast<double>(bs_payload.duti_samples) / sample_rate -
-            static_cast<double>(tadv_samples) / sample_rate;
-        const double to_bs_ue = static_cast<double>(signed_shift_bins) / sample_rate;
-        const double to_ue = (tau_c - to_bs_ue) * 0.5;
-        const double to_bs = (tau_c + to_bs_ue) * 0.5;
+        const double rf_delay_samples =
+            (cfg_.uplink.ertm_dl_rf_delay_ns + cfg_.uplink.ertm_ul_rf_delay_ns) *
+            1e-9 * sample_rate;
+        const double tau_c_samples =
+            rf_delay_samples -
+            static_cast<double>(bs_payload.duti_samples) -
+            static_cast<double>(tadv_samples);
+        const double shift_frac_os_bins =
+            static_cast<double>(signed_shift_bins) + centroid3_delta_bins;
+        const double to_bs_ue_samples =
+            shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
+        const double to_ue_samples = (tau_c_samples - to_bs_ue_samples) * 0.5;
+        const double to_bs_samples = (tau_c_samples + to_bs_ue_samples) * 0.5;
 
         std::ostringstream oss;
-        oss << std::scientific << std::setprecision(9)
-            << "[eRTM] TO seq=" << bs_payload.seq
-            << ", shift_bins=" << signed_shift_bins
-            << ", metric=" << metric
-            << ", DUTI=" << bs_payload.duti_samples
-            << ", TADV=" << tadv_samples
-            << ", tau_c=" << tau_c
-            << ", TO_BS_UE=" << to_bs_ue
-            << ", TO_UE=" << to_ue
-            << ", TO_BS=" << to_bs;
+        oss << std::fixed << std::setprecision(3)
+            << "[eRTM] TO(samples) seq=" << bs_payload.seq
+            << ", oversample=" << _ertm_delay_oversample_factor
+            << ", shift_os_bins=" << signed_shift_bins
+            << ", shift_centroid3_delta_os_bins=" << centroid3_delta_bins
+            << ", shift_frac_os_bins=" << shift_frac_os_bins
+            << ", shift_samples=" << to_bs_ue_samples
+            << ", peak_index=" << peak_index
+            << ", rf_delay_samples=" << rf_delay_samples
+            << ", metric=" << std::setprecision(6) << metric << std::setprecision(3)
+            << ", DUTI_samples=" << bs_payload.duti_samples
+            << ", TADV_samples=" << tadv_samples
+            << ", tau_c_samples=" << tau_c_samples
+            << ", TO_BS_UE_samples=" << to_bs_ue_samples
+            << ", TO_UE_samples=" << to_ue_samples
+            << ", TO_BS_samples=" << to_bs_samples
+            << ", rf_delay_ns=(" << cfg_.uplink.ertm_dl_rf_delay_ns
+            << "+" << cfg_.uplink.ertm_ul_rf_delay_ns << ")";
         LOG_G_INFO() << oss.str();
-        return true;
+        if (publish_debug) {
+            AlignedVector corrected_uplink_delay;
+            AlignedVector corrected_downlink_delay;
+            if (!_compute_ertm_oversampled_delay_spectrum(
+                    bs_payload.channel_freq, to_bs_samples, corrected_uplink_delay) ||
+                !_compute_ertm_oversampled_delay_spectrum(
+                    local_channel_freq, to_ue_samples, corrected_downlink_delay)) {
+                LOG_G_WARN() << "[eRTM] failed to compute TO-corrected debug spectra";
+                return;
+            }
+            _publish_ertm_debug_frame(
+                bs_payload,
+                bs_uplink_delay,
+                local_delay,
+                correlation_spectrum,
+                corrected_uplink_delay,
+                corrected_downlink_delay,
+                peak_index,
+                signed_shift_bins,
+                metric,
+                tadv_samples,
+                rf_delay_samples,
+                tau_c_samples,
+                to_bs_ue_samples,
+                to_ue_samples,
+                to_bs_samples);
+        }
+    }
+
+    // Plain background thread: no RT scheduling priority, no core pinning.
+    // Only consumes _ertm_payload_queue, so an OS-default scheduling slice is
+    // fine given the ~1-per-report-interval cadence.
+    void _ertm_process_proc() {
+        SPSCBackoff backoff;
+        while (_ertm_thread_running.load(std::memory_order_acquire)) {
+            std::vector<uint8_t> payload;
+            if (!_ertm_payload_queue.try_pop(payload)) {
+                backoff.pause();
+                continue;
+            }
+            backoff.reset();
+            _process_ertm_payload(payload);
+        }
     }
 
     void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
@@ -2106,6 +2466,49 @@ private:
             reinterpret_cast<fftwf_complex*>(fft_input_.data()),
             reinterpret_cast<fftwf_complex*>(fft_output_.data()),
             FFTW_FORWARD, FFTW_MEASURE);
+        if (cfg_.uplink.ertm_to_enable) {
+            _ertm_latest_dl_channel.resize(cfg_.ofdm.fft_size);
+            _ertm_delay_oversample_factor = std::max<size_t>(1, cfg_.uplink.ertm_delay_oversample_factor);
+            if (cfg_.ofdm.fft_size > std::numeric_limits<size_t>::max() / _ertm_delay_oversample_factor) {
+                throw std::runtime_error("eRTM oversampled FFT size overflows size_t");
+            }
+            _ertm_oversampled_fft_size = cfg_.ofdm.fft_size * _ertm_delay_oversample_factor;
+            if (_ertm_oversampled_fft_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                throw std::runtime_error("eRTM oversampled FFT size exceeds FFTW int plan limit");
+            }
+            _ertm_os_ifft_in.resize(_ertm_oversampled_fft_size);
+            _ertm_os_ifft_out.resize(_ertm_oversampled_fft_size);
+            _ertm_os_ifft_plan = fftwf_plan_dft_1d(
+                static_cast<int>(_ertm_oversampled_fft_size),
+                reinterpret_cast<fftwf_complex*>(_ertm_os_ifft_in.data()),
+                reinterpret_cast<fftwf_complex*>(_ertm_os_ifft_out.data()),
+                FFTW_BACKWARD,
+                FFTW_MEASURE);
+
+            _ertm_corr_a.resize(_ertm_oversampled_fft_size);
+            _ertm_corr_b.resize(_ertm_oversampled_fft_size);
+            _ertm_corr_a_freq.resize(_ertm_oversampled_fft_size);
+            _ertm_corr_b_freq.resize(_ertm_oversampled_fft_size);
+            _ertm_corr_out.resize(_ertm_oversampled_fft_size);
+            _ertm_corr_fft_a_plan = fftwf_plan_dft_1d(
+                static_cast<int>(_ertm_oversampled_fft_size),
+                reinterpret_cast<fftwf_complex*>(_ertm_corr_a.data()),
+                reinterpret_cast<fftwf_complex*>(_ertm_corr_a_freq.data()),
+                FFTW_FORWARD,
+                FFTW_MEASURE);
+            _ertm_corr_fft_b_plan = fftwf_plan_dft_1d(
+                static_cast<int>(_ertm_oversampled_fft_size),
+                reinterpret_cast<fftwf_complex*>(_ertm_corr_b.data()),
+                reinterpret_cast<fftwf_complex*>(_ertm_corr_b_freq.data()),
+                FFTW_FORWARD,
+                FFTW_MEASURE);
+            _ertm_corr_ifft_plan = fftwf_plan_dft_1d(
+                static_cast<int>(_ertm_oversampled_fft_size),
+                reinterpret_cast<fftwf_complex*>(_ertm_corr_a_freq.data()),
+                reinterpret_cast<fftwf_complex*>(_ertm_corr_out.data()),
+                FFTW_BACKWARD,
+                FFTW_MEASURE);
+        }
 
         // Pre-size persistent symbol buffers (data symbols exclude sync and
         // full-band mid-frame pilot symbols).
@@ -2142,6 +2545,14 @@ private:
                          << cfg_.network_output.uplink_self_channel_ip << ':' << cfg_.network_output.uplink_self_channel_port
                          << ", pdf=" << cfg_.network_output.uplink_self_pdf_ip << ':'
                          << cfg_.network_output.uplink_self_pdf_port;
+        }
+        if (cfg_.uplink.ertm_debug_output_enabled) {
+            ertm_debug_pub_ = std::make_unique<ZmqByteSender>(
+                cfg_.network_output.ertm_debug_ip,
+                static_cast<uint16_t>(cfg_.network_output.ertm_debug_port));
+            LOG_G_INFO() << "[eRTM] debug stream: "
+                         << cfg_.network_output.ertm_debug_ip << ':'
+                         << cfg_.network_output.ertm_debug_port;
         }
         vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.network_output.vofa_debug_ip, cfg_.network_output.vofa_debug_port, 64);
     }
@@ -3465,10 +3876,10 @@ private:
 
         // Channel response data
         prof_step_start = ProfileClock::now();
+        _store_ertm_downlink_channel_freq(H_est);
         channel_sender_.add_data(std::move(H_est));
 
         // PDF data
-        _store_ertm_downlink_delay_spectrum(delay_spectrum);
         pdf_sender_.add_data(std::move(delay_spectrum));
 
         // Constellation data. The sender throttles the display to 50ms

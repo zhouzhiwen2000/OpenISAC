@@ -794,6 +794,95 @@ private:
 };
 
 /**
+ * @brief Lock-free "latest value" publisher for a fixed-size complex buffer.
+ *
+ * One writer thread calls store() (e.g. once per received frame); any number
+ * of reader threads call load() to snapshot the most recent value. The complex
+ * samples are stored as atomic 64-bit slots so readers never race ordinary
+ * memory while the seqlock detects overlapping snapshots. resize() must be
+ * called once (before any store()/load()) and never again.
+ */
+class SeqlockedChannelEstimate {
+public:
+    void resize(size_t n) {
+        _size = n;
+        _buf = std::make_unique<std::atomic<uint64_t>[]>(n);
+        const uint64_t zero = pack_complex(std::complex<float>(0.0f, 0.0f));
+        for (size_t i = 0; i < n; ++i) {
+            _buf[i].store(zero, std::memory_order_relaxed);
+        }
+        _seq.store(0, std::memory_order_relaxed);
+    }
+
+    // Single-writer only. `value.size()` must equal the size passed to resize().
+    void store(const AlignedVector& value) {
+        if (!_buf || value.size() != _size) {
+            return;
+        }
+        const uint32_t s = _seq.load(std::memory_order_relaxed);
+        _seq.store(s + 1, std::memory_order_release);
+        for (size_t i = 0; i < _size; ++i) {
+            _buf[i].store(pack_complex(value[i]), std::memory_order_relaxed);
+        }
+        _seq.store(s + 2, std::memory_order_release);
+    }
+
+    // Safe for any number of concurrent readers. Returns false (leaving `out`
+    // untouched) if nothing has been published yet.
+    bool load(AlignedVector& out) const {
+        for (;;) {
+            const uint32_t s1 = _seq.load(std::memory_order_acquire);
+            if (s1 & 1u) {
+                continue;  // writer in progress; spin
+            }
+            if (s1 == 0) {
+                return false;  // never published
+            }
+            if (!_buf) {
+                return false;
+            }
+            if (out.size() != _size) {
+                out.resize(_size);
+            }
+            for (size_t i = 0; i < _size; ++i) {
+                out[i] = unpack_complex(_buf[i].load(std::memory_order_relaxed));
+            }
+            const uint32_t s2 = _seq.load(std::memory_order_acquire);
+            if (s1 == s2) {
+                return true;
+            }
+            // A store overlapped the copy; retry.
+        }
+    }
+
+private:
+    static uint64_t pack_complex(const std::complex<float>& value) {
+        uint32_t re_bits = 0;
+        uint32_t im_bits = 0;
+        const float re = value.real();
+        const float im = value.imag();
+        std::memcpy(&re_bits, &re, sizeof(re_bits));
+        std::memcpy(&im_bits, &im, sizeof(im_bits));
+        return static_cast<uint64_t>(re_bits) |
+               (static_cast<uint64_t>(im_bits) << 32);
+    }
+
+    static std::complex<float> unpack_complex(uint64_t bits) {
+        const uint32_t re_bits = static_cast<uint32_t>(bits & 0xffffffffu);
+        const uint32_t im_bits = static_cast<uint32_t>(bits >> 32);
+        float re = 0.0f;
+        float im = 0.0f;
+        std::memcpy(&re, &re_bits, sizeof(re));
+        std::memcpy(&im, &im_bits, sizeof(im));
+        return std::complex<float>(re, im);
+    }
+
+    std::atomic<uint32_t> _seq{0};
+    size_t _size = 0;
+    std::unique_ptr<std::atomic<uint64_t>[]> _buf;
+};
+
+/**
  * @brief Cooperative backoff helper for lock-free SPSC queue polling.
  *
  * Starts with a few scheduler yields, then falls back to short sleeps if the
@@ -968,8 +1057,10 @@ struct UplinkConfig {
     std::string idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     bool debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
     bool ertm_to_enable = false;      // Enable eRTM timing-offset estimation payloads/logs
-    double ertm_dl_rf_delay_s = 0.0;  // Calibrated downlink RF-chain delay term for eRTM TO estimation
-    double ertm_ul_rf_delay_s = 0.0;  // Calibrated uplink RF-chain delay term for eRTM TO estimation
+    size_t ertm_delay_oversample_factor = 10; // UE eRTM delay-spectrum IFFT oversampling factor
+    bool ertm_debug_output_enabled = false; // Publish UE-side eRTM debug spectra over ZMQ
+    double ertm_dl_rf_delay_ns = 0.0;  // Calibrated downlink RF-chain delay in ns
+    double ertm_ul_rf_delay_ns = 0.0;  // Calibrated uplink RF-chain delay in ns
     size_t ertm_report_interval_frames = 32; // BS eRTM payload cadence in TX frames
     double rx_gain = 0.0;              // BS uplink RX gain
     size_t rx_channel = 0;             // BS uplink RX channel index
@@ -1041,6 +1132,8 @@ struct NetworkOutputConfig {
     int constellation_port = 12346;
     std::string vofa_debug_ip = "127.0.0.1";
     int vofa_debug_port = 12347;
+    std::string ertm_debug_ip = "0.0.0.0";
+    int ertm_debug_port = 12362;
     std::string udp_output_ip = "127.0.0.1";
     int udp_output_port = 50001;
     std::string udp_input_ip = "0.0.0.0"; // bind address
@@ -2508,8 +2601,11 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
         }
         if (ul["debug_self_channel"]) cfg.uplink.debug_self_channel = ul["debug_self_channel"].as<bool>();
         if (ul["ertm_to_enable"]) cfg.uplink.ertm_to_enable = ul["ertm_to_enable"].as<bool>();
-        if (ul["ertm_dl_rf_delay_s"]) cfg.uplink.ertm_dl_rf_delay_s = ul["ertm_dl_rf_delay_s"].as<double>();
-        if (ul["ertm_ul_rf_delay_s"]) cfg.uplink.ertm_ul_rf_delay_s = ul["ertm_ul_rf_delay_s"].as<double>();
+        if (ul["ertm_debug_output_enabled"]) {
+            cfg.uplink.ertm_debug_output_enabled = ul["ertm_debug_output_enabled"].as<bool>();
+        }
+        if (ul["ertm_dl_rf_delay_ns"]) cfg.uplink.ertm_dl_rf_delay_ns = ul["ertm_dl_rf_delay_ns"].as<double>();
+        if (ul["ertm_ul_rf_delay_ns"]) cfg.uplink.ertm_ul_rf_delay_ns = ul["ertm_ul_rf_delay_ns"].as<double>();
         if (ul["ertm_report_interval_frames"]) {
             cfg.uplink.ertm_report_interval_frames = std::max<size_t>(
                 1, ul["ertm_report_interval_frames"].as<size_t>());
@@ -3259,6 +3355,8 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
             network, "uplink_constellation_ip", cfg.network_output.uplink_constellation_ip);
         config_detail::load_value(
             network, "uplink_constellation_port", cfg.network_output.uplink_constellation_port);
+        config_detail::load_value(network, "ertm_debug_ip", cfg.network_output.ertm_debug_ip);
+        config_detail::load_value(network, "ertm_debug_port", cfg.network_output.ertm_debug_port);
         config_detail::load_value(network, "control_port", cfg.network_output.control_port);
 
         load_bs_downlink_arq_config(downlink, cfg.network_output);
@@ -3390,10 +3488,18 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
     if (cfg.network_output.uplink_self_pdf_ip.empty()) {
         cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
     }
+    if (cfg.network_output.ertm_debug_ip.empty()) {
+        cfg.network_output.ertm_debug_ip = "0.0.0.0";
+    }
     if (cfg.network_output.mono_sensing_port <= 0) {
         LOG_G_WARN() << "mono_sensing_port=" << cfg.network_output.mono_sensing_port
                      << " is invalid. Falling back to 8888.";
         cfg.network_output.mono_sensing_port = 8888;
+    }
+    if (cfg.network_output.ertm_debug_port <= 0 || cfg.network_output.ertm_debug_port > 65535) {
+        LOG_G_WARN() << "ertm_debug_port=" << cfg.network_output.ertm_debug_port
+                     << " is invalid. Falling back to 12362.";
+        cfg.network_output.ertm_debug_port = 12362;
     }
 
     cfg.sensing.rx_channel_count = static_cast<uint32_t>(cfg.sensing.rx_channels.size());
@@ -3668,6 +3774,8 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "self_channel_port", cfg.network_output.uplink_self_channel_port);
         config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
         config_detail::load_value(network, "self_pdf_port", cfg.network_output.uplink_self_pdf_port);
+        config_detail::load_value(network, "ertm_debug_ip", cfg.network_output.ertm_debug_ip);
+        config_detail::load_value(network, "ertm_debug_port", cfg.network_output.ertm_debug_port);
 
         load_ue_downlink_arq_config(downlink, cfg.network_output);
         normalize_arq_config(cfg.network_output);
@@ -3681,6 +3789,11 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
 
         load_simulation_config(config, cfg);
         load_duplex_config(config, cfg);
+        if (uplink["ertm_delay_oversample_factor"]) {
+            const int64_t factor = uplink["ertm_delay_oversample_factor"].as<int64_t>();
+            cfg.uplink.ertm_delay_oversample_factor = static_cast<size_t>(
+                std::min<int64_t>(128, std::max<int64_t>(1, factor)));
+        }
 
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
         config_detail::load_value(cpu, "sensing_cpu_cores", cfg.cpu_cores.sensing_cpu_cores);
@@ -3798,6 +3911,12 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     if (cfg.network_output.constellation_ip.empty()) cfg.network_output.constellation_ip = "0.0.0.0";
     if (cfg.network_output.uplink_self_channel_ip.empty()) cfg.network_output.uplink_self_channel_ip = "0.0.0.0";
     if (cfg.network_output.uplink_self_pdf_ip.empty()) cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
+    if (cfg.network_output.ertm_debug_ip.empty()) cfg.network_output.ertm_debug_ip = "0.0.0.0";
+    if (cfg.network_output.ertm_debug_port <= 0 || cfg.network_output.ertm_debug_port > 65535) {
+        LOG_G_WARN() << "ertm_debug_port=" << cfg.network_output.ertm_debug_port
+                     << " is invalid. Falling back to 12362.";
+        cfg.network_output.ertm_debug_port = 12362;
+    }
     if (cfg.network_output.vofa_debug_ip.empty()) cfg.network_output.vofa_debug_ip = cfg.network_output.default_out_ip;
     if (cfg.network_output.udp_output_ip.empty()) cfg.network_output.udp_output_ip = cfg.network_output.default_out_ip;
     normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);

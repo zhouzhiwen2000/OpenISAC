@@ -897,32 +897,6 @@ bs:
       key: uplink.enabled
       value: true
   - type: scalar
-    key: ertm_dl_rf_delay_s
-    data_key: uplink.ertm_dl_rf_delay_s
-    kind: float
-    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (seconds)
-    default: 0
-    optional: true
-    enabled_if:
-      all:
-      - key: uplink.enabled
-        value: true
-      - key: uplink.ertm_to_enable
-        value: true
-  - type: scalar
-    key: ertm_ul_rf_delay_s
-    data_key: uplink.ertm_ul_rf_delay_s
-    kind: float
-    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (seconds)
-    default: 0
-    optional: true
-    enabled_if:
-      all:
-      - key: uplink.enabled
-        value: true
-      - key: uplink.ertm_to_enable
-        value: true
-  - type: scalar
     key: ertm_report_interval_frames
     data_key: uplink.ertm_report_interval_frames
     kind: int
@@ -1685,10 +1659,23 @@ ue:
       key: uplink.enabled
       value: true
   - type: scalar
-    key: ertm_dl_rf_delay_s
-    data_key: uplink.ertm_dl_rf_delay_s
+    key: ertm_delay_oversample_factor
+    data_key: uplink.ertm_delay_oversample_factor
+    kind: int
+    comment: eRTM delay-spectrum IFFT oversampling factor; 10 preserves the legacy 10x zero-padding
+    default: 10
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
+    key: ertm_dl_rf_delay_ns
+    data_key: uplink.ertm_dl_rf_delay_ns
     kind: float
-    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (seconds)
+    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (nanoseconds)
     default: 0
     optional: true
     enabled_if:
@@ -1698,11 +1685,24 @@ ue:
       - key: uplink.ertm_to_enable
         value: true
   - type: scalar
-    key: ertm_ul_rf_delay_s
-    data_key: uplink.ertm_ul_rf_delay_s
+    key: ertm_ul_rf_delay_ns
+    data_key: uplink.ertm_ul_rf_delay_ns
     kind: float
-    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (seconds)
+    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (nanoseconds)
     default: 0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
+    key: ertm_debug_output_enabled
+    data_key: uplink.ertm_debug_output_enabled
+    kind: bool
+    comment: Enable UE-side eRTM debug ZMQ output with uplink/downlink delay spectra and correlation spectrum
+    default: false
     optional: true
     enabled_if:
       all:
@@ -2016,6 +2016,34 @@ ue:
     comment: ZMQ port for runtime control commands
     default: 10001
     optional: true
+  - type: scalar
+    key: ertm_debug_ip
+    kind: string
+    comment: eRTM debug ZMQ listen IP
+    default: 0.0.0.0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+      - key: uplink.ertm_debug_output_enabled
+        value: true
+  - type: scalar
+    key: ertm_debug_port
+    kind: int
+    comment: eRTM debug output port
+    default: 12362
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+      - key: uplink.ertm_debug_output_enabled
+        value: true
   - type: scalar
     key: channel_ip
     kind: string

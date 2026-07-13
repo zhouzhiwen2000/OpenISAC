@@ -8,6 +8,33 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-02 - eRTM 调试谱输出
+
+### Summary
+
+新增 UE 侧 eRTM debug ZMQ 输出和独立 Python 绘图脚本，用于观察上行/下行 delay spectrum 与 eRTM 相关谱。
+
+### Changes
+
+- BS 在 eRTM payload 中发送 IFFT 前的频域上行信道，UE 端用 BS 上行信道和本地下行信道计算 10 倍补零 IFFT delay spectrum，并基于过采样谱做 eRTM 相关与 TO 样本点估计。
+- UE 在 `uplink.ertm_debug_output_enabled=true` 时发布 eRTM debug multipart 包，包含 10 倍过采样的 BS 上行 delay spectrum、UE 下行 delay spectrum、归一化相关谱、相关峰值位置和 TO 样本点元数据。
+- eRTM debug ZMQ 包只发送零延迟附近的中心窗口，完整 10 倍过采样谱仍用于 UE 端 eRTM 相关和 TO 计算。
+- `ertm_dl_rf_delay_ns` / `ertm_ul_rf_delay_ns` 仅保留在 UE 配置模板和 UE 配置编辑器中，`ertm_debug_output_enabled` 放在这两个 UE 校准项之后。
+- eRTM debug 包新增 C++ 频域 TO 补偿后再过采样 IFFT 的上行/下行 delay spectrum，`scripts/plot_ertm_debug.py` 的 `TO correction` 开关仅切换显示 debug corrected 谱，不影响 eRTM 估计计算。
+- 新增 `network_output.ertm_debug_ip` / `network_output.ertm_debug_port`，默认绑定 `0.0.0.0:12362`。
+- 新增 `scripts/plot_ertm_debug.py`，实时绘制上行 delay spectrum、下行 delay spectrum 和 eRTM 相关谱，并标注相关峰值与 TO 估计。
+
+## 2026-07-02 - eRTM TO 日志单位调整
+
+### Summary
+
+将 eRTM TO 日志输出统一改为采样点单位，并把 RF 链路校准延迟配置改为纳秒单位。
+
+### Changes
+
+- `UE` 的 `[eRTM] TO` 日志现在打印 `tau_c_samples`、`TO_BS_UE_samples`、`TO_UE_samples` 和 `TO_BS_samples`，保留小数采样点结果。
+- eRTM RF delay 配置字段重命名为 `ertm_dl_rf_delay_ns` 和 `ertm_ul_rf_delay_ns`，模板配置、Web 配置编辑器 schema 和 README 参数表同步改为 ns 单位。
+
 ## 2026-07-01 - CPU eRTM TO 估计日志
 
 ### Summary
@@ -19,7 +46,7 @@
 - BS CPU 下行发送路径在 `uplink.ertm_to_enable=true` 时，将最新上行 delay spectrum、采样率、运行时 `DUTI` 和序号封装为内部 `ERTM1` LDPC payload，并按 `ertm_report_interval_frames` 周期注入到普通 UDP payload 前。
   影响：该 payload 使用普通 LDPC mini-header，UE 通过 payload magic 识别；不改变现有 LDPC framing。
 
-- UE CPU 下行解码路径拦截 `ERTM1` payload，不转发到用户 UDP；它与本地最新下行 delay spectrum 做归一化幅度循环互相关，并用 `ertm_dl_rf_delay_s`、`ertm_ul_rf_delay_s`、payload `DUTI` 和本地运行时 `TADV` 打印 TO 估计。
+- UE CPU 下行解码路径拦截 `ERTM1` payload，不转发到用户 UDP；它与本地最新下行 delay spectrum 做归一化幅度循环互相关，并用 `ertm_dl_rf_delay_ns`、`ertm_ul_rf_delay_ns`、payload `DUTI` 和本地运行时 `TADV` 打印 TO 估计。
   影响：当前只做估计和日志，不自动修正定时。
 
 - ChannelSimulator 的 UE->BS uplink path 现在复用 BS->UE communication path 的 `comm_multipath_taps` 和双站散射体场景，不再暴露或读取单独的 `uplink_multipath_taps`。

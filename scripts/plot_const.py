@@ -1,92 +1,114 @@
+from __future__ import annotations
+
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+import pyqtgraph as pg
+from PyQt6 import QtWidgets
 
-import zmq
-from debug_zmq_viewer import DebugZmqConnector
+try:
+    from qt_debug_plot_common import (
+        PLOT_BACKGROUND,
+        PLOT_FOREGROUND,
+        DebugPlotWindow,
+        configure_plot,
+        parse_viewer_args,
+    )
+except ImportError:
+    from scripts.qt_debug_plot_common import (
+        PLOT_BACKGROUND,
+        PLOT_FOREGROUND,
+        DebugPlotWindow,
+        configure_plot,
+        parse_viewer_args,
+    )
 
-# Receiver configuration. The Endpoint box also accepts host:port, for example
-# 127.0.0.1:12356 for the BS uplink constellation stream.
-HOST = "127.0.0.1"
-UDP_PORT = 12346
+
+DEFAULT_PORT = 12346
 FFT_SIZE = 1024
 SHOW_GUARD_BAND = False
 
-pilot_indices = [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
-all_active_indices = np.concatenate([np.arange(1, 490), np.arange(535, 1024)])
-data_indices = np.setdiff1d(all_active_indices, pilot_indices)
-guard_band_indices = np.arange(490, 534)
+PILOT_INDICES = np.array([571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451])
+ALL_ACTIVE_INDICES = np.concatenate([np.arange(1, 490), np.arange(535, 1024)])
+DATA_INDICES = np.setdiff1d(ALL_ACTIVE_INDICES, PILOT_INDICES)
+GUARD_BAND_INDICES = np.arange(490, 534)
+
+
+class ConstellationWindow(DebugPlotWindow):
+    def __init__(self, host: str, port: int, interval_ms: int) -> None:
+        super().__init__(
+            title="OFDM Constellation",
+            default_port=port,
+            host=host,
+            interval_ms=interval_ms,
+        )
+        self.plot = pg.PlotWidget()
+        configure_plot(self.plot, "OFDM Constellation", "Imaginary (Q)", "Real (I)")
+        self.plot.setXRange(-2.0, 2.0, padding=0)
+        self.plot.setYRange(-2.0, 2.0, padding=0)
+        self.plot.addLegend(
+            offset=(12, 12),
+            labelTextColor=PLOT_FOREGROUND,
+            brush=pg.mkBrush(PLOT_BACKGROUND),
+            pen=pg.mkPen("#64748b"),
+        )
+
+        self.data_scatter = pg.ScatterPlotItem(
+            size=6,
+            brush=pg.mkBrush(37, 99, 235, 150),
+            pen=pg.mkPen(None),
+            name="Data Subcarriers",
+        )
+        self.pilot_scatter = pg.ScatterPlotItem(
+            size=10,
+            symbol="x",
+            brush=pg.mkBrush(249, 115, 22, 180),
+            pen=pg.mkPen("#f97316", width=1.4),
+            name="Pilot Subcarriers",
+        )
+        self.guard_scatter = pg.ScatterPlotItem(
+            size=9,
+            symbol="star",
+            brush=pg.mkBrush(220, 38, 38, 150),
+            pen=pg.mkPen("#dc2626", width=1.2),
+            name="Guard Band",
+        )
+        self.plot.addItem(self.data_scatter)
+        self.plot.addItem(self.pilot_scatter)
+        if SHOW_GUARD_BAND:
+            self.plot.addItem(self.guard_scatter)
+        self.plot_layout.addWidget(self.plot)
+
+        self.current_symbol = np.zeros(FFT_SIZE, dtype=np.complex64)
+        self._update_scatter()
+
+    def _update_scatter(self) -> None:
+        data_sc = self.current_symbol[DATA_INDICES]
+        pilot_sc = self.current_symbol[PILOT_INDICES]
+        self.data_scatter.setData(data_sc.real, data_sc.imag)
+        self.pilot_scatter.setData(pilot_sc.real, pilot_sc.imag)
+        if SHOW_GUARD_BAND:
+            guard_sc = self.current_symbol[GUARD_BAND_INDICES]
+            self.guard_scatter.setData(guard_sc.real, guard_sc.imag)
+
+    def handle_message(self, data: bytes) -> None:
+        expected = FFT_SIZE * np.dtype(np.complex64).itemsize
+        if len(data) != expected:
+            self.status_label.setText(f"Ignored {len(data)} B frame; expected {expected} B")
+            return
+        symbol = np.frombuffer(data, dtype=np.complex64)
+        if symbol.size != FFT_SIZE:
+            self.status_label.setText(f"Ignored symbol with {symbol.size} bins")
+            return
+        self.current_symbol = symbol
+        self._update_scatter()
 
 
 def main() -> None:
-    fig, ax = plt.subplots()
-    fig.subplots_adjust(bottom=0.18)
-    connector = DebugZmqConnector(fig, UDP_PORT, HOST)
-    ax.grid(True)
-    ax.set_title("OFDM Constellation")
-    ax.set_xlabel("Real (I)")
-    ax.set_ylabel("Imaginary (Q)")
-    ax.set_xlim([-2, 2])
-    ax.set_ylim([-2, 2])
-
-    data_plot = ax.scatter([], [], alpha=0.6, c="blue", label="Data Subcarriers", s=10)
-    guard_plot = ax.scatter(
-        [],
-        [],
-        alpha=0.6,
-        c="red",
-        marker="*",
-        label="Guard Band" if SHOW_GUARD_BAND else "_nolegend_",
-        s=40,
-    )
-    pilot_plot = ax.scatter([], [], alpha=0.6, c="orange", marker="x", label="Pilot Subcarriers", s=50)
-    guard_plot.set_visible(SHOW_GUARD_BAND)
-    ax.legend(loc="upper right")
-
-    current_symbol = np.zeros(FFT_SIZE, dtype=np.complex64)
-
-    def update(_frame):
-        nonlocal current_symbol
-        try:
-            data = connector.recv(flags=zmq.NOBLOCK)
-            if len(data) != FFT_SIZE * np.dtype(np.complex64).itemsize:
-                return data_plot, guard_plot, pilot_plot
-
-            symbol = np.frombuffer(data, dtype=np.complex64)
-            if symbol.size != FFT_SIZE:
-                return data_plot, guard_plot, pilot_plot
-
-            current_symbol = symbol
-
-        except zmq.Again:
-            pass
-        except Exception as exc:
-            print(f"Error: {exc}")
-
-        data_sc = current_symbol[data_indices]
-        pilot_sc = current_symbol[pilot_indices]
-
-        data_plot.set_offsets(np.column_stack([data_sc.real, data_sc.imag]))
-        if SHOW_GUARD_BAND:
-            guard_sc = current_symbol[guard_band_indices]
-            guard_plot.set_offsets(np.column_stack([guard_sc.real, guard_sc.imag]))
-        else:
-            guard_plot.set_offsets(np.empty((0, 2)))
-        pilot_plot.set_offsets(np.column_stack([pilot_sc.real, pilot_sc.imag]))
-
-        return data_plot, guard_plot, pilot_plot
-
-    ani = FuncAnimation(
-        fig,
-        update,
-        interval=10,
-        blit=True,
-        cache_frame_data=False,
-    )
-
-    plt.tight_layout(rect=[0, 0.12, 1, 1])
-    plt.show()
-    _ = ani
+    args = parse_viewer_args("Plot constellation debug stream.", DEFAULT_PORT)
+    app = QtWidgets.QApplication([])
+    window = ConstellationWindow(args.host, args.port, args.interval_ms)
+    window.resize(820, 760)
+    window.show()
+    app.exec()
 
 
 if __name__ == "__main__":

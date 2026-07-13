@@ -212,6 +212,10 @@ public:
         _latest_delay_spectrum_sink = std::move(sink);
     }
 
+    void set_latest_channel_estimate_sink(DebugVectorCallback sink) {
+        _latest_channel_estimate_sink = std::move(sink);
+    }
+
     void start(const radio::TimeSpec& start_time = radio::TimeSpec(0.0)) {
         if (!_rx_stream) throw std::runtime_error("UplinkRxEngine::start without an RX stream.");
         _running.store(true);
@@ -955,6 +959,9 @@ public:
         if (_channel_debug_sink) {
             _channel_debug_sink(AlignedVector(_h_est.begin(), _h_est.end()));
         }
+        if (_latest_channel_estimate_sink) {
+            _latest_channel_estimate_sink(AlignedVector(_h_est.begin(), _h_est.end()));
+        }
 
         if (_self_channel_debug_sink && !_self_h_est.empty()) {
             _self_channel_debug_sink(AlignedVector(_self_h_est.begin(), _self_h_est.end()));
@@ -1065,6 +1072,7 @@ public:
     DebugVectorCallback _self_channel_debug_sink;
     DebugVectorCallback _self_delay_debug_sink;
     DebugVectorCallback _latest_delay_spectrum_sink;
+    DebugVectorCallback _latest_channel_estimate_sink;
 
     ArqPayloadIntercept _arq_payload_intercept;
 

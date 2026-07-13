@@ -507,9 +507,7 @@ private:
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
     std::atomic<uint32_t> _ldpc_packet_seq{0};
-    std::mutex _ertm_delay_mutex;
-    AlignedVector _ertm_latest_ul_delay_spectrum;
-    bool _ertm_latest_ul_delay_valid = false;
+    SeqlockedChannelEstimate _ertm_latest_ul_channel;
     uint64_t _ertm_last_injected_frame = std::numeric_limits<uint64_t>::max();
     std::atomic<uint32_t> _ertm_payload_seq{0};
 
@@ -863,13 +861,11 @@ private:
         _uplink_rx->set_debug_sinks(channel_sink, pdf_sink, constellation_sink);
     }
 
-    void _store_ertm_uplink_delay_spectrum(AlignedVector&& delay_spectrum) {
-        if (!_cfg.uplink.ertm_to_enable || delay_spectrum.size() != _cfg.ofdm.fft_size) {
+    void _store_ertm_uplink_channel_freq(const AlignedVector& channel_freq) {
+        if (!_cfg.uplink.ertm_to_enable || channel_freq.size() != _cfg.ofdm.fft_size) {
             return;
         }
-        std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
-        _ertm_latest_ul_delay_spectrum = std::move(delay_spectrum);
-        _ertm_latest_ul_delay_valid = true;
+        _ertm_latest_ul_channel.store(channel_freq);
     }
 
     bool _try_inject_ertm_payload() {
@@ -884,13 +880,9 @@ private:
             return false;
         }
 
-        AlignedVector delay_spectrum;
-        {
-            std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
-            if (!_ertm_latest_ul_delay_valid) {
-                return false;
-            }
-            delay_spectrum = _ertm_latest_ul_delay_spectrum;
+        AlignedVector channel_freq;
+        if (!_ertm_latest_ul_channel.load(channel_freq)) {
+            return false;
         }
 
         const uint32_t seq = _ertm_payload_seq.fetch_add(1, std::memory_order_relaxed);
@@ -902,7 +894,7 @@ private:
                 static_cast<uint32_t>(_cfg.ofdm.fft_size),
                 _cfg.rf_sampling.sample_rate,
                 duti,
-                delay_spectrum,
+                channel_freq,
                 payload,
                 &pack_error)) {
             LOG_G_WARN() << "[eRTM] failed to pack TO payload: " << pack_error;
@@ -1495,8 +1487,9 @@ private:
         });
         _attach_uplink_debug_sinks();
         if (_cfg.uplink.ertm_to_enable) {
-            _uplink_rx->set_latest_delay_spectrum_sink([this](AlignedVector&& data) {
-                _store_ertm_uplink_delay_spectrum(std::move(data));
+            _ertm_latest_ul_channel.resize(_cfg.ofdm.fft_size);
+            _uplink_rx->set_latest_channel_estimate_sink([this](AlignedVector&& data) {
+                _store_ertm_uplink_channel_freq(data);
             });
         }
         if (ul_rx_dev->supports(radio::Capability::HardwareGain)) {

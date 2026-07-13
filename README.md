@@ -572,9 +572,7 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
 | `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols, and `center_freq` is ignored. In FDD, `center_freq` defines the UE->BS carrier, while `symbol_start`, `symbol_count`, and `guard_symbols` are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
 | `bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
-| `ertm_to_enable` | `bool` | `false` | Enable CPU-path eRTM TO estimation. BS embeds its latest uplink delay spectrum and runtime `DUTI` into internal downlink LDPC payloads; UE consumes those payloads and logs TO estimates instead of forwarding them to UDP. |
-| `ertm_dl_rf_delay_s` | `float` / seconds | `0.0` | Calibrated downlink RF-chain delay term used in the eRTM TO equations. |
-| `ertm_ul_rf_delay_s` | `float` / seconds | `0.0` | Calibrated uplink RF-chain delay term used in the eRTM TO equations. |
+| `ertm_to_enable` | `bool` | `false` | Enable CPU-path eRTM TO estimation. BS embeds its latest frequency-domain uplink channel estimate and runtime `DUTI` into internal downlink LDPC payloads; UE consumes those payloads and logs centroid3-refined TO estimates instead of forwarding them to UDP. |
 | `ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames. Values below `1` are clamped to `1`. |
 | `mono_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ listen IP for the monostatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `mono_sensing_port` | `int` | `8888` | ZeroMQ PUB bind port for the monostatic sensing stream. |
@@ -670,9 +668,11 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
 | `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | UE uplink settings. TDD uses `symbol_start`, `symbol_count`, and `guard_symbols` and ignores `center_freq`; FDD uses `center_freq` and ignores the TDD symbol-window fields, transmitting over the full frame. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
 | `ue_timing_advance` | `int` / samples | `63` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
-| `ertm_to_enable` | `bool` | `false` | Enable CPU-path eRTM TO estimation payload consumption and TO logs. |
-| `ertm_dl_rf_delay_s` | `float` / seconds | `0.0` | Calibrated downlink RF-chain delay term used in the eRTM TO equations. |
-| `ertm_ul_rf_delay_s` | `float` / seconds | `0.0` | Calibrated uplink RF-chain delay term used in the eRTM TO equations. |
+| `ertm_to_enable` | `bool` | `false` | Enable CPU-path eRTM TO estimation payload consumption and TO logs. UE computes configured-oversample zero-padded IFFT delay spectra from the BS-provided uplink channel and its local downlink channel before eRTM correlation, then applies centroid3 fractional-bin refinement to the correlation peak. |
+| `ertm_delay_oversample_factor` | `int` | `10` | eRTM delay-spectrum IFFT oversampling factor. Values below `1` are clamped to `1`; values above `128` are clamped to `128`. Higher values improve delay-grid resolution at higher CPU/FFTW/memory cost. |
+| `ertm_dl_rf_delay_ns` | `float` / ns | `0.0` | Calibrated downlink RF-chain delay term used in the eRTM TO equations. |
+| `ertm_ul_rf_delay_ns` | `float` / ns | `0.0` | Calibrated uplink RF-chain delay term used in the eRTM TO equations. |
+| `ertm_debug_output_enabled` | `bool` | `false` | Enable UE-side eRTM debug ZeroMQ output for the center window of the configured-oversample BS uplink delay spectrum, UE downlink delay spectrum, eRTM correlation spectrum, TO-corrected debug spectra, and peak metadata. View with `scripts/plot_ertm_debug.py`. |
 | `ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames; keep this matched with BS when comparing logs. |
 | `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
 | `frame_queue_size` | `int` | `8` | Capacity of the UE RX frame queue. Values below `1` are clamped to `1`. |
@@ -717,6 +717,8 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `bi_sensing_output_enabled` | `bool` | `true` | Enable the bistatic sensing ZeroMQ PUB output. The processing pipeline can remain enabled while this output is disabled. |
 | `bi_sensing_ip` | `string` / IPv4 | `0.0.0.0` | ZMQ bind IP for the bistatic sensing stream and control channel. Use `0.0.0.0` to accept remote viewers, or `127.0.0.1` for local-only access. |
 | `bi_sensing_port` | `int` | `8889` | ZeroMQ PUB bind port for the bistatic sensing data stream. |
+| `ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for UE eRTM debug output. |
+| `ertm_debug_port` | `int` | `12362` | ZeroMQ PUB bind port for UE eRTM debug output. |
 | `channel_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for channel-estimation output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |
 | `channel_port` | `int` | `12348` | ZeroMQ PUB bind port for channel-estimation output. |
 | `pdf_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for PDP/PDF output. Empty values also resolve to `0.0.0.0`, not `default_out_ip`. |

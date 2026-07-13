@@ -276,12 +276,12 @@ struct ErtmTimingPayloadView {
     double sample_rate = 0.0;
     int32_t duti_samples = 0;
     uint32_t seq = 0;
-    AlignedVector delay_spectrum;
+    AlignedVector channel_freq;
 };
 
 class ErtmTimingPayload {
 public:
-    static constexpr uint8_t kMagic[5] = {'E', 'R', 'T', 'M', '1'};
+    static constexpr uint8_t kMagic[5] = {'E', 'R', 'T', 'M', '2'};
     static constexpr size_t kHeaderBytes = 5 + 4 + 8 + 4 + 4;
 
     static bool looks_like(const uint8_t* data, size_t len) {
@@ -293,14 +293,14 @@ public:
                      uint32_t fft_size,
                      double sample_rate,
                      int32_t duti_samples,
-                     const AlignedVector& delay_spectrum,
+                     const AlignedVector& channel_freq,
                      std::vector<uint8_t>& out,
                      std::string* error = nullptr) {
         auto set_error = [error](const std::string& msg) {
             if (error) *error = msg;
         };
-        if (fft_size == 0 || delay_spectrum.size() != fft_size) {
-            set_error("delay spectrum size does not match fft_size");
+        if (fft_size == 0 || channel_freq.size() != fft_size) {
+            set_error("channel frequency response size does not match fft_size");
             return false;
         }
         if (!(sample_rate > 0.0) || !std::isfinite(sample_rate)) {
@@ -320,7 +320,7 @@ public:
         write_double(out, sample_rate);
         write_i32(out, duti_samples);
         write_u32(out, seq);
-        for (const auto& v : delay_spectrum) {
+        for (const auto& v : channel_freq) {
             write_float(out, v.real());
             write_float(out, v.imag());
         }
@@ -336,11 +336,11 @@ public:
             if (error) *error = msg;
         };
         if (!looks_like(data, len)) {
-            set_error("missing ERTM1 magic");
+            set_error("missing ERTM2 magic");
             return false;
         }
         if (len < kHeaderBytes) {
-            set_error("payload shorter than ERTM1 header");
+            set_error("payload shorter than ERTM2 header");
             return false;
         }
 
@@ -355,16 +355,16 @@ public:
         off += 4;
 
         if (fft_size == 0 || fft_size != expected_fft_size) {
-            set_error("ERTM1 fft_size mismatch");
+            set_error("ERTM2 fft_size mismatch");
             return false;
         }
         if (!(sample_rate > 0.0) || !std::isfinite(sample_rate)) {
-            set_error("ERTM1 sample_rate must be finite and positive");
+            set_error("ERTM2 sample_rate must be finite and positive");
             return false;
         }
         const size_t expected_len = kHeaderBytes + static_cast<size_t>(fft_size) * sizeof(float) * 2;
         if (len != expected_len) {
-            set_error("ERTM1 payload length mismatch");
+            set_error("ERTM2 payload length mismatch");
             return false;
         }
 
@@ -372,13 +372,13 @@ public:
         out.sample_rate = sample_rate;
         out.duti_samples = duti_samples;
         out.seq = seq;
-        out.delay_spectrum.resize(fft_size);
+        out.channel_freq.resize(fft_size);
         for (uint32_t i = 0; i < fft_size; ++i) {
             const float re = read_float(data, off);
             off += 4;
             const float im = read_float(data, off);
             off += 4;
-            out.delay_spectrum[i] = std::complex<float>(re, im);
+            out.channel_freq[i] = std::complex<float>(re, im);
         }
         return true;
     }
