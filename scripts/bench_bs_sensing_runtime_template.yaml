@@ -16,17 +16,18 @@ cuda:
 
 # ===== Sensing =====
 sensing:
-  sensing_rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
+  rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
   rx_device_args: ""  # Default sensing RX args (empty = use device_args)
   rx_clock_source: ""  # Sensing RX clock source override (optional)
   rx_time_source: ""  # Sensing RX time source override (optional)
-  sensing_rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
-  sensing_rx_channels: []
+  rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
+  rx_channels: []
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
   paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
 
 # ===== RF / Sampling =====
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
 rf_sampling:
   sample_rate: 100000000  # Baseband sample rate (Hz)
   bandwidth: 100000000  # Analog bandwidth (Hz), usually same as sample_rate
@@ -58,11 +59,11 @@ uplink:
   symbol_start: 90  # TDD first uplink symbol in the downlink frame
   symbol_count: 10  # TDD uplink window length in OFDM symbols
   guard_symbols: 1  # Leading TDD guard symbols inside the uplink window
-  uplink_rx_channel: 0  # Uplink RX channel index on USRP
-  uplink_rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
-  uplink_rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
-  uplink_rx_clock_source: ""  # Uplink RX clock source override (optional)
-  uplink_rx_time_source: ""  # Uplink RX time source override (optional)
+  rx_channel: 0  # Uplink RX channel index on USRP
+  rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
+  rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
+  rx_clock_source: ""  # Uplink RX clock source override (optional)
+  rx_time_source: ""  # Uplink RX time source override (optional)
   uplink_cpu_cores: []  # BS uplink CPU cores: [RX sample ingest, OFDM/LLR processing, LDPC decode + UDP output]
 
 # ===== Network =====
@@ -73,7 +74,6 @@ network_output:
   mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
   mono_sensing_output_enabled: false  # Enable monostatic sensing ZMQ output
   control_port: 9999  # ZMQ port for runtime control commands
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== Runtime / Debug =====
 runtime:

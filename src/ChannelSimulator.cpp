@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
     const bool enable_comm = sim.enable_comm_rx;
     const bool enable_uplink = sim.enable_uplink;
     const size_t num_channels =
-        sim.enable_sensing_rx ? cfg.sensing.sensing_rx_channels.size() : 0; // sensing antennas
+        sim.enable_sensing_rx ? cfg.sensing.rx_channels.size() : 0; // sensing antennas
     // Electrical ULA spacing d/lambda used in the steering phase. Derive it from the
     // PHYSICAL element spacing and the carrier so the simulated angles track
     // center_freq exactly like a real array (the viewers invert phase->angle using the

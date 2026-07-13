@@ -775,7 +775,7 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
         c.enable_sensing_output,
         logical_id,
         std::move(aggregated_sender),
-        cfg.sensing.sensing_on_wire_format),
+        cfg.sensing.on_wire_format),
     next_hb_time(std::chrono::steady_clock::now()) {
     accumulated_rx_symbols.reserve(cfg.ofdm.sensing_symbol_num);
     accumulated_tx_symbols.reserve(cfg.ofdm.sensing_symbol_num);
@@ -1668,7 +1668,7 @@ void SensingChannel::initialize_rx_hardware_and_sync(
 
     auto resolve_rx_wire_format = [&cfg](const SensingRxChannelConfig& ch_cfg) -> std::string {
         if (!ch_cfg.wire_format.empty()) return ch_cfg.wire_format;
-        return cfg.sensing.sensing_rx_wire_format;
+        return cfg.sensing.rx_wire_format;
     };
 
     auto get_or_create_rx_usrp = [&](const std::string& rx_args, const std::string& rx_clock_source, const std::string& rx_time_source) -> uhd::usrp::multi_usrp::sptr {

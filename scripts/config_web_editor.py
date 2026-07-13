@@ -106,6 +106,14 @@ SECTION_YAML_KEY_BY_TITLE: dict[str, str] = {
 
 SECTION_YAML_KEYS = set(SECTION_YAML_KEY_BY_TITLE.values())
 
+
+def field_data_key(field: dict[str, Any]) -> str:
+    return str(field.get("data_key") or field.get("key") or "")
+
+
+def field_yaml_key(field: dict[str, Any]) -> str:
+    return str(field.get("key") or "")
+
 CUDA_KEYS = (
     "cuda_mod_pipeline_slots",
     "cuda_demod_pipeline_slots",
@@ -157,7 +165,7 @@ BS_DOWNLINK_KEYS = (
 
 UE_DOWNLINK_KEYS = (
     "center_freq",
-    "downlink_rx_wire_format",
+    "downlink.rx_wire_format",
     "rx_channel",
     "equalizer_mode",
     "channel_tracking_mode",
@@ -179,23 +187,23 @@ UE_NETWORK_KEYS = (
 )
 
 SENSING_RX_KEYS = (
-    "sensing_rx_wire_format",
-    "rx_device_args",
-    "rx_clock_source",
-    "rx_time_source",
-    "sensing_rx_channel_count",
-    "sensing_rx_channels",
+    "sensing.rx_wire_format",
+    "sensing.rx_device_args",
+    "sensing.rx_clock_source",
+    "sensing.rx_time_source",
+    "sensing.rx_channel_count",
+    "sensing.rx_channels",
 )
 
 UE_SENSING_KEYS = (
-    "enable_bi_sensing",
-    "sensing_on_wire_format",
+    "sensing.bi_enabled",
+    "sensing.on_wire_format",
     "range_fft_size",
     "doppler_fft_size",
-    "sensing_output_mode",
-    "enable_backend_sensing_processing",
-    "sensing_view_range_bins",
-    "sensing_view_doppler_bins",
+    "sensing.output_mode",
+    "sensing.backend_processing_enabled",
+    "sensing.view_range_bins",
+    "sensing.view_doppler_bins",
 )
 
 MEASUREMENT_KEYS = (
@@ -210,7 +218,7 @@ MEASUREMENT_KEYS = (
 )
 
 BS_UPLINK_KEYS = (
-    "enable_uplink",
+    "uplink.enabled",
     "duplex_mode",
     "uplink",
     "equalizer_mode",
@@ -218,19 +226,19 @@ BS_UPLINK_KEYS = (
     "equalizer_mag_floor",
     "channel_tracking_min_pilot_snr",
     "rx_gain",
-    "uplink_rx_channel",
-    "uplink_rx_wire_format",
-    "uplink_rx_device_args",
-    "uplink_rx_clock_source",
-    "uplink_rx_time_source",
+    "uplink.rx_channel",
+    "uplink.rx_wire_format",
+    "uplink.rx_device_args",
+    "uplink.rx_clock_source",
+    "uplink.rx_time_source",
     "bs_dl_ul_timing_diff",
     "ue_timing_advance",
 )
 
 UE_UPLINK_KEYS = (
-    "enable_uplink",
+    "uplink.enabled",
     "duplex_mode",
-    "uplink_idle_waveform",
+    "uplink.idle_waveform",
     "uplink",
     "tx_gain",
     "tx_channel",
@@ -259,7 +267,8 @@ def load_layout_schema() -> dict[str, dict[str, dict[str, Any]]]:
             if not isinstance(field, dict):
                 continue
             field.setdefault("key", key)
-            scope_schema[str(field["key"])] = {
+            data_key = field_data_key(field)
+            scope_schema[data_key] = {
                 "title": title,
                 "field": field,
             }
@@ -942,7 +951,7 @@ def configured_cpu_values(data: dict[str, Any]) -> list[int]:
     main_core = data.get("main_cpu_core", -1)
     if main_core is not None:
         values.append(int_or_zero(main_core))
-    channels = data.get("sensing_rx_channels", []) or []
+    channels = data.get("sensing.rx_channels", data.get("rx_channels", [])) or []
     if isinstance(channels, list):
         for channel in channels:
             if not isinstance(channel, dict):
@@ -983,7 +992,7 @@ def append_missing_layout_fields(
     layout: list[dict[str, Any]],
     catalog: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    existing = {field["key"] for section in layout for field in section["fields"]}
+    existing = {field_data_key(field) for section in layout for field in section["fields"]}
     layout_copy = copy.deepcopy(layout)
     for key, entry in catalog.items():
         if key in existing:
@@ -1018,7 +1027,7 @@ def regroup_layout_fields(
         if section["title"] == target_title and target_index is None:
             target_index = len(layout_copy)
         for field in section["fields"]:
-            key = str(field.get("key", ""))
+            key = field_data_key(field)
             if key in key_set:
                 moved_fields[key] = copy.deepcopy(field)
                 continue
@@ -1068,22 +1077,23 @@ def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str,
         if not isinstance(section_value, dict):
             continue
         for field in section["fields"]:
-            key = str(field.get("key", ""))
-            if not key:
+            data_key = field_data_key(field)
+            yaml_key = field_yaml_key(field)
+            if not data_key or not yaml_key:
                 continue
-            if key == section_key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}:
+            if yaml_key == section_key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}:
                 if field.get("type") == "uplink_mapping":
                     child_keys = field_mapping_child_keys(field)
-                    data[key] = {
+                    data[data_key] = {
                         child_key: copy.deepcopy(child_value)
                         for child_key, child_value in section_value.items()
                         if child_key in child_keys
                     }
                 else:
-                    data[key] = copy.deepcopy(section_value)
+                    data[data_key] = copy.deepcopy(section_value)
                 continue
-            if key in section_value:
-                data[key] = copy.deepcopy(section_value[key])
+            if yaml_key in section_value:
+                data[data_key] = copy.deepcopy(section_value[yaml_key])
     return data
 
 
@@ -1133,7 +1143,7 @@ def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, 
                 if item_key in seen_keys:
                     continue
                 merged_item_fields.append(copy.deepcopy(fallback_field))
-            if field_key in {"data_resource_blocks", "sensing_mask_blocks"}:
+            if field_key in {"data_resource_blocks", "sensing.mask_blocks"}:
                 field["allow_omit"] = True
             field["item_fields"] = merged_item_fields
     return layout_copy
@@ -1353,7 +1363,7 @@ def sanitize_resource_blocks_around_tdd(data: dict[str, Any]) -> list[dict[str, 
 
     for key, keep_kind, label in (
         ("data_resource_blocks", True, "Resource Map"),
-        ("sensing_mask_blocks", False, "Sensing Resource Map"),
+        ("sensing.mask_blocks", False, "Sensing Resource Map"),
     ):
         blocks = data.get(key)
         clipped, removed_re, removed_symbols = clip_mapping_blocks_around_symbols(blocks, tdd_symbols, keep_kind)
@@ -1375,7 +1385,7 @@ def sanitize_resource_blocks_around_tdd(data: dict[str, Any]) -> list[dict[str, 
 
 def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] | None:
     cfo_symbol = cfo_training_symbol_for_data(data)
-    blocks = data.get("sensing_mask_blocks")
+    blocks = data.get("sensing.mask_blocks")
     if cfo_symbol is None or not isinstance(blocks, list) or not blocks:
         return None
 
@@ -1383,7 +1393,7 @@ def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] 
 
     if removed_re <= 0:
         return None
-    data["sensing_mask_blocks"] = clipped
+    data["sensing.mask_blocks"] = clipped
     return {
         "symbol": cfo_symbol,
         "symbols": removed_symbols,
@@ -1396,7 +1406,7 @@ def clip_sensing_mask_blocks_around_cfo(data: dict[str, Any]) -> dict[str, Any] 
 
 
 def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> list[dict[str, Any]]:
-    count = max(0, int_or_zero(data.get("sensing_rx_channel_count", 0)))
+    count = max(0, int_or_zero(data.get("sensing.rx_channel_count", data.get("rx_channel_count", 0))))
     dict_items = [item for item in items if isinstance(item, dict)]
     if count == 0:
         return []
@@ -1465,16 +1475,16 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     data = flatten_sectioned_yaml_data(data, layout)
     prune_cross_tab_only_values(tab_name, data)
     normalize_loaded_config_values(data)
-    if "sensing_rx_channels" in data and not isinstance(data["sensing_rx_channels"], list):
-        data["sensing_rx_channels"] = []
+    if "sensing.rx_channels" in data and not isinstance(data["sensing.rx_channels"], list):
+        data["sensing.rx_channels"] = []
     if "data_resource_blocks" in data:
         if not isinstance(data["data_resource_blocks"], list):
             data["data_resource_blocks"] = []
         else:
             data["data_resource_blocks"] = normalized_data_resource_block_items(data.get("data_resource_blocks", []))
-    if "sensing_mask_blocks" in data and not isinstance(data["sensing_mask_blocks"], list):
-        data["sensing_mask_blocks"] = []
-    known_keys = {field["key"] for section in layout for field in section["fields"]}
+    if "sensing.mask_blocks" in data and not isinstance(data["sensing.mask_blocks"], list):
+        data["sensing.mask_blocks"] = []
+    known_keys = {field_data_key(field) for section in layout for field in section["fields"]}
     extra_keys = [key for key in data.keys() if key not in known_keys]
     if extra_keys:
         layout.append({
@@ -1496,14 +1506,15 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
     for section in layout:
         section_payload = {"title": section["title"], "fields": []}
         for field in section["fields"]:
-            key = field["key"]
+            key = field_data_key(field)
+            yaml_key = field_yaml_key(field)
             has_value = key in data
             value = data.get(key)
             if field["type"] == "mapping_list":
                 items = copy.deepcopy(data.get(key, []) or [])
                 if not isinstance(items, list):
                     items = []
-                if key == "sensing_rx_channels":
+                if yaml_key == "rx_channels":
                     items = normalized_sensing_channel_items(data, items)
                 item_fields = []
                 for item_field in field["item_fields"]:
@@ -1522,15 +1533,16 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 field_payload = {
                     "type": "mapping_list",
                     "key": key,
+                    "yaml_key": yaml_key,
                     "comment": field.get("comment", ""),
-                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "display_comment": display_comment_override(yaml_key, field.get("comment", "")),
                     "item_fields": item_fields,
                     "items": items,
                     "allow_omit": bool(field.get("allow_omit", False)),
                     "optional": bool(field.get("optional", False)),
                     "planner_kind": field.get("planner_kind", ""),
                 }
-                if key == "sensing_rx_channels":
+                if yaml_key == "rx_channels":
                     base_item = items[0] if items else None
                     field_payload["default_item"] = default_sensing_channel_item(
                         data,
@@ -1546,9 +1558,9 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                         field_payload["mode"] = "custom"
                     else:
                         field_payload["mode"] = "disabled"
-                if key == "sensing_mask_blocks":
+                if yaml_key == "mask_blocks":
                     field_payload["default_item"] = default_data_resource_block_item(data)
-                    sensing_mode = str(data.get("sensing_output_mode", "dense") or "dense").strip().lower()
+                    sensing_mode = str(data.get("sensing.output_mode", data.get("output_mode", "dense")) or "dense").strip().lower()
                     field_payload["mode"] = "custom" if sensing_mode == "compact_mask" else "strd"
                 section_payload["fields"].append(field_payload)
                 continue
@@ -1568,8 +1580,9 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 section_payload["fields"].append({
                     "type": "mapping",
                     "key": key,
+                    "yaml_key": yaml_key,
                     "comment": field.get("comment", ""),
-                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "display_comment": display_comment_override(yaml_key, field.get("comment", "")),
                     "optional": bool(field.get("optional", False)),
                     "default_text": default_text,
                     "value_text": format_mapping_text(value_map) if has_value else "",
@@ -1581,8 +1594,9 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 section_payload["fields"].append({
                     "type": "profiling_modules",
                     "key": key,
+                    "yaml_key": yaml_key,
                     "comment": field.get("comment", ""),
-                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "display_comment": display_comment_override(yaml_key, field.get("comment", "")),
                     "options": [
                         {
                             "key": option,
@@ -1604,8 +1618,9 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 section_payload["fields"].append({
                     "type": "flow_list",
                     "key": key,
+                    "yaml_key": yaml_key,
                     "comment": field.get("comment", ""),
-                    "display_comment": display_comment_override(key, field.get("comment", "")),
+                    "display_comment": display_comment_override(yaml_key, field.get("comment", "")),
                     "kind": item_kind,
                     "optional": bool(field.get("optional", False)),
                     "default_text": default_text,
@@ -1615,27 +1630,28 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 continue
 
             kind = str(field.get("kind") or detect_kind(value))
-            unit_meta = display_unit_meta(key)
+            unit_meta = display_unit_meta(yaml_key)
             default_value = field.get("default")
             default_text = ""
             if default_value is not None:
                 if kind == "bool":
                     default_text = "true" if bool(default_value) else "false"
                 else:
-                    default_text = format_display_value(key, default_value)
+                    default_text = format_display_value(yaml_key, default_value)
             effective_value = value
             effective_has_value = has_value
             if kind == "bool" and not has_value and default_value is not None:
                 effective_value = bool(default_value)
                 effective_has_value = True
-            value_text = format_display_value(key, value) if has_value else ""
+            value_text = format_display_value(yaml_key, value) if has_value else ""
             if kind == "bool":
                 value_text = "true" if bool(effective_value) else "false"
             section_payload["fields"].append({
                 "type": "scalar",
                 "key": key,
+                "yaml_key": yaml_key,
                 "comment": field.get("comment", ""),
-                "display_comment": display_comment_override(key, field.get("comment", "")),
+                "display_comment": display_comment_override(yaml_key, field.get("comment", "")),
                 "kind": kind,
                 "optional": bool(field.get("optional", False)),
                 "default_text": default_text,
@@ -1657,7 +1673,8 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
         section_lines: list[str] = []
         section_key = SECTION_YAML_KEY_BY_TITLE.get(section["title"])
         for field in section["fields"]:
-            key = field["key"]
+            key = field_data_key(field)
+            yaml_key = field_yaml_key(field)
             comment = field.get("comment", "")
             suffix = f"  # {comment}" if comment else ""
             if field.get("optional") and key not in data:
@@ -1665,13 +1682,13 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
             if field["type"] == "mapping_list":
                 if field.get("allow_omit") and key not in data:
                     continue
-                if key == "sensing_rx_channels" and int_or_zero(data.get("sensing_rx_channel_count", 0)) <= 0:
+                if yaml_key == "rx_channels" and int_or_zero(data.get("sensing.rx_channel_count", data.get("rx_channel_count", 0))) <= 0:
                     continue
                 items = data.get(key, []) or []
                 if not items:
-                    section_lines.append(f"{key}: []{suffix}")
+                    section_lines.append(f"{yaml_key}: []{suffix}")
                     continue
-                section_lines.append(f"{key}:{suffix}")
+                section_lines.append(f"{yaml_key}:{suffix}")
                 item_fields = field["item_fields"]
                 for item in items:
                     if not isinstance(item, dict):
@@ -1691,24 +1708,24 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
                 value = data.get(key, {})
                 if field["type"] == "uplink_mapping":
                     value = schema_mapping_value(field, value, include_extra=False)
-                    value = filter_uplink_mapping_for_duplex_mode(value, data.get("duplex_mode", "tdd"))
+                    value = filter_uplink_mapping_for_duplex_mode(value, data.get("uplink.duplex_mode", data.get("duplex_mode", "tdd")))
                     if field.get("optional") and not value:
                         continue
                 elif field["type"] == "simulation_mapping":
-                    if data.get("radio_backend", "uhd") != "sim":
+                    if data.get("radio.radio_backend", data.get("radio_backend", "uhd")) != "sim":
                         continue
                     value = schema_mapping_value(field, value, include_extra=True)
-                if key == section_key:
+                if yaml_key == section_key:
                     append_structured_mapping_content_lines(section_lines, field, value)
                 else:
-                    append_mapping_lines(section_lines, key, value, suffix)
+                    append_mapping_lines(section_lines, yaml_key, value, suffix)
                 continue
 
             value = data.get(key)
             if field["type"] == "flow_list":
-                section_lines.append(f"{key}: {format_flow_list(value or [])}{suffix}")
+                section_lines.append(f"{yaml_key}: {format_flow_list(value or [])}{suffix}")
             else:
-                section_lines.append(f"{key}: {format_scalar(value)}{suffix}")
+                section_lines.append(f"{yaml_key}: {format_scalar(value)}{suffix}")
         if section_lines:
             lines.append(f"# ===== {section['title']} =====")
             if section_key:
@@ -1740,21 +1757,22 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
     mapping_layouts: dict[str, list[dict[str, Any]]] = {}
     for section in layout:
         for field in section["fields"]:
+            data_key = field_data_key(field)
             if field["type"] == "mapping_list":
-                mapping_layouts[field["key"]] = field["item_fields"]
+                mapping_layouts[data_key] = field["item_fields"]
             elif field["type"] in {"mapping", "simulation_mapping", "uplink_mapping"}:
-                mapping_optionals[field["key"]] = bool(field.get("optional", False))
-            elif field["key"] == "profiling_modules":
-                kind_map[field["key"]] = ("profiling_modules", "", bool(field.get("optional", False)))
+                mapping_optionals[data_key] = bool(field.get("optional", False))
+            elif field_yaml_key(field) == "profiling_modules":
+                kind_map[data_key] = ("profiling_modules", "", bool(field.get("optional", False)))
             elif field["type"] == "flow_list":
-                existing = current_data.get(field["key"], [])
+                existing = current_data.get(data_key, [])
                 item_kind = detect_kind(existing[0], "int") if isinstance(existing, list) and existing else "int"
                 if field.get("item_kind"):
                     item_kind = str(field.get("item_kind"))
-                kind_map[field["key"]] = ("flow_list", item_kind, bool(field.get("optional", False)))
+                kind_map[data_key] = ("flow_list", item_kind, bool(field.get("optional", False)))
             elif field["type"] == "scalar":
-                kind_map[field["key"]] = (
-                    str(field.get("kind") or detect_kind(current_data.get(field["key"]))),
+                kind_map[data_key] = (
+                    str(field.get("kind") or detect_kind(current_data.get(data_key))),
                     "",
                     bool(field.get("optional", False)),
                 )
@@ -1790,7 +1808,7 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
                 field
                 for section in layout
                 for field in section["fields"]
-                if field.get("key") == key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}
+                if field_data_key(field) == key and field.get("type") in {"mapping", "simulation_mapping", "uplink_mapping"}
             ),
             {},
         )
@@ -1809,7 +1827,9 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             normalized = normalize_uplink_mapping_payload(
                 raw_mapping_text,
                 mapping_field,
-                normalized_duplex_mode_value(result.get("duplex_mode", current_data.get("duplex_mode", "tdd"))),
+                normalized_duplex_mode_value(
+                    result.get("uplink.duplex_mode", result.get("duplex_mode", current_data.get("uplink.duplex_mode", current_data.get("duplex_mode", "tdd"))))
+                ),
             )
             if optional and not normalized:
                 result.pop(key, None)
@@ -1850,21 +1870,22 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
             else:
                 result[key] = normalized_data_resource_block_items(normalized_items)
             continue
-        if key == "sensing_mask_blocks":
+        if key.endswith(".mask_blocks") or key == "mask_blocks":
             if mode == "custom":
                 result[key] = normalized_items
-                result["sensing_output_mode"] = "compact_mask"
+                result["sensing.output_mode"] = "compact_mask"
             else:
                 result.pop(key, None)
-                result["sensing_output_mode"] = "dense"
+                result["sensing.output_mode"] = "dense"
             continue
         result[key] = normalized_items
 
     if tab_name == "bs":
-        channels = result.get("sensing_rx_channels", []) or []
+        channels_key = "sensing.rx_channels" if "sensing.rx_channels" in result else "rx_channels"
+        channels = result.get(channels_key, []) or []
         if not isinstance(channels, list):
             channels = []
-        result["sensing_rx_channels"] = normalized_sensing_channel_items(result, channels)
+        result[channels_key] = normalized_sensing_channel_items(result, channels)
     return result
 
 
@@ -2375,14 +2396,14 @@ def standardize_config_templates(repo_root: Path) -> list[Path]:
             sample_candidates_by_tab[tab_name],
         )
         if tab_name == "bs":
-            data.setdefault("uplink_rx_channel", 0)
-            data.setdefault("uplink_rx_wire_format", "sc16")
-            data.setdefault("uplink_rx_device_args", "")
-            data.setdefault("uplink_rx_clock_source", "")
-            data.setdefault("uplink_rx_time_source", "")
-            data.setdefault("sensing_rx_wire_format", "sc16")
+            data.setdefault("uplink.rx_channel", 0)
+            data.setdefault("uplink.rx_wire_format", "sc16")
+            data.setdefault("uplink.rx_device_args", "")
+            data.setdefault("uplink.rx_clock_source", "")
+            data.setdefault("uplink.rx_time_source", "")
+            data.setdefault("sensing.rx_wire_format", "sc16")
         if tab_name == "ue":
-            data.setdefault("downlink_rx_wire_format", "sc16")
+            data.setdefault("downlink.rx_wire_format", "sc16")
             data.setdefault("equalizer_mode", "mmse")
             data.setdefault("channel_tracking_mode", "pilot_phase")
             data.setdefault("equalizer_mag_floor", 1.0e-6)

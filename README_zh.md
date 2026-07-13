@@ -493,20 +493,20 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 随后在浏览器打开 `http://<your-host>:8765`。
 
 功能：
-* BS 和 UE 使用不同 tab 分开管理，并额外提供 `Resource Planner` 和 `Sensing Resource Map` 两个规划 tab，分别对应 `data_resource_blocks` 与 `sensing_mask_blocks`。
+* BS 和 UE 使用不同 tab 分开管理，并额外提供 `Resource Planner` 和 `Sensing Resource Map` 两个规划 tab，分别对应 `data_resource_blocks` 与 `mask_blocks`。
 * 以“参数 / 值”表单方式编辑 `build/BS.yaml` 和 `build/UE.yaml`，而不是原始 YAML 文本框。
 * 提供按模块放置的 CPU 绑核字段，覆盖下行、上行、感知实时 loop 和主线程模块。
 * 保存当前表单后，可在 `build/` 目录中启动/停止 BS 与 UE 进程。
 * 提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。
 * 每个 tab 都提供 CPU/CUDA 预设命令，也支持自定义启动命令。
-* 可以在较大的时频资源网格画布上直接绘制 `data_resource_blocks` 的 payload / sensing-pilot 矩形块，或绘制 `sensing_mask_blocks` 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。
+* 可以在较大的时频资源网格画布上直接绘制 `data_resource_blocks` 的 payload / sensing-pilot 矩形块，或绘制 `mask_blocks` 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。
 * 内置 `Guard Band Grid` 预设，规则与 `scripts/plot_const.py` 一致：默认仅保留 `1..489` 和 `535..N-1` 这两段子载波，然后再继续套用同步 / 梳状导频的剔除规则。
 
 说明：
 * 默认命令分别是 `./BS` 和 `./UE`；如果需要 CUDA 版本，可在下拉框里切换。
 * 编辑器当前直接面向 `build/` 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 `BS.yaml` / `UE.yaml`。
 * `Resource Planner` 用来编辑 `data_resource_blocks`：它决定哪些 RE 承载 payload，哪些 RE 作为 `sensing_pilot` 保留给感知参考。
-* `Sensing Resource Map` 用来编辑 `sensing_mask_blocks`：它决定 `sensing_output_mode=compact_mask` 时哪些 RE 会被送到感知输出。
+* `Sensing Resource Map` 用来编辑 `mask_blocks`：它决定 `output_mode=compact_mask` 时哪些 RE 会被送到感知输出。
 * 两个 planner 都可以分别应用到发射端或接收端。实验时 TX 和 RX 可以暂时不同，但正常收发时 `data_resource_blocks` 仍应保持一致。
 * 当 CPU 核心不足时，建议先给 `main thread affinity` 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。
 * CPU 绑核只配置实时流水线线程和主线程。非实时的服务、输出、辅助线程有意不做绑核。
@@ -541,13 +541,13 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `tx_channel` | `int` | `0` | TX 通道索引。 |
 | `zc_root` | `int` | `29` | Zadoff-Chu 根序号。 |
 | `num_symbols` | `int` | `100` | 每帧 OFDM 符号数。 |
-| `sensing_output_mode` | `string` | `dense` | 感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
+| `output_mode` | `string` | `dense` | 感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
 | `cuda_mod_pipeline_slots` | `int` | `2` | CUDA 调制流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
 | `pilot_positions` | `int[]` | `[571,631,...,451]` | 分布在占用带宽内的可配置梳状导频子载波索引。 |
 | `midframe_pilot_symbols` | `int[]` | `[]` | 可选的帧内 BPSK 导频符号索引，例如 `[25,50,75]`。这些符号不参与 payload 映射；配置的梳状导频 RE 会保留梳状导频序列用于相位跟踪，其余 RE 使用确定性 BPSK。 |
 | `midframe_pilot_seed` | `int` | `1296453708` | 确定性帧内 BPSK 导频种子，`BS.yaml` 和 `UE.yaml` 必须一致。 |
 | `data_resource_blocks` | `object[]` | 缺省 | 可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除预留同步符号和梳状导频 RE 外的所有 RE 都承载 payload。设为 `[]` 表示完全不发送 payload。每个块是一个矩形，使用 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`，并可选 `kind`。`kind: payload` 表示这些 RE 承载真实业务数据；`kind: sensing_pilot` 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 `sensing_pilot` 误判成专用同步符号。未被 `payload` 块选中的其余非预留同步、非梳状导频、非帧内 BPSK 导频 RE 会发送预生成 QPSK。 |
-| `sensing_mask_blocks` | `object[]` | 缺省 | 可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 `sensing_output_mode=compact_mask` 时生效；`dense` 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE；可选 CFO training field 会被拒绝，因为它不是合法感知符号。重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启。 |
+| `mask_blocks` | `object[]` | 缺省 | 可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 `output_mode=compact_mask` 时生效；`dense` 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE；可选 CFO training field 会被拒绝，因为它不是合法感知符号。重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启。 |
 | `device_args` | `string` | `""` | 通用 USRP 参数（TX/RX 兜底）。 |
 | `tx_device_args` | `string` | `""` | TX 专用 USRP 参数。 |
 | `rx_device_args` | `string` | `""` | 感知 RX 默认 USRP 参数。 |
@@ -558,9 +558,9 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `rx_clock_source` | `string` | `""` | 感知 RX 默认时钟源覆盖项。 |
 | `rx_time_source` | `string` | `""` | 感知 RX 默认时间源覆盖项。 |
 | `wire_format_tx` | `string` | `sc16` | TX 链路数据格式，常用 `sc16` 或 `sc8`。 |
-| `uplink_rx_channel` | `int` | `0` | BS 上行 RX 使用的 USRP 通道索引。兼容旧配置：省略该字段时会回退到 `rx_channel`。 |
-| `uplink_rx_wire_format` | `string` | `sc16` | BS 上行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
-| `sensing_rx_wire_format` | `string` | `sc16` | BS 感知 RX 默认链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `rx_channel` | `int` | `0` | BS 上行 RX 使用的 USRP 通道索引。 |
+| `rx_wire_format` | `string` | `sc16` | BS 上行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `rx_wire_format` | `string` | `sc16` | BS 感知 RX 默认链路数据格式，常用 `sc16` 或 `sc8`。 |
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS 下行业务 UDP 输入绑定地址，即 BS->UE 下行要发送的业务流。 |
 | `udp_input_port` | `int` | `50000` | BS 下行业务 UDP 输入绑定端口。 |
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS 解码后的上行业务 UDP 输出目标 IP，即从 UE->BS 上行恢复出的业务流。 |
@@ -576,8 +576,8 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `uplink_pdf_port` | `int` | `12359` | BS 上行 delay profile 调试流的 ZeroMQ PUB 绑定端口。 |
 | `uplink_constellation_ip` | `string` / IPv4 | `0.0.0.0` | BS 上行星座图调试流的 ZeroMQ PUB 监听 IP。 |
 | `uplink_constellation_port` | `int` | `12356` | BS 上行星座图调试流的 ZeroMQ PUB 绑定端口。 |
-| `sensing_rx_channel_count` | `int` | `1` | 感知 RX 通道数量（`0` 表示关闭感知 RX）。 |
-| `sensing_rx_channels` | `object[]` | `[]` | 感知 RX 每通道详细配置，字段见下表。 |
+| `rx_channel_count` | `int` | `1` | 感知 RX 通道数量（`0` 表示关闭感知 RX）。 |
+| `rx_channels` | `object[]` | `[]` | 感知 RX 每通道详细配置，字段见下表。 |
 | `tx_circular_buffer_size` | `int` | `32` | 向 TX 供帧的已调制帧队列容量。 |
 | `paired_frame_queue_size` | `int` | `64` | 每个感知通道的 RX/TX 帧配对队列容量。建议大于 `tx_circular_buffer_size`，以便在 RX 启动、网络缓冲和对齐完成前保留 TX 参考帧。若启动完成后仍持续满队列，通常说明感知处理吞吐不足，而不是应该无限增加缓冲。 |
 | `control_port` | `int` | `9999` | 双向控制通道的 ZeroMQ ROUTER 绑定端口（接收命令，回送参数/心跳）。 |
@@ -595,16 +595,16 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 
 快速理解：
 * `data_resource_blocks` 决定“通信数据放在哪里”。
-* `sensing_mask_blocks` 决定“compact 感知时哪些 RE 要导出”。
+* `mask_blocks` 决定“compact 感知时哪些 RE 要导出”。
 * 前者影响 payload 映射，后者只影响感知输出，两者不是互相替代的关系。
 
 若启用 `data_resource_blocks`，请把相同的矩形块和 `kind` 同步写入 `UE.yaml`。如果与 `sync_pos`、可选的 `sync_pos-1` 第二同步符号、`midframe_pilot_symbols` 或 `pilot_positions` 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 `sync_pos+1` CFO training field 只服务于 CFO 捕获/去模糊，不是合法的 sensing-pilot 或 sensing-mask 符号。优先级始终是“ZC 同步符号 > CFO training field > 梳状导频 RE > 帧内 BPSK 导频 > sensing_pilot > payload/预生成 QPSK”。
 
-dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `STRD` 会采到可选的 `sync_pos+1` CFO training field，会被直接拒绝。运行时修改 `STRD` 会在计划好的帧边界重启确定性采样相位，不会继承旧 stride 的漂移相位。
+dense 感知模式下，如果配置的 `symbol_stride` 或运行时 `STRD` 会采到可选的 `sync_pos+1` CFO training field，会被直接拒绝。运行时修改 `STRD` 会在计划好的帧边界重启确定性采样相位，不会继承旧 stride 的漂移相位。
 
-当 `sensing_output_mode=compact_mask` 时，感知会变成“每个 OFDM 帧发送一条紧凑消息”，其中只包含 `sensing_mask_blocks` 选中的 RE。此时 `STRD` 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启：`SKIP=1` 保持输出紧凑原始 RE，`SKIP=0` 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 `range_fft_size` 和 `doppler_fft_size`，确保它们能覆盖所选子载波数和符号数。紧凑感知载荷格式为 `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`，后面跟着固定顺序的 `re_count` 个原始 `complex<float>` 数据。当前 `plot_sensing*.py` 还不能处理非“规则”的 compact 载荷。
+当 `output_mode=compact_mask` 时，感知会变成“每个 OFDM 帧发送一条紧凑消息”，其中只包含 `mask_blocks` 选中的 RE。此时 `STRD` 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启：`SKIP=1` 保持输出紧凑原始 RE，`SKIP=0` 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 `range_fft_size` 和 `doppler_fft_size`，确保它们能覆盖所选子载波数和符号数。紧凑感知载荷格式为 `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`，后面跟着固定顺序的 `re_count` 个原始 `complex<float>` 数据。当前 `plot_sensing*.py` 还不能处理非“规则”的 compact 载荷。
 
-`sensing_rx_channels` 子项字段：
+`rx_channels` 子项字段：
 
 | 字段 | 类型 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -621,8 +621,8 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `processing_cpu_core` | `int` | `-1` | 该通道感知处理 loop 的 CPU 核。 |
 
 说明：
-* 当 `sensing_rx_channels` 为空且 `sensing_rx_channel_count > 0` 时，程序按通道号 `0..N-1` 自动补齐默认项。
-* 若两者数量不一致，程序会按 `sensing_rx_channel_count` 对通道列表做裁剪或扩展。
+* 当 `rx_channels` 为空且 `rx_channel_count > 0` 时，程序按通道号 `0..N-1` 自动补齐默认项。
+* 若两者数量不一致，程序会按 `rx_channel_count` 对通道列表做裁剪或扩展。
 * 当某通道设置 `enable_system_delay_estimation=true` 时，该通道会在启动附近执行一次系统时延估计，之后每隔 434 个帧重复执行一次，同时继续消耗帧数据；常规感知处理和感知输出保持停用。
 * `device_args`、`wire_format_*`、每通道天线口和输出 IP 等字段通常与硬件平台和部署环境强相关；样本 YAML 只是起点，不应把不同机器/射频平台的值机械互换。
 
@@ -656,10 +656,10 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `zc_root` | `int` | `29` | Zadoff-Chu 根序号。 |
 | `num_symbols` | `int` | `100` | 每帧 OFDM 符号数。 |
 | `sensing_symbol_num` | `int` | `100` | 参与感知处理的符号数。 |
-| `sensing_output_mode` | `string` | `dense` | 双站感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
-| `enable_bi_sensing` | `bool` | `true` | 启用双站感知处理链；设为 `false` 时 `UE` 与 `CUDAUE` 均不会启动双站感知通道。 |
+| `output_mode` | `string` | `dense` | 双站感知输出模式。`dense` 保持旧版基于 STRD 的全缓冲区输出；`compact_mask` 切换为按帧提取紧凑感知 RE。 |
+| `bi_enabled` | `bool` | `true` | 启用双站感知处理链；设为 `false` 时 `UE` 与 `CUDAUE` 均不会启动双站感知通道。 |
 | `duplex_mode` | `string` | `tdd` | 必须与 `BS.yaml` 保持一致。`tdd` 共享下行中心频率并只在配置的上行符号窗口发送；`fdd` 在 `uplink.center_freq` 上按整帧连续发送。 |
-| `uplink_idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
+| `idle_waveform` | `string` | `random_qpsk` | UE 无上行 UDP 载荷时的 idle 波形。`random_qpsk` 发送 zero-length mini-header 后接确定性随机 QPSK 填充；`zero` 发送 zero-length mini-header，剩余 payload RE 保持为 0。 |
 | `uplink` | `object` | `symbol_start=90`、`symbol_count=10`、`guard_symbols=1`、`center_freq=2500000000` | UE 上行设置。TDD 使用 `symbol_start`、`symbol_count`、`guard_symbols` 并忽略 `center_freq`；FDD 使用 `center_freq` 并忽略 TDD 符号窗口字段，按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端也必须具备上行 RX 路径。 |
 | `ue_timing_advance` | `int` / 采样点 | `63` | UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 `TADV` 值移动后续上行帧。 |
 | `cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。小于 `1` 时会钳制到 `1`。 |
@@ -676,11 +676,11 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 | `equalizer_mag_floor` | `float` | `1e-6` | 信道幅度平方反演下限，`zf` 和 `mmse` 都会使用。 |
 | `channel_tracking_min_pilot_snr` | `float` | `1e-4` | 每符号跟踪接受梳状导频残差的最小功率/权重，低于该值时回退到同步符号信道。 |
 | `data_resource_blocks` | `object[]` | 缺省 | 接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都参与 payload 提取。设为 `[]` 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 `kind`。其中 `kind: payload` 的块会产生 payload LLR；`kind: sensing_pilot` 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。 |
-| `sensing_mask_blocks` | `object[]` | 缺省 | 接收侧的紧凑感知资源映射，用来回答“在 `compact_mask` 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE，但拒绝 CFO training field；重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 `MTI` 和本地 Delay-Doppler 处理。 |
+| `mask_blocks` | `object[]` | 缺省 | 接收侧的紧凑感知资源映射，用来回答“在 `compact_mask` 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE，但拒绝 CFO training field；重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 `MTI` 和本地 Delay-Doppler 处理。 |
 | `device_args` | `string` | `""` | USRP 参数。 |
 | `clock_source` | `string` | `internal/external/gpsdo` | 时钟源。 |
 | `wire_format_tx` | `string` | `sc16` | 可选 UE 上行 TX 链路数据格式，常用 `sc16` 或 `sc8`。 |
-| `downlink_rx_wire_format` | `string` | `sc16` | UE 下行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
+| `rx_wire_format` | `string` | `sc16` | UE 下行 RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
 | `software_sync` | `bool` | `true` | 启用软件同步跟踪。 |
 | `predictive_delay` | `bool` | `true` | 启用基于 CFO 的预测性时延补偿，用于初始对齐和跟踪阶段的时延修正。仅当采样时钟和载波频率来自同一个参考源，且信号链路在 USRP 外没有二级变频时才应启用。 |
 | `hardware_sync` | `bool` | `false` | 启用硬件同步。 |
@@ -734,8 +734,8 @@ dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `ST
 说明：
 * `data_resource_blocks` 通常应与发射端完全一致，包括 `kind`。
 * 如果资源块与 `sync_pos`、可选的 `sync_pos-1` 第二同步符号、`midframe_pilot_symbols` 或 `pilot_positions` 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 `sync_pos+1` CFO training field 会在 sensing-pilot 和 sensing-mask 选择中被拒绝。优先级是“ZC 同步符号 > CFO training field > 梳状导频 RE > 帧内 BPSK 导频 > sensing_pilot > payload/预生成 QPSK”。
-* dense 模式下，如果 `sensing_symbol_stride` / 运行时 `STRD` 会采到可选的 `sync_pos+1` CFO training field，会被拒绝。运行时修改 `STRD` 会在计划好的帧边界重启确定性采样相位。
-* 当 `sensing_output_mode=compact_mask` 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 `sensing_mask_blocks` 选中的 RE；此时 `STRD` 会被忽略，因为 mask 已经定义了采样图样。
+* dense 模式下，如果 `symbol_stride` / 运行时 `STRD` 会采到可选的 `sync_pos+1` CFO training field，会被拒绝。运行时修改 `STRD` 会在计划好的帧边界重启确定性采样相位。
+* 当 `output_mode=compact_mask` 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 `mask_blocks` 选中的 RE；此时 `STRD` 会被忽略，因为 mask 已经定义了采样图样。
 * 紧凑载荷格式与发射端一致：`CompactSensingFrameHeader` 后面跟固定顺序的原始 `complex<float>` 数据。
 * RX AGC 分为两个阶段。`SYNC_SEARCH` 阶段会先把增益恢复到配置的 `rx_gain`，然后进行粗搜索扫描（每 10 个帧增加 `1 dB`，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 `rx_agc_low_threshold_db` / `rx_agc_high_threshold_db` 定义的窗口来细调增益。
 * UE 接收机会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。

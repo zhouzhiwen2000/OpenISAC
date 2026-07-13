@@ -299,7 +299,7 @@ inline std::string normalize_uplink_idle_waveform_string(std::string waveform) {
         return waveform;
     }
     throw std::runtime_error(
-        "Invalid uplink_idle_waveform='" + waveform +
+        "Invalid uplink.idle_waveform='" + waveform +
         "'. Expected 'zero' or 'random_qpsk'.");
 }
 
@@ -949,7 +949,7 @@ struct DownlinkConfig {
     std::string tx_time_source = "";
     std::string wire_format_tx = "sc16";
     size_t rx_channel = 0;             // UE downlink RX channel index
-    std::string downlink_rx_wire_format = "sc16"; // UE downlink RX wire format
+    std::string rx_wire_format = "sc16"; // UE downlink RX wire format
     EqualizerConfig equalizer;
 };
 
@@ -959,15 +959,15 @@ struct DownlinkPipelineConfig {
 };
 
 struct UplinkConfig {
-    bool enable_uplink = false;         // UE->BS uplink master switch
+    bool enabled = false;               // UE->BS uplink master switch
     DuplexConfig duplex;                // Duplexing (TDD/FDD) + uplink frame structure
     int32_t bs_dl_ul_timing_diff = 63; // BS: uplink-RX window offset relative to the TX frame anchor (samples)
     int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
-    std::string uplink_idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
+    std::string idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     bool debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
     double rx_gain = 0.0;              // BS uplink RX gain
-    size_t uplink_rx_channel = 0;      // BS uplink RX channel index
-    std::string uplink_rx_wire_format = "sc16"; // BS uplink RX wire format
+    size_t rx_channel = 0;             // BS uplink RX channel index
+    std::string rx_wire_format = "sc16"; // BS uplink RX wire format
     double tx_gain = 0.0;              // UE uplink TX gain
     uint32_t tx_channel = 0;           // UE uplink TX channel index
     std::string wire_format_tx = "sc16"; // UE uplink TX wire format
@@ -977,21 +977,21 @@ struct UplinkConfig {
 struct SensingConfig {
     size_t range_fft_size = 1024;      // Range FFT size
     size_t doppler_fft_size = 100;     // Doppler FFT size
-    size_t sensing_view_range_bins = 0;   // Backend RD view width (0 = full range_fft_size)
-    size_t sensing_view_doppler_bins = 0; // Backend RD view height (0 = full doppler_fft_size)
-    std::string sensing_output_mode = kSensingOutputModeDense;
-    SensingOnWireFormat sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
-    bool enable_backend_sensing_processing = false;
-    std::vector<DataResourceBlock> sensing_mask_blocks;
+    size_t view_range_bins = 0;        // Backend RD view width (0 = full range_fft_size)
+    size_t view_doppler_bins = 0;      // Backend RD view height (0 = full doppler_fft_size)
+    std::string output_mode = kSensingOutputModeDense;
+    SensingOnWireFormat on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    bool backend_processing_enabled = false;
+    std::vector<DataResourceBlock> mask_blocks;
     std::string rx_device_args = "";
     std::string rx_clock_source = "";
     std::string rx_time_source = "";
-    std::string sensing_rx_wire_format = "sc16";  // BS sensing RX default wire format
-    uint32_t sensing_rx_channel_count = 1; // Number of sensing RX channels
-    std::vector<SensingRxChannelConfig> sensing_rx_channels; // Per-channel sensing RX config
-    size_t sensing_symbol_stride = 20;     // Default sensing STRD applied at startup
+    std::string rx_wire_format = "sc16";  // BS sensing RX default wire format
+    uint32_t rx_channel_count = 1; // Number of sensing RX channels
+    std::vector<SensingRxChannelConfig> rx_channels; // Per-channel sensing RX config
+    size_t symbol_stride = 20;     // Default sensing STRD applied at startup
     size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
-    bool enable_bi_sensing = true;
+    bool bi_enabled = true;
 };
 
 struct RadioConfig {
@@ -1241,7 +1241,7 @@ inline DuplexFrameLayout build_duplex_frame_layout(const Config& cfg) {
     DuplexFrameLayout layout;
     layout.mode = cfg.uplink.duplex.mode;
     layout.num_symbols = cfg.ofdm.num_symbols;
-    if (!cfg.uplink.enable_uplink) {
+    if (!cfg.uplink.enabled) {
         layout.uplink_enabled = false;
         layout.symbol_is_uplink.assign(cfg.ofdm.num_symbols, 0);
         layout.symbol_is_guard.assign(cfg.ofdm.num_symbols, 0);
@@ -1375,7 +1375,7 @@ inline int select_distinct_zc_root(
 inline Config make_uplink_config(const Config& cfg) {
     Config ul = cfg;
     const DuplexFrameLayout dl = build_duplex_frame_layout(cfg);
-    const size_t ul_syms = !cfg.uplink.enable_uplink
+    const size_t ul_syms = !cfg.uplink.enabled
         ? 0
         : ((cfg.uplink.duplex.mode == DuplexMode::FDD)
             ? cfg.ofdm.num_symbols
@@ -1390,7 +1390,7 @@ inline Config make_uplink_config(const Config& cfg) {
     ul.ofdm.enable_sec_sync_symbol = false;
     ul.ofdm.enable_cfo_training_sequence = false;
     ul.ofdm.midframe_pilot_symbols.clear();
-    ul.sensing.sensing_mask_blocks.clear();
+    ul.sensing.mask_blocks.clear();
     ul.resource_preview.data_resource_blocks.clear();
     ul.resource_preview.data_resource_blocks_configured = false;
     // The uplink does not run sensing; keep sensing_symbol_num consistent.
@@ -1511,12 +1511,12 @@ inline std::string normalize_sensing_output_mode_string(std::string mode) {
         return mode;
     }
     throw std::runtime_error(
-        "Invalid sensing_output_mode='" + mode +
+        "Invalid sensing.output_mode='" + mode +
         "'. Supported values: dense, compact_mask.");
 }
 
 inline bool sensing_output_mode_is_compact_mask(const Config& cfg) {
-    return cfg.sensing.sensing_output_mode == kSensingOutputModeCompactMask;
+    return cfg.sensing.output_mode == kSensingOutputModeCompactMask;
 }
 
 inline const char* sensing_on_wire_format_to_string(SensingOnWireFormat format) {
@@ -1689,35 +1689,35 @@ inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
         return symbol_index * cfg.ofdm.fft_size + subcarrier_index;
     };
 
-    for (size_t block_idx = 0; block_idx < cfg.sensing.sensing_mask_blocks.size(); ++block_idx) {
-        const auto& block = cfg.sensing.sensing_mask_blocks[block_idx];
+    for (size_t block_idx = 0; block_idx < cfg.sensing.mask_blocks.size(); ++block_idx) {
+        const auto& block = cfg.sensing.mask_blocks[block_idx];
         if (block.symbol_count == 0) {
             throw std::runtime_error(
-                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "mask_blocks[" + std::to_string(block_idx) +
                 "].symbol_count must be greater than 0.");
         }
         if (block.subcarrier_count == 0) {
             throw std::runtime_error(
-                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "mask_blocks[" + std::to_string(block_idx) +
                 "].subcarrier_count must be greater than 0.");
         }
         if (block.symbol_start >= cfg.ofdm.num_symbols ||
             block.symbol_start + block.symbol_count > cfg.ofdm.num_symbols) {
             throw std::runtime_error(
-                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "mask_blocks[" + std::to_string(block_idx) +
                 "] exceeds the configured symbol range.");
         }
         if (block.subcarrier_start >= cfg.ofdm.fft_size ||
             block.subcarrier_start + block.subcarrier_count > cfg.ofdm.fft_size) {
             throw std::runtime_error(
-                "sensing_mask_blocks[" + std::to_string(block_idx) +
+                "mask_blocks[" + std::to_string(block_idx) +
                 "] exceeds the configured subcarrier range.");
         }
 
         for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
             if (is_cfo_training_symbol(cfg, sym)) {
                 throw std::runtime_error(
-                    "sensing_mask_blocks[" + std::to_string(block_idx) +
+                    "mask_blocks[" + std::to_string(block_idx) +
                     "] selects symbol " + std::to_string(sym) +
                     ", which is the CFO training field. CFO training fields are not valid sensing symbols.");
             }
@@ -1750,7 +1750,7 @@ inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
     layout.total_re_count = layout.flat_subcarrier_indices.size();
     if (layout.total_re_count == 0) {
         throw std::runtime_error(
-            "compact_mask mode requires sensing_mask_blocks to select at least one RE.");
+            "compact_mask mode requires sensing.mask_blocks to select at least one RE.");
     }
     layout.mask_hash = sensing_mask_hash_from_layout(
         layout.num_symbols,
@@ -1872,7 +1872,7 @@ inline std::string compact_mask_runtime_fft_controls_reason(const Config& cfg) {
 }
 
 inline bool backend_sensing_processing_supported(const Config& cfg) {
-    if (!cfg.sensing.enable_backend_sensing_processing) {
+    if (!cfg.sensing.backend_processing_enabled) {
         return false;
     }
     if (!sensing_output_mode_is_compact_mask(cfg)) {
@@ -1882,7 +1882,7 @@ inline bool backend_sensing_processing_supported(const Config& cfg) {
 }
 
 inline std::string backend_sensing_processing_reason(const Config& cfg) {
-    if (!cfg.sensing.enable_backend_sensing_processing) {
+    if (!cfg.sensing.backend_processing_enabled) {
         return "backend sensing processing disabled";
     }
     if (!sensing_output_mode_is_compact_mask(cfg)) {
@@ -1916,19 +1916,19 @@ inline size_t required_sensing_doppler_symbol_count(const Config& cfg) {
 
 inline size_t resolved_sensing_view_range_bins(const Config& cfg) {
     const size_t full_range_bins = std::max<size_t>(cfg.sensing.range_fft_size, 1);
-    if (cfg.sensing.sensing_view_range_bins == 0) {
+    if (cfg.sensing.view_range_bins == 0) {
         return full_range_bins;
     }
-    return std::clamp(cfg.sensing.sensing_view_range_bins, size_t{1}, full_range_bins);
+    return std::clamp(cfg.sensing.view_range_bins, size_t{1}, full_range_bins);
 }
 
 inline size_t resolved_sensing_view_doppler_bins(const Config& cfg) {
     const size_t full_doppler_bins = std::max<size_t>(cfg.sensing.doppler_fft_size, 1);
     const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
-    if (cfg.sensing.sensing_view_doppler_bins == 0) {
+    if (cfg.sensing.view_doppler_bins == 0) {
         return full_doppler_bins;
     }
-    return std::clamp(cfg.sensing.sensing_view_doppler_bins, min_doppler_bins, full_doppler_bins);
+    return std::clamp(cfg.sensing.view_doppler_bins, min_doppler_bins, full_doppler_bins);
 }
 
 inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
@@ -1965,30 +1965,30 @@ inline void normalize_sensing_fft_sizes(Config& cfg, const char* context_name) {
 }
 
 inline void normalize_sensing_view_bins(Config& cfg, const char* context_name) {
-    if (cfg.sensing.sensing_view_range_bins != 0 && cfg.sensing.sensing_view_range_bins > cfg.sensing.range_fft_size) {
+    if (cfg.sensing.view_range_bins != 0 && cfg.sensing.view_range_bins > cfg.sensing.range_fft_size) {
         LOG_G_WARN() << context_name
-                     << " sensing_view_range_bins=" << cfg.sensing.sensing_view_range_bins
+                     << " sensing_view_range_bins=" << cfg.sensing.view_range_bins
                      << " exceeds range_fft_size=" << cfg.sensing.range_fft_size
                      << ". Clamping backend view width to the configured range FFT size.";
-        cfg.sensing.sensing_view_range_bins = cfg.sensing.range_fft_size;
+        cfg.sensing.view_range_bins = cfg.sensing.range_fft_size;
     }
 
-    if (cfg.sensing.sensing_view_doppler_bins != 0) {
+    if (cfg.sensing.view_doppler_bins != 0) {
         const size_t min_doppler_bins = std::max<size_t>(required_sensing_doppler_symbol_count(cfg), 1);
-        if (cfg.sensing.sensing_view_doppler_bins < min_doppler_bins) {
+        if (cfg.sensing.view_doppler_bins < min_doppler_bins) {
             LOG_G_WARN() << context_name
-                         << " sensing_view_doppler_bins=" << cfg.sensing.sensing_view_doppler_bins
+                         << " sensing_view_doppler_bins=" << cfg.sensing.view_doppler_bins
                          << " is smaller than the required slow-time symbol count="
                          << min_doppler_bins
                          << ". Clamping backend view height to preserve the full sensing aperture.";
-            cfg.sensing.sensing_view_doppler_bins = min_doppler_bins;
+            cfg.sensing.view_doppler_bins = min_doppler_bins;
         }
-        if (cfg.sensing.sensing_view_doppler_bins > cfg.sensing.doppler_fft_size) {
+        if (cfg.sensing.view_doppler_bins > cfg.sensing.doppler_fft_size) {
             LOG_G_WARN() << context_name
-                         << " sensing_view_doppler_bins=" << cfg.sensing.sensing_view_doppler_bins
+                         << " sensing_view_doppler_bins=" << cfg.sensing.view_doppler_bins
                          << " exceeds doppler_fft_size=" << cfg.sensing.doppler_fft_size
                          << ". Clamping backend view height to the configured Doppler FFT size.";
-            cfg.sensing.sensing_view_doppler_bins = cfg.sensing.doppler_fft_size;
+            cfg.sensing.view_doppler_bins = cfg.sensing.doppler_fft_size;
         }
     }
 }
@@ -2263,17 +2263,17 @@ inline void finalize_data_resource_grid_config(Config& cfg, const char* role_nam
 }
 
 inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
-    cfg.sensing.sensing_output_mode = normalize_sensing_output_mode_string(cfg.sensing.sensing_output_mode);
+    cfg.sensing.output_mode = normalize_sensing_output_mode_string(cfg.sensing.output_mode);
     if (!sensing_output_mode_is_compact_mask(cfg)) {
         validate_dense_sensing_stride(
             cfg,
-            cfg.sensing.sensing_symbol_stride,
+            cfg.sensing.symbol_stride,
             std::string(role_name) + " dense sensing stride");
-        if (cfg.sensing.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
+        if (cfg.sensing.backend_processing_enabled && !backend_sensing_processing_supported(cfg)) {
             LOG_G_WARN() << role_name
-                         << " requested enable_backend_sensing_processing=1, but the current sensing mode "
+                         << " requested sensing.backend_processing_enabled=1, but the current sensing mode "
                          << "cannot provide dense backend RD output. Falling back to viewer-local processing.";
-            cfg.sensing.enable_backend_sensing_processing = false;
+            cfg.sensing.backend_processing_enabled = false;
         }
         return;
     }
@@ -2281,15 +2281,15 @@ inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
     if (layout.empty()) {
         throw std::runtime_error(
             std::string(role_name) +
-            " compact_mask mode requires a non-empty sensing_mask_blocks selection.");
+            " compact_mask mode requires a non-empty sensing.mask_blocks selection.");
     }
-    if (cfg.sensing.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
+    if (cfg.sensing.backend_processing_enabled && !backend_sensing_processing_supported(cfg)) {
         LOG_G_WARN() << role_name
-                     << " requested enable_backend_sensing_processing=1 in compact_mask mode, but the mask "
+                     << " requested sensing.backend_processing_enabled=1 in compact_mask mode, but the mask "
                      << "is not regular local-DD compatible: "
                      << backend_sensing_processing_reason(cfg)
                      << ". Falling back to viewer-local processing.";
-        cfg.sensing.enable_backend_sensing_processing = false;
+        cfg.sensing.backend_processing_enabled = false;
     }
 }
 
@@ -2439,8 +2439,9 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
 
 // Parse the duplexing block. Shared by the BS and UE config loaders so both
 // agree on the DL/UL/guard symbol partition. Schema:
-//   duplex_mode: tdd | fdd
 //   uplink:
+//     enabled: true | false
+//     duplex_mode: tdd | fdd
 //     symbol_start: <size_t>     # TDD: first uplink OFDM symbol
 //     symbol_count: <size_t>     # TDD: uplink symbol count (0 => uplink off)
 //     guard_symbols: <size_t>    # TDD: guard symbols at the DL->UL boundary
@@ -2451,8 +2452,8 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
     const YAML::Node ul = config["uplink"] && config["uplink"].IsMap()
         ? config["uplink"]
         : YAML::Node();
-    if (ul["enable_uplink"]) {
-        cfg.uplink.enable_uplink = ul["enable_uplink"].as<bool>();
+    if (ul["enabled"]) {
+        cfg.uplink.enabled = ul["enabled"].as<bool>();
     }
     if (ul["duplex_mode"]) {
         const std::string raw = ul["duplex_mode"].as<std::string>();
@@ -2469,21 +2470,6 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
             cfg.uplink.duplex.ul_center_freq = ul["center_freq"].as<double>();
         }
         if (ul["debug_self_channel"]) cfg.uplink.debug_self_channel = ul["debug_self_channel"].as<bool>();
-        if (ul["uplink_debug_self_channel"]) {
-            cfg.uplink.debug_self_channel = ul["uplink_debug_self_channel"].as<bool>();
-        }
-        if (ul["self_channel_ip"]) cfg.network_output.uplink_self_channel_ip = ul["self_channel_ip"].as<std::string>();
-        if (ul["self_channel_port"]) cfg.network_output.uplink_self_channel_port = ul["self_channel_port"].as<int>();
-        if (ul["self_pdf_ip"]) cfg.network_output.uplink_self_pdf_ip = ul["self_pdf_ip"].as<std::string>();
-        if (ul["self_pdf_port"]) cfg.network_output.uplink_self_pdf_port = ul["self_pdf_port"].as<int>();
-        if (ul["uplink_self_channel_ip"]) {
-            cfg.network_output.uplink_self_channel_ip = ul["uplink_self_channel_ip"].as<std::string>();
-        }
-        if (ul["uplink_self_channel_port"]) {
-            cfg.network_output.uplink_self_channel_port = ul["uplink_self_channel_port"].as<int>();
-        }
-        if (ul["uplink_self_pdf_ip"]) cfg.network_output.uplink_self_pdf_ip = ul["uplink_self_pdf_ip"].as<std::string>();
-        if (ul["uplink_self_pdf_port"]) cfg.network_output.uplink_self_pdf_port = ul["uplink_self_pdf_port"].as<int>();
     }
     if (cfg.uplink.duplex.mode != DuplexMode::FDD) {
         cfg.uplink.duplex.ul_center_freq = 0.0;
@@ -2494,25 +2480,13 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
     if (ul["ue_timing_advance"]) {
         cfg.uplink.ue_timing_advance = ul["ue_timing_advance"].as<int32_t>();
     }
-    if (ul["uplink_idle_waveform"]) {
-        cfg.uplink.uplink_idle_waveform = normalize_uplink_idle_waveform_string(
-            ul["uplink_idle_waveform"].as<std::string>());
+    if (ul["idle_waveform"]) {
+        cfg.uplink.idle_waveform = normalize_uplink_idle_waveform_string(
+            ul["idle_waveform"].as<std::string>());
     }
     const YAML::Node net = config["network_output"] && config["network_output"].IsMap()
         ? config["network_output"]
         : YAML::Node();
-    if (net["uplink_self_channel_ip"]) {
-        cfg.network_output.uplink_self_channel_ip = net["uplink_self_channel_ip"].as<std::string>();
-    }
-    if (net["uplink_self_channel_port"]) {
-        cfg.network_output.uplink_self_channel_port = net["uplink_self_channel_port"].as<int>();
-    }
-    if (net["uplink_self_pdf_ip"]) {
-        cfg.network_output.uplink_self_pdf_ip = net["uplink_self_pdf_ip"].as<std::string>();
-    }
-    if (net["uplink_self_pdf_port"]) {
-        cfg.network_output.uplink_self_pdf_port = net["uplink_self_pdf_port"].as<int>();
-    }
     if (net["self_channel_ip"]) {
         cfg.network_output.uplink_self_channel_ip = net["self_channel_ip"].as<std::string>();
     }
@@ -2820,10 +2794,10 @@ inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg
 }
 
 inline void emit_sensing_mask_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
-    if (cfg.sensing.sensing_mask_blocks.empty()) {
+    if (cfg.sensing.mask_blocks.empty()) {
         return;
     }
-    emit_resource_blocks_yaml(out, "sensing_mask_blocks", cfg.sensing.sensing_mask_blocks);
+    emit_resource_blocks_yaml(out, "mask_blocks", cfg.sensing.mask_blocks);
 }
 
 inline bool load_resource_blocks_from_yaml(
@@ -2900,9 +2874,9 @@ inline bool load_data_resource_blocks_from_yaml(Config& cfg, const YAML::Node& c
 
 inline bool load_sensing_mask_blocks_from_yaml(Config& cfg, const YAML::Node& config, const char* context_name) {
     return load_resource_blocks_from_yaml(
-        cfg.sensing.sensing_mask_blocks,
+        cfg.sensing.mask_blocks,
         config,
-        "sensing_mask_blocks",
+        "mask_blocks",
         context_name);
 }
 } // namespace config_detail
@@ -2946,9 +2920,9 @@ inline Config make_default_bs_config() {
     cfg.ofdm.midframe_pilot_symbols = {};
     cfg.ofdm.midframe_pilot_seed = 0x4D46504Cu;
     cfg.ofdm.num_symbols = 100;
-    cfg.sensing.sensing_output_mode = kSensingOutputModeDense;
-    cfg.sensing.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
-    cfg.sensing.enable_backend_sensing_processing = false;
+    cfg.sensing.output_mode = kSensingOutputModeDense;
+    cfg.sensing.on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    cfg.sensing.backend_processing_enabled = false;
     cfg.cuda.cuda_mod_pipeline_slots = 2;
     cfg.network_output.mono_sensing_output_enabled = true;
     cfg.network_output.mono_sensing_ip = "";
@@ -2964,8 +2938,8 @@ inline Config make_default_bs_config() {
     cfg.network_output.uplink_self_channel_port = 12360;
     cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
     cfg.network_output.uplink_self_pdf_port = 12361;
-    cfg.sensing.sensing_rx_channel_count = 1;
-    cfg.sensing.sensing_symbol_stride = 20;
+    cfg.sensing.rx_channel_count = 1;
+    cfg.sensing.symbol_stride = 20;
     cfg.downlink_pipeline.tx_circular_buffer_size = 8;
     cfg.downlink_pipeline.data_packet_buffer_size = 32;
     cfg.sensing.paired_frame_queue_size = 16;
@@ -3032,29 +3006,29 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
 
         config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
         config_detail::load_value(sensing, "doppler_fft_size", cfg.sensing.doppler_fft_size);
-        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing.sensing_view_range_bins);
+        config_detail::load_value(sensing, "view_range_bins", cfg.sensing.view_range_bins);
         config_detail::load_value(
-            sensing, "sensing_view_doppler_bins", cfg.sensing.sensing_view_doppler_bins);
-        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing.sensing_output_mode);
-        if (sensing["sensing_on_wire_format"]) {
-            cfg.sensing.sensing_on_wire_format = parse_sensing_on_wire_format_string(
-                sensing["sensing_on_wire_format"].as<std::string>());
+            sensing, "view_doppler_bins", cfg.sensing.view_doppler_bins);
+        config_detail::load_value(sensing, "output_mode", cfg.sensing.output_mode);
+        if (sensing["on_wire_format"]) {
+            cfg.sensing.on_wire_format = parse_sensing_on_wire_format_string(
+                sensing["on_wire_format"].as<std::string>());
         }
         config_detail::load_value(
-            sensing, "enable_backend_sensing_processing", cfg.sensing.enable_backend_sensing_processing);
+            sensing, "backend_processing_enabled", cfg.sensing.backend_processing_enabled);
         config_detail::load_value(sensing, "rx_device_args", cfg.sensing.rx_device_args);
         config_detail::load_value(sensing, "rx_clock_source", cfg.sensing.rx_clock_source);
         config_detail::load_value(sensing, "rx_time_source", cfg.sensing.rx_time_source);
-        config_detail::load_value(sensing, "sensing_rx_wire_format", cfg.sensing.sensing_rx_wire_format);
-        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing.sensing_symbol_stride);
+        config_detail::load_value(sensing, "rx_wire_format", cfg.sensing.rx_wire_format);
+        config_detail::load_value(sensing, "symbol_stride", cfg.sensing.symbol_stride);
         config_detail::load_value(sensing, "paired_frame_queue_size", cfg.sensing.paired_frame_queue_size);
-        const bool has_sensing_count_key = static_cast<bool>(sensing["sensing_rx_channel_count"]);
+        const bool has_sensing_count_key = static_cast<bool>(sensing["rx_channel_count"]);
         if (has_sensing_count_key) {
-            cfg.sensing.sensing_rx_channel_count = sensing["sensing_rx_channel_count"].as<uint32_t>();
+            cfg.sensing.rx_channel_count = sensing["rx_channel_count"].as<uint32_t>();
         }
-        if (sensing["sensing_rx_channels"] && sensing["sensing_rx_channels"].IsSequence()) {
-            cfg.sensing.sensing_rx_channels.clear();
-            for (const auto& node : sensing["sensing_rx_channels"]) {
+        if (sensing["rx_channels"] && sensing["rx_channels"].IsSequence()) {
+            cfg.sensing.rx_channels.clear();
+            for (const auto& node : sensing["rx_channels"]) {
                 SensingRxChannelConfig ch;
                 if (node["usrp_channel"]) ch.usrp_channel = node["usrp_channel"].as<uint32_t>();
                 if (node["device_args"]) ch.device_args = node["device_args"].as<std::string>();
@@ -3074,11 +3048,11 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
                 config_detail::load_optional_int_yaml(node["rx_cpu_core"], ch.rx_cpu_core);
                 config_detail::load_optional_int_yaml(
                     node["processing_cpu_core"], ch.processing_cpu_core);
-                cfg.sensing.sensing_rx_channels.push_back(ch);
+                cfg.sensing.rx_channels.push_back(ch);
             }
             if (!has_sensing_count_key) {
-                cfg.sensing.sensing_rx_channel_count =
-                    static_cast<uint32_t>(cfg.sensing.sensing_rx_channels.size());
+                cfg.sensing.rx_channel_count =
+                    static_cast<uint32_t>(cfg.sensing.rx_channels.size());
             }
         }
 
@@ -3102,8 +3076,8 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
             downlink_pipeline, "data_packet_buffer_size", cfg.downlink_pipeline.data_packet_buffer_size);
 
         config_detail::load_value(uplink, "rx_gain", cfg.uplink.rx_gain);
-        config_detail::load_value(uplink, "uplink_rx_channel", cfg.uplink.uplink_rx_channel);
-        config_detail::load_value(uplink, "uplink_rx_wire_format", cfg.uplink.uplink_rx_wire_format);
+        config_detail::load_value(uplink, "rx_channel", cfg.uplink.rx_channel);
+        config_detail::load_value(uplink, "rx_wire_format", cfg.uplink.rx_wire_format);
         config_detail::load_value(uplink, "equalizer_mode", cfg.uplink.equalizer.equalizer_mode);
         if (uplink["channel_tracking_mode"]) {
             cfg.uplink.equalizer.channel_tracking_mode = normalize_channel_tracking_mode_string(
@@ -3185,9 +3159,9 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
         LOG_G_WARN() << "paired_frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.sensing.paired_frame_queue_size = 1;
     }
-    if (cfg.sensing.sensing_symbol_stride == 0) {
+    if (cfg.sensing.symbol_stride == 0) {
         LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
-        cfg.sensing.sensing_symbol_stride = 1;
+        cfg.sensing.symbol_stride = 1;
     }
     if (cfg.measurement.measurement_enable) {
         if (cfg.measurement.measurement_mode.empty()) {
@@ -3229,25 +3203,25 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
         ch.enable_sensing_output = cfg.network_output.mono_sensing_output_enabled;
         return ch;
     };
-    if (cfg.sensing.sensing_rx_channels.empty() && cfg.sensing.sensing_rx_channel_count > 0) {
-        cfg.sensing.sensing_rx_channels.push_back(make_default_ch0());
-        for (uint32_t i = 1; i < cfg.sensing.sensing_rx_channel_count; ++i) {
+    if (cfg.sensing.rx_channels.empty() && cfg.sensing.rx_channel_count > 0) {
+        cfg.sensing.rx_channels.push_back(make_default_ch0());
+        for (uint32_t i = 1; i < cfg.sensing.rx_channel_count; ++i) {
             auto ch = make_default_ch0();
             ch.usrp_channel = i;
-            cfg.sensing.sensing_rx_channels.push_back(ch);
+            cfg.sensing.rx_channels.push_back(ch);
         }
     }
 
-    if (cfg.sensing.sensing_rx_channel_count == 0) {
-        cfg.sensing.sensing_rx_channels.clear();
-    } else if (cfg.sensing.sensing_rx_channels.size() > cfg.sensing.sensing_rx_channel_count) {
-        cfg.sensing.sensing_rx_channels.resize(cfg.sensing.sensing_rx_channel_count);
-    } else if (cfg.sensing.sensing_rx_channels.size() < cfg.sensing.sensing_rx_channel_count) {
-        const auto base = cfg.sensing.sensing_rx_channels.empty() ? make_default_ch0() : cfg.sensing.sensing_rx_channels.front();
-        for (size_t i = cfg.sensing.sensing_rx_channels.size(); i < cfg.sensing.sensing_rx_channel_count; ++i) {
+    if (cfg.sensing.rx_channel_count == 0) {
+        cfg.sensing.rx_channels.clear();
+    } else if (cfg.sensing.rx_channels.size() > cfg.sensing.rx_channel_count) {
+        cfg.sensing.rx_channels.resize(cfg.sensing.rx_channel_count);
+    } else if (cfg.sensing.rx_channels.size() < cfg.sensing.rx_channel_count) {
+        const auto base = cfg.sensing.rx_channels.empty() ? make_default_ch0() : cfg.sensing.rx_channels.front();
+        for (size_t i = cfg.sensing.rx_channels.size(); i < cfg.sensing.rx_channel_count; ++i) {
             auto ch = base;
             ch.usrp_channel = static_cast<uint32_t>(base.usrp_channel + i);
-            cfg.sensing.sensing_rx_channels.push_back(ch);
+            cfg.sensing.rx_channels.push_back(ch);
         }
     }
 
@@ -3275,7 +3249,7 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
         cfg.network_output.mono_sensing_port = 8888;
     }
 
-    cfg.sensing.sensing_rx_channel_count = static_cast<uint32_t>(cfg.sensing.sensing_rx_channels.size());
+    cfg.sensing.rx_channel_count = static_cast<uint32_t>(cfg.sensing.rx_channels.size());
 }
 
 inline Config make_default_ue_config() {
@@ -3313,7 +3287,7 @@ inline Config make_default_ue_config() {
     cfg.rf_sampling.rx_agc_update_frames = 4;
     cfg.ofdm.zc_root = 29;
     cfg.usrp_device.device_args = "";
-    cfg.sensing.enable_bi_sensing = true;
+    cfg.sensing.bi_enabled = true;
     cfg.network_output.bi_sensing_output_enabled = true;
     cfg.network_output.bi_sensing_ip = "";
     cfg.network_output.bi_sensing_port = 8889;
@@ -3351,10 +3325,10 @@ inline Config make_default_ue_config() {
     cfg.downlink.equalizer.channel_tracking_mode = kChannelTrackingModePilotPhase;
     cfg.downlink.equalizer.equalizer_mag_floor = 1e-6;
     cfg.downlink.equalizer.channel_tracking_min_pilot_snr = 1e-4;
-    cfg.sensing.sensing_output_mode = kSensingOutputModeDense;
-    cfg.sensing.sensing_on_wire_format = SensingOnWireFormat::ComplexFloat32;
-    cfg.sensing.enable_backend_sensing_processing = false;
-    cfg.sensing.sensing_symbol_stride = 20;
+    cfg.sensing.output_mode = kSensingOutputModeDense;
+    cfg.sensing.on_wire_format = SensingOnWireFormat::ComplexFloat32;
+    cfg.sensing.backend_processing_enabled = false;
+    cfg.sensing.symbol_stride = 20;
     cfg.radio.radio_backend = "uhd";
     cfg.simulation = SimConfig{};
     cfg.measurement.measurement_enable = false;
@@ -3423,20 +3397,20 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(
             cuda, "cuda_ldpc_cross_frame_flush_us", cfg.cuda.cuda_ldpc_cross_frame_flush_us);
 
-        config_detail::load_value(sensing, "enable_bi_sensing", cfg.sensing.enable_bi_sensing);
+        config_detail::load_value(sensing, "bi_enabled", cfg.sensing.bi_enabled);
         config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
         config_detail::load_value(sensing, "doppler_fft_size", cfg.sensing.doppler_fft_size);
-        config_detail::load_value(sensing, "sensing_output_mode", cfg.sensing.sensing_output_mode);
-        if (sensing["sensing_on_wire_format"]) {
-            cfg.sensing.sensing_on_wire_format = parse_sensing_on_wire_format_string(
-                sensing["sensing_on_wire_format"].as<std::string>());
+        config_detail::load_value(sensing, "output_mode", cfg.sensing.output_mode);
+        if (sensing["on_wire_format"]) {
+            cfg.sensing.on_wire_format = parse_sensing_on_wire_format_string(
+                sensing["on_wire_format"].as<std::string>());
         }
         config_detail::load_value(
-            sensing, "enable_backend_sensing_processing", cfg.sensing.enable_backend_sensing_processing);
-        config_detail::load_value(sensing, "sensing_view_range_bins", cfg.sensing.sensing_view_range_bins);
+            sensing, "backend_processing_enabled", cfg.sensing.backend_processing_enabled);
+        config_detail::load_value(sensing, "view_range_bins", cfg.sensing.view_range_bins);
         config_detail::load_value(
-            sensing, "sensing_view_doppler_bins", cfg.sensing.sensing_view_doppler_bins);
-        config_detail::load_value(sensing, "sensing_symbol_stride", cfg.sensing.sensing_symbol_stride);
+            sensing, "view_doppler_bins", cfg.sensing.view_doppler_bins);
+        config_detail::load_value(sensing, "symbol_stride", cfg.sensing.symbol_stride);
 
         config_detail::load_value(rf, "sample_rate", cfg.rf_sampling.sample_rate);
         config_detail::load_value(rf, "bandwidth", cfg.rf_sampling.bandwidth);
@@ -3451,7 +3425,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(usrp, "clock_source", cfg.clock_time.clock_source);
 
         config_detail::load_value(downlink, "center_freq", cfg.downlink.center_freq);
-        config_detail::load_value(downlink, "downlink_rx_wire_format", cfg.downlink.downlink_rx_wire_format);
+        config_detail::load_value(downlink, "rx_wire_format", cfg.downlink.rx_wire_format);
         config_detail::load_value(downlink, "rx_channel", cfg.downlink.rx_channel);
         config_detail::load_value(downlink, "equalizer_mode", cfg.downlink.equalizer.equalizer_mode);
         if (downlink["channel_tracking_mode"]) {
@@ -3601,9 +3575,9 @@ inline void finalize_ue_network_defaults(Config& cfg) {
         LOG_G_WARN() << "reset_hold_s<=0 is invalid. Clamping to 0.5 s.";
         cfg.sync_tracking.reset_hold_s = 0.5;
     }
-    if (cfg.sensing.sensing_symbol_stride == 0) {
+    if (cfg.sensing.symbol_stride == 0) {
         LOG_G_WARN() << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
-        cfg.sensing.sensing_symbol_stride = 1;
+        cfg.sensing.symbol_stride = 1;
     }
     if (cfg.rf_sampling.rx_agc_update_frames == 0) {
         LOG_G_WARN() << "rx_agc_update_frames=0 is invalid. Clamping to 1.";
@@ -4482,7 +4456,7 @@ inline uint32_t sensing_viewer_mask_hash(const Config& cfg)
 
 inline SensingViewerWireDataFormat sensing_viewer_wire_data_format(const Config& cfg)
 {
-    switch (cfg.sensing.sensing_on_wire_format) {
+    switch (cfg.sensing.on_wire_format) {
     case SensingOnWireFormat::ComplexFloat16:
         return SensingViewerWireDataFormat::ComplexFloat16;
     case SensingOnWireFormat::ComplexFloat32:

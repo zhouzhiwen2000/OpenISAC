@@ -493,20 +493,20 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 Then open `http://<your-host>:8765` in a browser.
 
 What it does:
-* Provides separate BS / UE tabs, plus a `Resource Planner` tab for `data_resource_blocks` and a `Sensing Resource Map` tab for `sensing_mask_blocks`.
+* Provides separate BS / UE tabs, plus a `Resource Planner` tab for `data_resource_blocks` and a `Sensing Resource Map` tab for `mask_blocks`.
 * Edits `build/BS.yaml` and `build/UE.yaml` as parameter/value forms instead of a raw YAML text area.
 * Provides module-local CPU-binding fields for downlink, uplink, sensing real-time loops, and the main thread.
 * Saves the current form back to YAML and starts/stops BS and UE processes from the `build/` directory.
 * Includes launch options such as enabling/disabling CPU isolation and overriding the isolate CPU list.
 * Includes CPU/CUDA command presets and a custom command field for each tab.
-* Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `sensing_mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
+* Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
 * Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
 Notes:
 * Default commands are `./BS` and `./UE`; switch to the CUDA preset if needed.
 * The editor currently targets the runtime YAML files in `build/`, because the binaries read `BS.yaml` / `UE.yaml` from their working directory.
 * `Resource Planner` edits `data_resource_blocks`: it decides which RE carry payload and which RE are reserved as `sensing_pilot`.
-* `Sensing Resource Map` edits `sensing_mask_blocks`: it decides which RE are exported on the compact sensing path when `sensing_output_mode=compact_mask`.
+* `Sensing Resource Map` edits `mask_blocks`: it decides which RE are exported on the compact sensing path when `output_mode=compact_mask`.
 * Both planners can be applied to either side. During experiments TX and RX may differ temporarily, but normal operation still expects matching `data_resource_blocks` on both sides.
 * If CPU cores are limited, reserve a dedicated core for `main thread affinity` first, then prioritize TX/RX threads, and finally modulation/demodulation plus sensing/signal-processing threads; these compute-heavy stages typically have larger buffers and tolerate transient jitter better.
 * CPU affinity is configured only for real-time pipeline threads and the main thread. Non-real-time service/output/helper threads are intentionally left unbound.
@@ -541,13 +541,13 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `tx_channel` | `int` | `0` | TX channel index. |
 | `zc_root` | `int` | `29` | Zadoff-Chu root index. |
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
-| `sensing_output_mode` | `string` | `dense` | Sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
+| `output_mode` | `string` | `dense` | Sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
 | `cuda_mod_pipeline_slots` | `int` | `2` | Number of CUDA modulation pipeline slots. Values below `1` are clamped to `1`. |
 | `pilot_positions` | `int[]` | `[571,631,...,451]` | Configurable comb-pilot subcarrier indices spread across the occupied band. |
 | `midframe_pilot_symbols` | `int[]` | `[]` | Optional mid-frame BPSK pilot symbol indices inside each frame, such as `[25,50,75]`. These symbols are excluded from payload mapping; configured comb-pilot RE keep the comb-pilot sequence for phase tracking, while the remaining RE in those symbols use deterministic BPSK. |
 | `midframe_pilot_seed` | `int` | `1296453708` | Deterministic BPSK pilot seed. It must match between `BS.yaml` and `UE.yaml`. |
 | `data_resource_blocks` | `object[]` | omitted | Optional communication resource map. It answers: "which RE are allowed to carry payload?" Omit the key to keep the legacy behavior, where every non-reserved-sync, non-comb-pilot RE carries payload. Set `[]` to disable payload RE entirely. Each block is a rectangle with `symbol_start`, `symbol_count`, `subcarrier_start`, `subcarrier_count`, and optional `kind`. `kind: payload` means those RE carry real payload. `kind: sensing_pilot` means those RE transmit a deterministic sensing-pilot reference sequence instead, so they stay predictable for sensing and are excluded from payload mapping. This sensing-pilot sequence is generated from an alternate Zadoff-Chu root that is different from the frame sync root, which avoids confusing sensing-pilot symbols with the dedicated sync symbol. Any remaining non-reserved-sync, non-comb-pilot, non-mid-frame-BPSK-pilot RE outside `payload` blocks transmit pre-generated QPSK. |
-| `sensing_mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `sensing_output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. ZC sync symbols, comb-pilot, and mid-frame BPSK pilot RE are allowed here; the optional CFO training field is rejected because it is not a valid sensing symbol. Overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
+| `mask_blocks` | `object[]` | omitted | Optional compact sensing resource map. It answers: "which RE should be exported on the sensing output path?" It is used only when `output_mode=compact_mask`; in `dense` mode it is ignored. Each block is a rectangle in absolute frame-symbol index and raw FFT-bin index. ZC sync symbols, comb-pilot, and mid-frame BPSK pilot RE are allowed here; the optional CFO training field is rejected because it is not a valid sensing symbol. Overlapping blocks are merged automatically, and the exported order is fixed as symbol-major then subcarrier-major. If every selected symbol uses the same subcarrier set and the selected symbols are evenly spaced on the frame ring, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | Shared USRP args fallback for TX/RX. |
 | `tx_device_args` | `string` | `""` | TX-specific USRP args. |
 | `rx_device_args` | `string` | `""` | Default sensing RX USRP args. |
@@ -558,9 +558,9 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `rx_clock_source` | `string` | `""` | Default sensing RX clock source override. |
 | `rx_time_source` | `string` | `""` | Default sensing RX time source override. |
 | `wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
-| `uplink_rx_channel` | `int` | `0` | BS uplink RX channel index on the shared TX/RX USRP. Legacy `rx_channel` remains a fallback when this key is omitted. |
-| `uplink_rx_wire_format` | `string` | `sc16` | BS uplink RX wire format, typically `sc16` or `sc8`. |
-| `sensing_rx_wire_format` | `string` | `sc16` | BS sensing RX default wire format, typically `sc16` or `sc8`. |
+| `rx_channel` | `int` | `0` | BS uplink RX channel index on the shared TX/RX USRP. |
+| `rx_wire_format` | `string` | `sc16` | BS uplink RX wire format, typically `sc16` or `sc8`. |
+| `rx_wire_format` | `string` | `sc16` | BS sensing RX default wire format, typically `sc16` or `sc8`. |
 | `udp_input_ip` | `string` / IPv4 | `0.0.0.0` | BS downlink payload UDP bind IP. This is the input stream transmitted on the BS->UE downlink. |
 | `udp_input_port` | `int` | `50000` | BS downlink payload UDP bind port. |
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS decoded uplink payload UDP destination IP. This is the output stream recovered from UE->BS uplink. |
@@ -576,8 +576,8 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `uplink_pdf_port` | `int` | `12359` | ZeroMQ PUB bind port for the BS uplink delay-profile debug stream. |
 | `uplink_constellation_ip` | `string` / IPv4 | `0.0.0.0` | ZeroMQ PUB listen IP for the BS uplink constellation debug stream. |
 | `uplink_constellation_port` | `int` | `12356` | ZeroMQ PUB bind port for the BS uplink constellation debug stream. |
-| `sensing_rx_channel_count` | `int` | `1` | Number of sensing RX channels (`0` disables sensing RX). |
-| `sensing_rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
+| `rx_channel_count` | `int` | `1` | Number of sensing RX channels (`0` disables sensing RX). |
+| `rx_channels` | `object[]` | `[]` | Per-channel sensing RX settings (see table below). |
 | `tx_circular_buffer_size` | `int` | `32` | Capacity of the modulated-frame queue feeding TX. |
 | `paired_frame_queue_size` | `int` | `64` | Capacity of each sensing channel's RX/TX frame-pairing queues. Keep this above `tx_circular_buffer_size` so it can retain TX references while RX startup, network buffering, and alignment complete. A continuously full queue after startup indicates insufficient sensing-processing throughput rather than a need for unlimited buffering. |
 | `control_port` | `int` | `9999` | ZeroMQ ROUTER bind port for the bidirectional control channel (commands in, params/heartbeat out). |
@@ -595,16 +595,16 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 
 Quick mental model:
 * `data_resource_blocks` decides where communication data goes.
-* `sensing_mask_blocks` decides which RE are exported for compact sensing.
+* `mask_blocks` decides which RE are exported for compact sensing.
 * The first affects payload mapping; the second affects sensing output only.
 
 If `data_resource_blocks` is enabled, copy the same rectangles and `kind` values into `UE.yaml`. If a block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still take precedence. The optional CFO training field at `sync_pos+1` is reserved for CFO acquisition/deambiguation and is not a valid sensing-pilot or sensing-mask symbol. Priority is always `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
 
-In dense sensing mode, the configured `sensing_symbol_stride` and runtime `STRD` command are rejected if they would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary, so the new stride does not inherit a drifting phase from the old stride. ZC sync symbols remain valid sensing symbols.
+In dense sensing mode, the configured `symbol_stride` and runtime `STRD` command are rejected if they would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary, so the new stride does not inherit a drifting phase from the old stride. ZC sync symbols remain valid sensing symbols.
 
-When `sensing_output_mode=compact_mask`, sensing sends one compact message per OFDM frame and includes only the RE selected by `sensing_mask_blocks`. In this mode `STRD` is ignored, because the mask itself defines the sampling pattern. If the mask is "regular" (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime `MTI` and local Delay-Doppler processing can also be enabled: `SKIP=1` keeps the raw compact RE output, while `SKIP=0` switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands `range_fft_size` and `doppler_fft_size` when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`, followed by `re_count` raw `complex<float>` values in fixed order. Existing `plot_sensing*.py` viewers cannot handle non-"regular" compact payloads yet.
+When `output_mode=compact_mask`, sensing sends one compact message per OFDM frame and includes only the RE selected by `mask_blocks`. In this mode `STRD` is ignored, because the mask itself defines the sampling pattern. If the mask is "regular" (same subcarrier set on every selected symbol, and selected symbols evenly spaced around the frame), runtime `MTI` and local Delay-Doppler processing can also be enabled: `SKIP=1` keeps the raw compact RE output, while `SKIP=0` switches back to dense Delay-Doppler output computed from that regular selection. Config normalization also expands `range_fft_size` and `doppler_fft_size` when needed so they cover the selected subcarriers and symbols. The compact sensing payload begins with `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`, followed by `re_count` raw `complex<float>` values in fixed order. Existing `plot_sensing*.py` viewers cannot handle non-"regular" compact payloads yet.
 
-`sensing_rx_channels` object fields:
+`rx_channels` object fields:
 
 | Key | Type | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
@@ -621,8 +621,8 @@ When `sensing_output_mode=compact_mask`, sensing sends one compact message per O
 | `processing_cpu_core` | `int` | `-1` | CPU core for this channel's sensing-processing loop. |
 
 Notes:
-* If `sensing_rx_channels` is empty and `sensing_rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
-* If the count and list size differ, the list is resized to match `sensing_rx_channel_count`.
+* If `rx_channels` is empty and `rx_channel_count > 0`, default channels `0..N-1` are generated automatically.
+* If the count and list size differ, the list is resized to match `rx_channel_count`.
 * When `enable_system_delay_estimation=true` for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing output remain disabled.
 * In practice, keep hardware-specific fields such as `device_args`, `wire_format_*`, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.
 
@@ -656,10 +656,10 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `zc_root` | `int` | `29` | Zadoff-Chu root index. |
 | `num_symbols` | `int` | `100` | Number of OFDM symbols per frame. |
 | `sensing_symbol_num` | `int` | `100` | Number of symbols used for sensing processing. |
-| `sensing_output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
-| `enable_bi_sensing` | `bool` | `true` | Enable the bistatic sensing processing pipeline. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
+| `output_mode` | `string` | `dense` | Bistatic sensing output mode. `dense` keeps the legacy STRD-based full-buffer output. `compact_mask` switches sensing to per-frame compact RE extraction. |
+| `bi_enabled` | `bool` | `true` | Enable the bistatic sensing processing pipeline. When set to `false`, both `UE` and `CUDAUE` skip bistatic sensing channel startup. |
 | `duplex_mode` | `string` | `tdd` | Must match `BS.yaml`. `tdd` shares the downlink center frequency and sends only in the configured uplink symbol window; `fdd` transmits continuously over the full frame on `uplink.center_freq`. |
-| `uplink_idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
+| `idle_waveform` | `string` | `random_qpsk` | UE uplink idle waveform when no UDP payload is queued. `random_qpsk` sends a zero-length mini-header followed by deterministic random QPSK filler; `zero` sends the zero-length mini-header and leaves the remaining payload RE at zero. |
 | `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | UE uplink settings. TDD uses `symbol_start`, `symbol_count`, and `guard_symbols` and ignores `center_freq`; FDD uses `center_freq` and ignores the TDD symbol-window fields, transmitting over the full frame. Enabling uplink requires a UE TX antenna/RF chain; the BS must also have an uplink RX path. |
 | `ue_timing_advance` | `int` / samples | `63` | UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable `TADV` value. |
 | `cuda_demod_pipeline_slots` | `int` | `3` | Number of CUDA demodulation pipeline slots. Values below `1` are clamped to `1`. |
@@ -676,11 +676,11 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `equalizer_mag_floor` | `float` | `1e-6` | Lower bound for channel magnitude squared during inversion, used by both `zf` and `mmse`. |
 | `channel_tracking_min_pilot_snr` | `float` | `1e-4` | Minimum comb-pilot residual power/weight accepted by per-symbol tracking before falling back to the sync-only correction. |
 | `data_resource_blocks` | `object[]` | omitted | Receiver-side communication resource map. It answers: "which RE should be interpreted as payload?" Omit the key to keep the legacy behavior, where every non-sync, non-comb-pilot RE is treated as payload. Set `[]` to extract no payload LLR at all. Use the same rectangles and `kind` values as the transmitter. Blocks with `kind: payload` produce payload LLR; blocks with `kind: sensing_pilot` are treated as known reference RE instead and are excluded from payload extraction. The known sensing-pilot reference uses the same alternate Zadoff-Chu root as the transmitter, distinct from the frame sync root. |
-| `sensing_mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the BS side: absolute frame-symbol index, raw FFT-bin index, ZC sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, CFO training field rejected, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
+| `mask_blocks` | `object[]` | omitted | Receiver-side compact sensing resource map. It answers: "which RE should be exported on the bistatic sensing path in `compact_mask` mode?" The coordinate system and behavior are the same as on the BS side: absolute frame-symbol index, raw FFT-bin index, ZC sync-symbol, comb-pilot, and mid-frame BPSK pilot RE allowed, CFO training field rejected, overlapping blocks merged automatically, and exported order fixed as symbol-major then subcarrier-major. If the mask is regular, runtime MTI and local Delay-Doppler processing can also be enabled. |
 | `device_args` | `string` | `""` | USRP device args. |
 | `clock_source` | `string` | `internal/external/gpsdo` | Clock source. |
 | `wire_format_tx` | `string` | `sc16` | TX wire format for the optional UE uplink path, typically `sc16` or `sc8`. |
-| `downlink_rx_wire_format` | `string` | `sc16` | UE downlink RX wire format, typically `sc16` or `sc8`. |
+| `rx_wire_format` | `string` | `sc16` | UE downlink RX wire format, typically `sc16` or `sc8`. |
 | `software_sync` | `bool` | `true` | Enable software synchronization tracking. |
 | `predictive_delay` | `bool` | `true` | Enable CFO-based predictive delay compensation during initial alignment and tracking delay correction. Use this only when the sample clock and carrier frequency are derived from the same reference, and there is no secondary frequency conversion outside the USRP. |
 | `hardware_sync` | `bool` | `false` | Enable hardware synchronization. |
@@ -734,8 +734,8 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 Receiver-side note:
 * `data_resource_blocks` should normally match the transmitter exactly, including `kind`.
 * If a resource block overlaps `sync_pos`, the optional second sync symbol at `sync_pos-1`, `midframe_pilot_symbols`, or `pilot_positions`, the built-in ZC sync symbols, comb-pilot RE, and mid-frame BPSK pilots still win. The optional CFO training field at `sync_pos+1` is rejected for sensing-pilot and sensing-mask selection. Priority is `ZC sync symbols > CFO training field > comb-pilot RE > mid-frame BPSK pilot > sensing_pilot > payload/random QPSK`.
-* In dense mode, `sensing_symbol_stride` / runtime `STRD` is rejected if it would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary; ZC sync symbols remain valid sensing symbols.
-* In `compact_mask` mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by `sensing_mask_blocks`; `STRD` is ignored in this mode because the mask already defines the sampling pattern.
+* In dense mode, `symbol_stride` / runtime `STRD` is rejected if it would sample the optional CFO training field at `sync_pos+1`. Runtime `STRD` changes restart the deterministic sampling phase at the scheduled frame boundary; ZC sync symbols remain valid sensing symbols.
+* In `compact_mask` mode, bistatic sensing also sends one compact message per OFDM frame and includes only the RE selected by `mask_blocks`; `STRD` is ignored in this mode because the mask already defines the sampling pattern.
 * The compact payload format is the same as on the BS side: `CompactSensingFrameHeader` followed by fixed-order raw `complex<float>` samples.
 
 Notes:

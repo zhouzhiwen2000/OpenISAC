@@ -17,11 +17,12 @@ cuda:
 
 # ===== Sensing =====
 sensing:
-  enable_bi_sensing: false  # Enable bistatic sensing processing pipeline
+  bi_enabled: false  # Enable bistatic sensing processing pipeline
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
 
 # ===== RF / Sampling =====
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
 rf_sampling:
   sample_rate: 100000000  # Baseband sample rate (Hz)
   bandwidth: 100000000  # Analog bandwidth (Hz), usually same as sample_rate
@@ -40,7 +41,7 @@ usrp_device:
 
 # ===== Downlink =====
 downlink:
-  downlink_rx_wire_format: sc16  # Downlink RX wire format; sc16/sc8
+  rx_wire_format: sc16  # Downlink RX wire format; sc16/sc8
   rx_channel: 0  # RX channel index on USRP
   equalizer_mode: mmse  # Communication equalizer inverse mode
   channel_tracking_mode: pilot_phase  # Per-symbol comb-pilot tracking mode
@@ -86,7 +87,6 @@ sync_tracking:
   akf_r_min: 1e-08  # Lower bound of observation noise variance R
   akf_r_max: 1.0e3  # Upper bound of observation noise variance R
   desired_peak_pos: 20  # Target delay-peak index for alignment
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== Network =====
 network_output:

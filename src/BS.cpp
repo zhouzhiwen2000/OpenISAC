@@ -195,7 +195,7 @@ public:
         _shared_sensing_cfg.sensing_symbol_stride =
             compact_mask_analysis.local_delay_doppler_supported
                 ? compact_mask_analysis.implicit_symbol_stride
-                : cfg.sensing.sensing_symbol_stride;
+                : cfg.sensing.symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
         _shared_sensing_cfg.generation = 1;
@@ -503,9 +503,9 @@ private:
             return;
         }
         std::vector<uint32_t> aggregate_channel_ids;
-        aggregate_channel_ids.reserve(_cfg.sensing.sensing_rx_channels.size());
-        for (uint32_t i = 0; i < _cfg.sensing.sensing_rx_channels.size(); ++i) {
-            const auto& ch_cfg = _cfg.sensing.sensing_rx_channels[i];
+        aggregate_channel_ids.reserve(_cfg.sensing.rx_channels.size());
+        for (uint32_t i = 0; i < _cfg.sensing.rx_channels.size(); ++i) {
+            const auto& ch_cfg = _cfg.sensing.rx_channels[i];
             if (!ch_cfg.enable_sensing_output || ch_cfg.enable_system_delay_estimation) {
                 continue;
             }
@@ -518,7 +518,7 @@ private:
                 std::move(aggregate_channel_ids),
                 true,
                 8,
-                _cfg.sensing.sensing_on_wire_format);
+                _cfg.sensing.on_wire_format);
             LOG_G_INFO() << "[Sensing Aggregate] enabled for "
                          << _aggregated_sensing_sender->channel_count()
                          << " channels -> " << _cfg.network_output.mono_sensing_ip
@@ -526,11 +526,11 @@ private:
         }
 
         _sensing_channels.clear();
-        _sensing_channels.reserve(_cfg.sensing.sensing_rx_channels.size());
-        for (uint32_t i = 0; i < _cfg.sensing.sensing_rx_channels.size(); ++i) {
+        _sensing_channels.reserve(_cfg.sensing.rx_channels.size());
+        for (uint32_t i = 0; i < _cfg.sensing.rx_channels.size(); ++i) {
             auto channel = std::make_unique<SensingChannel>(
                 _cfg,
-                _cfg.sensing.sensing_rx_channels[i],
+                _cfg.sensing.rx_channels[i],
                 SensingChannel::SensingRole::Monostatic,
                 _cfg.network_output.mono_sensing_ip,
                 _cfg.network_output.mono_sensing_port,
@@ -1112,7 +1112,7 @@ private:
             const double ul_freq = (_cfg.uplink.duplex.mode == DuplexMode::FDD &&
                                     _cfg.uplink.duplex.ul_center_freq > 0.0)
                 ? _cfg.uplink.duplex.ul_center_freq : _cfg.downlink.center_freq;
-            const size_t ul_rx_ch = _cfg.uplink.uplink_rx_channel;
+            const size_t ul_rx_ch = _cfg.uplink.rx_channel;
             const size_t usrp_rx_channels = _tx_usrp->get_rx_num_channels();
             if (ul_rx_ch >= usrp_rx_channels) {
                 throw std::runtime_error(
@@ -1124,7 +1124,7 @@ private:
             _tx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
             _tx_usrp->set_rx_gain(_cfg.uplink.rx_gain, ul_rx_ch);
             _tx_usrp->set_rx_bandwidth(_cfg.rf_sampling.bandwidth, ul_rx_ch);
-            uhd::stream_args_t ul_rx_args("fc32", _cfg.uplink.uplink_rx_wire_format);
+            uhd::stream_args_t ul_rx_args("fc32", _cfg.uplink.rx_wire_format);
             ul_rx_args.channels = {ul_rx_ch};
             _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
             _uplink_rx->set_rx_stream(_tx_usrp->get_rx_stream(ul_rx_args));

@@ -213,7 +213,7 @@ private:
         data_pool.resize(LdpcPacketFraming::kControlSymbols);
         LdpcPacketFraming::write_control_qpsk(hdr, data_pool.data());
 
-        if (_link_cfg.uplink.uplink_idle_waveform != kUplinkIdleWaveformRandomQpsk) {
+        if (_link_cfg.uplink.idle_waveform != kUplinkIdleWaveformRandomQpsk) {
             return;
         }
         data_pool.reserve(_layout.payload_re_count);

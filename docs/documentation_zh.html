@@ -302,13 +302,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <p>随后在浏览器打开 <code>http://&lt;your-host&gt;:8765</code>。</p>
 <p>功能：</p>
 <ul>
-<li>BS 和 UE 使用不同 tab 分开管理，并额外提供 <code>Resource Planner</code> 和 <code>Sensing Resource Map</code> 两个规划 tab，分别对应 <code>data_resource_blocks</code> 与 <code>sensing_mask_blocks</code>。</li>
+<li>BS 和 UE 使用不同 tab 分开管理，并额外提供 <code>Resource Planner</code> 和 <code>Sensing Resource Map</code> 两个规划 tab，分别对应 <code>data_resource_blocks</code> 与 <code>mask_blocks</code>。</li>
 <li>以“参数 / 值”表单方式编辑 <code>build/BS.yaml</code> 和 <code>build/UE.yaml</code>，而不是原始 YAML 文本框。</li>
 <li>提供按模块放置的 CPU 绑核字段，覆盖下行、上行、感知实时 loop 和主线程模块。</li>
 <li>保存当前表单后，可在 <code>build/</code> 目录中启动/停止 BS 与 UE 进程。</li>
 <li>提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。</li>
 <li>每个 tab 都提供 CPU/CUDA 预设命令，也支持自定义启动命令。</li>
-<li>可以在较大的时频资源网格画布上直接绘制 <code>data_resource_blocks</code> 的 payload / sensing-pilot 矩形块，或绘制 <code>sensing_mask_blocks</code> 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。</li>
+<li>可以在较大的时频资源网格画布上直接绘制 <code>data_resource_blocks</code> 的 payload / sensing-pilot 矩形块，或绘制 <code>mask_blocks</code> 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。</li>
 <li>内置 <code>Guard Band Grid</code> 预设，规则与 <code>scripts/plot_const.py</code> 一致：默认仅保留 <code>1..489</code> 和 <code>535..N-1</code> 这两段子载波，然后再继续套用同步 / 梳状导频的剔除规则。</li>
 </ul>
 <p>说明：</p>
@@ -316,7 +316,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <li>默认命令分别是 <code>./BS</code> 和 <code>./UE</code>；如果需要 CUDA 版本，可在下拉框里切换。</li>
 <li>编辑器当前直接面向 <code>build/</code> 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 <code>BS.yaml</code> / <code>UE.yaml</code>。</li>
 <li><code>Resource Planner</code> 用来编辑 <code>data_resource_blocks</code>：它决定哪些 RE 承载 payload，哪些 RE 作为 <code>sensing_pilot</code> 保留给感知参考。</li>
-<li><code>Sensing Resource Map</code> 用来编辑 <code>sensing_mask_blocks</code>：它决定 <code>sensing_output_mode=compact_mask</code> 时哪些 RE 会被送到感知输出。</li>
+<li><code>Sensing Resource Map</code> 用来编辑 <code>mask_blocks</code>：它决定 <code>output_mode=compact_mask</code> 时哪些 RE 会被送到感知输出。</li>
 <li>两个 planner 都可以分别应用到发射端或接收端。实验时 TX 和 RX 可以暂时不同，但正常收发时 <code>data_resource_blocks</code> 仍应保持一致。</li>
 <li>当 CPU 核心不足时，建议先给 <code>main thread affinity</code> 预留一个专用核心，然后优先保证 TX/RX 线程，最后再保证调制/解调线程和感知/信号处理线程；这些计算线程通常对应更大的缓冲区，对瞬时抖动更耐受。</li>
 <li>CPU 绑核只配置实时流水线线程和主线程。非实时的服务、输出、辅助线程有意不做绑核。</li>
@@ -421,7 +421,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">每帧 OFDM 符号数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>output_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>dense</code></td>
 <td style="text-align:left">感知输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
@@ -457,10 +457,10 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除预留同步符号和梳状导频 RE 外的所有 RE 都承载 payload。设为 <code>[]</code> 表示完全不发送 payload。每个块是一个矩形，使用 <code>symbol_start</code>、<code>symbol_count</code>、<code>subcarrier_start</code>、<code>subcarrier_count</code>，并可选 <code>kind</code>。<code>kind: payload</code> 表示这些 RE 承载真实业务数据；<code>kind: sensing_pilot</code> 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 <code>sensing_pilot</code> 误判成专用同步符号。未被 <code>payload</code> 块选中的其余非预留同步、非梳状导频、非帧内 BPSK 导频 RE 会发送预生成 QPSK。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>mask_blocks</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">缺省</td>
-<td style="text-align:left">可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 <code>sensing_output_mode=compact_mask</code> 时生效；<code>dense</code> 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE；可选 CFO training field 会被拒绝，因为它不是合法感知符号。重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启。</td>
+<td style="text-align:left">可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 <code>output_mode=compact_mask</code> 时生效；<code>dense</code> 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE；可选 CFO training field 会被拒绝，因为它不是合法感知符号。重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>device_args</code></td>
@@ -523,19 +523,19 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>uplink_rx_channel</code></td>
+<td style="text-align:left"><code>rx_channel</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>0</code></td>
-<td style="text-align:left">BS 上行 RX 使用的 USRP 通道索引。兼容旧配置：省略该字段时会回退到 <code>rx_channel</code>。</td>
+<td style="text-align:left">BS 上行 RX 使用的 USRP 通道索引。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>uplink_rx_wire_format</code></td>
+<td style="text-align:left"><code>rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
 <td style="text-align:left">BS 上行 RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_rx_wire_format</code></td>
+<td style="text-align:left"><code>rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
 <td style="text-align:left">BS 感知 RX 默认链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
@@ -631,13 +631,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">BS 上行星座图调试流的 ZeroMQ PUB 绑定端口。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_rx_channel_count</code></td>
+<td style="text-align:left"><code>rx_channel_count</code></td>
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>1</code></td>
 <td style="text-align:left">感知 RX 通道数量（<code>0</code> 表示关闭感知 RX）。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_rx_channels</code></td>
+<td style="text-align:left"><code>rx_channels</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
 <td style="text-align:left">感知 RX 每通道详细配置，字段见下表。</td>
@@ -731,13 +731,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <p>快速理解：</p>
 <ul>
 <li><code>data_resource_blocks</code> 决定“通信数据放在哪里”。</li>
-<li><code>sensing_mask_blocks</code> 决定“compact 感知时哪些 RE 要导出”。</li>
+<li><code>mask_blocks</code> 决定“compact 感知时哪些 RE 要导出”。</li>
 <li>前者影响 payload 映射，后者只影响感知输出，两者不是互相替代的关系。</li>
 </ul>
 <p>若启用 <code>data_resource_blocks</code>，请把相同的矩形块和 <code>kind</code> 同步写入 <code>UE.yaml</code>。如果与 <code>sync_pos</code>、可选的 <code>sync_pos-1</code> 第二同步符号、<code>midframe_pilot_symbols</code> 或 <code>pilot_positions</code> 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 <code>sync_pos+1</code> CFO training field 只服务于 CFO 捕获/去模糊，不是合法的 sensing-pilot 或 sensing-mask 符号。优先级始终是“ZC 同步符号 &gt; CFO training field &gt; 梳状导频 RE &gt; 帧内 BPSK 导频 &gt; sensing_pilot &gt; payload/预生成 QPSK”。</p>
-<p>dense 感知模式下，如果配置的 <code>sensing_symbol_stride</code> 或运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被直接拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位，不会继承旧 stride 的漂移相位。</p>
-<p>当 <code>sensing_output_mode=compact_mask</code> 时，感知会变成“每个 OFDM 帧发送一条紧凑消息”，其中只包含 <code>sensing_mask_blocks</code> 选中的 RE。此时 <code>STRD</code> 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启：<code>SKIP=1</code> 保持输出紧凑原始 RE，<code>SKIP=0</code> 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 <code>range_fft_size</code> 和 <code>doppler_fft_size</code>，确保它们能覆盖所选子载波数和符号数。紧凑感知载荷格式为 <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>，后面跟着固定顺序的 <code>re_count</code> 个原始 <code>complex&lt;float&gt;</code> 数据。当前 <code>plot_sensing*.py</code> 还不能处理非“规则”的 compact 载荷。</p>
-<p><code>sensing_rx_channels</code> 子项字段：</p>
+<p>dense 感知模式下，如果配置的 <code>symbol_stride</code> 或运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被直接拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位，不会继承旧 stride 的漂移相位。</p>
+<p>当 <code>output_mode=compact_mask</code> 时，感知会变成“每个 OFDM 帧发送一条紧凑消息”，其中只包含 <code>mask_blocks</code> 选中的 RE。此时 <code>STRD</code> 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 <code>MTI</code> 和本地 Delay-Doppler 处理也可以开启：<code>SKIP=1</code> 保持输出紧凑原始 RE，<code>SKIP=0</code> 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 <code>range_fft_size</code> 和 <code>doppler_fft_size</code>，确保它们能覆盖所选子载波数和符号数。紧凑感知载荷格式为 <code>CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }</code>，后面跟着固定顺序的 <code>re_count</code> 个原始 <code>complex&lt;float&gt;</code> 数据。当前 <code>plot_sensing*.py</code> 还不能处理非“规则”的 compact 载荷。</p>
+<p><code>rx_channels</code> 子项字段：</p>
 <table>
 <thead>
 <tr>
@@ -818,8 +818,8 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 </table>
 <p>说明：</p>
 <ul>
-<li>当 <code>sensing_rx_channels</code> 为空且 <code>sensing_rx_channel_count &gt; 0</code> 时，程序按通道号 <code>0..N-1</code> 自动补齐默认项。</li>
-<li>若两者数量不一致，程序会按 <code>sensing_rx_channel_count</code> 对通道列表做裁剪或扩展。</li>
+<li>当 <code>rx_channels</code> 为空且 <code>rx_channel_count &gt; 0</code> 时，程序按通道号 <code>0..N-1</code> 自动补齐默认项。</li>
+<li>若两者数量不一致，程序会按 <code>rx_channel_count</code> 对通道列表做裁剪或扩展。</li>
 <li>当某通道设置 <code>enable_system_delay_estimation=true</code> 时，该通道会在启动附近执行一次系统时延估计，之后每隔 434 个帧重复执行一次，同时继续消耗帧数据；常规感知处理和感知输出保持停用。</li>
 <li><code>device_args</code>、<code>wire_format_*</code>、每通道天线口和输出 IP 等字段通常与硬件平台和部署环境强相关；样本 YAML 只是起点，不应把不同机器/射频平台的值机械互换。</li>
 </ul>
@@ -964,13 +964,13 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">参与感知处理的符号数。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_output_mode</code></td>
+<td style="text-align:left"><code>output_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>dense</code></td>
 <td style="text-align:left">双站感知输出模式。<code>dense</code> 保持旧版基于 STRD 的全缓冲区输出；<code>compact_mask</code> 切换为按帧提取紧凑感知 RE。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>enable_bi_sensing</code></td>
+<td style="text-align:left"><code>bi_enabled</code></td>
 <td style="text-align:left"><code>bool</code></td>
 <td style="text-align:left"><code>true</code></td>
 <td style="text-align:left">启用双站感知处理链；设为 <code>false</code> 时 <code>UE</code> 与 <code>CUDAUE</code> 均不会启动双站感知通道。</td>
@@ -982,7 +982,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">必须与 <code>BS.yaml</code> 保持一致。<code>tdd</code> 共享下行中心频率并只在配置的上行符号窗口发送；<code>fdd</code> 在 <code>uplink.center_freq</code> 上按整帧连续发送。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>uplink_idle_waveform</code></td>
+<td style="text-align:left"><code>idle_waveform</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>random_qpsk</code></td>
 <td style="text-align:left">UE 无上行 UDP 载荷时的 idle 波形。<code>random_qpsk</code> 发送 zero-length mini-header 后接确定性随机 QPSK 填充；<code>zero</code> 发送 zero-length mini-header，剩余 payload RE 保持为 0。</td>
@@ -1084,7 +1084,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都参与 payload 提取。设为 <code>[]</code> 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 <code>kind</code>。其中 <code>kind: payload</code> 的块会产生 payload LLR；<code>kind: sensing_pilot</code> 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>sensing_mask_blocks</code></td>
+<td style="text-align:left"><code>mask_blocks</code></td>
 <td style="text-align:left"><code>object[]</code></td>
 <td style="text-align:left">缺省</td>
 <td style="text-align:left">接收侧的紧凑感知资源映射，用来回答“在 <code>compact_mask</code> 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE，但拒绝 CFO training field；重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 <code>MTI</code> 和本地 Delay-Doppler 处理。</td>
@@ -1108,7 +1108,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">可选 UE 上行 TX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
 </tr>
 <tr>
-<td style="text-align:left"><code>downlink_rx_wire_format</code></td>
+<td style="text-align:left"><code>rx_wire_format</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>sc16</code></td>
 <td style="text-align:left">UE 下行 RX 链路数据格式，常用 <code>sc16</code> 或 <code>sc8</code>。</td>
@@ -1413,8 +1413,8 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <ul>
 <li><code>data_resource_blocks</code> 通常应与发射端完全一致，包括 <code>kind</code>。</li>
 <li>如果资源块与 <code>sync_pos</code>、可选的 <code>sync_pos-1</code> 第二同步符号、<code>midframe_pilot_symbols</code> 或 <code>pilot_positions</code> 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 <code>sync_pos+1</code> CFO training field 会在 sensing-pilot 和 sensing-mask 选择中被拒绝。优先级是“ZC 同步符号 &gt; CFO training field &gt; 梳状导频 RE &gt; 帧内 BPSK 导频 &gt; sensing_pilot &gt; payload/预生成 QPSK”。</li>
-<li>dense 模式下，如果 <code>sensing_symbol_stride</code> / 运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位。</li>
-<li>当 <code>sensing_output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 <code>sensing_mask_blocks</code> 选中的 RE；此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
+<li>dense 模式下，如果 <code>symbol_stride</code> / 运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位。</li>
+<li>当 <code>output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 <code>mask_blocks</code> 选中的 RE；此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
 <li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
 <li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
 <li>UE 接收机会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>

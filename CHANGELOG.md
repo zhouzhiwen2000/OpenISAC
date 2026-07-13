@@ -8,6 +8,20 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-24 - YAML 嵌套字段命名收敛
+
+### Summary
+
+本次更新将外部 YAML 配置字段收敛到各 section 内的短字段名，并移除对应旧字段的前向兼容读取。
+
+### Changes
+
+- `uplink`、`sensing`、`downlink` 下的重复前缀字段改为 section-scoped 短字段名，例如 `uplink.enabled`、`uplink.rx_channel`、`sensing.rx_channels`、`sensing.output_mode`、`sensing.mask_blocks` 和 `downlink.rx_wire_format`。
+  影响：新配置不再接受旧的前缀式字段名，模板、Web 编辑器、benchmark 模板和文档均已同步到新 YAML schema。
+
+- Web 配置编辑器新增内部 `data_key` 区分同名字段，使不同 section 可以各自使用 `rx_wire_format`、`rx_channel` 等短 YAML key，同时保持表单数据不会互相覆盖。
+  影响：Web 端保存的 YAML 与运行时读取的嵌套 schema 保持一致。
+
 ## 2026-06-23 - BS 上行 RX 通道配置生效
 
 ### Summary

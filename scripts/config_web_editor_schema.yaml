@@ -24,11 +24,12 @@ common:
       options:
       - tdd
       - fdd
-  enable_uplink:
+  uplink.enabled:
     title: Uplink
     field:
       type: scalar
-      key: enable_uplink
+      key: enabled
+      data_key: uplink.enabled
       kind: bool
       comment: Enable UE-to-BS uplink / duplex path
       default: false
@@ -245,11 +246,12 @@ common:
       comment: Max measurement packets pulled per frame; 0 means unlimited
       default: 1
       optional: true
-  sensing_on_wire_format:
+  sensing.on_wire_format:
     title: Sensing
     field:
       type: scalar
-      key: sensing_on_wire_format
+      key: on_wire_format
+      data_key: sensing.on_wire_format
       kind: string
       comment: Sensing ZMQ sample format
       default: cf32
@@ -291,11 +293,12 @@ common:
         comment: Number of contiguous subcarriers in this block
         kind: int
         default: 1
-  sensing_mask_blocks:
+  sensing.mask_blocks:
     title: Resource Preview
     field:
       type: mapping_list
-      key: sensing_mask_blocks
+      key: mask_blocks
+      data_key: sensing.mask_blocks
       comment: Optional compact sensing RE rectangles
       allow_omit: true
       optional: true
@@ -598,11 +601,12 @@ bs:
       comment: Doppler FFT size
       default: 100
       optional: true
-  sensing_output_mode:
+  sensing.output_mode:
     title: Sensing
     field:
       type: scalar
-      key: sensing_output_mode
+      key: output_mode
+      data_key: sensing.output_mode
       kind: string
       comment: dense or compact_mask
       default: dense
@@ -610,29 +614,32 @@ bs:
       options:
       - dense
       - compact_mask
-  enable_backend_sensing_processing:
+  sensing.backend_processing_enabled:
     title: Sensing
     field:
       type: scalar
-      key: enable_backend_sensing_processing
+      key: backend_processing_enabled
+      data_key: sensing.backend_processing_enabled
       kind: bool
       comment: true lets backend publish RD/CFAR/MD metadata sidecars
       default: false
       optional: true
-  sensing_view_range_bins:
+  sensing.view_range_bins:
     title: Sensing
     field:
       type: scalar
-      key: sensing_view_range_bins
+      key: view_range_bins
+      data_key: sensing.view_range_bins
       kind: int
       comment: Backend RD view width in range bins; 0 uses full range_fft_size
       default: 63
       optional: true
-  sensing_view_doppler_bins:
+  sensing.view_doppler_bins:
     title: Sensing
     field:
       type: scalar
-      key: sensing_view_doppler_bins
+      key: view_doppler_bins
+      data_key: sensing.view_doppler_bins
       kind: int
       comment: Backend RD view height in Doppler bins; 0 uses full doppler_fft_size
       default: 0
@@ -691,11 +698,12 @@ bs:
       comment: Uplink RX gain (dB)
       default: 10
       optional: true
-  uplink_rx_channel:
+  uplink.rx_channel:
     title: Uplink
     field:
       type: scalar
-      key: uplink_rx_channel
+      key: rx_channel
+      data_key: uplink.rx_channel
       kind: int
       comment: Uplink RX channel index on USRP
       default: 0
@@ -718,20 +726,22 @@ bs:
       comment: TX-specific args (empty = use device_args)
       default: ''
       optional: true
-  uplink_rx_device_args:
+  uplink.rx_device_args:
     title: Uplink
     field:
       type: scalar
-      key: uplink_rx_device_args
+      key: rx_device_args
+      data_key: uplink.rx_device_args
       kind: string
       comment: Uplink RX-specific args (empty = use TX/shared device)
       default: ''
       optional: true
-  uplink_rx_wire_format:
+  uplink.rx_wire_format:
     title: Uplink
     field:
       type: scalar
-      key: uplink_rx_wire_format
+      key: rx_wire_format
+      data_key: uplink.rx_wire_format
       kind: string
       comment: Uplink RX wire format; sc16/sc8
       default: sc16
@@ -744,6 +754,7 @@ bs:
     field:
       type: scalar
       key: rx_device_args
+      data_key: sensing.rx_device_args
       kind: string
       comment: Default sensing RX args (empty = use device_args)
       default: ''
@@ -803,11 +814,12 @@ bs:
       - internal
       - external
       - gpsdo
-  uplink_rx_clock_source:
+  uplink.rx_clock_source:
     title: Uplink
     field:
       type: scalar
-      key: uplink_rx_clock_source
+      key: rx_clock_source
+      data_key: uplink.rx_clock_source
       kind: string
       comment: Uplink RX clock source override (optional)
       default: ''
@@ -817,11 +829,12 @@ bs:
       - internal
       - external
       - gpsdo
-  uplink_rx_time_source:
+  uplink.rx_time_source:
     title: Uplink
     field:
       type: scalar
-      key: uplink_rx_time_source
+      key: rx_time_source
+      data_key: uplink.rx_time_source
       kind: string
       comment: Uplink RX time source override (optional)
       default: ''
@@ -836,6 +849,7 @@ bs:
     field:
       type: scalar
       key: rx_clock_source
+      data_key: sensing.rx_clock_source
       kind: string
       comment: Sensing RX clock source override (optional)
       default: ''
@@ -850,6 +864,7 @@ bs:
     field:
       type: scalar
       key: rx_time_source
+      data_key: sensing.rx_time_source
       kind: string
       comment: Sensing RX time source override (optional)
       default: ''
@@ -859,11 +874,12 @@ bs:
       - internal
       - external
       - gpsdo
-  sensing_rx_wire_format:
+  sensing.rx_wire_format:
     title: Sensing
     field:
       type: scalar
-      key: sensing_rx_wire_format
+      key: rx_wire_format
+      data_key: sensing.rx_wire_format
       kind: string
       comment: Sensing RX default wire format; sc16/sc8
       default: sc16
@@ -1009,29 +1025,32 @@ bs:
       comment: ZMQ port for runtime control commands
       default: 9999
       optional: true
-  sensing_symbol_stride:
+  sensing.symbol_stride:
     title: Sensing
     field:
       type: scalar
-      key: sensing_symbol_stride
+      key: symbol_stride
+      data_key: sensing.symbol_stride
       kind: int
       comment: Default STRD applied at startup before runtime commands
       default: 20
       optional: true
-  sensing_rx_channel_count:
+  sensing.rx_channel_count:
     title: Sensing
     field:
       type: scalar
-      key: sensing_rx_channel_count
+      key: rx_channel_count
+      data_key: sensing.rx_channel_count
       kind: int
       comment: Number of sensing RX channels (0 disables sensing RX)
       default: 1
       optional: true
-  sensing_rx_channels:
+  sensing.rx_channels:
     title: Sensing
     field:
       type: mapping_list
-      key: sensing_rx_channels
+      key: rx_channels
+      data_key: sensing.rx_channels
       comment: ''
       optional: false
       item_fields:
@@ -1170,11 +1189,12 @@ bs:
       default: ''
       optional: true
 ue:
-  uplink_idle_waveform:
+  uplink.idle_waveform:
     title: Uplink
     field:
       type: scalar
-      key: uplink_idle_waveform
+      key: idle_waveform
+      data_key: uplink.idle_waveform
       kind: string
       comment: UE uplink idle waveform when no UDP payload is queued
       default: random_qpsk
@@ -1536,11 +1556,12 @@ ue:
       comment: Doppler FFT size
       default: 100
       optional: true
-  sensing_output_mode:
+  sensing.output_mode:
     title: Sensing
     field:
       type: scalar
-      key: sensing_output_mode
+      key: output_mode
+      data_key: sensing.output_mode
       kind: string
       comment: dense or compact_mask
       default: dense
@@ -1548,29 +1569,32 @@ ue:
       options:
       - dense
       - compact_mask
-  enable_backend_sensing_processing:
+  sensing.backend_processing_enabled:
     title: Sensing
     field:
       type: scalar
-      key: enable_backend_sensing_processing
+      key: backend_processing_enabled
+      data_key: sensing.backend_processing_enabled
       kind: bool
       comment: true lets backend publish RD/CFAR/MD metadata sidecars
       default: false
       optional: true
-  sensing_view_range_bins:
+  sensing.view_range_bins:
     title: Sensing
     field:
       type: scalar
-      key: sensing_view_range_bins
+      key: view_range_bins
+      data_key: sensing.view_range_bins
       kind: int
       comment: Backend RD view width in range bins; 0 uses full range_fft_size
       default: 0
       optional: true
-  sensing_view_doppler_bins:
+  sensing.view_doppler_bins:
     title: Sensing
     field:
       type: scalar
-      key: sensing_view_doppler_bins
+      key: view_doppler_bins
+      data_key: sensing.view_doppler_bins
       kind: int
       comment: Backend RD view height in Doppler bins; 0 uses full doppler_fft_size
       default: 0
@@ -1719,11 +1743,12 @@ ue:
       options:
       - sc16
       - sc8
-  downlink_rx_wire_format:
+  downlink.rx_wire_format:
     title: Downlink
     field:
       type: scalar
-      key: downlink_rx_wire_format
+      key: rx_wire_format
+      data_key: downlink.rx_wire_format
       kind: string
       comment: Downlink RX wire format; sc16/sc8
       default: sc16
@@ -1974,20 +1999,22 @@ ue:
       comment: Target delay-peak index for alignment
       default: 20
       optional: true
-  sensing_symbol_stride:
+  sensing.symbol_stride:
     title: Sensing
     field:
       type: scalar
-      key: sensing_symbol_stride
+      key: symbol_stride
+      data_key: sensing.symbol_stride
       kind: int
       comment: Default STRD applied at startup before runtime commands
       default: 20
       optional: true
-  enable_bi_sensing:
+  sensing.bi_enabled:
     title: Sensing
     field:
       type: scalar
-      key: enable_bi_sensing
+      key: bi_enabled
+      data_key: sensing.bi_enabled
       kind: bool
       comment: Enable bistatic sensing processing pipeline
       default: true

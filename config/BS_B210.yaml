@@ -19,12 +19,12 @@ cuda:
 
 # ===== Sensing =====
 sensing:
-  sensing_rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
+  rx_wire_format: sc16  # Sensing RX default wire format; sc16/sc8
   rx_device_args: ""  # Default sensing RX args (empty = use device_args)
   rx_clock_source: ""  # Sensing RX clock source override (optional)
   rx_time_source: ""  # Sensing RX time source override (optional)
-  sensing_rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
-  sensing_rx_channels:
+  rx_channel_count: 1  # Number of sensing RX channels (0 disables sensing RX)
+  rx_channels:
     - usrp_channel: 1  # USRP RX channel index for this sensing path
       device_args: ""  # Per-channel USRP args override (optional)
       clock_source: ""  # Per-channel clock source override (optional)
@@ -38,9 +38,9 @@ sensing:
       processing_cpu_core: 5  # CPU core for SensingChannel::_sensing_loop (-1 disables explicit binding)
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
-  sensing_output_mode: dense  # dense or compact_mask
-  enable_backend_sensing_processing: false  # true lets backend publish RD/CFAR/MD metadata sidecars
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
+  output_mode: dense  # dense or compact_mask
+  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
   paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
 
 # ===== RF / Sampling =====
@@ -68,20 +68,15 @@ downlink:
   wire_format_tx: sc8  # TX wire format; sc16/sc8
 
 # ===== Uplink =====
-
-# ===== Downlink Pipeline =====
-downlink_pipeline:
-  tx_circular_buffer_size: 32  # BS frame circular buffer capacity
-  data_packet_buffer_size: 32  # Encoded packet buffer capacity
 uplink:
   symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
   symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
   guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
-  uplink_rx_channel: 0  # Uplink RX channel index on USRP
-  uplink_rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
-  uplink_rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
-  uplink_rx_clock_source: ""  # Uplink RX clock source override (optional)
-  uplink_rx_time_source: ""  # Uplink RX time source override (optional)
+  rx_channel: 0  # Uplink RX channel index on USRP
+  rx_wire_format: sc16  # Uplink RX wire format; sc16/sc8
+  rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
+  rx_clock_source: ""  # Uplink RX clock source override (optional)
+  rx_time_source: ""  # Uplink RX time source override (optional)
   bs_dl_ul_timing_diff: 63  # BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
 
 # ===== Network =====

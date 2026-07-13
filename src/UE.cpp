@@ -1413,7 +1413,7 @@ private:
         LOG_G_INFO() << "RX gain range: [" << _rx_gain_min_db << ", " << _rx_gain_max_db
                      << "] dB, initial gain: " << initial_rx_gain_db << " dB";
 
-        uhd::stream_args_t args("fc32", cfg_.downlink.downlink_rx_wire_format);
+        uhd::stream_args_t args("fc32", cfg_.downlink.rx_wire_format);
         args.args["block_id"] = "radio";
         args.channels = {cfg_.downlink.rx_channel};
         rx_stream_ = usrp_->get_rx_stream(args);
@@ -1709,7 +1709,7 @@ private:
         });
 
         _control_handler.register_request("PARM", [this](int32_t, const ControlCommandHandler::ControlPeer& peer) {
-            if (!cfg_.sensing.enable_bi_sensing) {
+            if (!cfg_.sensing.bi_enabled) {
                 return;
             }
             SharedSensingRuntime snapshot;
@@ -1741,7 +1741,7 @@ private:
                 static_cast<int>(i);
         }
 
-        if (!cfg_.sensing.enable_bi_sensing) {
+        if (!cfg_.sensing.bi_enabled) {
             LOG_G_INFO() << "Bistatic sensing disabled by config.";
             return;
         }
@@ -1750,7 +1750,7 @@ private:
         _shared_sensing_cfg.sensing_symbol_stride =
             compact_mask_analysis.local_delay_doppler_supported
                 ? compact_mask_analysis.implicit_symbol_stride
-                : cfg_.sensing.sensing_symbol_stride;
+                : cfg_.sensing.symbol_stride;
         _shared_sensing_cfg.enable_mti = true;
         _shared_sensing_cfg.skip_sensing_fft = true;
         _shared_sensing_cfg.generation = 1;

@@ -76,14 +76,14 @@ const APP = window.__APP_STATE__;
 	      if (tabName === 'sensingPlanner') {
 	        return {
 	          cacheKey: 'sensingPlanner',
-	          fieldKey: 'sensing_mask_blocks',
+	          fieldKey: 'sensing.mask_blocks',
 		          title: 'Sensing Resource Map',
 	          intro: 'Plan sensing time-frequency resources on a large canvas, choose whether to load from the BS or UE config, then apply back to either side.',
 		          summaryTitle: 'Sensing Resource Map',
 		          loadedFromLabel: 'current sensing resource map tab',
 	          metricLabel: 'sensing RE',
 	          missingMode: 'disabled',
-	          note: 'Selections are snapped to integer RE cells on drag release. STRD-based mode writes `sensing_output_mode=dense`. Custom Blocks writes `sensing_output_mode=compact_mask` plus `sensing_mask_blocks`. If every selected symbol uses the same subcarrier set and symbols are equally spaced across the frame ring, compact sensing can enable MTI and local Delay-Doppler; in that mode `range_fft_size` must cover the selected subcarrier count and `doppler_fft_size` must cover the selected symbol count. Load pulls `sensing_mask_blocks` from BS.yaml or UE.yaml. Apply writes the current sensing resource plan back to either file.',
+	          note: 'Selections are snapped to integer RE cells on drag release. STRD-based mode writes `output_mode=dense`. Custom Blocks writes `output_mode=compact_mask` plus `mask_blocks`. If every selected symbol uses the same subcarrier set and symbols are equally spaced across the frame ring, compact sensing can enable MTI and local Delay-Doppler; in that mode `range_fft_size` must cover the selected subcarrier count and `doppler_fft_size` must cover the selected symbol count. Load pulls `mask_blocks` from BS.yaml or UE.yaml. Apply writes the current sensing resource plan back to either file.',
 	        };
 	      }
 	      return {
@@ -161,9 +161,9 @@ const APP = window.__APP_STATE__;
       'clock_source',
       'time_source',
       'wire_format_tx',
-      'uplink_rx_wire_format',
-      'sensing_rx_wire_format',
-      'downlink_rx_wire_format',
+      'uplink.rx_wire_format',
+      'sensing.rx_wire_format',
+      'downlink.rx_wire_format',
       'tx_gain',
       'tx_channel',
       'tx_device_args',
@@ -174,10 +174,10 @@ const APP = window.__APP_STATE__;
       'rx_clock_source',
       'rx_time_source',
       'rx_channel',
-      'uplink_rx_channel',
-      'uplink_rx_device_args',
-      'uplink_rx_clock_source',
-      'uplink_rx_time_source',
+      'uplink.rx_channel',
+      'uplink.rx_device_args',
+      'uplink.rx_clock_source',
+      'uplink.rx_time_source',
       'rx_agc_enable',
       'rx_agc_low_threshold_db',
       'rx_agc_high_threshold_db',
@@ -228,14 +228,14 @@ const APP = window.__APP_STATE__;
     function visibleMappingItemFields(field, showSimulation) {
       const itemFields = Array.isArray(field.item_fields) ? field.item_fields : [];
       if (!showSimulation) return itemFields;
-      if (field.key !== 'sensing_rx_channels') return itemFields;
+      if (field.key !== 'sensing.rx_channels') return itemFields;
       return itemFields.filter((sub) => !SIM_HARDWARE_MAPPING_ITEM_KEYS.has(sub.key));
     }
 
     // self_channel_* live in Network but stay gated by the uplink
-    // mapping's debug_self_channel checkbox (and enable_uplink/TDD).
+    // mapping's debug_self_channel checkbox (and uplink.enabled/TDD).
     function uplinkSelfChannelVisible(model) {
-      if (!fieldBoolValue(model, 'enable_uplink', false)) return false;
+      if (!fieldBoolValue(model, 'uplink.enabled', false)) return false;
       if (duplexModeValue(model) === 'fdd') return false;
       const uplinkField = findField(model, 'uplink');
       return uplinkField ? structuredBoolValue(uplinkField, 'debug_self_channel', false) : false;
@@ -248,35 +248,35 @@ const APP = window.__APP_STATE__;
 
     const DEPENDENT_FIELD_RULES = {
       cfo_training_period_samples: (model) => fieldBoolValue(model, 'enable_cfo_training_sequence', false),
-      duplex_mode: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_idle_waveform: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      duplex_mode: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      'uplink.idle_waveform': (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink: (model) => fieldBoolValue(model, 'uplink.enabled', false),
       self_channel_ip: uplinkSelfChannelVisible,
       self_channel_port: uplinkSelfChannelVisible,
       self_pdf_ip: uplinkSelfChannelVisible,
       self_pdf_port: uplinkSelfChannelVisible,
-      equalizer_mode: (model) => !fieldIsInSection(model, 'equalizer_mode', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      channel_tracking_mode: (model) => !fieldIsInSection(model, 'channel_tracking_mode', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      equalizer_mag_floor: (model) => !fieldIsInSection(model, 'equalizer_mag_floor', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      channel_tracking_min_pilot_snr: (model) => !fieldIsInSection(model, 'channel_tracking_min_pilot_snr', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      rx_gain: (model) => !fieldIsInSection(model, 'rx_gain', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      tx_gain: (model) => !fieldIsInSection(model, 'tx_gain', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      tx_channel: (model) => !fieldIsInSection(model, 'tx_channel', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      wire_format_tx: (model) => !fieldIsInSection(model, 'wire_format_tx', 'Uplink') || fieldBoolValue(model, 'enable_uplink', false),
-      uplink_rx_channel: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_rx_wire_format: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_rx_device_args: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_rx_clock_source: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_rx_time_source: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      bs_dl_ul_timing_diff: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      ue_timing_advance: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_cpu_cores: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_channel_ip: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_channel_port: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_pdf_ip: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_pdf_port: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_constellation_ip: (model) => fieldBoolValue(model, 'enable_uplink', false),
-      uplink_constellation_port: (model) => fieldBoolValue(model, 'enable_uplink', false),
+      equalizer_mode: (model) => !fieldIsInSection(model, 'equalizer_mode', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      channel_tracking_mode: (model) => !fieldIsInSection(model, 'channel_tracking_mode', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      equalizer_mag_floor: (model) => !fieldIsInSection(model, 'equalizer_mag_floor', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      channel_tracking_min_pilot_snr: (model) => !fieldIsInSection(model, 'channel_tracking_min_pilot_snr', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      rx_gain: (model) => !fieldIsInSection(model, 'rx_gain', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      tx_gain: (model) => !fieldIsInSection(model, 'tx_gain', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      tx_channel: (model) => !fieldIsInSection(model, 'tx_channel', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      wire_format_tx: (model) => !fieldIsInSection(model, 'wire_format_tx', 'Uplink') || fieldBoolValue(model, 'uplink.enabled', false),
+      'uplink.rx_channel': (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      'uplink.rx_wire_format': (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      'uplink.rx_device_args': (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      'uplink.rx_clock_source': (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      'uplink.rx_time_source': (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      bs_dl_ul_timing_diff: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      ue_timing_advance: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_cpu_cores: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_channel_ip: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_channel_port: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_pdf_ip: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_pdf_port: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_constellation_ip: (model) => fieldBoolValue(model, 'uplink.enabled', false),
+      uplink_constellation_port: (model) => fieldBoolValue(model, 'uplink.enabled', false),
       measurement_mode: (model) => fieldBoolValue(model, 'measurement_enable', false),
       measurement_run_id: (model) => fieldBoolValue(model, 'measurement_enable', false),
       measurement_output_dir: (model) => fieldBoolValue(model, 'measurement_enable', false),
@@ -311,12 +311,12 @@ const APP = window.__APP_STATE__;
       akf_q_rw_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
       akf_r_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
       akf_r_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      bi_sensing_output_enabled: (model) => fieldBoolValue(model, 'enable_bi_sensing', false),
-      bi_sensing_ip: (model) => fieldBoolValue(model, 'enable_bi_sensing', false),
-      bi_sensing_port: (model) => fieldBoolValue(model, 'enable_bi_sensing', false) && fieldBoolValue(model, 'bi_sensing_output_enabled', true),
-      sensing_view_range_bins: (model) => fieldBoolValue(model, 'enable_backend_sensing_processing', false),
-      sensing_view_doppler_bins: (model) => fieldBoolValue(model, 'enable_backend_sensing_processing', false),
-      sensing_rx_channels: (model) => fieldIntValue(model, 'sensing_rx_channel_count', 0) > 0,
+      bi_sensing_output_enabled: (model) => fieldBoolValue(model, 'sensing.bi_enabled', false),
+      bi_sensing_ip: (model) => fieldBoolValue(model, 'sensing.bi_enabled', false),
+      bi_sensing_port: (model) => fieldBoolValue(model, 'sensing.bi_enabled', false) && fieldBoolValue(model, 'bi_sensing_output_enabled', true),
+      'sensing.view_range_bins': (model) => fieldBoolValue(model, 'sensing.backend_processing_enabled', false),
+      'sensing.view_doppler_bins': (model) => fieldBoolValue(model, 'sensing.backend_processing_enabled', false),
+      'sensing.rx_channels': (model) => fieldIntValue(model, 'sensing.rx_channel_count', 0) > 0,
     };
 
     function shouldHideFieldByDependency(model, field) {
@@ -338,8 +338,8 @@ const APP = window.__APP_STATE__;
     }
 
     function shouldHideStructuredScalar(field, sub, model = currentModel()) {
-      if (field.key === 'simulation' && sub.key === 'enable_uplink') {
-        return !fieldBoolValue(model, 'enable_uplink', false);
+      if (field.key === 'simulation' && sub.key === 'uplink.enabled') {
+        return !fieldBoolValue(model, 'uplink.enabled', false);
       }
       if (field.key === 'simulation' && sub.key === 'target_snr_db') {
         return !structuredBoolValue(field, 'snr_control_enable', false);
@@ -394,7 +394,7 @@ const APP = window.__APP_STATE__;
         const field = findField(model, key);
         if (field) values.push(parseCpuScalar(field.value_text ?? field.value));
       }
-      const sensingField = findField(model, 'sensing_rx_channels');
+      const sensingField = findField(model, 'sensing.rx_channels');
       for (const item of (sensingField?.items || [])) {
         values.push(parseCpuScalar(item.rx_cpu_core));
         values.push(parseCpuScalar(item.processing_cpu_core));
@@ -725,7 +725,7 @@ const APP = window.__APP_STATE__;
     }
 
 	    function plannerKind(field) {
-      if (field?.key === 'sensing_mask_blocks') return 'sensing_mask';
+      if (field?.key === 'sensing.mask_blocks') return 'sensing_mask';
       if (field?.key === 'data_resource_blocks') return 'payload';
 	      return field?.planner_kind || 'payload';
 	    }
@@ -1102,11 +1102,11 @@ const APP = window.__APP_STATE__;
 	        const chosen = useRxSnapshot ? rxSnapshot : txSnapshot;
 	        cache._plannerStates[spec.cacheKey] = {
 	          key: spec.fieldKey,
-		          planner_kind: spec.fieldKey === 'sensing_mask_blocks' ? 'sensing_mask' : 'payload',
-		          comment: spec.fieldKey === 'sensing_mask_blocks'
+		          planner_kind: spec.fieldKey === 'sensing.mask_blocks' ? 'sensing_mask' : 'payload',
+		          comment: spec.fieldKey === 'sensing.mask_blocks'
 		            ? 'Optional compact sensing RE rectangles'
 		            : 'Optional payload / sensing-pilot RE rectangles',
-		          display_comment: spec.fieldKey === 'sensing_mask_blocks'
+		          display_comment: spec.fieldKey === 'sensing.mask_blocks'
 		            ? 'Plan compact sensing rectangles on a dedicated grid, then write them to TX or RX.'
 		            : 'Plan payload or sensing-pilot rectangles on a dedicated grid, then apply them to TX or RX.',
 	          allow_omit: true,
@@ -1268,9 +1268,9 @@ const APP = window.__APP_STATE__;
     function ensureSensingChannelItems() {
       const model = currentModel();
       if (!model) return;
-      const field = findField(model, 'sensing_rx_channels');
+      const field = findField(model, 'sensing.rx_channels');
       if (!field) return;
-      const countField = findField(model, 'sensing_rx_channel_count');
+      const countField = findField(model, 'sensing.rx_channel_count');
       const countRaw = countField ? (countField.value_text ?? countField.value ?? '') : '';
       const count = Math.max(0, parseIntOrNull(countRaw) ?? 0);
       const items = Array.isArray(field.items) ? field.items : [];
@@ -2405,25 +2405,25 @@ const APP = window.__APP_STATE__;
 	      configSections.innerHTML = '';
 
         const fieldSortOrder = {
-          enable_uplink: 0,
+          'uplink.enabled': 0,
           duplex_mode: 1,
-          uplink_idle_waveform: 2,
+          'uplink.idle_waveform': 2,
           uplink: 3,
           equalizer_mode: 4,
           channel_tracking_mode: 5,
           equalizer_mag_floor: 6,
           channel_tracking_min_pilot_snr: 7,
           rx_gain: 8,
-          uplink_rx_channel: 9,
-          uplink_rx_wire_format: 10,
-          uplink_rx_device_args: 11,
-          uplink_rx_clock_source: 12,
-          uplink_rx_time_source: 13,
+          'uplink.rx_channel': 9,
+          'uplink.rx_wire_format': 10,
+          'uplink.rx_device_args': 11,
+          'uplink.rx_clock_source': 12,
+          'uplink.rx_time_source': 13,
           bs_dl_ul_timing_diff: 14,
           ue_timing_advance: 15,
           uplink_cpu_cores: 16,
           data_resource_blocks: 0,
-          sensing_mask_blocks: 1,
+          'sensing.mask_blocks': 1,
         };
 
       const showSimulation = radioBackendValue(model) === 'sim';
@@ -2451,7 +2451,7 @@ const APP = window.__APP_STATE__;
           });
 
 		        for (const field of orderedFields) {
-	          if (field.key === 'data_resource_blocks' || field.key === 'sensing_mask_blocks') {
+	          if (field.key === 'data_resource_blocks' || field.key === 'sensing.mask_blocks') {
 	            kv.appendChild(renderDataResourcePlanner(field, {
 	              sourceTab: currentTab,
                 readOnly: true,
@@ -2650,20 +2650,20 @@ const APP = window.__APP_STATE__;
               field.value = input.checked;
               field.value_text = input.checked ? 'true' : 'false';
               if ([
-                'enable_uplink',
+                'uplink.enabled',
                 'enable_sec_sync_symbol',
                 'enable_cfo_training_sequence',
                 'measurement_enable',
                 'rx_agc_enable',
                 'hardware_sync',
                 'akf_enable',
-                'enable_bi_sensing',
-                'enable_backend_sensing_processing',
+                'sensing.bi_enabled',
+                'sensing.backend_processing_enabled',
               ].includes(field.key)) {
                 renderSections();
                 return;
               }
-	              if (field.key === 'sensing_rx_channel_count') {
+	              if (field.key === 'sensing.rx_channel_count') {
 	                renderSections();
 	                updateRuntimeOptionControls();
 	              }
@@ -2691,7 +2691,7 @@ const APP = window.__APP_STATE__;
             }
             select.addEventListener('change', () => {
               field.value_text = select.value;
-	              if (field.key === 'sensing_rx_channel_count') {
+	              if (field.key === 'sensing.rx_channel_count') {
 	                field.value = select.value;
 	                renderSections();
 	                updateRuntimeOptionControls();
@@ -2702,7 +2702,7 @@ const APP = window.__APP_STATE__;
                 renderSections();
                 return;
               }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_uplink', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'enable_bi_sensing', 'enable_backend_sensing_processing', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
+              if (['fft_size', 'num_symbols', 'sync_pos', 'uplink.enabled', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'sensing.bi_enabled', 'sensing.backend_processing_enabled', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
                 field.value = select.value;
                 renderSections();
               }
@@ -2717,7 +2717,7 @@ const APP = window.__APP_STATE__;
             }
             input.addEventListener('input', () => {
               field.value_text = input.value;
-	              if (field.key === 'sensing_rx_channel_count') {
+	              if (field.key === 'sensing.rx_channel_count') {
 	                field.value = input.value;
 	                renderSections();
 	                updateRuntimeOptionControls();
@@ -2728,7 +2728,7 @@ const APP = window.__APP_STATE__;
                 renderSections();
                 return;
               }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'enable_uplink', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'enable_bi_sensing', 'enable_backend_sensing_processing', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
+              if (['fft_size', 'num_symbols', 'sync_pos', 'uplink.enabled', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'sensing.bi_enabled', 'sensing.backend_processing_enabled', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
                 field.value = input.value;
                 renderSections();
               }
@@ -2762,7 +2762,7 @@ const APP = window.__APP_STATE__;
       for (const section of model.sections) {
         for (const field of section.fields) {
           if (field.type === 'mapping_list') {
-            if (field.key === 'data_resource_blocks' || field.key === 'sensing_mask_blocks') {
+            if (field.key === 'data_resource_blocks' || field.key === 'sensing.mask_blocks') {
               mappingLists[field.key] = {
                 mode: plannerMode(field),
                 items: field.items,
@@ -2815,7 +2815,7 @@ const APP = window.__APP_STATE__;
     function sanitizeBeforeSave(tabName) {
       const model = modelForTab(tabName);
       if (!model) return [];
-      return ['data_resource_blocks', 'sensing_mask_blocks']
+      return ['data_resource_blocks', 'sensing.mask_blocks']
         .map((key) => sanitizePlannerFieldForTab(tabName, findField(model, key)))
         .filter(Boolean);
     }
@@ -2881,7 +2881,7 @@ TX/RX block configs currently ${plannerField.mismatch ? 'differ' : 'match'}.</di
 	      const txError = validatePlannerForTab('bs', plannerField);
 	      const rxError = validatePlannerForTab('ue', plannerField);
         const summaryHeading = 'Resource Summary';
-        if (spec.fieldKey === 'sensing_mask_blocks') {
+        if (spec.fieldKey === 'sensing.mask_blocks') {
 	        targets.innerHTML = `
 	          <h3>${summaryHeading}</h3>
 	          <div class="mono">BS ${spec.metricLabel}: ${txStats.payloadCount}/${txStats.totalCount}

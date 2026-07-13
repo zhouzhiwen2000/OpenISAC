@@ -24,12 +24,12 @@ ofdm_frame:
 
 # ===== Sensing =====
 sensing:
-  enable_bi_sensing: true  # Enable bistatic sensing processing pipeline
+  bi_enabled: true  # Enable bistatic sensing processing pipeline
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
-  sensing_output_mode: dense  # dense or compact_mask
-  enable_backend_sensing_processing: false  # true lets backend publish RD/CFAR/MD metadata sidecars
-  sensing_symbol_stride: 20  # Default STRD applied at startup before runtime commands
+  output_mode: dense  # dense or compact_mask
+  backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
+  symbol_stride: 20  # Default STRD applied at startup before runtime commands
 
 # ===== RF / Sampling =====
 rf_sampling:
@@ -45,7 +45,7 @@ usrp_device:
 # ===== Downlink =====
 downlink:
   center_freq: 2400000000  # RF center frequency (Hz)
-  downlink_rx_wire_format: sc16  # Downlink RX wire format; sc16/sc8
+  rx_wire_format: sc16  # Downlink RX wire format; sc16/sc8
   rx_channel: 0  # RX channel index on USRP
   equalizer_mode: mmse  # Communication equalizer inverse mode
   channel_tracking_mode: pilot_phase  # Per-symbol comb-pilot tracking mode
@@ -54,9 +54,9 @@ downlink:
 
 # ===== Uplink =====
 uplink:
-  enable_uplink: true  # Enable UE-to-BS uplink / duplex path
+  enabled: true  # Enable UE-to-BS uplink / duplex path
   duplex_mode: tdd  # Uplink carrier/window scheme (tdd = shared downlink carrier with a symbol window, fdd = separate carrier with continuous full-frame uplink)
-  uplink_idle_waveform: random_qpsk  # UE uplink idle waveform when no UDP payload is queued
+  idle_waveform: random_qpsk  # UE uplink idle waveform when no UDP payload is queued
   symbol_start: 90  # TDD only; first uplink symbol in the downlink frame
   symbol_count: 10  # TDD only; uplink window length in OFDM symbols; 0 disables TDD uplink
   guard_symbols: 1  # TDD only; leading guard symbols inside the uplink window
@@ -81,6 +81,7 @@ measurement:
 
 # ===== Network =====
 network_output:
+  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
   bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
@@ -91,7 +92,6 @@ network_output:
   pdf_port: 12349  # Delay-spectrum output port
   constellation_ip: 0.0.0.0  # Constellation ZMQ listen IP
   constellation_port: 12346  # Constellation output port
-  udp_output_port: 50001  # UE decoded downlink payload UDP destination port
 
 # ===== CPU Cores =====
 cpu_cores:
