@@ -122,8 +122,7 @@ via `steering_override_file`; each row corresponds to one target.
 
 When `simulation.enable_uplink` is enabled, the UE->BS simulated uplink uses the
 same communication-channel scene as the BS->UE downlink: `comm_multipath_taps`
-plus the selected bistatic scatterers. There is no separate uplink multipath
-configuration key.
+plus the selected bistatic scatterers.
 
 ## Channel model
 

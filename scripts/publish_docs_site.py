@@ -10,7 +10,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "site" / "dist"
 DOCS = ROOT / "docs"
-LEGACY_MANAGED_NAMES = ("style.css",)
+LEGACY_MANAGED_NAMES = (
+    "style.css",
+    "index_zh.html",
+    "architecture.html",
+    "architecture_zh.html",
+    "signal_processing.html",
+    "signal_processing_zh.html",
+    "documentation",
+    "documentation_zh",
+)
 
 
 def _remove_path(path: Path) -> None:

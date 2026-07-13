@@ -4,8 +4,8 @@ const { navItems, pageKey, langSwitch, lang } = Astro.props;
 
 <header>
   <nav>
-    <a href={String(lang).startsWith("zh") ? "index_zh.html" : "index.html"} class="logo">
-      <img src="images/logo.svg" alt="OpenISAC" />
+    <a href={String(lang).startsWith("zh") ? "/zh-cn/" : "/"} class="logo">
+      <img src="/images/logo.svg" alt="OpenISAC" />
     </a>
     <ul class="nav-links" aria-label={String(lang).startsWith("zh") ? "主导航" : "Main navigation"}>
       {navItems.map((item) => (

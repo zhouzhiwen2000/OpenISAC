@@ -6,8 +6,8 @@ const { locale } = Astro.props;
 const isZh = locale === "zh";
 const lang = isZh ? "zh-CN" : "en";
 const languageSwitch = isZh
-  ? { href: "index.html", label: "En" }
-  : { href: "index_zh.html", label: "中文" };
+  ? { href: "/", label: "En" }
+  : { href: "/zh-cn/", label: "中文" };
 
 const content = isZh
   ? {
@@ -34,8 +34,8 @@ const content = isZh
       ],
       heroFootnote: "* 在 i7 10700 + USRP X310 平台上已完成通信以及单站、双站感知验证。",
       actions: [
-        { href: "documentation_zh.html", label: "进入文档中心", kind: "primary" },
-        { href: "architecture_zh.html", label: "查看系统架构", kind: "secondary" },
+        { href: "/zh-cn/docs/", label: "进入文档中心", kind: "primary" },
+        { href: "/zh-cn/docs/architecture/system/", label: "查看系统架构", kind: "secondary" },
       ],
       overview: {
         kicker: "Why OpenISAC",
@@ -90,21 +90,21 @@ const content = isZh
             tag: "快速开始",
             title: "安装、调优与首次 OTA 运行",
             body: "覆盖硬件准备、软件安装、性能调优和端到端运行前检查。",
-            href: "documentation_zh.html",
+            href: "/zh-cn/docs/getting-started/first-ota-run/",
             cta: "打开文档中心",
           },
           {
             tag: "系统设计",
             title: "系统架构与软件架构",
             body: "查看系统架构以及 BS、UE 两侧的软件架构。",
-            href: "architecture_zh.html",
+            href: "/zh-cn/docs/architecture/system/",
             cta: "查看系统架构",
           },
           {
             tag: "信号处理",
             title: "PHY 与感知处理链",
             body: "查看信号模型、单站感知流程、UE 接收链，以及双站 OTA 同步的处理细节。",
-            href: "signal_processing_zh.html",
+            href: "/zh-cn/docs/signal-processing/signal-model/",
             cta: "查看信号处理",
           },
           {
@@ -182,8 +182,8 @@ const content = isZh
       ],
       heroFootnote: "* Validated for communication plus monostatic and bistatic sensing on an i7 10700 + USRP X310 platform.",
       actions: [
-        { href: "documentation.html", label: "Open Documentation", kind: "primary" },
-        { href: "architecture.html", label: "See System Architecture", kind: "secondary" },
+        { href: "/docs/", label: "Open Documentation", kind: "primary" },
+        { href: "/docs/architecture/system/", label: "See System Architecture", kind: "secondary" },
       ],
       overview: {
         kicker: "Why OpenISAC",
@@ -239,21 +239,21 @@ const content = isZh
             tag: "Getting Started",
             title: "Setup and first OTA run",
             body: "Hardware setup, software installation, performance tuning, and runtime preparation for end-to-end deployment.",
-            href: "documentation.html",
+            href: "/docs/getting-started/first-ota-run/",
             cta: "Go to Documentation",
           },
           {
             tag: "System Design",
             title: "System and software architecture",
             body: "Read the overall system architecture together with the BS-side and UE-side software architecture.",
-            href: "architecture.html",
+            href: "/docs/architecture/system/",
             cta: "View Architecture",
           },
           {
             tag: "Signal Processing",
             title: "PHY and sensing pipeline",
             body: "Read the signal model, monostatic sensing flow, UE reception, and bistatic OTA synchronization details.",
-            href: "signal_processing.html",
+            href: "/docs/signal-processing/signal-model/",
             cta: "Open Signal Processing",
           },
           {
@@ -323,7 +323,7 @@ const content = isZh
       <div class="hero-layout">
         <div class="hero-copy">
           <span class="eyebrow">Open-source OFDM ISAC platform</span>
-          <img src="images/logo_light.svg" alt="OpenISAC" class="hero-logo" />
+          <img src="/images/logo_light.svg" alt="OpenISAC" class="hero-logo" />
           <h1 class:list={["hero-title", isZh ? "hero-title-zh" : "hero-title-en"]}>{content.heroTitle}</h1>
           <div class="hero-stats">
             {content.stats.map((item) => (
@@ -435,8 +435,8 @@ const content = isZh
         <div class="meta-card">
           <h3>{content.meta.affiliationTitle}</h3>
           <div class="affiliation-logos">
-            <img src="images/SEUlogo.png" alt="SEU Logo" />
-            <img src="images/PML.png" alt="PML Logo" />
+            <img src="/images/SEUlogo.png" alt="SEU Logo" />
+            <img src="/images/PML.png" alt="PML Logo" />
           </div>
           <p><strong>{content.meta.affiliationBody}</strong></p>
         </div>
@@ -450,7 +450,7 @@ const content = isZh
         </div>
         <div class="meta-card">
           <h3>{content.meta.wechatTitle}</h3>
-          <img src="images/WeChat.jpg" alt="WeChat QR Code" width="170" />
+          <img src="/images/WeChat.jpg" alt="WeChat QR Code" width="170" />
         </div>
       </div>
     </section>
