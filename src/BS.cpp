@@ -1497,6 +1497,17 @@ private:
             _uplink_rx->configure_agc(
                 _cfg.uplink.rx_gain, gr.start, gr.stop,
                 [ul_rx_dev, ul_rx_ch](double g) { ul_rx_dev->set_rx_gain(g, ul_rx_ch); });
+            if (_cfg.rf_sampling.rx_agc_enable && _cfg.should_profile("agc")) {
+                LOG_G_INFO() << "[UL-RX] RX AGC enabled. initial_gain_db=" << _cfg.uplink.rx_gain
+                             << ", gain_range=[" << gr.start << ", " << gr.stop << "]"
+                             << ", low_threshold_db=" << _cfg.rf_sampling.rx_agc_low_threshold_db
+                             << ", high_threshold_db=" << _cfg.rf_sampling.rx_agc_high_threshold_db
+                             << ", max_step_db=" << _cfg.rf_sampling.rx_agc_max_step_db
+                             << ", update_frames=" << _cfg.rf_sampling.rx_agc_update_frames;
+            }
+        } else if (_cfg.rf_sampling.rx_agc_enable) {
+            LOG_G_WARN() << "[UL-RX] RX AGC requested but this radio backend has no hardware gain control; "
+                         << "using fixed uplink RX gain " << _cfg.uplink.rx_gain << " dB";
         }
         LOG_G_INFO() << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
                      << " @ " << format_freq_hz(ul_freq) << " Hz on "

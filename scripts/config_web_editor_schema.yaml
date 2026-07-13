@@ -881,6 +881,60 @@ bs:
     - external
     - gpsdo
   - type: scalar
+    key: rx_agc_enable
+    kind: bool
+    comment: Enable uplink hardware RX AGC driven by delay-spectrum peak
+    default: false
+    optional: true
+  - type: scalar
+    key: rx_agc_low_threshold_db
+    kind: float
+    comment: Increase uplink RX gain when filtered delay-spectrum peak falls below this threshold (dB)
+    default: 14.0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: rx_agc_enable
+        value: true
+  - type: scalar
+    key: rx_agc_high_threshold_db
+    kind: float
+    comment: Decrease uplink RX gain when filtered delay-spectrum peak rises above this threshold (dB)
+    default: 16.0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: rx_agc_enable
+        value: true
+  - type: scalar
+    key: rx_agc_max_step_db
+    kind: float
+    comment: Maximum uplink RX gain step per AGC update (dB)
+    default: 1.0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: rx_agc_enable
+        value: true
+  - type: scalar
+    key: rx_agc_update_frames
+    kind: int
+    comment: Apply uplink AGC at most once every N processed frames
+    default: 4
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: rx_agc_enable
+        value: true
+  - type: scalar
     key: bs_dl_ul_timing_diff
     kind: int
     comment: BS DL/UL timing difference (samples) — also adjustable at runtime via DUTI
@@ -1142,7 +1196,7 @@ bs:
   - type: scalar
     key: profiling_modules
     kind: string
-    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, arq), or "all"
+    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, agc, arq), or "all"
     default: ''
     optional: true
 ue:
@@ -1380,24 +1434,36 @@ ue:
     comment: Increase gain when filtered delay-spectrum peak falls below this threshold (dB)
     default: 14.0
     optional: true
+    enabled_if:
+      key: rx_agc_enable
+      value: true
   - type: scalar
     key: rx_agc_high_threshold_db
     kind: float
     comment: Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
-    default: 32.0
+    default: 16.0
     optional: true
+    enabled_if:
+      key: rx_agc_enable
+      value: true
   - type: scalar
     key: rx_agc_max_step_db
     kind: float
     comment: Maximum RX gain step per AGC update (dB)
     default: 1.0
     optional: true
+    enabled_if:
+      key: rx_agc_enable
+      value: true
   - type: scalar
     key: rx_agc_update_frames
     kind: int
     comment: Apply AGC at most once every N processed frames
     default: 4
     optional: true
+    enabled_if:
+      key: rx_agc_enable
+      value: true
   - type: scalar
     key: rx_gain
     kind: int

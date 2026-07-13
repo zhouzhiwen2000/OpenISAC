@@ -601,6 +601,36 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">上行/双工设置。TDD 下，<code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 以 OFDM 符号为单位定义 DL/UL 边界，<code>center_freq</code> 会被忽略；FDD 下，<code>center_freq</code> 定义 UE-&gt;BS 上行载波，而 <code>symbol_start</code>、<code>symbol_count</code>、<code>guard_symbols</code> 会被忽略，上行按整帧连续传输。开启上行需要 UE 端具备 TX 天线/RF 链路，BS 端具备上行 RX 天线/RF 链路；FDD 还需要足够的频率间隔或收发隔离。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>rx_agc_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">上行设置。启用 BS 上行接收端硬件 RX AGC。硬件 Duplex 模板默认开启；固定的 <code>uplink.rx_gain</code> 会作为初始增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>14.0</code></td>
+<td style="text-align:left">上行设置。上行跟踪 AGC 窗口下界。只有当滤波后的上行 delay-spectrum 主峰低于该阈值时，才提高 RX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>16.0</code></td>
+<td style="text-align:left">上行设置。上行跟踪 AGC 窗口上界。只有当滤波后的上行 delay-spectrum 主峰高于该阈值时，才降低 RX 增益。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>1.0</code></td>
+<td style="text-align:left">上行设置。BS 上行 RX 单次 AGC 更新允许的最大增益步进。饱和保护强制降增益时也使用这个步进上限。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">上行设置。上行跟踪 AGC 两次更新之间最少处理的上行帧数。小于 <code>1</code> 时会钳制到 <code>1</code>。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
 <td style="text-align:left"><code>int</code> / 采样点</td>
 <td style="text-align:left"><code>63</code></td>
@@ -742,7 +772,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>ldpc_encode</code>、<code>sensing_proc</code>；<code>all</code> 表示全部。BS 端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>modulation</code>、<code>latency</code>、<code>ldpc_encode</code>、<code>sensing_proc</code>、<code>agc</code> 和 <code>uplink</code>；<code>all</code> 表示全部。BS 端到端时延统计只有在同时包含 <code>modulation</code> 和 <code>latency</code> 时才启用。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
@@ -858,6 +888,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <li>若两者数量不一致，程序会按 <code>rx_channel_count</code> 对通道列表做裁剪或扩展。</li>
 <li>当某通道设置 <code>enable_system_delay_estimation=true</code> 时，该通道会在启动附近执行一次系统时延估计，之后每隔 434 个帧重复执行一次，同时继续消耗帧数据；常规感知处理和感知输出保持停用。</li>
 <li><code>device_args</code>、<code>wire_format_*</code>、每通道天线口和输出 IP 等字段通常与硬件平台和部署环境强相关；样本 YAML 只是起点，不应把不同机器/射频平台的值机械互换。</li>
+<li>BS 上行 AGC 复用 UE 下行路径相同的跟踪 <code>HardwareRxAgc</code> 逻辑：根据上行同步符号的 delay spectrum、同步符号时域样本是否接近/达到 ADC 满幅，调节上行 RX 通道的 USRP 硬件增益。UE 下行专用的 <code>SYNC_SEARCH</code> 增益扫描不用于 BS 上行，因为 BS 接收的是已调度的上行窗口，而不是连续同步搜索状态机。</li>
 </ul>
 <h3 id="ue">UE</h3>
 <p><code>UE</code> (UE 节点) 使用 <code>UE.yaml</code> 配置。
@@ -1530,7 +1561,7 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <li>dense 模式下，如果 <code>symbol_stride</code> / 运行时 <code>STRD</code> 会采到可选的 <code>sync_pos+1</code> CFO training field，会被拒绝。运行时修改 <code>STRD</code> 会在计划好的帧边界重启确定性采样相位。</li>
 <li>当 <code>output_mode=compact_mask</code> 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 <code>mask_blocks</code> 选中的 RE；此时 <code>STRD</code> 会被忽略，因为 mask 已经定义了采样图样。</li>
 <li>紧凑载荷格式与发射端一致：<code>CompactSensingFrameHeader</code> 后面跟固定顺序的原始 <code>complex&lt;float&gt;</code> 数据。</li>
-<li>RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
+<li>UE 下行 RX AGC 分为两个阶段。<code>SYNC_SEARCH</code> 阶段会先把增益恢复到配置的 <code>rx_gain</code>，然后进行粗搜索扫描（每 10 个帧增加 <code>1 dB</code>，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 <code>rx_agc_low_threshold_db</code> / <code>rx_agc_high_threshold_db</code> 定义的窗口来细调增益。</li>
 <li>UE 接收机会检查同步符号时域样本的 I/Q 分量是否接近或达到 ADC 满幅。如果满幅点数过多，会立即强制降低增益，并在短时间内禁止再次升增益，避免在噪声或削顶附近来回摆动。</li>
 <li>硬 reset 会清空时延/频偏跟踪状态、刷新队列、重置跟踪 AGC 状态，并回到 <code>SYNC_SEARCH</code>。<code>reset_hold_s</code> 决定坏的 delay 条件需要持续多久才会触发这一动作。</li>
 </ul></div> </section> </main>  <footer class="site-footer"> <div class="footer-panel"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p><strong>作者:</strong> 周智文 (zhiwen_zhou@seu.edu.cn), 张超越 (chaoyue_zhang@seu.edu.cn), 徐晓莉 (xiaolixu@seu.edu.cn), 曾勇 (yong_zeng@seu.edu.cn)</p> </div> </footer> </body></html>

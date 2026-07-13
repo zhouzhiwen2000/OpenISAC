@@ -601,6 +601,36 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left">Uplink/duplex settings. In TDD, <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> define the DL/UL boundary in OFDM symbols, and <code>center_freq</code> is ignored. In FDD, <code>center_freq</code> defines the UE-&gt;BS carrier, while <code>symbol_start</code>, <code>symbol_count</code>, and <code>guard_symbols</code> are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>rx_agc_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Uplink setting. Enable hardware RX AGC on the BS uplink receiver. The hardware Duplex templates enable it by default; the fixed <code>uplink.rx_gain</code> value is used as the initial gain.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_low_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>14.0</code></td>
+<td style="text-align:left">Uplink setting. Lower bound of the uplink tracking AGC window. Gain is increased only when the filtered uplink delay-spectrum peak falls below this threshold.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_high_threshold_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>16.0</code></td>
+<td style="text-align:left">Uplink setting. Upper bound of the uplink tracking AGC window. Gain is decreased only when the filtered uplink delay-spectrum peak rises above this threshold.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_max_step_db</code></td>
+<td style="text-align:left"><code>float</code> / dB</td>
+<td style="text-align:left"><code>1.0</code></td>
+<td style="text-align:left">Uplink setting. Maximum BS uplink RX gain step applied by one AGC update. Saturation-triggered protection also uses this step size when forcing gain down.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>rx_agc_update_frames</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>4</code></td>
+<td style="text-align:left">Uplink setting. Minimum processed-uplink-frame interval between tracking-stage AGC updates. Values below <code>1</code> are clamped to <code>1</code>.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>bs_dl_ul_timing_diff</code></td>
 <td style="text-align:left"><code>int</code> / samples</td>
 <td style="text-align:left"><code>63</code></td>
@@ -742,7 +772,7 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, and <code>sensing_proc</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, <code>sensing_proc</code>, <code>agc</code>, and <code>uplink</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
@@ -858,6 +888,7 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <li>If the count and list size differ, the list is resized to match <code>rx_channel_count</code>.</li>
 <li>When <code>enable_system_delay_estimation=true</code> for a channel, that channel performs one system delay estimation near startup and then repeats it once every 434 frames while continuing to drain frames. Normal sensing processing and sensing output remain disabled.</li>
 <li>In practice, keep hardware-specific fields such as <code>device_args</code>, <code>wire_format_*</code>, per-channel RX antenna selection, and output IPs aligned with the actual radio/deployment you are using; the sample YAMLs are starting points, not universal presets.</li>
+<li>BS uplink AGC reuses the same tracking <code>HardwareRxAgc</code> logic as the UE downlink path: it computes the uplink sync-symbol delay spectrum, checks sync-symbol samples for near/full-scale ADC usage, and adjusts USRP RX gain through the uplink RX channel's hardware gain control. The UE-only <code>SYNC_SEARCH</code> gain sweep is not used on the BS uplink path because the BS receives a scheduled uplink window rather than running a continuous sync-search state machine.</li>
 </ul>
 <h3 id="ue">UE</h3>
 <p><code>UE</code> is configured through <code>UE.yaml</code>.
@@ -1533,7 +1564,7 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 </ul>
 <p>Notes:</p>
 <ul>
-<li>RX AGC has two phases. During <code>SYNC_SEARCH</code>, the receiver resets gain to the configured <code>rx_gain</code> and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered <code>delay_spectrum</code> peak window defined by <code>rx_agc_low_threshold_db</code> and <code>rx_agc_high_threshold_db</code>.</li>
+<li>UE downlink RX AGC has two phases. During <code>SYNC_SEARCH</code>, the receiver resets gain to the configured <code>rx_gain</code> and performs a coarse search sweep (+1 dB every 10 frames, wrapping from max gain back to min gain). After lock, tracking AGC uses the filtered <code>delay_spectrum</code> peak window defined by <code>rx_agc_low_threshold_db</code> and <code>rx_agc_high_threshold_db</code>.</li>
 <li>Sync-symbol time-domain samples are also checked for near/full-scale ADC usage. If too many I/Q components approach full scale, the UE receiver forces gain reduction and temporarily blocks gain increases to avoid ping-pong behavior.</li>
 <li>A hard reset clears timing/frequency tracking state, flushes pending queues, resets the tracking AGC state, and returns the receiver to <code>SYNC_SEARCH</code>. <code>reset_hold_s</code> controls how long bad delay conditions must persist before this happens.</li>
 </ul></div> </section> </main>  <footer class="site-footer"> <div class="footer-panel"> <p>Copyright &copy; 2025, Zhiwen Zhou. Released under the BSD 2-Clause License.</p> <p><strong>Authors:</strong> Zhiwen Zhou (zhiwen_zhou@seu.edu.cn), Chaoyue Zhang (chaoyue_zhang@seu.edu.cn), Xiaoli Xu (xiaolixu@seu.edu.cn), Yong Zeng (yong_zeng@seu.edu.cn)</p> </div> </footer> </body></html>

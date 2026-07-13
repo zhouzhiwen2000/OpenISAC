@@ -3865,9 +3865,8 @@ private:
             sense_frame.delay_offset = delay_offset + _user_delay_offset;
             sense_frame.generation = frame.generation;
 
-            if (!spsc_wait_push(sensing_queue_, std::move(sense_frame), [this]() {
-                    return !sensing_running_.load(std::memory_order_acquire);
-                })) {
+            if (!sensing_queue_.try_push(std::move(sense_frame))) {
+                LOG_RT_WARN_HZ(5) << "Bistatic sensing queue full; dropping newest sensing frame";
                 _sensing_frame_pool.release(std::move(sense_frame));
             }
         }

@@ -916,22 +916,34 @@ public:
             _ce_in[i + half] = _h_est[i];
         }
         fftwf_execute(_ce_ifft_plan);
-        float peak = 0.0f;
-        double sum = 0.0;
-        const auto* __restrict__ ce = _ce_out.data();
-        #pragma omp simd simdlen(16) reduction(max:peak) reduction(+:sum)
+        _delay_spectrum.resize(_cfg.ofdm.fft_size);
+        const float scale = 1.0f / std::sqrt(static_cast<float>(_cfg.ofdm.fft_size));
+        #pragma omp simd simdlen(16)
         for (size_t i = 0; i < _cfg.ofdm.fft_size; ++i) {
-            const float re = ce[i].real();
-            const float im = ce[i].imag();
-            const float m = std::sqrt(re * re + im * im);
-            peak = std::max(peak, m);
-            sum += m;
+            _delay_spectrum[i] = _ce_out[i] * scale;
         }
-        const float avg = static_cast<float>(sum / static_cast<double>(_cfg.ofdm.fft_size));
+        size_t peak_index = 0;
+        float peak = 0.0f;
+        float avg = 0.0f;
+        DelayProcessor::find_peak(_delay_spectrum, peak_index, peak, avg, _cfg.ofdm.cp_length);
         const std::complex<float>* sync_time = frame.data() + _window_offset + _cfg.ofdm.cp_length;
-        _rx_agc.maybe_apply_from_delay_peak(
+        RxAgcAdjustment agc_adjustment;
+        const bool adjusted = _rx_agc.maybe_apply_from_delay_peak(
             peak, avg, sync_time, _cfg.ofdm.fft_size, _host_now_ns(), _agc_gates,
-            [this](double g) { if (_apply_gain) _apply_gain(g); });
+            [this](double g) { if (_apply_gain) _apply_gain(g); },
+            &agc_adjustment);
+        if (adjusted && _link_cfg.should_profile("agc")) {
+            LOG_RT_INFO() << "[UL-RX] RX AGC adjusted gain to " << agc_adjustment.next_gain_db
+                          << " dB (delta=" << agc_adjustment.delta_db
+                          << " dB, delay_peak=" << agc_adjustment.observed_peak
+                          << ", delay_peak_db=" << agc_adjustment.observed_peak_db
+                          << ", filtered_peak_db=" << agc_adjustment.filtered_peak_db
+                          << ", peak_ratio=" << agc_adjustment.peak_ratio
+                          << ", max_sync_component=" << agc_adjustment.max_sync_sample_component
+                          << ", near_fs_count=" << agc_adjustment.near_full_scale_count
+                          << ", hard_fs_count=" << agc_adjustment.hard_full_scale_count
+                          << ", saturation=" << agc_adjustment.saturation_detected << ")";
+        }
     }
 
     void _update_self_channel_debug(const AlignedVector& frame) {

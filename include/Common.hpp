@@ -3307,6 +3307,11 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(uplink, "rx_device_args", cfg.uplink.rx_device_args);
         config_detail::load_value(uplink, "rx_clock_source", cfg.uplink.rx_clock_source);
         config_detail::load_value(uplink, "rx_time_source", cfg.uplink.rx_time_source);
+        config_detail::load_value(uplink, "rx_agc_enable", cfg.rf_sampling.rx_agc_enable);
+        config_detail::load_value(uplink, "rx_agc_low_threshold_db", cfg.rf_sampling.rx_agc_low_threshold_db);
+        config_detail::load_value(uplink, "rx_agc_high_threshold_db", cfg.rf_sampling.rx_agc_high_threshold_db);
+        config_detail::load_value(uplink, "rx_agc_max_step_db", cfg.rf_sampling.rx_agc_max_step_db);
+        config_detail::load_value(uplink, "rx_agc_update_frames", cfg.rf_sampling.rx_agc_update_frames);
         config_detail::load_value(uplink, "equalizer_mode", cfg.uplink.equalizer.equalizer_mode);
         if (uplink["channel_tracking_mode"]) {
             cfg.uplink.equalizer.channel_tracking_mode = normalize_channel_tracking_mode_string(

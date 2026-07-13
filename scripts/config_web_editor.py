@@ -26,7 +26,7 @@ JS_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor.js")
 SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
-    "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc", "arq"),
+    "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc", "agc", "arq"),
     "ue": ("all", "demodulation", "cfo", "agc", "align", "uplink", "arq"),
 }
 

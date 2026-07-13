@@ -97,6 +97,11 @@ uplink:
   rx_device_args: ""  # Uplink RX-specific args (empty = use TX/shared device)
   rx_clock_source: ""  # Uplink RX clock source override (optional)
   rx_time_source: ""  # Uplink RX time source override (optional)
+  rx_agc_enable: false  # Enable uplink hardware RX AGC driven by delay-spectrum peak
+  rx_agc_low_threshold_db: 14.0  # Increase uplink RX gain when filtered delay-spectrum peak falls below this threshold (dB)
+  rx_agc_high_threshold_db: 16.0  # Decrease uplink RX gain when filtered delay-spectrum peak rises above this threshold (dB)
+  rx_agc_max_step_db: 1.0  # Maximum uplink RX gain step per AGC update (dB)
+  rx_agc_update_frames: 4  # Apply uplink AGC at most once every N processed frames
   arq_enabled: false  # Enable uplink ARQ on the BS receiver
   arq_ordered_delivery: false  # Buffer uplink packets for in-order UDP delivery
   arq_window_packets: 32767  # Uplink ARQ receive/reorder window [1, 32767]
