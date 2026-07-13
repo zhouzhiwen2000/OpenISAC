@@ -1789,7 +1789,10 @@ private:
 
     void init_data_processing() {
         // Initialize UDP output sender
-        _udp_output_sender = std::make_unique<UdpSender>(cfg_.network_output.udp_output_ip, static_cast<uint16_t>(cfg_.network_output.udp_output_port));
+        _udp_output_sender = std::make_unique<UdpSender>(
+            cfg_.network_output.udp_output_ip,
+            static_cast<uint16_t>(cfg_.network_output.udp_output_port),
+            cfg_.network_output.udp_egress_pacer);
     }
 
     void adjust_rx_freq(double detected_offset, bool reset = false) {

@@ -82,6 +82,10 @@ measurement:
 # ===== Network =====
 network_output:
   udp_output_port: 50001  # UE decoded downlink payload UDP destination port
+  udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
+  udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
+  udp_egress_pacer_queue_packets: 512  # UDP egress pacer queue capacity in datagrams
+  udp_egress_pacer_max_delay_ms: 250  # UDP egress pacer max queued packet age in ms; 0 disables age drops
   bi_sensing_output_enabled: true  # Enable bistatic sensing ZMQ output
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port

@@ -356,6 +356,7 @@ public:
 private:
     Config _cfg;
     uhd::usrp::multi_usrp::sptr _tx_usrp;
+    uhd::usrp::multi_usrp::sptr _uplink_rx_usrp;  // dedicated uplink RX device; null when sharing _tx_usrp
     std::unique_ptr<SimRadio> _sim_radio;  // non-null when radio_backend == "sim"
     uhd::tx_streamer::sptr _tx_stream;
     std::unique_ptr<UplinkRxEngine> _uplink_rx;  // non-null when duplex uplink enabled
@@ -1107,27 +1108,51 @@ private:
         );
 
         if (uplink_enabled(_cfg)) {
+            // Resolve the uplink RX device. Empty overrides reuse the shared TX
+            // device (and its clock/time sources); a non-empty uplink.rx_device_args
+            // selects a dedicated USRP, mirroring the sensing RX device scheme.
+            const std::string ul_rx_device_args = _cfg.uplink.rx_device_args.empty()
+                ? tx_device_args : _cfg.uplink.rx_device_args;
+            const std::string ul_rx_clock = _cfg.uplink.rx_clock_source.empty()
+                ? tx_clock_source : _cfg.uplink.rx_clock_source;
+            const std::string ul_rx_time = _cfg.uplink.rx_time_source.empty()
+                ? tx_time_source : _cfg.uplink.rx_time_source;
+            uhd::usrp::multi_usrp::sptr ul_rx_usrp;
+            if (ul_rx_device_args == tx_device_args) {
+                if (ul_rx_clock != tx_clock_source || ul_rx_time != tx_time_source) {
+                    throw std::runtime_error(
+                        "Uplink RX clock/time source conflicts with the shared TX device. "
+                        "Set uplink.rx_device_args to select a separate uplink RX USRP.");
+                }
+                ul_rx_usrp = _tx_usrp;
+            } else {
+                _uplink_rx_usrp = uhd::usrp::multi_usrp::make(ul_rx_device_args);
+                _uplink_rx_usrp->set_clock_source(ul_rx_clock);
+                _uplink_rx_usrp->set_time_source(ul_rx_time);
+                ul_rx_usrp = _uplink_rx_usrp;
+            }
+
             // Full-duplex uplink RX on the BS device. TDD: same carrier as TX.
             // FDD: the uplink carrier (duplex.ul_center_freq).
             const double ul_freq = (_cfg.uplink.duplex.mode == DuplexMode::FDD &&
                                     _cfg.uplink.duplex.ul_center_freq > 0.0)
                 ? _cfg.uplink.duplex.ul_center_freq : _cfg.downlink.center_freq;
             const size_t ul_rx_ch = _cfg.uplink.rx_channel;
-            const size_t usrp_rx_channels = _tx_usrp->get_rx_num_channels();
+            const size_t usrp_rx_channels = ul_rx_usrp->get_rx_num_channels();
             if (ul_rx_ch >= usrp_rx_channels) {
                 throw std::runtime_error(
                     "Configured uplink_rx_channel out of range: " +
                     std::to_string(ul_rx_ch) +
                     " (USRP supports " + std::to_string(usrp_rx_channels) + " RX channels)");
             }
-            _tx_usrp->set_rx_rate(_cfg.rf_sampling.sample_rate);
-            _tx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
-            _tx_usrp->set_rx_gain(_cfg.uplink.rx_gain, ul_rx_ch);
-            _tx_usrp->set_rx_bandwidth(_cfg.rf_sampling.bandwidth, ul_rx_ch);
+            ul_rx_usrp->set_rx_rate(_cfg.rf_sampling.sample_rate);
+            ul_rx_usrp->set_rx_freq(uhd::tune_request_t(ul_freq), ul_rx_ch);
+            ul_rx_usrp->set_rx_gain(_cfg.uplink.rx_gain, ul_rx_ch);
+            ul_rx_usrp->set_rx_bandwidth(_cfg.rf_sampling.bandwidth, ul_rx_ch);
             uhd::stream_args_t ul_rx_args("fc32", _cfg.uplink.rx_wire_format);
             ul_rx_args.channels = {ul_rx_ch};
             _uplink_rx = std::make_unique<UplinkRxEngine>(_cfg);
-            _uplink_rx->set_rx_stream(_tx_usrp->get_rx_stream(ul_rx_args));
+            _uplink_rx->set_rx_stream(ul_rx_usrp->get_rx_stream(ul_rx_args));
             _uplink_rx->dl_ul_timing_diff().store(_cfg.uplink.bs_dl_ul_timing_diff,
                                                   std::memory_order_relaxed);
             _uplink_rx->set_bs_frame_provider([this]() {
@@ -1135,12 +1160,13 @@ private:
                 return _cfg.ofdm.num_symbols ? (s / _cfg.ofdm.num_symbols) : s;
             });
             _attach_uplink_debug_sinks();
-            const uhd::gain_range_t gr = _tx_usrp->get_rx_gain_range(ul_rx_ch);
+            const uhd::gain_range_t gr = ul_rx_usrp->get_rx_gain_range(ul_rx_ch);
             _uplink_rx->configure_agc(
                 _cfg.uplink.rx_gain, gr.start(), gr.stop(),
-                [this, ul_rx_ch](double g) { _tx_usrp->set_rx_gain(g, ul_rx_ch); });
+                [ul_rx_usrp, ul_rx_ch](double g) { ul_rx_usrp->set_rx_gain(g, ul_rx_ch); });
             LOG_G_INFO() << "[UL-RX] uplink receive enabled on RX ch " << ul_rx_ch
-                         << " @ " << format_freq_hz(ul_freq) << " Hz, "
+                         << " @ " << format_freq_hz(ul_freq) << " Hz on "
+                         << (ul_rx_usrp == _tx_usrp ? "shared TX device" : "dedicated device") << ", "
                          << _uplink_rx->uplink_config().ofdm.num_symbols << " UL symbols/frame, "
                          << "zc_root=" << _uplink_rx->uplink_config().ofdm.zc_root;
         }

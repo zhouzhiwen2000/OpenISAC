@@ -91,6 +91,10 @@ network_output:
   udp_input_port: 50000  # BS downlink payload UDP bind port
   udp_output_ip: 127.0.0.1  # BS decoded uplink payload UDP destination IP
   udp_output_port: 50003  # BS decoded uplink payload UDP destination port
+  udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
+  udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
+  udp_egress_pacer_queue_packets: 512  # UDP egress pacer queue capacity in datagrams
+  udp_egress_pacer_max_delay_ms: 250  # UDP egress pacer max queued packet age in ms; 0 disables age drops
   mono_sensing_ip: 0.0.0.0  # Monostatic sensing ZMQ listen IP
   mono_sensing_port: 8888  # Monostatic sensing ZMQ listen port
   mono_sensing_output_enabled: false  # Enable monostatic sensing ZMQ output

@@ -118,6 +118,10 @@ network_output:
   udp_input_port: 50002  # UE uplink payload UDP bind port
   udp_output_ip: ""  # UE decoded downlink payload UDP destination IP (empty = use default_out_ip)
   udp_output_port: 50001  # UE decoded downlink payload UDP destination port
+  udp_egress_pacer_enabled: false  # Enable queued pacing for decoded payload UDP output
+  udp_egress_pacer_target_mbps: 0  # UDP egress pacer target Mbps; 0 = auto-estimate
+  udp_egress_pacer_queue_packets: 512  # UDP egress pacer queue capacity in datagrams
+  udp_egress_pacer_max_delay_ms: 250  # UDP egress pacer max queued packet age in ms; 0 disables age drops
   self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
   self_channel_port: 12350  # UE self-channel output port
   self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP

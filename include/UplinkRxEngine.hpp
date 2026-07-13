@@ -87,7 +87,9 @@ public:
             reinterpret_cast<fftwf_complex*>(_ce_out.data()),
             FFTW_BACKWARD, FFTW_MEASURE);
         _udp_out = std::make_unique<UdpSender>(
-            link_cfg.network_output.ul_udp_output_ip, static_cast<uint16_t>(link_cfg.network_output.ul_udp_output_port));
+            link_cfg.network_output.ul_udp_output_ip,
+            static_cast<uint16_t>(link_cfg.network_output.ul_udp_output_port),
+            link_cfg.network_output.udp_egress_pacer);
         _rx_frame_queue.reset(4, [this]() {
             UplinkRxFrame frame;
             frame.samples.resize(_period_samples);

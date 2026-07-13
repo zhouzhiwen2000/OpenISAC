@@ -968,6 +968,9 @@ struct UplinkConfig {
     double rx_gain = 0.0;              // BS uplink RX gain
     size_t rx_channel = 0;             // BS uplink RX channel index
     std::string rx_wire_format = "sc16"; // BS uplink RX wire format
+    std::string rx_device_args = "";   // BS uplink RX device args override (empty = shared TX device)
+    std::string rx_clock_source = "";  // BS uplink RX clock source override (empty = TX clock source)
+    std::string rx_time_source = "";   // BS uplink RX time source override (empty = TX time source)
     double tx_gain = 0.0;              // UE uplink TX gain
     uint32_t tx_channel = 0;           // UE uplink TX channel index
     std::string wire_format_tx = "sc16"; // UE uplink TX wire format
@@ -996,6 +999,13 @@ struct SensingConfig {
 
 struct RadioConfig {
     std::string radio_backend = "uhd";  // Radio I/O backend: "uhd" (real USRP) or "sim" (channel simulator)
+};
+
+struct UdpEgressPacerConfig {
+    bool enabled = false;             // Enable queued/paced UDP egress for decoded payload streams
+    double target_mbps = 0.0;         // <=0: auto-estimate from enqueue rate; >0: fixed payload Mbps
+    size_t queue_packets = 512;       // Max queued UDP datagrams before dropping oldest
+    double max_delay_ms = 250.0;      // Drop queued datagrams older than this; <=0 disables age drop
 };
 
 struct NetworkOutputConfig {
@@ -1033,6 +1043,7 @@ struct NetworkOutputConfig {
     int ul_udp_input_port = 50002;
     std::string ul_udp_output_ip = "127.0.0.1"; // BS decoded uplink UDP output
     int ul_udp_output_port = 50003;
+    UdpEgressPacerConfig udp_egress_pacer;
 };
 
 struct CpuCoresConfig {
@@ -2958,6 +2969,20 @@ inline Config make_default_bs_config() {
     return cfg;
 }
 
+inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
+    if (pacer.target_mbps < 0.0) {
+        pacer.target_mbps = 0.0;
+    }
+    if (pacer.queue_packets == 0) {
+        LOG_G_WARN() << "udp_egress_pacer_queue_packets=0 is invalid. Clamping to 1.";
+        pacer.queue_packets = 1;
+    }
+    if (pacer.max_delay_ms < 0.0) {
+        LOG_G_WARN() << "udp_egress_pacer_max_delay_ms<0 is invalid. Clamping to 0 ms.";
+        pacer.max_delay_ms = 0.0;
+    }
+}
+
 inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
     if (!path_exists(filepath)) {
         return false;
@@ -3078,6 +3103,9 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(uplink, "rx_gain", cfg.uplink.rx_gain);
         config_detail::load_value(uplink, "rx_channel", cfg.uplink.rx_channel);
         config_detail::load_value(uplink, "rx_wire_format", cfg.uplink.rx_wire_format);
+        config_detail::load_value(uplink, "rx_device_args", cfg.uplink.rx_device_args);
+        config_detail::load_value(uplink, "rx_clock_source", cfg.uplink.rx_clock_source);
+        config_detail::load_value(uplink, "rx_time_source", cfg.uplink.rx_time_source);
         config_detail::load_value(uplink, "equalizer_mode", cfg.uplink.equalizer.equalizer_mode);
         if (uplink["channel_tracking_mode"]) {
             cfg.uplink.equalizer.channel_tracking_mode = normalize_channel_tracking_mode_string(
@@ -3107,6 +3135,14 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "udp_output_ip", cfg.network_output.ul_udp_output_ip);
         config_detail::load_value(network, "udp_output_port", cfg.network_output.ul_udp_output_port);
         config_detail::load_value(
+            network, "udp_egress_pacer_enabled", cfg.network_output.udp_egress_pacer.enabled);
+        config_detail::load_value(
+            network, "udp_egress_pacer_target_mbps", cfg.network_output.udp_egress_pacer.target_mbps);
+        config_detail::load_value(
+            network, "udp_egress_pacer_queue_packets", cfg.network_output.udp_egress_pacer.queue_packets);
+        config_detail::load_value(
+            network, "udp_egress_pacer_max_delay_ms", cfg.network_output.udp_egress_pacer.max_delay_ms);
+        config_detail::load_value(
             network, "mono_sensing_output_enabled", cfg.network_output.mono_sensing_output_enabled);
         config_detail::load_value(network, "mono_sensing_ip", cfg.network_output.mono_sensing_ip);
         config_detail::load_value(network, "mono_sensing_port", cfg.network_output.mono_sensing_port);
@@ -3133,6 +3169,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
                 cfg, resource_preview, "BS config")) {
             return false;
         }
+        normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -3505,6 +3542,14 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "udp_input_port", cfg.network_output.ul_udp_input_port);
         config_detail::load_value(network, "udp_output_ip", cfg.network_output.udp_output_ip);
         config_detail::load_value(network, "udp_output_port", cfg.network_output.udp_output_port);
+        config_detail::load_value(
+            network, "udp_egress_pacer_enabled", cfg.network_output.udp_egress_pacer.enabled);
+        config_detail::load_value(
+            network, "udp_egress_pacer_target_mbps", cfg.network_output.udp_egress_pacer.target_mbps);
+        config_detail::load_value(
+            network, "udp_egress_pacer_queue_packets", cfg.network_output.udp_egress_pacer.queue_packets);
+        config_detail::load_value(
+            network, "udp_egress_pacer_max_delay_ms", cfg.network_output.udp_egress_pacer.max_delay_ms);
         config_detail::load_value(network, "self_channel_ip", cfg.network_output.uplink_self_channel_ip);
         config_detail::load_value(network, "self_channel_port", cfg.network_output.uplink_self_channel_port);
         config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
@@ -3530,6 +3575,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
                 cfg, resource_preview, "UE config")) {
             return false;
         }
+        normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR() << "Error parsing YAML config: " << e.what();
@@ -3629,6 +3675,7 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     if (cfg.network_output.uplink_self_pdf_ip.empty()) cfg.network_output.uplink_self_pdf_ip = "0.0.0.0";
     if (cfg.network_output.vofa_debug_ip.empty()) cfg.network_output.vofa_debug_ip = cfg.network_output.default_out_ip;
     if (cfg.network_output.udp_output_ip.empty()) cfg.network_output.udp_output_ip = cfg.network_output.default_out_ip;
+    normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);
 }
 
 inline void log_ue_sync_mode(const Config& cfg) {
@@ -4592,14 +4639,208 @@ class UdpSender : public UdpBaseSender {
 public:
     UdpSender(const std::string& ip, uint16_t port) : UdpBaseSender(ip, port) {}
 
+    UdpSender(const std::string& ip, uint16_t port, const UdpEgressPacerConfig& pacer_cfg)
+        : UdpBaseSender(ip, port)
+        , pacer_cfg_(pacer_cfg) {
+        if (pacer_cfg_.enabled) {
+            pacer_running_ = true;
+            pacer_thread_ = std::thread(&UdpSender::pacer_loop, this);
+            LOG_G_INFO() << "UDP egress pacer enabled: target_mbps="
+                         << pacer_cfg_.target_mbps
+                         << " (0=auto), queue_packets="
+                         << pacer_cfg_.queue_packets
+                         << ", max_delay_ms="
+                         << pacer_cfg_.max_delay_ms;
+        }
+    }
+
+    ~UdpSender() override {
+        stop_pacer();
+    }
+
+    UdpSender(const UdpSender&) = delete;
+    UdpSender& operator=(const UdpSender&) = delete;
+
     template <typename T>
     void send(const T* data, size_t size_bytes) {
-        send_raw(data, size_bytes);
+        if (!pacer_cfg_.enabled) {
+            send_raw(data, size_bytes);
+            return;
+        }
+        enqueue_paced(data, size_bytes);
     }
 
     template <typename Container>
     void send_container(const Container& data) {
         send(data.data(), data.size() * sizeof(typename Container::value_type));
+    }
+
+private:
+    using SteadyClock = std::chrono::steady_clock;
+
+    struct PacerPacket {
+        std::vector<uint8_t> bytes;
+        SteadyClock::time_point enqueue_time;
+    };
+
+    UdpEgressPacerConfig pacer_cfg_;
+    std::mutex pacer_mutex_;
+    std::condition_variable pacer_cv_;
+    std::deque<PacerPacket> pacer_queue_;
+    std::thread pacer_thread_;
+    bool pacer_running_ = false;
+    size_t pacer_dropped_oldest_ = 0;
+    size_t pacer_dropped_stale_ = 0;
+    SteadyClock::time_point next_send_time_{};
+    SteadyClock::time_point auto_rate_interval_start_{};
+    size_t auto_rate_interval_bytes_ = 0;
+    double auto_rate_bytes_per_s_ = 0.0;
+
+    static double mbps_to_bytes_per_s(double mbps) {
+        return (mbps * 1000.0 * 1000.0) / 8.0;
+    }
+
+    double current_rate_bytes_per_s_locked() const {
+        if (pacer_cfg_.target_mbps > 0.0) {
+            return mbps_to_bytes_per_s(pacer_cfg_.target_mbps);
+        }
+        if (auto_rate_bytes_per_s_ > 0.0) {
+            return auto_rate_bytes_per_s_;
+        }
+        return mbps_to_bytes_per_s(8.0);
+    }
+
+    void update_auto_rate_locked(size_t size_bytes, SteadyClock::time_point now) {
+        if (pacer_cfg_.target_mbps > 0.0) {
+            return;
+        }
+        if (auto_rate_interval_start_ == SteadyClock::time_point{}) {
+            auto_rate_interval_start_ = now;
+        }
+        auto_rate_interval_bytes_ += size_bytes;
+
+        const double elapsed_s =
+            std::chrono::duration<double>(now - auto_rate_interval_start_).count();
+        if (elapsed_s < 0.2) {
+            return;
+        }
+
+        const double interval_rate = static_cast<double>(auto_rate_interval_bytes_) / elapsed_s;
+        if (interval_rate > 0.0) {
+            if (auto_rate_bytes_per_s_ <= 0.0) {
+                auto_rate_bytes_per_s_ = interval_rate;
+            } else {
+                auto_rate_bytes_per_s_ = 0.85 * auto_rate_bytes_per_s_ + 0.15 * interval_rate;
+            }
+        }
+        auto_rate_interval_start_ = now;
+        auto_rate_interval_bytes_ = 0;
+    }
+
+    template <typename T>
+    void enqueue_paced(const T* data, size_t size_bytes) {
+        if (size_bytes == 0) {
+            return;
+        }
+        PacerPacket packet;
+        packet.bytes.resize(size_bytes);
+        std::memcpy(packet.bytes.data(), data, size_bytes);
+        packet.enqueue_time = SteadyClock::now();
+
+        {
+            std::lock_guard<std::mutex> lock(pacer_mutex_);
+            update_auto_rate_locked(size_bytes, packet.enqueue_time);
+            while (pacer_queue_.size() >= pacer_cfg_.queue_packets) {
+                pacer_queue_.pop_front();
+                ++pacer_dropped_oldest_;
+                if (pacer_dropped_oldest_ <= 5 || (pacer_dropped_oldest_ % 100) == 0) {
+                    LOG_G_WARN() << "UDP egress pacer dropped oldest packet: queue full, dropped="
+                                 << pacer_dropped_oldest_;
+                }
+            }
+            pacer_queue_.push_back(std::move(packet));
+        }
+        pacer_cv_.notify_one();
+    }
+
+    void stop_pacer() {
+        if (!pacer_cfg_.enabled) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(pacer_mutex_);
+            pacer_running_ = false;
+            pacer_queue_.clear();
+        }
+        pacer_cv_.notify_one();
+        if (pacer_thread_.joinable()) {
+            pacer_thread_.join();
+        }
+    }
+
+    bool wait_until_send_time(SteadyClock::time_point send_time) {
+        std::unique_lock<std::mutex> lock(pacer_mutex_);
+        return !pacer_cv_.wait_until(lock, send_time, [this]() {
+            return !pacer_running_;
+        });
+    }
+
+    bool packet_is_stale(const PacerPacket& packet, SteadyClock::time_point now) const {
+        if (pacer_cfg_.max_delay_ms <= 0.0) {
+            return false;
+        }
+        const double age_ms =
+            std::chrono::duration<double, std::milli>(now - packet.enqueue_time).count();
+        return age_ms > pacer_cfg_.max_delay_ms;
+    }
+
+    void pacer_loop() {
+        while (true) {
+            PacerPacket packet;
+            double rate_bytes_per_s = 0.0;
+            {
+                std::unique_lock<std::mutex> lock(pacer_mutex_);
+                pacer_cv_.wait(lock, [this]() {
+                    return !pacer_running_ || !pacer_queue_.empty();
+                });
+                if (!pacer_running_) {
+                    break;
+                }
+                packet = std::move(pacer_queue_.front());
+                pacer_queue_.pop_front();
+                rate_bytes_per_s = current_rate_bytes_per_s_locked();
+            }
+
+            const auto now = SteadyClock::now();
+            if (packet_is_stale(packet, now)) {
+                ++pacer_dropped_stale_;
+                if (pacer_dropped_stale_ <= 5 || (pacer_dropped_stale_ % 100) == 0) {
+                    LOG_G_WARN() << "UDP egress pacer dropped stale packet: dropped="
+                                 << pacer_dropped_stale_;
+                }
+                continue;
+            }
+
+            if (next_send_time_ == SteadyClock::time_point{} || now > next_send_time_) {
+                next_send_time_ = now;
+            }
+            const auto send_time = next_send_time_;
+            if (rate_bytes_per_s > 0.0) {
+                const auto spacing = std::chrono::duration<double>(
+                    static_cast<double>(packet.bytes.size()) / rate_bytes_per_s);
+                next_send_time_ += std::chrono::duration_cast<SteadyClock::duration>(spacing);
+            }
+
+            if (send_time > now && !wait_until_send_time(send_time)) {
+                break;
+            }
+
+            try {
+                send_raw(packet.bytes.data(), packet.bytes.size());
+            } catch (const std::exception& e) {
+                LOG_G_WARN() << "UDP egress pacer send failed: " << e.what();
+            }
+        }
     }
 };
 

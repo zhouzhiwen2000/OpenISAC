@@ -565,6 +565,30 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">BS 解码后的上行业务 UDP 输出目标端口。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>udp_egress_pacer_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用解码后业务 UDP 输出的排队 pacing，用于平滑 decoder 造成的突发输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_target_mbps</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UDP egress pacer 的目标载荷速率。<code>0</code> 表示根据入队速率自动估计；正数表示固定 Mbps 速率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>512</code></td>
+<td style="text-align:left">egress pacer 最多缓存的 UDP 数据报数量，超过后丢弃最旧数据报。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>250</code></td>
+<td style="text-align:left">egress pacer 中数据报允许排队的最长时间；设为 <code>0</code> 可关闭按年龄丢包。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>duplex_mode</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>tdd</code></td>
@@ -1328,6 +1352,30 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>50001</code></td>
 <td style="text-align:left">UE 解码后的下行业务 UDP 输出目标端口。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_enabled</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">启用解码后业务 UDP 输出的排队 pacing，用于平滑 decoder 造成的突发输出。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_target_mbps</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>0</code></td>
+<td style="text-align:left">UDP egress pacer 的目标载荷速率。<code>0</code> 表示根据入队速率自动估计；正数表示固定 Mbps 速率。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_queue_packets</code></td>
+<td style="text-align:left"><code>int</code></td>
+<td style="text-align:left"><code>512</code></td>
+<td style="text-align:left">egress pacer 最多缓存的 UDP 数据报数量，超过后丢弃最旧数据报。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>udp_egress_pacer_max_delay_ms</code></td>
+<td style="text-align:left"><code>float</code></td>
+<td style="text-align:left"><code>250</code></td>
+<td style="text-align:left">egress pacer 中数据报允许排队的最长时间；设为 <code>0</code> 可关闭按年龄丢包。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>default_out_ip</code></td>

@@ -42,71 +42,6 @@ PROFILING_DESCRIPTIONS: dict[str, str] = {
     "uplink": "Enable UE uplink TX runtime diagnostics, including UL-TX timing and waveform logs.",
 }
 
-SECTION_ORDER_BY_TAB: dict[str, tuple[str, ...]] = {
-    "bs": (
-        "Radio backend",
-        "Channel simulator",
-        "OFDM Frame",
-        "CUDA",
-        "Sensing",
-        "RF / Sampling",
-        "USRP Device Args",
-        "Clock / Time Sources",
-        "Wire Format",
-        "Downlink",
-        "Downlink Pipeline",
-        "Uplink",
-        "Measurement mode",
-        "Network",
-        "CPU Cores",
-        "Runtime / Debug",
-        "Resource Preview",
-        "Other",
-    ),
-    "ue": (
-        "Radio backend",
-        "Channel simulator",
-        "OFDM Frame",
-        "CUDA",
-        "Sensing",
-        "RF / Sampling",
-        "USRP Device / Link",
-        "Downlink",
-        "Uplink",
-        "Sync / Tracking",
-        "Measurement mode",
-        "Network",
-        "CPU Cores",
-        "Runtime / Debug",
-        "Resource Preview",
-        "Other",
-    ),
-}
-
-SECTION_YAML_KEY_BY_TITLE: dict[str, str] = {
-    "Radio backend": "radio",
-    "Channel simulator": "simulation",
-    "OFDM Frame": "ofdm_frame",
-    "CUDA": "cuda",
-    "Sensing": "sensing",
-    "RF / Sampling": "rf_sampling",
-    "USRP Device Args": "usrp_device",
-    "USRP Device / Link": "usrp_device",
-    "Clock / Time Sources": "clock_time",
-    "Downlink": "downlink",
-    "Downlink Pipeline": "downlink_pipeline",
-    "Uplink": "uplink",
-    "Sync / Tracking": "sync_tracking",
-    "Measurement mode": "measurement",
-    "Network": "network_output",
-    "CPU Cores": "cpu_cores",
-    "Runtime / Debug": "runtime",
-    "Resource Preview": "resource_preview",
-}
-
-SECTION_YAML_KEYS = set(SECTION_YAML_KEY_BY_TITLE.values())
-
-
 def field_data_key(field: dict[str, Any]) -> str:
     return str(field.get("data_key") or field.get("key") or "")
 
@@ -114,169 +49,88 @@ def field_data_key(field: dict[str, Any]) -> str:
 def field_yaml_key(field: dict[str, Any]) -> str:
     return str(field.get("key") or "")
 
-CUDA_KEYS = (
-    "cuda_mod_pipeline_slots",
-    "cuda_demod_pipeline_slots",
-    "cuda_ldpc_decoder_backend",
-    "cuda_ldpc_worker_buffers",
-    "cuda_ldpc_cross_frame_flush_frames",
-    "cuda_ldpc_cross_frame_flush_us",
-)
 
-RADIO_BACKEND_KEYS = ("radio_backend",)
+def load_layout_schema() -> tuple[
+    dict[str, dict[str, dict[str, Any]]],
+    dict[str, list[dict[str, Any]]],
+]:
+    """Parse the hierarchical schema (scope -> ordered section list -> fields).
 
-SIMULATION_KEYS = ("simulation",)
-
-RF_SAMPLING_KEYS = (
-    "sample_rate",
-    "bandwidth",
-    "rx_agc_enable",
-    "rx_agc_low_threshold_db",
-    "rx_agc_high_threshold_db",
-    "rx_agc_max_step_db",
-    "rx_agc_update_frames",
-)
-
-BS_DEVICE_KEYS = ("device_args",)
-
-BS_CLOCK_KEYS = (
-    "clock_source",
-    "time_source",
-)
-
-BS_WIRE_FORMAT_KEYS: tuple[str, ...] = ()
-
-UE_DEVICE_KEYS = (
-    "device_args",
-    "clock_source",
-)
-
-BS_DOWNLINK_KEYS = (
-    "center_freq",
-    "tx_gain",
-    "tx_channel",
-    "tx_device_args",
-    "tx_clock_source",
-    "tx_time_source",
-    "wire_format_tx",
-    "tx_circular_buffer_size",
-    "data_packet_buffer_size",
-)
-
-UE_DOWNLINK_KEYS = (
-    "center_freq",
-    "downlink.rx_wire_format",
-    "rx_channel",
-    "equalizer_mode",
-    "channel_tracking_mode",
-    "equalizer_mag_floor",
-    "channel_tracking_min_pilot_snr",
-)
-
-CPU_CORES_KEYS = (
-    "downlink_cpu_cores",
-    "uplink_cpu_cores",
-    "main_cpu_core",
-)
-
-UE_NETWORK_KEYS = (
-    "udp_input_ip",
-    "udp_input_port",
-    "udp_output_ip",
-    "udp_output_port",
-)
-
-SENSING_RX_KEYS = (
-    "sensing.rx_wire_format",
-    "sensing.rx_device_args",
-    "sensing.rx_clock_source",
-    "sensing.rx_time_source",
-    "sensing.rx_channel_count",
-    "sensing.rx_channels",
-)
-
-UE_SENSING_KEYS = (
-    "sensing.bi_enabled",
-    "sensing.on_wire_format",
-    "range_fft_size",
-    "doppler_fft_size",
-    "sensing.output_mode",
-    "sensing.backend_processing_enabled",
-    "sensing.view_range_bins",
-    "sensing.view_doppler_bins",
-)
-
-MEASUREMENT_KEYS = (
-    "measurement_enable",
-    "measurement_mode",
-    "measurement_run_id",
-    "measurement_output_dir",
-    "measurement_payload_bytes",
-    "measurement_prbs_seed",
-    "measurement_packets_per_point",
-    "measurement_max_packets_per_frame",
-)
-
-BS_UPLINK_KEYS = (
-    "uplink.enabled",
-    "duplex_mode",
-    "uplink",
-    "equalizer_mode",
-    "channel_tracking_mode",
-    "equalizer_mag_floor",
-    "channel_tracking_min_pilot_snr",
-    "rx_gain",
-    "uplink.rx_channel",
-    "uplink.rx_wire_format",
-    "uplink.rx_device_args",
-    "uplink.rx_clock_source",
-    "uplink.rx_time_source",
-    "bs_dl_ul_timing_diff",
-    "ue_timing_advance",
-)
-
-UE_UPLINK_KEYS = (
-    "uplink.enabled",
-    "duplex_mode",
-    "uplink.idle_waveform",
-    "uplink",
-    "tx_gain",
-    "tx_channel",
-    "wire_format_tx",
-    "ue_timing_advance",
-)
-
-def load_layout_schema() -> dict[str, dict[str, dict[str, Any]]]:
+    Returns:
+      fields_by_scope: scope -> {data_key -> {"title", "field"}}  (flat lookup used downstream)
+      sections_by_scope: scope -> [ {"title", "yaml_key", "order", "fields": [field, ...]} ]
+    """
+    fields_by_scope: dict[str, dict[str, dict[str, Any]]] = {}
+    sections_by_scope: dict[str, list[dict[str, Any]]] = {}
     if not SCHEMA_TEMPLATE_PATH.exists():
-        return {}
+        return fields_by_scope, sections_by_scope
     raw = yaml.safe_load(SCHEMA_TEMPLATE_PATH.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        return {}
+        return fields_by_scope, sections_by_scope
 
-    schema: dict[str, dict[str, dict[str, Any]]] = {}
     for scope_name in ("common", "bs", "ue"):
-        scope = raw.get(scope_name, {})
-        if not isinstance(scope, dict):
+        scope = raw.get(scope_name) or []
+        if not isinstance(scope, list):
             continue
-        scope_schema: dict[str, dict[str, Any]] = {}
-        for key, entry in scope.items():
-            if not isinstance(entry, dict):
+        scope_fields: dict[str, dict[str, Any]] = {}
+        scope_sections: list[dict[str, Any]] = []
+        for section in scope:
+            if not isinstance(section, dict):
                 continue
-            title = str(entry.get("title", "Other"))
-            field = copy.deepcopy(entry.get("field", {}))
-            if not isinstance(field, dict):
-                continue
-            field.setdefault("key", key)
-            data_key = field_data_key(field)
-            scope_schema[data_key] = {
+            title = str(section.get("title", "Other"))
+            yaml_key = section.get("yaml_key")
+            order = section.get("order", 0)
+            field_list: list[dict[str, Any]] = []
+            for field in section.get("fields", []) or []:
+                if not isinstance(field, dict):
+                    continue
+                field = copy.deepcopy(field)
+                data_key = field_data_key(field)
+                scope_fields[data_key] = {"title": title, "field": field}
+                field_list.append(field)
+            scope_sections.append({
                 "title": title,
-                "field": field,
-            }
-        schema[scope_name] = scope_schema
-    return schema
+                "yaml_key": yaml_key,
+                "order": order,
+                "fields": field_list,
+            })
+        fields_by_scope[scope_name] = scope_fields
+        sections_by_scope[scope_name] = scope_sections
+    return fields_by_scope, sections_by_scope
 
 
-LAYOUT_SCHEMA_FIELDS_BY_SCOPE = load_layout_schema()
+LAYOUT_SCHEMA_FIELDS_BY_SCOPE, LAYOUT_SECTIONS_BY_SCOPE = load_layout_schema()
+
+
+def _derive_section_yaml_keys() -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for sections in LAYOUT_SECTIONS_BY_SCOPE.values():
+        for section in sections:
+            yaml_key = section.get("yaml_key")
+            if yaml_key:
+                mapping.setdefault(section["title"], str(yaml_key))
+    return mapping
+
+
+SECTION_YAML_KEY_BY_TITLE: dict[str, str] = _derive_section_yaml_keys()
+SECTION_YAML_KEYS = set(SECTION_YAML_KEY_BY_TITLE.values())
+
+
+def build_layout_for_tab(tab_name: str) -> list[dict[str, Any]]:
+    """Merge common + tab sections, ordered by (order, title); fields keep schema order."""
+    sections: list[dict[str, Any]] = []
+    for scope_name in ("common", tab_name):
+        for section in LAYOUT_SECTIONS_BY_SCOPE.get(scope_name, []):
+            sections.append({
+                "title": section["title"],
+                "fields": [copy.deepcopy(field) for field in section["fields"]],
+                "_order": section.get("order", 0),
+            })
+    sections.sort(key=lambda section: (section["_order"], section["title"]))
+    for section in sections:
+        section.pop("_order", None)
+    return sections
+
 
 
 def schema_keys_for_tab(tab_name: str) -> set[str]:
@@ -961,111 +815,6 @@ def configured_cpu_values(data: dict[str, Any]) -> list[int]:
     return values
 
 
-def build_optional_field_catalog(
-    tab_name: str,
-    sample_candidates: tuple[Path, ...],
-    schema_fields_by_scope: dict[str, dict[str, dict[str, Any]]],
-) -> dict[str, dict[str, Any]]:
-    catalog: dict[str, dict[str, Any]] = {}
-
-    merged_schema: dict[str, dict[str, Any]] = {}
-    for scope_name in ("common", tab_name):
-        for key, schema_entry in schema_fields_by_scope.get(scope_name, {}).items():
-            merged_schema[key] = schema_entry
-
-    for key, schema_entry in merged_schema.items():
-        title = str(schema_entry.get("title", "Other"))
-        schema_field = copy.deepcopy(schema_entry.get("field", {}))
-        if not isinstance(schema_field, dict):
-            continue
-        schema_field.setdefault("key", key)
-        schema_field.setdefault("optional", True)
-        catalog[key] = {
-            "title": title,
-            "field": schema_field,
-        }
-
-    return catalog
-
-
-def append_missing_layout_fields(
-    layout: list[dict[str, Any]],
-    catalog: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    existing = {field_data_key(field) for section in layout for field in section["fields"]}
-    layout_copy = copy.deepcopy(layout)
-    for key, entry in catalog.items():
-        if key in existing:
-            continue
-        inserted = False
-        for target_section in layout_copy:
-            if target_section["title"] == entry["title"]:
-                target_section["fields"].append(copy.deepcopy(entry["field"]))
-                inserted = True
-                break
-        if not inserted:
-            layout_copy.append({
-                "title": entry["title"],
-                "fields": [copy.deepcopy(entry["field"])],
-            })
-    return layout_copy
-
-
-def regroup_layout_fields(
-    layout: list[dict[str, Any]],
-    catalog: dict[str, dict[str, Any]],
-    target_title: str,
-    ordered_keys: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    key_set = set(ordered_keys)
-    moved_fields: dict[str, dict[str, Any]] = {}
-    layout_copy: list[dict[str, Any]] = []
-    target_index: int | None = None
-
-    for section in layout:
-        section_copy = {"title": section["title"], "fields": []}
-        if section["title"] == target_title and target_index is None:
-            target_index = len(layout_copy)
-        for field in section["fields"]:
-            key = field_data_key(field)
-            if key in key_set:
-                moved_fields[key] = copy.deepcopy(field)
-                continue
-            section_copy["fields"].append(field)
-        if section_copy["fields"] or section["title"] == target_title:
-            layout_copy.append(section_copy)
-
-    for key in ordered_keys:
-        if key in moved_fields:
-            continue
-        catalog_field = catalog.get(key, {}).get("field")
-        if isinstance(catalog_field, dict):
-            moved_fields[key] = copy.deepcopy(catalog_field)
-
-    if target_index is None:
-        layout_copy.append({"title": target_title, "fields": []})
-        target_index = len(layout_copy) - 1
-
-    target_section = layout_copy[target_index]
-    target_section["fields"] = [
-        *[moved_fields[key] for key in ordered_keys if key in moved_fields],
-        *target_section["fields"],
-    ]
-    return layout_copy
-
-
-def sort_layout_sections(tab_name: str, layout: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    section_order = SECTION_ORDER_BY_TAB.get(tab_name, ())
-    order_index = {title: index for index, title in enumerate(section_order)}
-    return sorted(
-        layout,
-        key=lambda section: (
-            order_index.get(section["title"], len(section_order)),
-            section["title"],
-        ),
-    )
-
-
 def flatten_sectioned_yaml_data(raw_data: dict[str, Any], layout: list[dict[str, Any]]) -> dict[str, Any]:
     data: dict[str, Any] = {}
 
@@ -1433,45 +1182,8 @@ def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path,
     if not isinstance(data, dict):
         data = {}
     reject_top_level_config_values(data, source)
-    optional_catalog = build_optional_field_catalog(
-        tab_name=tab_name,
-        sample_candidates=fallback_paths,
-        schema_fields_by_scope=LAYOUT_SCHEMA_FIELDS_BY_SCOPE,
-    )
-    layout: list[dict[str, Any]] = []
-    layout = append_missing_layout_fields(layout, optional_catalog)
-    layout = regroup_layout_fields(layout, optional_catalog, "Radio backend", RADIO_BACKEND_KEYS)
-    layout = regroup_layout_fields(layout, optional_catalog, "Channel simulator", SIMULATION_KEYS)
-    layout = regroup_layout_fields(layout, optional_catalog, "RF / Sampling", RF_SAMPLING_KEYS)
-    if tab_name == "bs":
-        layout = regroup_layout_fields(layout, optional_catalog, "USRP Device Args", BS_DEVICE_KEYS)
-        layout = regroup_layout_fields(layout, optional_catalog, "Clock / Time Sources", BS_CLOCK_KEYS)
-        layout = regroup_layout_fields(layout, optional_catalog, "Wire Format", BS_WIRE_FORMAT_KEYS)
-    else:
-        layout = regroup_layout_fields(layout, optional_catalog, "USRP Device / Link", UE_DEVICE_KEYS)
-    layout = regroup_layout_fields(layout, optional_catalog, "CUDA", CUDA_KEYS)
-    layout = regroup_layout_fields(
-        layout,
-        optional_catalog,
-        "Downlink",
-        UE_DOWNLINK_KEYS if tab_name == "ue" else BS_DOWNLINK_KEYS,
-    )
-    layout = regroup_layout_fields(
-        layout,
-        optional_catalog,
-        "Uplink",
-        BS_UPLINK_KEYS if tab_name == "bs" else UE_UPLINK_KEYS,
-    )
-    if tab_name == "bs":
-        layout = regroup_layout_fields(layout, optional_catalog, "Sensing", SENSING_RX_KEYS)
-    else:
-        layout = regroup_layout_fields(layout, optional_catalog, "Sensing", UE_SENSING_KEYS)
-    layout = regroup_layout_fields(layout, optional_catalog, "Measurement mode", MEASUREMENT_KEYS)
-    if tab_name == "ue":
-        layout = regroup_layout_fields(layout, optional_catalog, "Network", UE_NETWORK_KEYS)
-    layout = regroup_layout_fields(layout, optional_catalog, "CPU Cores", CPU_CORES_KEYS)
+    layout = build_layout_for_tab(tab_name)
     layout = enrich_mapping_list_layouts(layout)
-    layout = sort_layout_sections(tab_name, layout)
     data = flatten_sectioned_yaml_data(data, layout)
     prune_cross_tab_only_values(tab_name, data)
     normalize_loaded_config_values(data)
@@ -1626,6 +1338,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                     "default_text": default_text,
                     "value_text": ", ".join(str(v) for v in (value or [])) if has_value else "",
                     "options": copy.deepcopy(field.get("options", [])),
+                    "enabled_if": copy.deepcopy(field.get("enabled_if")),
                 })
                 continue
 
@@ -1660,6 +1373,7 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 "display_unit": unit_meta[1] if unit_meta is not None else "",
                 "options": copy.deepcopy(field.get("options", [])),
                 "is_set": effective_has_value,
+                "enabled_if": copy.deepcopy(field.get("enabled_if")),
             })
         sections.append(section_payload)
 

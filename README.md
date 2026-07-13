@@ -565,6 +565,10 @@ Use `config/BS_X310.yaml`, `config/BS_B210.yaml`, or `config/BS_B210_Duplex.yaml
 | `udp_input_port` | `int` | `50000` | BS downlink payload UDP bind port. |
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | BS decoded uplink payload UDP destination IP. This is the output stream recovered from UE->BS uplink. |
 | `udp_output_port` | `int` | `50003` | BS decoded uplink payload UDP destination port. |
+| `udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress. |
+| `udp_egress_pacer_target_mbps` | `float` | `0` | UDP egress pacer target payload rate. `0` enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate. |
+| `udp_egress_pacer_queue_packets` | `int` | `512` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
+| `udp_egress_pacer_max_delay_ms` | `float` | `250` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
 | `duplex_mode` | `string` | `tdd` | Duplexing scheme. `tdd` time-multiplexes UE uplink symbols into the BS frame on the downlink center frequency; `fdd` keeps BS downlink active while UE uplink uses `uplink.center_freq`. |
 | `uplink` | `object` | `symbol_start=90`, `symbol_count=10`, `guard_symbols=1`, `center_freq=2500000000` | Uplink/duplex settings. In TDD, `symbol_start`, `symbol_count`, and `guard_symbols` define the DL/UL boundary in OFDM symbols, and `center_freq` is ignored. In FDD, `center_freq` defines the UE->BS carrier, while `symbol_start`, `symbol_count`, and `guard_symbols` are ignored and the uplink uses the full frame. Enabling uplink requires a UE TX antenna/RF chain and a BS RX antenna/RF chain; FDD additionally requires enough RF separation or isolation for simultaneous TX/RX. |
 | `bs_dl_ul_timing_diff` | `int` / samples | `63` | BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with `DUTI`. |
@@ -717,6 +721,10 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `udp_input_port` | `int` | `50002` | UE uplink payload UDP bind port. |
 | `udp_output_ip` | `string` / IPv4 | `127.0.0.1` | UE decoded downlink payload UDP destination IP. This is the output stream recovered from the BS->UE downlink. |
 | `udp_output_port` | `int` | `50001` | UE decoded downlink payload UDP destination port. |
+| `udp_egress_pacer_enabled` | `bool` | `false` | Enable queued pacing for decoded payload UDP output to smooth bursty decoder egress. |
+| `udp_egress_pacer_target_mbps` | `float` | `0` | UDP egress pacer target payload rate. `0` enables automatic estimation from the enqueue rate; positive values use a fixed Mbps rate. |
+| `udp_egress_pacer_queue_packets` | `int` | `512` | Maximum UDP datagrams buffered by the egress pacer before dropping the oldest packet. |
+| `udp_egress_pacer_max_delay_ms` | `float` | `250` | Maximum queued packet age before the egress pacer drops it. Set `0` to disable age-based drops. |
 | `default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP payload and VOFA+ debug outputs when those IP fields are empty. ZeroMQ PUB listen IPs do not inherit this value. |
 | `control_port` | `int` | `10001` | ZeroMQ ROUTER bind port for the bidirectional control channel. |
 | `measurement_enable` | `bool` | `false` | Enable CPU internal measurement mode. In this mode, decoded measurement payloads are consumed locally for BER/BLER/EVM statistics instead of being forwarded to `udp_output_*`. CUDA binaries ignore this mode. |

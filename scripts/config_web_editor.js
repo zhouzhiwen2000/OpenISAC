@@ -163,6 +163,9 @@ const APP = window.__APP_STATE__;
       'wire_format_tx',
       'uplink.rx_wire_format',
       'sensing.rx_wire_format',
+      'sensing.rx_device_args',
+      'sensing.rx_clock_source',
+      'sensing.rx_time_source',
       'downlink.rx_wire_format',
       'tx_gain',
       'tx_channel',
@@ -319,7 +322,35 @@ const APP = window.__APP_STATE__;
       'sensing.rx_channels': (model) => fieldIntValue(model, 'sensing.rx_channel_count', 0) > 0,
     };
 
+    function singleEnabledIfRuleSatisfied(model, rule) {
+      if (!rule || !rule.key) return true;
+      const expected = Object.prototype.hasOwnProperty.call(rule, 'value') ? rule.value : true;
+      if (typeof expected === 'boolean') {
+        return fieldBoolValue(model, rule.key, false) === expected;
+      }
+      const parent = findField(model, rule.key);
+      if (!parent) return true;
+      const actual = parent.value ?? parent.value_text;
+      return String(actual) === String(expected);
+    }
+
+    function enabledIfRuleSatisfied(model, field) {
+      const rule = field.enabled_if;
+      if (!rule) return true;
+      if (Array.isArray(rule)) {
+        return rule.every((item) => singleEnabledIfRuleSatisfied(model, item));
+      }
+      if (Array.isArray(rule.all)) {
+        return rule.all.every((item) => singleEnabledIfRuleSatisfied(model, item));
+      }
+      if (Array.isArray(rule.any)) {
+        return rule.any.some((item) => singleEnabledIfRuleSatisfied(model, item));
+      }
+      return singleEnabledIfRuleSatisfied(model, rule);
+    }
+
     function shouldHideFieldByDependency(model, field) {
+      if (!enabledIfRuleSatisfied(model, field)) return true;
       const rule = DEPENDENT_FIELD_RULES[field.key];
       return Boolean(rule && !rule(model));
     }
@@ -2398,11 +2429,11 @@ const APP = window.__APP_STATE__;
       return fragment;
     }
 
-	    function renderSections() {
-	      const model = currentModel();
-	      if (!model) return;
-	      ensureSensingChannelItems();
-	      configSections.innerHTML = '';
+    function renderSections() {
+      const model = currentModel();
+      if (!model) return;
+      ensureSensingChannelItems();
+      configSections.innerHTML = '';
 
         const fieldSortOrder = {
           'uplink.enabled': 0,
@@ -2651,6 +2682,7 @@ const APP = window.__APP_STATE__;
               field.value_text = input.checked ? 'true' : 'false';
               if ([
                 'uplink.enabled',
+                'udp_egress_pacer_enabled',
                 'enable_sec_sync_symbol',
                 'enable_cfo_training_sequence',
                 'measurement_enable',
