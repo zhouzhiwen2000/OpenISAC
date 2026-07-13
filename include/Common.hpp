@@ -1520,6 +1520,36 @@ inline DuplexFrameLayout build_duplex_frame_layout(const Config& cfg) {
     return layout;
 }
 
+inline std::vector<uint8_t> build_cfo_tracking_skip_mask(
+    const Config& cfg,
+    const DuplexFrameLayout& duplex_layout)
+{
+    std::vector<uint8_t> skip_mask(cfg.ofdm.num_symbols, 0);
+    if (duplex_layout.mode != DuplexMode::TDD ||
+        !duplex_layout.uplink_enabled ||
+        cfg.ofdm.num_symbols == 0) {
+        return skip_mask;
+    }
+
+    for (size_t sym = 0; sym < cfg.ofdm.num_symbols; ++sym) {
+        if (duplex_layout.is_uplink(sym) || duplex_layout.is_guard(sym)) {
+            skip_mask[sym] = 1;
+        }
+    }
+    for (size_t sym = 0; sym < cfg.ofdm.num_symbols; ++sym) {
+        if (duplex_layout.is_uplink(sym) || duplex_layout.is_guard(sym)) {
+            continue;
+        }
+        const size_t prev = (sym == 0) ? (cfg.ofdm.num_symbols - 1) : (sym - 1);
+        const size_t next = (sym + 1 == cfg.ofdm.num_symbols) ? 0 : (sym + 1);
+        if (duplex_layout.is_uplink(prev) || duplex_layout.is_guard(prev) ||
+            duplex_layout.is_uplink(next) || duplex_layout.is_guard(next)) {
+            skip_mask[sym] = 1;
+        }
+    }
+    return skip_mask;
+}
+
 inline int normalize_config_zc_root(int zc_root, size_t fft_size) {
     if (fft_size == 0) {
         return zc_root;

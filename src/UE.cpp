@@ -2144,29 +2144,7 @@ private:
     }
 
     void _build_cfo_symbol_skip_mask() {
-        _cfo_symbol_skip_mask.assign(cfg_.ofdm.num_symbols, 0);
-        if (_duplex_layout.mode != DuplexMode::TDD ||
-            !_duplex_layout.uplink_enabled ||
-            cfg_.ofdm.num_symbols == 0) {
-            return;
-        }
-
-        for (size_t sym = 0; sym < cfg_.ofdm.num_symbols; ++sym) {
-            if (_duplex_layout.is_uplink(sym) || _duplex_layout.is_guard(sym)) {
-                _cfo_symbol_skip_mask[sym] = 1;
-            }
-        }
-        for (size_t sym = 0; sym < cfg_.ofdm.num_symbols; ++sym) {
-            if (_duplex_layout.is_uplink(sym) || _duplex_layout.is_guard(sym)) {
-                continue;
-            }
-            const size_t prev = (sym == 0) ? (cfg_.ofdm.num_symbols - 1) : (sym - 1);
-            const size_t next = (sym + 1 == cfg_.ofdm.num_symbols) ? 0 : (sym + 1);
-            if (_duplex_layout.is_uplink(prev) || _duplex_layout.is_guard(prev) ||
-                _duplex_layout.is_uplink(next) || _duplex_layout.is_guard(next)) {
-                _cfo_symbol_skip_mask[sym] = 1;
-            }
-        }
+        _cfo_symbol_skip_mask = build_cfo_tracking_skip_mask(cfg_, _duplex_layout);
     }
 
     FrameEvmStats _compute_frame_evm_stats(const std::vector<AlignedVector>& symbols) const
