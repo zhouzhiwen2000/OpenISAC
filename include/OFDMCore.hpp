@@ -4851,8 +4851,12 @@ public:
 
     void reset() {
         _count = 0;
+        _err_large_count = 0;
+        _pd = 1e-5f;
         _cumulative_delay_offset = 0.0f;
+        _cumulative_sensing_delay_offset = 0.0f;
         _sfo_per_frame = 0.0f;
+        _first_delay_offset_reading = true;
         std::fill(_delay_offsets.begin(), _delay_offsets.end(), 0.0f);
     }
 

@@ -897,7 +897,9 @@ private:
                 channel_freq,
                 payload,
                 &pack_error)) {
-            LOG_G_WARN() << "[eRTM] failed to pack TO payload: " << pack_error;
+            if (_cfg.should_profile("ertm")) {
+                LOG_G_WARN() << "[eRTM] failed to pack TO payload: " << pack_error;
+            }
             _ertm_last_injected_frame = current_frame;
             return false;
         }
@@ -905,10 +907,12 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
         const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
         if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
-            LOG_G_WARN() << "[eRTM] TO payload does not fit in one downlink frame: payload_bytes="
-                         << payload.size()
-                         << ", qpsk_syms=" << packet_qpsk_symbols
-                         << ", frame_capacity=" << _data_resource_layout.payload_re_count;
+            if (_cfg.should_profile("ertm")) {
+                LOG_G_WARN() << "[eRTM] TO payload does not fit in one downlink frame: payload_bytes="
+                             << payload.size()
+                             << ", qpsk_syms=" << packet_qpsk_symbols
+                             << ", frame_capacity=" << _data_resource_layout.payload_re_count;
+            }
             _ertm_last_injected_frame = current_frame;
             return false;
         }
@@ -919,7 +923,7 @@ private:
             LdpcPacketFraming::kFlagErtmTiming);
         if (enqueued) {
             _ertm_last_injected_frame = current_frame;
-            if (seq == 0 || (seq % 64u) == 0u) {
+            if (_cfg.should_profile("ertm") && (seq == 0 || (seq % 64u) == 0u)) {
                 LOG_G_INFO() << "[eRTM] injected TO payload seq=" << seq
                              << ", duti_samples=" << duti
                              << ", fft_size=" << _cfg.ofdm.fft_size

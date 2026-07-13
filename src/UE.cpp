@@ -670,6 +670,10 @@ private:
     AlignedVector _delay_spectrum_buf;           // delay (time-domain) spectrum
     SeqlockedChannelEstimate _ertm_latest_dl_channel;
     bool _ertm_missing_delay_warned = false;
+    std::atomic<double> _ertm_latest_to_ue_samples{0.0};
+    std::atomic<uint64_t> _ertm_latest_to_ue_seq{0};
+    std::atomic<bool> _ertm_absolute_delay_available{false};
+    std::atomic<double> _ertm_absolute_pending_alignment_samples{0.0};
     // eRTM TO payloads are processed off the RT demod/decode threads: the
     // decode thread only classifies+enqueues (cheap), a plain (non-pinned,
     // non-RT-priority) background thread does the unpack/FFT/correlate/log/
@@ -1203,11 +1207,15 @@ private:
             return false;
         }
         if (!cfg_.uplink.ertm_to_enable) {
-            LOG_G_INFO() << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
+            if (cfg_.should_profile("ertm")) {
+                LOG_G_INFO() << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
+            }
             return true;
         }
         if (!_ertm_payload_queue.try_push(std::move(payload))) {
-            LOG_G_WARN() << "[eRTM] TO payload queue full; dropping report";
+            if (cfg_.should_profile("ertm")) {
+                LOG_G_WARN() << "[eRTM] TO payload queue full; dropping report";
+            }
         }
         return true;
     }
@@ -1225,13 +1233,15 @@ private:
                 static_cast<uint32_t>(cfg_.ofdm.fft_size),
                 bs_payload,
                 &unpack_error)) {
-            LOG_G_WARN() << "[eRTM] invalid TO payload: " << unpack_error;
+            if (cfg_.should_profile("ertm")) {
+                LOG_G_WARN() << "[eRTM] invalid TO payload: " << unpack_error;
+            }
             return;
         }
 
         AlignedVector local_channel_freq;
         if (!_ertm_latest_dl_channel.load(local_channel_freq)) {
-            if (!_ertm_missing_delay_warned) {
+            if (cfg_.should_profile("ertm") && !_ertm_missing_delay_warned) {
                 LOG_G_WARN() << "[eRTM] TO payload received before local downlink channel estimate is available";
                 _ertm_missing_delay_warned = true;
             }
@@ -1242,7 +1252,9 @@ private:
         AlignedVector local_delay;
         if (!_compute_ertm_oversampled_delay_spectrum(bs_payload.channel_freq, 0.0, bs_uplink_delay) ||
             !_compute_ertm_oversampled_delay_spectrum(local_channel_freq, 0.0, local_delay)) {
-            LOG_G_WARN() << "[eRTM] failed to compute oversampled delay spectra";
+            if (cfg_.should_profile("ertm")) {
+                LOG_G_WARN() << "[eRTM] failed to compute oversampled delay spectra";
+            }
             return;
         }
 
@@ -1260,7 +1272,9 @@ private:
                 publish_debug ? &correlation_spectrum : nullptr,
                 &peak_index,
                 &centroid3_delta_bins)) {
-            LOG_G_WARN() << "[eRTM] failed to correlate delay spectra";
+            if (cfg_.should_profile("ertm")) {
+                LOG_G_WARN() << "[eRTM] failed to correlate delay spectra";
+            }
             return;
         }
 
@@ -1279,27 +1293,52 @@ private:
             shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
         const double to_ue_samples = (tau_c_samples - to_bs_ue_samples) * 0.5;
         const double to_bs_samples = (tau_c_samples + to_bs_ue_samples) * 0.5;
+        if (std::isfinite(to_ue_samples)) {
+            const bool had_previous_to_ue =
+                _ertm_absolute_delay_available.load(std::memory_order_acquire);
+            const double previous_to_ue =
+                _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
+            if (had_previous_to_ue) {
+                const double to_ue_diff = to_ue_samples - previous_to_ue;
+                if (std::abs(to_ue_diff) > 0.1) {
+                    LOG_G_INFO() << "[eRTM] TO_UE diff"
+                                 << " seq=" << bs_payload.seq
+                                 << ", previous_to_ue=" << previous_to_ue
+                                 << " samples, current_to_ue=" << to_ue_samples
+                                 << " samples, to_ue_diff=" << to_ue_diff
+                                 << " samples, pending_alignment="
+                                 << _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed)
+                                 << " samples";
+                }
+                _update_ertm_absolute_pending_alignment(to_ue_diff);
+            }
+            _ertm_latest_to_ue_samples.store(to_ue_samples, std::memory_order_relaxed);
+            _ertm_latest_to_ue_seq.store(bs_payload.seq, std::memory_order_relaxed);
+            _ertm_absolute_delay_available.store(true, std::memory_order_release);
+        }
 
-        std::ostringstream oss;
-        oss << std::fixed << std::setprecision(3)
-            << "[eRTM] TO(samples) seq=" << bs_payload.seq
-            << ", oversample=" << _ertm_delay_oversample_factor
-            << ", shift_os_bins=" << signed_shift_bins
-            << ", shift_centroid3_delta_os_bins=" << centroid3_delta_bins
-            << ", shift_frac_os_bins=" << shift_frac_os_bins
-            << ", shift_samples=" << to_bs_ue_samples
-            << ", peak_index=" << peak_index
-            << ", rf_delay_samples=" << rf_delay_samples
-            << ", metric=" << std::setprecision(6) << metric << std::setprecision(3)
-            << ", DUTI_samples=" << bs_payload.duti_samples
-            << ", TADV_samples=" << tadv_samples
-            << ", tau_c_samples=" << tau_c_samples
-            << ", TO_BS_UE_samples=" << to_bs_ue_samples
-            << ", TO_UE_samples=" << to_ue_samples
-            << ", TO_BS_samples=" << to_bs_samples
-            << ", rf_delay_ns=(" << cfg_.uplink.ertm_dl_rf_delay_ns
-            << "+" << cfg_.uplink.ertm_ul_rf_delay_ns << ")";
-        LOG_G_INFO() << oss.str();
+        if (cfg_.should_profile("ertm")) {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(3)
+                << "[eRTM] TO(samples) seq=" << bs_payload.seq
+                << ", oversample=" << _ertm_delay_oversample_factor
+                << ", shift_os_bins=" << signed_shift_bins
+                << ", shift_centroid3_delta_os_bins=" << centroid3_delta_bins
+                << ", shift_frac_os_bins=" << shift_frac_os_bins
+                << ", shift_samples=" << to_bs_ue_samples
+                << ", peak_index=" << peak_index
+                << ", rf_delay_samples=" << rf_delay_samples
+                << ", metric=" << std::setprecision(6) << metric << std::setprecision(3)
+                << ", DUTI_samples=" << bs_payload.duti_samples
+                << ", TADV_samples=" << tadv_samples
+                << ", tau_c_samples=" << tau_c_samples
+                << ", TO_BS_UE_samples=" << to_bs_ue_samples
+                << ", TO_UE_samples=" << to_ue_samples
+                << ", TO_BS_samples=" << to_bs_samples
+                << ", rf_delay_ns=(" << cfg_.uplink.ertm_dl_rf_delay_ns
+                << "+" << cfg_.uplink.ertm_ul_rf_delay_ns << ")";
+            LOG_G_INFO() << oss.str();
+        }
         if (publish_debug) {
             AlignedVector corrected_uplink_delay;
             AlignedVector corrected_downlink_delay;
@@ -1307,7 +1346,9 @@ private:
                     bs_payload.channel_freq, to_bs_samples, corrected_uplink_delay) ||
                 !_compute_ertm_oversampled_delay_spectrum(
                     local_channel_freq, to_ue_samples, corrected_downlink_delay)) {
-                LOG_G_WARN() << "[eRTM] failed to compute TO-corrected debug spectra";
+                if (cfg_.should_profile("ertm")) {
+                    LOG_G_WARN() << "[eRTM] failed to compute TO-corrected debug spectra";
+                }
                 return;
             }
             _publish_ertm_debug_frame(
@@ -1327,6 +1368,78 @@ private:
                 to_ue_samples,
                 to_bs_samples);
         }
+    }
+
+    void _record_ertm_absolute_pending_alignment(double alignment_samples) {
+        if (alignment_samples == 0.0 ||
+            cfg_.sensing.delay_correction_mode != kSensingDelayCorrectionModeErtmAbsolute ||
+            !_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const double pending_alignment = -std::round(alignment_samples);
+        _ertm_absolute_pending_alignment_samples.store(
+            pending_alignment,
+            std::memory_order_relaxed);
+
+        LOG_G_INFO() << "[eRTM] pending sensing alignment compensation updated"
+                     << " alignment=" << alignment_samples
+                     << " samples, pending_alignment=" << pending_alignment
+                     << " samples";
+    }
+
+    void _update_ertm_absolute_pending_alignment(double to_ue_diff) {
+        double pending = _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
+        if (std::abs(pending) < 0.5) {
+            return;
+        }
+
+        constexpr double kPendingAlignmentJumpThreshold = 0.7;
+        if (std::abs(to_ue_diff) <= kPendingAlignmentJumpThreshold) {
+            return;
+        }
+
+        const double rounded_jump = std::round(to_ue_diff);
+        const double updated_pending = pending + rounded_jump;
+        const double stored_pending = (std::abs(updated_pending) < 0.5) ? 0.0 : updated_pending;
+        if (_ertm_absolute_pending_alignment_samples.compare_exchange_strong(
+                pending,
+                stored_pending,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            if (stored_pending == 0.0) {
+                LOG_G_INFO() << "[eRTM] cleared pending sensing alignment compensation after TO_UE jump"
+                             << " pending_alignment=" << pending
+                             << " samples, to_ue_diff=" << to_ue_diff
+                             << " samples, rounded_jump=" << rounded_jump
+                             << " samples";
+            } else {
+                LOG_G_INFO() << "[eRTM] updated pending sensing alignment compensation after TO_UE jump"
+                             << " previous_pending_alignment=" << pending
+                             << " samples, to_ue_diff=" << to_ue_diff
+                             << " samples, rounded_jump=" << rounded_jump
+                             << " samples, pending_alignment=" << stored_pending
+                             << " samples";
+            }
+        }
+    }
+
+    float _select_sensing_delay_offset(float tracking_delay_offset) {
+        float base_delay_offset = tracking_delay_offset;
+        if (cfg_.sensing.delay_correction_mode == kSensingDelayCorrectionModeErtmAbsolute) {
+            if (_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
+                const double to_ue_samples =
+                    _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
+                const double pending_alignment =
+                    _ertm_absolute_pending_alignment_samples.load(std::memory_order_relaxed);
+                base_delay_offset = -static_cast<float>(to_ue_samples - pending_alignment);
+            } else {
+                LOG_RT_WARN_HZ(1)
+                    << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "
+                    << "but no valid TO_UE estimate is available yet; using los_tracking delay";
+            }
+        }
+        return base_delay_offset + _user_delay_offset.load(std::memory_order_relaxed);
     }
 
     // Plain background thread: no RT scheduling priority, no core pinning.
@@ -2550,9 +2663,11 @@ private:
             ertm_debug_pub_ = std::make_unique<ZmqByteSender>(
                 cfg_.network_output.ertm_debug_ip,
                 static_cast<uint16_t>(cfg_.network_output.ertm_debug_port));
-            LOG_G_INFO() << "[eRTM] debug stream: "
-                         << cfg_.network_output.ertm_debug_ip << ':'
-                         << cfg_.network_output.ertm_debug_port;
+            if (cfg_.should_profile("ertm")) {
+                LOG_G_INFO() << "[eRTM] debug stream: "
+                             << cfg_.network_output.ertm_debug_ip << ':'
+                             << cfg_.network_output.ertm_debug_port;
+            }
         }
         vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.network_output.vofa_debug_ip, cfg_.network_output.vofa_debug_port, 64);
     }
@@ -3856,13 +3971,14 @@ private:
 
         prof_step_start = ProfileClock::now();
         if (sensing_enabled) {
+            _record_ertm_absolute_pending_alignment(static_cast<double>(frame.Alignment));
             sense_frame.CFO = alpha;
             if (_sfo_per_frame != 0.0f) {
                 sense_frame.SFO = -_sfo_per_frame * (2 * M_PI) / (cfg_.ofdm.fft_size * cfg_.ofdm.num_symbols);
             } else {
                 sense_frame.SFO = beta;
             }
-            sense_frame.delay_offset = delay_offset + _user_delay_offset;
+            sense_frame.delay_offset = _select_sensing_delay_offset(delay_offset);
             sense_frame.generation = frame.generation;
 
             if (!sensing_queue_.try_push(std::move(sense_frame))) {

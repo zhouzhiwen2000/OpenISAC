@@ -105,6 +105,7 @@ sync_tracking:
 
 # ===== Sensing =====
 sensing:
+  sensing_delay_correction_mode: los_tracking  # Sensing delay correction source: los_tracking or ertm_absolute
   bi_enabled: true  # Enable bistatic sensing processing pipeline
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size
@@ -145,4 +146,4 @@ runtime:
   default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
   vofa_debug_ip: ""  # VOFA+ debug output IP
   vofa_debug_port: 12347  # VOFA+ debug output port
-  profiling_modules: ""  # Comma-separated modules to profile, or "all"
+  profiling_modules: ""  # Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm), or "all"

@@ -772,7 +772,7 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, <code>sensing_proc</code>, <code>agc</code>, and <code>uplink</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>modulation</code>, <code>latency</code>, <code>ldpc_encode</code>, <code>sensing_proc</code>, <code>agc</code>, <code>uplink</code>, and <code>ertm</code>; <code>all</code> enables every module. BS end-to-end latency profiling is enabled only when both <code>modulation</code> and <code>latency</code> are included.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
@@ -1077,6 +1077,12 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>int</code></td>
 <td style="text-align:left"><code>10</code></td>
 <td style="text-align:left">eRTM delay-spectrum IFFT oversampling factor. Values below <code>1</code> are clamped to <code>1</code>; values above <code>128</code> are clamped to <code>128</code>. Higher values improve delay-grid resolution at higher CPU/FFTW/memory cost.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_delay_correction_mode</code></td>
+<td style="text-align:left"><code>string</code></td>
+<td style="text-align:left"><code>los_tracking</code></td>
+<td style="text-align:left">UE <code>sensing</code> setting for the sensing delay correction source. <code>los_tracking</code> uses the local LoS sync/SFO tracking delay; <code>ertm_absolute</code> uses the latest CPU-path eRTM <code>TO_UE_samples</code> as the absolute sensing delay when available, then still applies runtime <code>ALGN</code> user trim. CUDAUE currently falls back to <code>los_tracking</code> for this mode.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>ertm_dl_rf_delay_ns</code></td>
@@ -1526,7 +1532,7 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>cfo</code>, <code>sync</code>, <code>agc</code>, <code>align</code>, <code>snr</code>, and <code>uplink</code>; <code>all</code> enables every module. <code>cfo</code> gates CUDA CFO diagnostics, <code>sync</code> gates per-alias synchronization peak comparisons, <code>agc</code> gates AGC logs, <code>align</code> gates runtime <code>ALGN:</code> logs, <code>snr</code> prints periodic <code>_snr_db / _noise_var / _llr_scale</code> updates, and <code>uplink</code> gates <code>[UL-TX]</code> timing/waveform diagnostics.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>cfo</code>, <code>sync</code>, <code>agc</code>, <code>align</code>, <code>snr</code>, <code>uplink</code>, and <code>ertm</code>; <code>all</code> enables every module. <code>cfo</code> gates CUDA CFO diagnostics, <code>sync</code> gates per-alias synchronization peak comparisons, <code>agc</code> gates AGC logs, <code>align</code> gates runtime <code>ALGN:</code> logs, <code>snr</code> prints periodic <code>_snr_db / _noise_var / _llr_scale</code> updates, <code>uplink</code> gates <code>[UL-TX]</code> timing/waveform diagnostics, and <code>ertm</code> gates eRTM TO/payload/debug-spectrum diagnostics. Sensing delay-correction warnings and pending-alignment updates remain visible.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>

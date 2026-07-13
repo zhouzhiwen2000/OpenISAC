@@ -1196,7 +1196,7 @@ bs:
   - type: scalar
     key: profiling_modules
     kind: string
-    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, agc, arq), or "all"
+    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, agc, arq, ertm), or "all"
     default: ''
     optional: true
 ue:
@@ -1378,6 +1378,22 @@ ue:
     options:
     - dense
     - compact_mask
+  - type: scalar
+    key: sensing_delay_correction_mode
+    data_key: sensing.sensing_delay_correction_mode
+    kind: string
+    comment: Sensing delay correction source; los_tracking uses local LoS sync/SFO tracking, ertm_absolute uses latest eRTM TO_UE when available
+    default: los_tracking
+    optional: true
+    options:
+    - los_tracking
+    - ertm_absolute
+    enabled_if:
+      all:
+      - key: sensing.bi_enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
   - type: scalar
     key: backend_processing_enabled
     data_key: sensing.backend_processing_enabled
@@ -2206,6 +2222,6 @@ ue:
   - type: scalar
     key: profiling_modules
     kind: string
-    comment: Comma-separated modules to profile, or "all"
+    comment: Comma-separated modules to profile (demodulation, cfo, sync, agc, align, snr, uplink, ertm), or "all"
     default: agc
     optional: true

@@ -116,4 +116,4 @@ cpu_cores:
 
 # ===== Runtime / Debug =====
 runtime:
-  profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, agc, arq), or "all"
+  profiling_modules: ""  # Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, agc, arq, ertm), or "all"

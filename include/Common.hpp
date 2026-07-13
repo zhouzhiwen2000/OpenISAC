@@ -104,6 +104,8 @@ inline constexpr const char* kEqualizerModeZf = "zf";
 inline constexpr const char* kEqualizerModeMmse = "mmse";
 inline constexpr const char* kChannelTrackingModeOff = "disabled";
 inline constexpr const char* kChannelTrackingModePilotPhase = "pilot_phase";
+inline constexpr const char* kSensingDelayCorrectionModeLosTracking = "los_tracking";
+inline constexpr const char* kSensingDelayCorrectionModeErtmAbsolute = "ertm_absolute";
 
 /**
  * @brief Zero-copy view over frequency-domain TX symbols for sensing.
@@ -319,6 +321,16 @@ inline std::string normalize_channel_tracking_mode_string(std::string mode) {
         return mode;
     }
     return kChannelTrackingModePilotPhase;
+}
+
+inline std::string normalize_sensing_delay_correction_mode_string(const std::string& mode) {
+    if (mode == kSensingDelayCorrectionModeLosTracking ||
+        mode == kSensingDelayCorrectionModeErtmAbsolute) {
+        return mode;
+    }
+    throw std::runtime_error(
+        "Invalid sensing.sensing_delay_correction_mode='" + mode +
+        "'. Supported values: los_tracking, ertm_absolute.");
 }
 
 /**
@@ -1092,6 +1104,7 @@ struct SensingConfig {
     size_t symbol_stride = 20;     // Default sensing STRD applied at startup
     size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
     bool bi_enabled = true;
+    std::string delay_correction_mode = kSensingDelayCorrectionModeLosTracking; // los_tracking or ertm_absolute
 };
 
 struct RadioConfig {
@@ -3663,6 +3676,11 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
         config_detail::load_value(sensing, "doppler_fft_size", cfg.sensing.doppler_fft_size);
         config_detail::load_value(sensing, "output_mode", cfg.sensing.output_mode);
+        if (sensing["sensing_delay_correction_mode"]) {
+            cfg.sensing.delay_correction_mode =
+                normalize_sensing_delay_correction_mode_string(
+                    sensing["sensing_delay_correction_mode"].as<std::string>());
+        }
         if (sensing["on_wire_format"]) {
             cfg.sensing.on_wire_format = parse_sensing_on_wire_format_string(
                 sensing["on_wire_format"].as<std::string>());
@@ -3798,6 +3816,11 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
             const int64_t factor = uplink["ertm_delay_oversample_factor"].as<int64_t>();
             cfg.uplink.ertm_delay_oversample_factor = static_cast<size_t>(
                 std::min<int64_t>(128, std::max<int64_t>(1, factor)));
+        }
+        if (!cfg.uplink.ertm_to_enable &&
+            cfg.sensing.delay_correction_mode == kSensingDelayCorrectionModeErtmAbsolute) {
+            throw std::runtime_error(
+                "sensing.sensing_delay_correction_mode=ertm_absolute requires uplink.ertm_to_enable=true");
         }
 
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
