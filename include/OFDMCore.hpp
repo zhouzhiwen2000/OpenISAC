@@ -271,6 +271,177 @@ struct LdpcMiniHeader {
     uint16_t seq = 0;
 };
 
+struct ErtmTimingPayloadView {
+    uint32_t fft_size = 0;
+    double sample_rate = 0.0;
+    int32_t duti_samples = 0;
+    uint32_t seq = 0;
+    AlignedVector delay_spectrum;
+};
+
+class ErtmTimingPayload {
+public:
+    static constexpr uint8_t kMagic[5] = {'E', 'R', 'T', 'M', '1'};
+    static constexpr size_t kHeaderBytes = 5 + 4 + 8 + 4 + 4;
+
+    static bool looks_like(const uint8_t* data, size_t len) {
+        return data != nullptr && len >= sizeof(kMagic) &&
+               std::memcmp(data, kMagic, sizeof(kMagic)) == 0;
+    }
+
+    static bool pack(uint32_t seq,
+                     uint32_t fft_size,
+                     double sample_rate,
+                     int32_t duti_samples,
+                     const AlignedVector& delay_spectrum,
+                     std::vector<uint8_t>& out,
+                     std::string* error = nullptr) {
+        auto set_error = [error](const std::string& msg) {
+            if (error) *error = msg;
+        };
+        if (fft_size == 0 || delay_spectrum.size() != fft_size) {
+            set_error("delay spectrum size does not match fft_size");
+            return false;
+        }
+        if (!(sample_rate > 0.0) || !std::isfinite(sample_rate)) {
+            set_error("sample_rate must be finite and positive");
+            return false;
+        }
+        const size_t total = kHeaderBytes + static_cast<size_t>(fft_size) * sizeof(float) * 2;
+        if (total > std::numeric_limits<uint16_t>::max()) {
+            set_error("eRTM payload exceeds LDPC mini-header payload limit");
+            return false;
+        }
+
+        out.clear();
+        out.reserve(total);
+        out.insert(out.end(), std::begin(kMagic), std::end(kMagic));
+        write_u32(out, fft_size);
+        write_double(out, sample_rate);
+        write_i32(out, duti_samples);
+        write_u32(out, seq);
+        for (const auto& v : delay_spectrum) {
+            write_float(out, v.real());
+            write_float(out, v.imag());
+        }
+        return true;
+    }
+
+    static bool unpack(const uint8_t* data,
+                       size_t len,
+                       uint32_t expected_fft_size,
+                       ErtmTimingPayloadView& out,
+                       std::string* error = nullptr) {
+        auto set_error = [error](const std::string& msg) {
+            if (error) *error = msg;
+        };
+        if (!looks_like(data, len)) {
+            set_error("missing ERTM1 magic");
+            return false;
+        }
+        if (len < kHeaderBytes) {
+            set_error("payload shorter than ERTM1 header");
+            return false;
+        }
+
+        size_t off = sizeof(kMagic);
+        const uint32_t fft_size = read_u32(data, off);
+        off += 4;
+        const double sample_rate = read_double(data, off);
+        off += 8;
+        const int32_t duti_samples = read_i32(data, off);
+        off += 4;
+        const uint32_t seq = read_u32(data, off);
+        off += 4;
+
+        if (fft_size == 0 || fft_size != expected_fft_size) {
+            set_error("ERTM1 fft_size mismatch");
+            return false;
+        }
+        if (!(sample_rate > 0.0) || !std::isfinite(sample_rate)) {
+            set_error("ERTM1 sample_rate must be finite and positive");
+            return false;
+        }
+        const size_t expected_len = kHeaderBytes + static_cast<size_t>(fft_size) * sizeof(float) * 2;
+        if (len != expected_len) {
+            set_error("ERTM1 payload length mismatch");
+            return false;
+        }
+
+        out.fft_size = fft_size;
+        out.sample_rate = sample_rate;
+        out.duti_samples = duti_samples;
+        out.seq = seq;
+        out.delay_spectrum.resize(fft_size);
+        for (uint32_t i = 0; i < fft_size; ++i) {
+            const float re = read_float(data, off);
+            off += 4;
+            const float im = read_float(data, off);
+            off += 4;
+            out.delay_spectrum[i] = std::complex<float>(re, im);
+        }
+        return true;
+    }
+
+private:
+    static void write_u32(std::vector<uint8_t>& out, uint32_t value) {
+        out.push_back(static_cast<uint8_t>(value & 0xFFu));
+        out.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+    }
+
+    static void write_i32(std::vector<uint8_t>& out, int32_t value) {
+        write_u32(out, static_cast<uint32_t>(value));
+    }
+
+    static void write_float(std::vector<uint8_t>& out, float value) {
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value), "Unexpected float size");
+        std::memcpy(&bits, &value, sizeof(bits));
+        write_u32(out, bits);
+    }
+
+    static void write_double(std::vector<uint8_t>& out, double value) {
+        uint64_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value), "Unexpected double size");
+        std::memcpy(&bits, &value, sizeof(bits));
+        for (int i = 0; i < 8; ++i) {
+            out.push_back(static_cast<uint8_t>((bits >> (i * 8)) & 0xFFu));
+        }
+    }
+
+    static uint32_t read_u32(const uint8_t* data, size_t off) {
+        return static_cast<uint32_t>(data[off]) |
+               (static_cast<uint32_t>(data[off + 1]) << 8) |
+               (static_cast<uint32_t>(data[off + 2]) << 16) |
+               (static_cast<uint32_t>(data[off + 3]) << 24);
+    }
+
+    static int32_t read_i32(const uint8_t* data, size_t off) {
+        return static_cast<int32_t>(read_u32(data, off));
+    }
+
+    static float read_float(const uint8_t* data, size_t off) {
+        const uint32_t bits = read_u32(data, off);
+        float value = 0.0f;
+        static_assert(sizeof(bits) == sizeof(value), "Unexpected float size");
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+
+    static double read_double(const uint8_t* data, size_t off) {
+        uint64_t bits = 0;
+        for (int i = 0; i < 8; ++i) {
+            bits |= static_cast<uint64_t>(data[off + static_cast<size_t>(i)]) << (i * 8);
+        }
+        double value = 0.0;
+        static_assert(sizeof(bits) == sizeof(value), "Unexpected double size");
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+};
+
 /**
  * @brief Shared marker + mini-header framing for LDPC(1008,504) packets.
  */
@@ -290,11 +461,12 @@ public:
     static constexpr size_t kLdpcQpskSymbolsPerBlock = kLdpcCodeBitsPerBlock / 2;
     static constexpr uint8_t kVersion = 1;
     static constexpr uint8_t kFlags = 0;
-    // Mini-header flag bits (4-bit field). Data frames use 0; ARQ feedback
-    // frames set kFlagArqFeedback so receivers classify them by header, not by
+    // Mini-header flag bits (4-bit field). Data frames use 0; control/internal
+    // frames set a dedicated flag so receivers classify them by header, not by
     // sniffing payload bytes. Unknown flag bits are rejected on decode.
     static constexpr uint8_t kFlagArqFeedback = 0x01;
-    static constexpr uint8_t kKnownFlagsMask = 0x01;
+    static constexpr uint8_t kFlagErtmTiming = 0x02;
+    static constexpr uint8_t kKnownFlagsMask = 0x03;
     static constexpr uint8_t kPayloadBlocksExtended = std::numeric_limits<uint8_t>::max();
 
     static bool flags_are_known(uint8_t flags) {
@@ -307,6 +479,14 @@ public:
 
     static bool is_arq_feedback(const LdpcMiniHeader& header) {
         return is_arq_feedback_flags(header.flags);
+    }
+
+    static bool is_ertm_timing_flags(uint8_t flags) {
+        return (flags & kFlagErtmTiming) != 0;
+    }
+
+    static bool is_ertm_timing(const LdpcMiniHeader& header) {
+        return is_ertm_timing_flags(header.flags);
     }
     static constexpr float kMarkerMetricThreshold = 0.50f;
 

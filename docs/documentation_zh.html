@@ -607,6 +607,30 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left">BS 侧上行 RX 窗口相对下行帧锚点的 DL/UL 定时差。启动时会按一帧长度做 modulo 规范化，也可运行时通过 <code>DUTI</code> 调整。</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启 CPU 路径 eRTM TO 估计。BS 将最新上行 delay spectrum 和运行时 <code>DUTI</code> 封装到内部下行 LDPC payload；UE 消费该 payload 并打印 TO 估计，不转发到用户 UDP。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_dl_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / 秒</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">eRTM TO 方程使用的下行 RF 链路校准延迟项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_ul_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / 秒</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">eRTM TO 方程使用的上行 RF 链路校准延迟项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / 帧</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM payload/report 的下行 TX 帧间隔；小于 <code>1</code> 的值会按 <code>1</code> 处理。</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>mono_sensing_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>0.0.0.0</code></td>
@@ -1022,6 +1046,30 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>int</code> / 采样点</td>
 <td style="text-align:left"><code>63</code></td>
 <td style="text-align:left">UE 侧上行发送 timing advance。UE 启动时会让 UL TX 和 RX 同时开启，之后根据 RX 同步/对齐结果和运行时可调的 <code>TADV</code> 值移动后续上行帧。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">开启 CPU 路径 eRTM TO payload 消费和 TO 日志。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_dl_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / 秒</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">eRTM TO 方程使用的下行 RF 链路校准延迟项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_ul_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / 秒</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">eRTM TO 方程使用的上行 RF 链路校准延迟项。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / 帧</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM payload/report 的下行 TX 帧间隔；对比日志时应与 BS 保持一致。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>

@@ -208,6 +208,10 @@ public:
         _self_delay_debug_sink = std::move(self_delay_sink);
     }
 
+    void set_latest_delay_spectrum_sink(DebugVectorCallback sink) {
+        _latest_delay_spectrum_sink = std::move(sink);
+    }
+
     void start(const radio::TimeSpec& start_time = radio::TimeSpec(0.0)) {
         if (!_rx_stream) throw std::runtime_error("UplinkRxEngine::start without an RX stream.");
         _running.store(true);
@@ -956,7 +960,8 @@ public:
             _self_channel_debug_sink(AlignedVector(_self_h_est.begin(), _self_h_est.end()));
         }
 
-        const bool need_delay = static_cast<bool>(_delay_debug_sink);
+        const bool need_delay = static_cast<bool>(_delay_debug_sink) ||
+                                static_cast<bool>(_latest_delay_spectrum_sink);
         if (need_delay) {
             const size_t half = _cfg.ofdm.fft_size / 2;
             for (size_t i = 0; i < half; ++i) {
@@ -969,7 +974,12 @@ public:
             for (size_t i = 0; i < _cfg.ofdm.fft_size; ++i) {
                 _delay_spectrum[i] = _ce_out[i] * scale;
             }
-            _delay_debug_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
+            if (_delay_debug_sink) {
+                _delay_debug_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
+            }
+            if (_latest_delay_spectrum_sink) {
+                _latest_delay_spectrum_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
+            }
         }
 
         const bool need_self_delay = static_cast<bool>(_self_delay_debug_sink) && !_self_h_est.empty();
@@ -1054,6 +1064,7 @@ public:
     DebugVectorCallback _constellation_debug_sink;
     DebugVectorCallback _self_channel_debug_sink;
     DebugVectorCallback _self_delay_debug_sink;
+    DebugVectorCallback _latest_delay_spectrum_sink;
 
     ArqPayloadIntercept _arq_payload_intercept;
 

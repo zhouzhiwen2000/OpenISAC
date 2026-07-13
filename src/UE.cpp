@@ -639,6 +639,10 @@ private:
     std::vector<AlignedVector> _channel_anchor_h_bufs;
     std::vector<int> _channel_anchor_symbols_buf;
     AlignedVector _delay_spectrum_buf;           // delay (time-domain) spectrum
+    std::mutex _ertm_delay_mutex;
+    AlignedVector _ertm_latest_dl_delay_spectrum;
+    bool _ertm_latest_dl_delay_valid = false;
+    bool _ertm_missing_delay_warned = false;
 
     // Core computation instances (manage their own FFT plans)
     ChannelEstimator _channel_estimator;
@@ -852,6 +856,134 @@ private:
     std::atomic<uint64_t> _arq_dl_ack_injected{0};
     std::atomic<uint64_t> _arq_dl_ack_no_uplink_tx{0};
     std::atomic<uint64_t> _arq_dl_ack_inject_failed{0};
+
+    void _store_ertm_downlink_delay_spectrum(const AlignedVector& delay_spectrum) {
+        if (!cfg_.uplink.ertm_to_enable || delay_spectrum.size() != cfg_.ofdm.fft_size) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
+        _ertm_latest_dl_delay_spectrum = delay_spectrum;
+        _ertm_latest_dl_delay_valid = true;
+    }
+
+    static bool _estimate_ertm_delay_shift(
+        const AlignedVector& bs_uplink_delay,
+        const AlignedVector& ue_downlink_delay,
+        int64_t& signed_shift_bins,
+        double& metric_out)
+    {
+        const size_t n = bs_uplink_delay.size();
+        if (n == 0 || ue_downlink_delay.size() != n) {
+            return false;
+        }
+
+        std::vector<float> bs_mag(n);
+        std::vector<float> ue_mag(n);
+        double bs_energy = 0.0;
+        double ue_energy = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            bs_mag[i] = std::abs(bs_uplink_delay[i]);
+            ue_mag[i] = std::abs(ue_downlink_delay[i]);
+            bs_energy += static_cast<double>(bs_mag[i]) * static_cast<double>(bs_mag[i]);
+            ue_energy += static_cast<double>(ue_mag[i]) * static_cast<double>(ue_mag[i]);
+        }
+        const double denom = std::sqrt(bs_energy * ue_energy);
+        if (!(denom > 0.0) || !std::isfinite(denom)) {
+            return false;
+        }
+
+        size_t best_shift = 0;
+        double best_metric = -std::numeric_limits<double>::infinity();
+        for (size_t shift = 0; shift < n; ++shift) {
+            double acc = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                const size_t j = (i + shift) % n;
+                acc += static_cast<double>(bs_mag[i]) * static_cast<double>(ue_mag[j]);
+            }
+            const double metric = acc / denom;
+            if (metric > best_metric) {
+                best_metric = metric;
+                best_shift = shift;
+            }
+        }
+
+        signed_shift_bins = (best_shift <= n / 2)
+            ? static_cast<int64_t>(best_shift)
+            : static_cast<int64_t>(best_shift) - static_cast<int64_t>(n);
+        metric_out = best_metric;
+        return true;
+    }
+
+    bool _handle_ertm_payload(const std::vector<uint8_t>& payload, uint8_t flags) {
+        if (!LdpcPacketFraming::is_ertm_timing_flags(flags)) {
+            return false;
+        }
+        if (!cfg_.uplink.ertm_to_enable) {
+            LOG_G_INFO() << "[eRTM] consumed TO payload while uplink.ertm_to_enable=false";
+            return true;
+        }
+
+        ErtmTimingPayloadView bs_payload;
+        std::string unpack_error;
+        if (!ErtmTimingPayload::unpack(
+                payload.data(),
+                payload.size(),
+                static_cast<uint32_t>(cfg_.ofdm.fft_size),
+                bs_payload,
+                &unpack_error)) {
+            LOG_G_WARN() << "[eRTM] invalid TO payload: " << unpack_error;
+            return true;
+        }
+
+        AlignedVector local_delay;
+        {
+            std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
+            if (!_ertm_latest_dl_delay_valid) {
+                if (!_ertm_missing_delay_warned) {
+                    LOG_G_WARN() << "[eRTM] TO payload received before local downlink delay spectrum is available";
+                    _ertm_missing_delay_warned = true;
+                }
+                return true;
+            }
+            local_delay = _ertm_latest_dl_delay_spectrum;
+        }
+
+        int64_t signed_shift_bins = 0;
+        double metric = 0.0;
+        if (!_estimate_ertm_delay_shift(
+                bs_payload.delay_spectrum,
+                local_delay,
+                signed_shift_bins,
+                metric)) {
+            LOG_G_WARN() << "[eRTM] failed to correlate delay spectra";
+            return true;
+        }
+
+        const double sample_rate = bs_payload.sample_rate;
+        const int32_t tadv_samples = _ue_timing_advance.load(std::memory_order_relaxed);
+        const double tau_c =
+            cfg_.uplink.ertm_dl_rf_delay_s +
+            cfg_.uplink.ertm_ul_rf_delay_s -
+            static_cast<double>(bs_payload.duti_samples) / sample_rate -
+            static_cast<double>(tadv_samples) / sample_rate;
+        const double to_bs_ue = static_cast<double>(signed_shift_bins) / sample_rate;
+        const double to_ue = (tau_c - to_bs_ue) * 0.5;
+        const double to_bs = (tau_c + to_bs_ue) * 0.5;
+
+        std::ostringstream oss;
+        oss << std::scientific << std::setprecision(9)
+            << "[eRTM] TO seq=" << bs_payload.seq
+            << ", shift_bins=" << signed_shift_bins
+            << ", metric=" << metric
+            << ", DUTI=" << bs_payload.duti_samples
+            << ", TADV=" << tadv_samples
+            << ", tau_c=" << tau_c
+            << ", TO_BS_UE=" << to_bs_ue
+            << ", TO_UE=" << to_ue
+            << ", TO_BS=" << to_bs;
+        LOG_G_INFO() << oss.str();
+        return true;
+    }
 
     void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
         if (!cfg_.should_profile("arq")) {
@@ -3336,6 +3468,7 @@ private:
         channel_sender_.add_data(std::move(H_est));
 
         // PDF data
+        _store_ertm_downlink_delay_spectrum(delay_spectrum);
         pdf_sender_.add_data(std::move(delay_spectrum));
 
         // Constellation data. The sender throttles the display to 50ms
@@ -3614,6 +3747,11 @@ private:
                 std::vector<uint8_t> udp_data(
                     decoded_payload.begin(),
                     decoded_payload.begin() + mini_header.payload_len);
+
+                if (_handle_ertm_payload(udp_data, mini_header.flags)) {
+                    symbol_offset = next_symbol_offset;
+                    continue;
+                }
 
                 bool handled_measurement_payload = false;
                 if (_measurement_enabled) {

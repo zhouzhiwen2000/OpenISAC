@@ -442,7 +442,7 @@ int main(int argc, char** argv) {
     };
 
     std::vector<Target> targets = build_target_table(sim.targets, true);            // monostatic
-    std::vector<Target> bistatic_targets = build_target_table(bistatic_src, false); // bistatic / comm
+    std::vector<Target> bistatic_targets = build_target_table(bistatic_src, false); // downlink bistatic / comm
 
     // --- Build comm multipath taps (default: single unit tap) ---
     std::vector<Tap> taps;
@@ -463,33 +463,18 @@ int main(int argc, char** argv) {
 
     const size_t L = static_cast<size_t>(max_delay) + 1; // history length
 
-    // --- Build uplink (UE->BS) multipath taps (default: reuse comm taps) ---
-    // The uplink shares the BS radio clock in simulation, so the hub only applies
-    // a tapped-delay-line channel + AWGN; per-link timing (timing advance / DL-UL
-    // timing difference) is handled by the engines, not here.
+    // --- Build reciprocal uplink (UE->BS) communication channel ---
+    // The uplink uses the same static taps and bistatic scatterer scene as the
+    // downlink communication path. Per-link timing (timing advance / DL-UL timing
+    // difference) is handled by the engines, not here.
     std::vector<Tap> ul_taps;
+    std::vector<Target> uplink_bistatic_targets;
     long ul_max_delay = 0;
     if (enable_uplink) {
-        // Default to a clean 0 dB LoS tap (the uplink frame is mostly zero-padded
-        // within the DL period, so per-chunk SNR scaling is not applied to it).
-        const std::vector<SimMultipathTap>& ul_src = sim.uplink_multipath_taps;
-        if (ul_src.empty()) {
-            Tap tap;
-            tap.gain = cf(1.0f, 0.0f);
-            tap.delay_samples = std::max<long>(0, static_cast<long>(sim.timing_offset_samples));
-            ul_taps.push_back(tap);
-        } else {
-            for (const auto& tp : ul_src) {
-                const double amp = db_to_linear_amplitude(tp.gain_db);
-                const double ph = tp.phase_deg * kTwoPi / 360.0;
-                Tap tap;
-                tap.gain = cf(static_cast<float>(amp * std::cos(ph)), static_cast<float>(amp * std::sin(ph)));
-                tap.delay_samples = tp.delay_samples + sim.timing_offset_samples;
-                if (tap.delay_samples < 0) tap.delay_samples = 0;
-                ul_taps.push_back(tap);
-            }
-        }
+        ul_taps = taps;
+        uplink_bistatic_targets = build_target_table(bistatic_src, false);
         for (const auto& tap : ul_taps) ul_max_delay = std::max(ul_max_delay, tap.delay_samples);
+        for (const auto& tg : uplink_bistatic_targets) ul_max_delay = std::max(ul_max_delay, tg.delay_samples);
     }
     const size_t ul_L = static_cast<size_t>(ul_max_delay) + 1; // uplink history length
 
@@ -543,8 +528,9 @@ int main(int argc, char** argv) {
     if (enable_uplink) {
         ul_tx_ring.create(sim_shm::make_shm_name(sim.session, "ul.tx"), sim.ring_capacity_samples);
         ul_rx_ring.create(sim_shm::make_shm_name(sim.session, "rx.ul"), sim.ring_capacity_samples);
-        LOG_G_INFO() << "[ChannelSim] uplink enabled (UE ul.tx -> hub -> BS rx.ul), taps="
-                     << ul_taps.size();
+        LOG_G_INFO() << "[ChannelSim] uplink enabled (UE ul.tx -> hub -> BS rx.ul), reciprocal comm channel, taps="
+                     << ul_taps.size()
+                     << ", bistatic_targets=" << uplink_bistatic_targets.size();
     }
 
     std::unique_ptr<ControlCommandHandler> control_handler;
@@ -794,6 +780,17 @@ int main(int argc, char** argv) {
                         acc += tap.gain * ul_ext[ul_L + n - d];
                     }
                     ul_out[n] = acc;
+                }
+                for (auto& tg : uplink_bistatic_targets) {
+                    cf phasor = tg.doppler_phasor;
+                    const size_t d = static_cast<size_t>(tg.delay_samples);
+                    for (size_t n = 0; n < got; ++n) {
+                        ul_out[n] += tg.gain * ul_ext[ul_L + n - d] * phasor;
+                        phasor *= tg.doppler_step;
+                    }
+                    const float mag = std::abs(phasor);
+                    if (mag > 1e-6f) phasor /= mag;
+                    tg.doppler_phasor = phasor;
                 }
                 size_t ul_count = got;
                 if (sro_on) {

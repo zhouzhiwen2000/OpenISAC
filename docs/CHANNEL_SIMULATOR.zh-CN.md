@@ -78,6 +78,8 @@ simulation:
 
 `targets` 描述单站感知看到的散射体场景，并为每个感知天线生成对应的阵列响应。双站（通信）信道可以通过 `bistatic_targets` 单独配置；如果不配置，则复用 `targets`，也就是用同一组散射体同时驱动单站和双站两条链路。由于通信 RX 是单天线，`angle_deg` 不参与双站信道计算。若需要自定义阵列流形，`steering_override_file` 应提供 `目标数 × 通道数` 个小端 `complex<float>`，按行优先存储，每一行对应一个目标。
 
+启用 `simulation.enable_uplink` 后，UE->BS 仿真上行复用与 BS->UE 下行相同的通信信道场景：`comm_multipath_taps` 加选定的双站散射体。配置中不再提供单独的上行多径键。
+
 ## 信道模型
 
 模型按下面的顺序作用于发射采样 \(x[n]\)。
@@ -149,7 +151,7 @@ u[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_s}
 + w_{\mathrm{comm}}[n]
 $$
 
-默认情况下，`targets` 列表同时驱动单站感知天线（带阵列流形）和双站通信信道（单天线，不使用阵列流形），对应同一个相干场景。设置 `bistatic_targets` 可让双站/通信信道拥有独立的散射体。`comm_multipath_taps` 用于配置 LoS 路径和静态多径路径的时延、增益与初始相位。
+默认情况下，`targets` 列表同时驱动单站感知天线（带阵列流形）和双站通信信道（单天线，不使用阵列流形），对应同一个相干场景。设置 `bistatic_targets` 可让双站/通信信道拥有独立的散射体。`comm_multipath_taps` 用于配置 LoS 路径和静态多径路径的时延、增益与初始相位。UE->BS 上行复用同一个通信信道模型，因此仿真 TDD 上行与下行信道形状互易。
 
 ## 说明 / 限制
 

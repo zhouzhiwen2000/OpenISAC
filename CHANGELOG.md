@@ -8,6 +8,26 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-01 - CPU eRTM TO 估计日志
+
+### Summary
+
+新增 CPU BS/UE 路径的 eRTM TO 估计到日志输出阶段，用于对比 BS 上行 delay spectrum 与 UE 下行 delay spectrum，并结合运行时 DUTI/TADV 打印 TO_BS_UE、TO_UE、TO_BS。
+
+### Changes
+
+- BS CPU 下行发送路径在 `uplink.ertm_to_enable=true` 时，将最新上行 delay spectrum、采样率、运行时 `DUTI` 和序号封装为内部 `ERTM1` LDPC payload，并按 `ertm_report_interval_frames` 周期注入到普通 UDP payload 前。
+  影响：该 payload 使用普通 LDPC mini-header，UE 通过 payload magic 识别；不改变现有 LDPC framing。
+
+- UE CPU 下行解码路径拦截 `ERTM1` payload，不转发到用户 UDP；它与本地最新下行 delay spectrum 做归一化幅度循环互相关，并用 `ertm_dl_rf_delay_s`、`ertm_ul_rf_delay_s`、payload `DUTI` 和本地运行时 `TADV` 打印 TO 估计。
+  影响：当前只做估计和日志，不自动修正定时。
+
+- ChannelSimulator 的 UE->BS uplink path 现在复用 BS->UE communication path 的 `comm_multipath_taps` 和双站散射体场景，不再暴露或读取单独的 `uplink_multipath_taps`。
+  影响：仿真 TDD 上下行信道形状保持互易，避免 eRTM delay spectrum 对比时由独立上行通道引入人为偏差。
+
+- eRTM payload 注入不再依赖 BS 下行 UDP 输入唤醒，且 `ertm_report_interval_frames` 默认值和配置模板调整为 `32`。
+  影响：无用户下行数据时仍可持续输出 eRTM TO 日志；默认实时报告频率约为原 `16` 帧间隔设置的一半。
+
 ## 2026-06-29 - 移除旧兼容路径
 
 ### Summary
@@ -404,7 +424,7 @@
 - 新增 BS 侧 `bs_dl_ul_timing_diff` / `DUTI` 和 UE 侧 `ue_timing_advance` / `TADV` 控制，用于在共享无线时钟下调整 BS 上行接收窗口和 UE 上行发送窗口。
   影响：TDD 上行收发切换和硬件/链路延迟补偿可以在运行时微调，不需要重新生成配置文件。
 
-- ChannelSimulator 新增 uplink transport，将 UE `ul.tx` 经过独立 uplink multipath 通道送到 BS `rx.ul`；仿真配置支持 `simulation.enable_uplink` 和 `uplink_multipath_taps`。
+- ChannelSimulator 新增 uplink transport，将 UE `ul.tx` 送到 BS `rx.ul`；仿真配置支持 `simulation.enable_uplink`。
   影响：TDD/FDD duplex uplink 可以先在仿真链路中做双向 packet 验证，再迁移到 USRP 硬件。
 
 - CMake、配置模板、benchmark 脚本、Web 配置编辑器和 README 从 `OFDMModulator` / `OFDMDemodulator` 命名迁移到 `BS` / `UE`，并将运行时 YAML 命名为 `BS.yaml` / `UE.yaml`。

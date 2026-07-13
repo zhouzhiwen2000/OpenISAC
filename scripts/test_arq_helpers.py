@@ -77,11 +77,16 @@ void test_mini_header_flags() {
     };
     LdpcMiniHeader feedback_hdr = data_hdr;
     feedback_hdr.flags = LdpcPacketFraming::kFlagArqFeedback;
+    LdpcMiniHeader ertm_hdr = data_hdr;
+    ertm_hdr.flags = LdpcPacketFraming::kFlagErtmTiming;
 
     CHECK(!LdpcPacketFraming::is_arq_feedback(data_hdr), "data header not feedback");
     CHECK(LdpcPacketFraming::is_arq_feedback(feedback_hdr), "feedback header flagged");
+    CHECK(!LdpcPacketFraming::is_ertm_timing(data_hdr), "data header not ertm");
+    CHECK(LdpcPacketFraming::is_ertm_timing(ertm_hdr), "ertm header flagged");
     CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlags), "data flags known");
     CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlagArqFeedback), "feedback flags known");
+    CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlagErtmTiming), "ertm flags known");
     CHECK(!LdpcPacketFraming::flags_are_known(0x08), "unknown flag rejected");
 
     const uint64_t packed_header = LdpcPacketFraming::pack_header(feedback_hdr);
@@ -89,6 +94,10 @@ void test_mini_header_flags() {
     CHECK(LdpcPacketFraming::unpack_header(packed_header, decoded), "decode flagged header");
     CHECK(decoded.flags == LdpcPacketFraming::kFlagArqFeedback, "flag roundtrip");
     CHECK(decoded.seq == feedback_hdr.seq, "seq roundtrip");
+
+    const uint64_t packed_ertm_header = LdpcPacketFraming::pack_header(ertm_hdr);
+    CHECK(LdpcPacketFraming::unpack_header(packed_ertm_header, decoded), "decode ertm header");
+    CHECK(decoded.flags == LdpcPacketFraming::kFlagErtmTiming, "ertm flag roundtrip");
 
     LdpcMiniHeader bad_hdr = data_hdr;
     bad_hdr.flags = 0x08;

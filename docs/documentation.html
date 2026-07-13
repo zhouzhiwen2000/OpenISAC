@@ -607,6 +607,30 @@ Use <code>config/BS_X310.yaml</code>, <code>config/BS_B210.yaml</code>, or <code
 <td style="text-align:left">BS-side DL/UL timing offset for the uplink RX window. It is normalized modulo one frame at startup and can be adjusted at runtime with <code>DUTI</code>.</td>
 </tr>
 <tr>
+<td style="text-align:left"><code>ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable CPU-path eRTM TO estimation. BS embeds its latest uplink delay spectrum and runtime <code>DUTI</code> into internal downlink LDPC payloads; UE consumes those payloads and logs TO estimates instead of forwarding them to UDP.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_dl_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / seconds</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">Calibrated downlink RF-chain delay term used in the eRTM TO equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_ul_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / seconds</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">Calibrated uplink RF-chain delay term used in the eRTM TO equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / frames</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM payload/report cadence in downlink TX frames. Values below <code>1</code> are clamped to <code>1</code>.</td>
+</tr>
+<tr>
 <td style="text-align:left"><code>mono_sensing_ip</code></td>
 <td style="text-align:left"><code>string</code> / IPv4</td>
 <td style="text-align:left"><code>0.0.0.0</code></td>
@@ -1022,6 +1046,30 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>int</code> / samples</td>
 <td style="text-align:left"><code>63</code></td>
 <td style="text-align:left">UE-side uplink transmit timing advance. UE starts UL TX with the receiver at launch and later shifts future UL frames from RX synchronization/alignment plus this runtime-adjustable <code>TADV</code> value.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_to_enable</code></td>
+<td style="text-align:left"><code>bool</code></td>
+<td style="text-align:left"><code>false</code></td>
+<td style="text-align:left">Enable CPU-path eRTM TO estimation payload consumption and TO logs.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_dl_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / seconds</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">Calibrated downlink RF-chain delay term used in the eRTM TO equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_ul_rf_delay_s</code></td>
+<td style="text-align:left"><code>float</code> / seconds</td>
+<td style="text-align:left"><code>0.0</code></td>
+<td style="text-align:left">Calibrated uplink RF-chain delay term used in the eRTM TO equations.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>ertm_report_interval_frames</code></td>
+<td style="text-align:left"><code>int</code> / frames</td>
+<td style="text-align:left"><code>32</code></td>
+<td style="text-align:left">BS eRTM payload/report cadence in downlink TX frames; keep this matched with BS when comparing logs.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>cuda_demod_pipeline_slots</code></td>

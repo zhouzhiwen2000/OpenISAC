@@ -219,7 +219,6 @@ struct SimConfig {
     bool enable_comm_rx = true;                // produce the communication RX channel (run with UE)
     bool enable_sensing_rx = true;             // produce the monostatic sensing RX channels (one per antenna)
     bool enable_uplink = false;                // route the UE->BS uplink stream (UE TX -> BS uplink RX)
-    std::vector<SimMultipathTap> uplink_multipath_taps; // Uplink TDL taps (empty => reuse comm_multipath_taps)
     double noise_power_dbfs = -100.0;          // AWGN power per RX channel (dBFS); very low = effectively off
     bool snr_control_enable = false;           // Enable target-SNR scaling of clean signal before AWGN
     double target_snr_db = 40.0;               // Target SNR when snr_control_enable is true
@@ -967,6 +966,10 @@ struct UplinkConfig {
     int32_t ue_timing_advance = 63;    // UE: uplink-TX window advance relative to the RX frame anchor (samples)
     std::string idle_waveform = kUplinkIdleWaveformRandomQpsk; // UE idle UL payload RE: zero or random_qpsk
     bool debug_self_channel = false; // Estimate local-TX leakage channel from RX windows for DUTI/TADV debug
+    bool ertm_to_enable = false;      // Enable eRTM timing-offset estimation payloads/logs
+    double ertm_dl_rf_delay_s = 0.0;  // Calibrated downlink RF-chain delay term for eRTM TO estimation
+    double ertm_ul_rf_delay_s = 0.0;  // Calibrated uplink RF-chain delay term for eRTM TO estimation
+    size_t ertm_report_interval_frames = 32; // BS eRTM payload cadence in TX frames
     double rx_gain = 0.0;              // BS uplink RX gain
     size_t rx_channel = 0;             // BS uplink RX channel index
     std::string rx_wire_format = "sc16"; // BS uplink RX wire format
@@ -2448,9 +2451,6 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["comm_multipath_taps"] && sim_node["comm_multipath_taps"].IsSequence()) {
             load_tap_seq(sim_node["comm_multipath_taps"], sim.comm_multipath_taps);
         }
-        if (sim_node["uplink_multipath_taps"] && sim_node["uplink_multipath_taps"].IsSequence()) {
-            load_tap_seq(sim_node["uplink_multipath_taps"], sim.uplink_multipath_taps);
-        }
         auto load_target_seq = [](const YAML::Node& seq, std::vector<SimTarget>& out_list) {
             out_list.clear();
             for (const auto& node : seq) {
@@ -2504,6 +2504,13 @@ inline void load_duplex_config(const YAML::Node& config, Config& cfg) {
             cfg.uplink.duplex.ul_center_freq = ul["center_freq"].as<double>();
         }
         if (ul["debug_self_channel"]) cfg.uplink.debug_self_channel = ul["debug_self_channel"].as<bool>();
+        if (ul["ertm_to_enable"]) cfg.uplink.ertm_to_enable = ul["ertm_to_enable"].as<bool>();
+        if (ul["ertm_dl_rf_delay_s"]) cfg.uplink.ertm_dl_rf_delay_s = ul["ertm_dl_rf_delay_s"].as<double>();
+        if (ul["ertm_ul_rf_delay_s"]) cfg.uplink.ertm_ul_rf_delay_s = ul["ertm_ul_rf_delay_s"].as<double>();
+        if (ul["ertm_report_interval_frames"]) {
+            cfg.uplink.ertm_report_interval_frames = std::max<size_t>(
+                1, ul["ertm_report_interval_frames"].as<size_t>());
+        }
     }
     if (cfg.uplink.duplex.mode != DuplexMode::FDD) {
         cfg.uplink.duplex.ul_center_freq = 0.0;

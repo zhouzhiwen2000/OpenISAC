@@ -507,6 +507,11 @@ private:
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
     std::atomic<uint32_t> _ldpc_packet_seq{0};
+    std::mutex _ertm_delay_mutex;
+    AlignedVector _ertm_latest_ul_delay_spectrum;
+    bool _ertm_latest_ul_delay_valid = false;
+    uint64_t _ertm_last_injected_frame = std::numeric_limits<uint64_t>::max();
+    std::atomic<uint32_t> _ertm_payload_seq{0};
 
     // ARQ link-layer retransmission state
     bool _arq_enabled{false};
@@ -856,6 +861,80 @@ private:
             return;
         }
         _uplink_rx->set_debug_sinks(channel_sink, pdf_sink, constellation_sink);
+    }
+
+    void _store_ertm_uplink_delay_spectrum(AlignedVector&& delay_spectrum) {
+        if (!_cfg.uplink.ertm_to_enable || delay_spectrum.size() != _cfg.ofdm.fft_size) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
+        _ertm_latest_ul_delay_spectrum = std::move(delay_spectrum);
+        _ertm_latest_ul_delay_valid = true;
+    }
+
+    bool _try_inject_ertm_payload() {
+        if (!_cfg.uplink.ertm_to_enable || !_uplink_rx || !_cfg.uplink.enabled) {
+            return false;
+        }
+        const uint64_t current_frame = _next_tx_frame_seq.load(std::memory_order_relaxed);
+        const uint64_t interval =
+            std::max<uint64_t>(1, static_cast<uint64_t>(_cfg.uplink.ertm_report_interval_frames));
+        if (_ertm_last_injected_frame != std::numeric_limits<uint64_t>::max() &&
+            current_frame < _ertm_last_injected_frame + interval) {
+            return false;
+        }
+
+        AlignedVector delay_spectrum;
+        {
+            std::lock_guard<std::mutex> lock(_ertm_delay_mutex);
+            if (!_ertm_latest_ul_delay_valid) {
+                return false;
+            }
+            delay_spectrum = _ertm_latest_ul_delay_spectrum;
+        }
+
+        const uint32_t seq = _ertm_payload_seq.fetch_add(1, std::memory_order_relaxed);
+        const int32_t duti = _bs_dl_ul_timing_diff.load(std::memory_order_relaxed);
+        std::vector<uint8_t> payload;
+        std::string pack_error;
+        if (!ErtmTimingPayload::pack(
+                seq,
+                static_cast<uint32_t>(_cfg.ofdm.fft_size),
+                _cfg.rf_sampling.sample_rate,
+                duti,
+                delay_spectrum,
+                payload,
+                &pack_error)) {
+            LOG_G_WARN() << "[eRTM] failed to pack TO payload: " << pack_error;
+            _ertm_last_injected_frame = current_frame;
+            return false;
+        }
+
+        const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
+        const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+        if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
+            LOG_G_WARN() << "[eRTM] TO payload does not fit in one downlink frame: payload_bytes="
+                         << payload.size()
+                         << ", qpsk_syms=" << packet_qpsk_symbols
+                         << ", frame_capacity=" << _data_resource_layout.payload_re_count;
+            _ertm_last_injected_frame = current_frame;
+            return false;
+        }
+
+        EncodePacketProfile profile;
+        const bool enqueued = _encode_and_enqueue_payload(
+            payload.data(), payload.size(), 0, false, profile, false, false,
+            LdpcPacketFraming::kFlagErtmTiming);
+        if (enqueued) {
+            _ertm_last_injected_frame = current_frame;
+            if (seq == 0 || (seq % 64u) == 0u) {
+                LOG_G_INFO() << "[eRTM] injected TO payload seq=" << seq
+                             << ", duti_samples=" << duti
+                             << ", fft_size=" << _cfg.ofdm.fft_size
+                             << ", payload_bytes=" << payload.size();
+            }
+        }
+        return enqueued;
     }
 
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
@@ -1415,6 +1494,11 @@ private:
             return _cfg.ofdm.num_symbols ? (s / _cfg.ofdm.num_symbols) : s;
         });
         _attach_uplink_debug_sinks();
+        if (_cfg.uplink.ertm_to_enable) {
+            _uplink_rx->set_latest_delay_spectrum_sink([this](AlignedVector&& data) {
+                _store_ertm_uplink_delay_spectrum(std::move(data));
+            });
+        }
         if (ul_rx_dev->supports(radio::Capability::HardwareGain)) {
             const radio::GainRange gr = ul_rx_dev->get_rx_gain_range(ul_rx_ch);
             _uplink_rx->configure_agc(
@@ -1685,7 +1769,8 @@ private:
         bool do_latency_profile,
         EncodePacketProfile& profile,
         bool track_arq = true,
-        bool is_feedback = false
+        bool is_feedback = false,
+        uint8_t packet_flags = LdpcPacketFraming::kFlags
     ) {
         using ProfileClock = std::chrono::high_resolution_clock;
         auto prof_step_start = ProfileClock::now();
@@ -1732,10 +1817,11 @@ private:
         const uint16_t frame_seq = is_feedback
             ? static_cast<uint16_t>(_arq_feedback_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu)
             : static_cast<uint16_t>(_ldpc_packet_seq.fetch_add(1, std::memory_order_relaxed) & 0xFFFFu);
+        const uint8_t header_flags = static_cast<uint8_t>(
+            is_feedback ? LdpcPacketFraming::kFlagArqFeedback : packet_flags);
         const LdpcMiniHeader mini_header{
             LdpcPacketFraming::kVersion,
-            static_cast<uint8_t>(is_feedback ? LdpcPacketFraming::kFlagArqFeedback
-                                             : LdpcPacketFraming::kFlags),
+            header_flags,
             static_cast<uint16_t>(payload_len),
             LdpcPacketFraming::payload_blocks_field_for_len(payload_len),
             frame_seq,
@@ -2157,17 +2243,19 @@ private:
                 _log_arq_profile_if_due("periodic", arq_now_ms());
             }
 
+            const bool injected_ertm_payload = _try_inject_ertm_payload();
+
             RawUdpPacket* pkt = nullptr;
-            // Only read new data if no pending retransmissions (backpressure)
+            // Multiplex internal payload sources and UDP without blocking on the
+            // UDP queue. eRTM reports must keep flowing even when no user data is
+            // arriving on the downlink UDP input.
             if (!_arq_enabled || !_dl_arq_tx.has_retransmit_pending(arq_now_ms())) {
-                while (_running.load(std::memory_order_relaxed)) {
-                    pkt = _raw_udp_buffer.consumer_slot();
-                    if (pkt != nullptr) break;
-                    if (_arq_enabled) break;
-                    std::this_thread::sleep_for(std::chrono::microseconds(200));
-                }
+                pkt = _raw_udp_buffer.consumer_slot();
             }
             if (!_running.load(std::memory_order_relaxed)) break;
+            if (injected_ertm_payload && pkt == nullptr) {
+                continue;
+            }
             if (pkt == nullptr) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
                 continue;

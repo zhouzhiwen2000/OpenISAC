@@ -284,7 +284,7 @@ common:
     key: fixed_point_scale
     kind: int
     comment: pow2 multiplier applied to LLRs before int16 saturation (Q16 path only)
-    default: 16
+    default: 32
     optional: true
 bs:
 - title: OFDM Frame
@@ -325,7 +325,7 @@ bs:
     key: cfo_training_period_samples
     kind: int
     comment: Repetition period of CFO training field in samples
-    default: 16
+    default: 32
     optional: true
   - type: scalar
     key: num_symbols
@@ -882,6 +882,55 @@ bs:
     default: 63
     optional: true
   - type: scalar
+    key: ertm_to_enable
+    data_key: uplink.ertm_to_enable
+    kind: bool
+    comment: Enable CPU eRTM TO estimation payload injection and UE-side TO logs
+    default: false
+    optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
+  - type: scalar
+    key: ertm_dl_rf_delay_s
+    data_key: uplink.ertm_dl_rf_delay_s
+    kind: float
+    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (seconds)
+    default: 0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
+    key: ertm_ul_rf_delay_s
+    data_key: uplink.ertm_ul_rf_delay_s
+    kind: float
+    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (seconds)
+    default: 0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
+    key: ertm_report_interval_frames
+    data_key: uplink.ertm_report_interval_frames
+    kind: int
+    comment: BS eRTM payload/report cadence in downlink frames
+    default: 32
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
     key: arq_enabled
     data_key: uplink.arq_enabled
     kind: bool
@@ -1156,7 +1205,7 @@ ue:
     key: cfo_training_period_samples
     kind: int
     comment: Repetition period of CFO training field in samples
-    default: 16
+    default: 32
     optional: true
   - type: scalar
     key: num_symbols
@@ -1356,7 +1405,7 @@ ue:
     key: rx_agc_high_threshold_db
     kind: float
     comment: Decrease gain when filtered delay-spectrum peak rises above this threshold (dB)
-    default: 16.0
+    default: 32.0
     optional: true
   - type: scalar
     key: rx_agc_max_step_db
@@ -1620,6 +1669,55 @@ ue:
     comment: UE Timing Advance (samples) — also adjustable at runtime via TADV
     default: 0
     optional: true
+  - type: scalar
+    key: ertm_to_enable
+    data_key: uplink.ertm_to_enable
+    kind: bool
+    comment: Enable CPU eRTM TO estimation payload injection and UE-side TO logs
+    default: false
+    optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
+  - type: scalar
+    key: ertm_dl_rf_delay_s
+    data_key: uplink.ertm_dl_rf_delay_s
+    kind: float
+    comment: Calibrated downlink RF-chain delay for eRTM TO estimation (seconds)
+    default: 0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
+    key: ertm_ul_rf_delay_s
+    data_key: uplink.ertm_ul_rf_delay_s
+    kind: float
+    comment: Calibrated uplink RF-chain delay for eRTM TO estimation (seconds)
+    default: 0
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
+  - type: scalar
+    key: ertm_report_interval_frames
+    data_key: uplink.ertm_report_interval_frames
+    kind: int
+    comment: BS eRTM payload/report cadence in downlink frames
+    default: 32
+    optional: true
+    enabled_if:
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.ertm_to_enable
+        value: true
 - title: Sync / Tracking
   yaml_key: sync_tracking
   order: 45

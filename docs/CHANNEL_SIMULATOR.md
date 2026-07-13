@@ -116,6 +116,11 @@ not used in the bistatic channel calculation. To override the array manifold, pr
 `num_targets × num_channels` little-endian `complex<float>` values in row-major order
 via `steering_override_file`; each row corresponds to one target.
 
+When `simulation.enable_uplink` is enabled, the UE->BS simulated uplink uses the
+same communication-channel scene as the BS->UE downlink: `comm_multipath_taps`
+plus the selected bistatic scatterers. There is no separate uplink multipath
+configuration key.
+
 ## Channel model
 
 The model is applied to transmitted samples \(x[n]\) in this order.
@@ -203,7 +208,9 @@ By default, `targets` drives both the monostatic sensing antennas (with array ma
 and the bistatic communication channel (single-antenna, no array manifold), modelling
 one coherent scene. Set `bistatic_targets` to give the bistatic/communication channel
 its own independent scatterers. `comm_multipath_taps` configures the delay, gain, and
-initial phase of the LoS path and static multipath paths.
+initial phase of the LoS path and static multipath paths. The UE->BS uplink reuses
+this same communication-channel model so the simulated TDD uplink is reciprocal with
+the downlink channel shape.
 
 ## Notes / limits
 
