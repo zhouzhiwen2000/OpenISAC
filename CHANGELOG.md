@@ -28,6 +28,9 @@
 - eRTM payload 注入不再依赖 BS 下行 UDP 输入唤醒，且 `ertm_report_interval_frames` 默认值和配置模板调整为 `32`。
   影响：无用户下行数据时仍可持续输出 eRTM TO 日志；默认实时报告频率约为原 `16` 帧间隔设置的一半。
 
+- ChannelSimulator 新增默认启用的 `simulation.pacing_enabled`，按 `chunk_samples / sample_rate` 将共享内存输出限速到 wall-clock 采样时间。
+  影响：sim backend 默认更接近硬件实时推进，eRTM/感知/通信日志频率不再随 CPU 可跑多快而暴涨；需要最快 batch 仿真时可显式关闭该开关。
+
 ## 2026-06-29 - 移除旧兼容路径
 
 ### Summary

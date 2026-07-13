@@ -43,6 +43,11 @@ common:
       kind: bool
       default: false
       optional: true
+    - key: pacing_enabled
+      comment: Pace ChannelSimulator output to wall-clock sample time
+      kind: bool
+      default: true
+      optional: true
     - key: noise_power_dbfs
       comment: AWGN power per RX channel in dBFS; very low disables effectively
       kind: float

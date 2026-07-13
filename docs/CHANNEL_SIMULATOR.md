@@ -8,10 +8,11 @@ sensing pipeline with no radio attached. It replaces the USRP with shared-memory
 "air" and builds a scatterer-based multipath channel: the transmitted samples pass
 through a LoS path, optional static multipath paths, and moving scatterers with
 delay / Doppler / gain / array response. A fixed integer timing offset can be folded
-into each path delay; the communication/bistatic receive chain then applies relative
-carrier frequency offset (CFO), and AWGN is added to every RX output. The timing
-offset here is a fixed integer sample offset; the simulator does not model sampling
-frequency offset (SFO).
+into each path delay; the communication/bistatic receive chain can also apply a UE
+sample-clock offset, then relative carrier frequency offset (CFO), and AWGN is added
+to every RX output. The timing offset is a fixed integer sample offset, while
+`sample_rate_offset_ppm` models sampling frequency offset (SFO) between the BS and UE
+sample clocks.
 
 Each sensing RX channel is treated as one antenna. The array response can be generated
 from a parametric uniform linear array (ULA, `array_spacing_lambda`) or loaded as a
@@ -56,11 +57,12 @@ cp ../config/UE_Sim.yaml UE.yaml
 ./UE
 ```
 
-Start `ChannelSimulator` first. By default the hub uses backpressure: if communication
-RX or sensing RX is enabled but the corresponding consumer process is not reading from
-shared memory, the related ring buffer will fill and the whole simulation will wait.
-Start every enabled receiver; if you only need one side, disable the unused output in
-the `simulation:` block:
+Start `ChannelSimulator` first. By default the hub paces output to wall-clock sample
+time and still uses shared-memory backpressure: if communication RX or sensing RX is
+enabled but the corresponding consumer process is not reading from shared memory, the
+related ring buffer will fill and the whole simulation will wait. Start every enabled
+receiver; if you only need one side, disable the unused output in the `simulation:`
+block:
 
 - **Sensing only** — set `enable_comm_rx: false`; the hub does not produce communication RX output, so run only `ChannelSimulator` + `BS` and skip `UE`.
 - **Comm only** — set `enable_sensing_rx: false`; the hub does not produce sensing RX output, but still run `ChannelSimulator` + `BS` + `UE` because the BS transmits and the UE receives the communication stream.
@@ -79,6 +81,8 @@ simulation:
   session: oisac_sim             # must match across all three processes
   enable_comm_rx: true           # produce the comm RX path (false = sensing-only, no UE)
   enable_sensing_rx: true        # produce the sensing RX paths (false = comm-only)
+  enable_uplink: false           # route UE ul.tx to BS rx.ul; true in BS_Sim_Duplex.yaml
+  pacing_enabled: true           # pace shared-memory output to wall-clock sample time
   noise_power_dbfs: -50          # AWGN per RX channel; <= -200 disables
   cfo_hz: 0.0                    # relative CFO on the communication/bistatic RX
   sample_rate_offset_ppm: 0.0    # UE sample clock offset relative to the BS clock
@@ -127,8 +131,9 @@ The model is applied to transmitted samples \(x[n]\) in this order.
 
 1. For each scatterer, compute integer propagation delay, Doppler, and complex gain; the monostatic sensing path also applies the array manifold vector.
 2. The communication/bistatic path first adds the LoS path and static multipath paths, then adds the scatterer-return components.
-3. The communication/bistatic path applies relative CFO to the whole received signal; the monostatic sensing path does not apply CFO.
-4. AWGN is added to every RX output.
+3. The BS->UE communication path is resampled by `1 + sample_rate_offset_ppm * 1e-6`; when uplink simulation is enabled, the UE->BS path is resampled by the reciprocal ratio.
+4. The communication/bistatic path applies relative CFO to the whole received signal; the monostatic sensing path does not apply CFO.
+5. AWGN is added to every RX output.
 
 Target round-trip delay, sample delay, and Doppler are:
 
@@ -139,10 +144,10 @@ f_{D,i} = \frac{2 v_i}{\lambda}, \qquad
 \lambda = \frac{c}{f_c}
 $$
 
-Here \(R_i\) is `range_m`, \(v_i\) is `velocity_mps`, \(f_s\) is `sample_rate`,
-\(f_c\) is `center_freq`, and \(n_0\) is `timing_offset_samples`. The \(n_0\)
-term is a fixed integer sample offset; the simulator does not model sampling
-frequency offset (SFO).
+Here \(R_i\) is `range_m`, \(v_i\) is `velocity_mps`, \(f_s\) is the BS
+`sample_rate`, \(f_c\) is `center_freq`, and \(n_0\) is `timing_offset_samples`.
+The \(n_0\) term is a fixed integer sample offset; SFO is modeled separately by
+the communication-path resampler.
 
 The ULA array manifold is:
 
@@ -173,8 +178,8 @@ y_{\mathrm{mono},k}[n]
 $$
 
 The monostatic sensing channel shares the simulator clock with the transmitter and
-does not apply relative CFO. The simulator does not model sampling frequency offset
-(SFO). In the equation above, \(w_k[n]\) is AWGN.
+does not apply relative CFO or UE sample-clock offset. In the equation above,
+\(w_k[n]\) is AWGN.
 
 The communication/bistatic RX is single-antenna. The LoS/static multipath paths first
 form the communication multipath component:
@@ -196,13 +201,21 @@ u_{\mathrm{LoS}}[n]
 + \sum_i g_i\, x[n-\ell_i]\, e^{j 2\pi f_{D,i} n / f_s}
 $$
 
-The communication/bistatic chain then applies relative CFO and AWGN:
+With SFO disabled, the communication/bistatic chain then applies relative CFO and AWGN:
 
 $$
 y_{\mathrm{comm}}[n] =
 u[n]\, e^{j 2\pi f_{\mathrm{CFO}} n / f_s}
 + w_{\mathrm{comm}}[n]
 $$
+
+With `sample_rate_offset_ppm` enabled, the simulator first forms \(u[n]\) on the
+source clock and passes it through a 32-tap, 1024-phase Kaiser-windowed sinc
+polyphase resampler. Positive ppm means the UE clock is faster than the BS clock,
+so BS->UE communication produces samples at
+\(f_{s,\mathrm{UE}} = f_{s,\mathrm{BS}}(1+\mathrm{ppm}\cdot10^{-6})\). The CFO
+phasor step uses that UE-side sample rate. The reciprocal resampler is used for
+UE->BS uplink output back onto the BS clock.
 
 By default, `targets` drives both the monostatic sensing antennas (with array manifold)
 and the bistatic communication channel (single-antenna, no array manifold), modelling
@@ -216,10 +229,12 @@ the downlink channel shape.
 
 - Each process stops cleanly on Ctrl-C (SIGINT), independently of the others; the hub
   unlinks its shared memory on exit.
-- Not real-time: pacing is by shared-memory backpressure (correctness over speed).
+- The hub is paced by default: each processed BS-clock chunk is released after
+  `chunk_samples / sample_rate` wall-clock time. Set
+  `simulation.pacing_enabled: false` for fastest-possible batch simulation.
 - Keep `ring_capacity_samples` small (≈ a couple of frames) so the transmitter cannot
   race far ahead of the hub and overflow the monostatic TX/RX pairing queue.
-- The simulator does not model sampling frequency offset (SFO); `timing_offset_samples`
-  is only a fixed integer sample offset.
+- `sample_rate_offset_ppm` models one endpoint-level UE/BS SFO. `timing_offset_samples`
+  remains only a fixed integer sample offset and does not drift over time.
 - The simulator does not model fractional delay; all propagation delays and configured
   timing offsets are quantized to integer samples.

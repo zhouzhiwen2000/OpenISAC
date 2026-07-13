@@ -21,9 +21,6 @@
 #include <csignal>
 #include <cstdint>
 #include <fstream>
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
 #include <limits>
 #include <memory>
 #include <string>
@@ -141,6 +138,7 @@ public:
         constexpr double beta = 8.0;
         const double i0_beta = bessel_i0(beta);
         const double cutoff = std::min(1.0, std::max(0.0, sample_rate_ratio));
+        std::vector<double> tap(kTaps);
         for (size_t phase = 0; phase < kPhases; ++phase) {
             const double frac = static_cast<double>(phase) / static_cast<double>(kPhases);
             double sum = 0.0;
@@ -151,14 +149,17 @@ public:
                 const double window =
                     bessel_i0(beta * std::sqrt(std::max(0.0, 1.0 - pos * pos))) / i0_beta;
                 const double coeff = cutoff * sinc(cutoff * rel) * window;
-                _coeffs[phase * kTaps + k] = static_cast<float>(coeff);
+                tap[k] = coeff;
                 sum += coeff;
             }
-            if (std::abs(sum) > 1e-30) {
-                const float inv_sum = static_cast<float>(1.0 / sum);
-                for (size_t k = 0; k < kTaps; ++k) {
-                    _coeffs[phase * kTaps + k] *= inv_sum;
-                }
+            const double inv_sum = (std::abs(sum) > 1e-30) ? (1.0 / sum) : 1.0;
+            // Each tap coefficient is stored twice (real+imag lanes) to match the
+            // interleaved [re,im,re,im,...] layout of `samples`, so filter_aos below
+            // is a single elementwise multiply-accumulate with no per-tap unpacking.
+            for (size_t k = 0; k < kTaps; ++k) {
+                const float v = static_cast<float>(tap[k] * inv_sum);
+                _coeffs[phase * kTaps * 2 + 2 * k] = v;
+                _coeffs[phase * kTaps * 2 + 2 * k + 1] = v;
             }
         }
     }
@@ -182,7 +183,7 @@ public:
             if (base + kRight >= _buffer.size()) {
                 break;
             }
-            out.push_back(filter_aos(&_buffer[base - kCenter], &_coeffs[phase * kTaps]));
+            out.push_back(filter_aos(&_buffer[base - kCenter], &_coeffs[phase * kTaps * 2]));
             _read_pos += _source_step;
         }
 
@@ -199,43 +200,39 @@ private:
     static constexpr size_t kPhases = 1024;
     static constexpr size_t kCenter = 15;
     static constexpr size_t kRight = kTaps - kCenter - 1;
+    // Width of the local accumulator the dot product reduces into. This is a plain
+    // array, not an intrinsic register width: #pragma omp simd auto-vectorizes the
+    // inner loop to whatever the target ISA offers (AVX2/AVX-512/NEON/...) under
+    // -march=native, so this only needs to divide 2*kTaps evenly, not match a
+    // specific instruction set.
+    static constexpr size_t kSimdWidth = 8;
+    static_assert((2 * kTaps) % kSimdWidth == 0, "kSimdWidth must divide 2*kTaps");
 
+    // `coeffs` points at kTaps pairs of [re,im] where re==im==the tap weight
+    // (see the constructor), matching the interleaved layout of `samples` so the
+    // multiply-accumulate below is a straight elementwise pass with no per-tap
+    // scalar coefficient assembly.
     static sample_t filter_aos(const sample_t* samples, const float* coeffs) {
-#if defined(__AVX2__)
-        __m256 acc = _mm256_setzero_ps();
         const float* sample_f = reinterpret_cast<const float*>(samples);
-        for (size_t k = 0; k < kTaps; k += 4) {
-            const __m256 x = _mm256_loadu_ps(sample_f + 2 * k);
-            const __m256 c = _mm256_set_ps(
-                coeffs[k + 3], coeffs[k + 3],
-                coeffs[k + 2], coeffs[k + 2],
-                coeffs[k + 1], coeffs[k + 1],
-                coeffs[k + 0], coeffs[k + 0]);
-#if defined(__FMA__)
-            acc = _mm256_fmadd_ps(x, c, acc);
-#else
-            acc = _mm256_add_ps(acc, _mm256_mul_ps(x, c));
-#endif
+        alignas(64) float acc[kSimdWidth] = {};
+        for (size_t k = 0; k < 2 * kTaps; k += kSimdWidth) {
+            #pragma omp simd
+            for (size_t lane = 0; lane < kSimdWidth; ++lane) {
+                acc[lane] += sample_f[k + lane] * coeffs[k + lane];
+            }
         }
-        alignas(32) float lanes[8];
-        _mm256_store_ps(lanes, acc);
-        return sample_t(
-            lanes[0] + lanes[2] + lanes[4] + lanes[6],
-            lanes[1] + lanes[3] + lanes[5] + lanes[7]);
-#else
-        sample_t acc(0.0f, 0.0f);
-        #pragma omp simd
-        for (size_t k = 0; k < kTaps; ++k) {
-            acc += samples[k] * coeffs[k];
+        float re = 0.0f, im = 0.0f;
+        for (size_t lane = 0; lane < kSimdWidth; lane += 2) {
+            re += acc[lane];
+            im += acc[lane + 1];
         }
-        return acc;
-#endif
+        return sample_t(re, im);
     }
 
     double _source_step = 1.0;
     double _read_pos = 0.0;
     std::vector<sample_t> _buffer;
-    std::vector<float> _coeffs = std::vector<float>(kPhases * kTaps, 0.0f);
+    std::vector<float> _coeffs = std::vector<float>(kPhases * kTaps * 2, 0.0f);
 };
 
 constexpr int32_t kSnrControlDisabled = std::numeric_limits<int32_t>::min();
@@ -387,6 +384,7 @@ int main(int argc, char** argv) {
                  << " (UE/BS ratio=" << ue_to_bs_sample_rate_ratio << ")"
                  << ", comm_rx=" << (enable_comm ? "on" : "off")
                  << ", sensing_channels=" << num_channels
+                 << ", pacing=" << (sim.pacing_enabled ? "on" : "off")
                  << ", ULA spacing=" << spacing << " lambda ("
                  << (sim.array_spacing_m > 0.0
                          ? std::to_string(sim.array_spacing_m * 1e3) + " mm @ center_freq"
@@ -598,6 +596,7 @@ int main(int argc, char** argv) {
 
     uint64_t total_produced = 0;
     auto last_log = std::chrono::steady_clock::now();
+    auto next_release_time = last_log;
     int32_t last_logged_snr_centidb = std::numeric_limits<int32_t>::max();
 
     while (!g_stop.load() && running->load(std::memory_order_acquire) != 0) {
@@ -748,6 +747,18 @@ int main(int argc, char** argv) {
             }
             if (enable_comm) {
                 noise_gen.add(out_comm.data(), comm_count, sigma);
+            }
+        }
+
+        if (sim.pacing_enabled && fs > 0.0) {
+            const auto now = std::chrono::steady_clock::now();
+            if (next_release_time < now) {
+                next_release_time = now;
+            }
+            next_release_time += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(static_cast<double>(M) / fs));
+            if (next_release_time > now) {
+                std::this_thread::sleep_until(next_release_time);
             }
         }
 

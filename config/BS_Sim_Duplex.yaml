@@ -7,6 +7,8 @@ simulation:
   session: oisac_sim  # Shared-memory namespace used by BS, UE, and ChannelSimulator
   enable_comm_rx: true  # Produce the communication RX path for UE
   enable_sensing_rx: true  # Produce monostatic sensing RX paths for the antenna array
+  enable_uplink: true  # Route the UE->BS uplink stream through the simulator (duplex/eRTM)
+  pacing_enabled: true  # Pace simulator output to wall-clock sample time
   noise_power_dbfs: -70.0  # AWGN power per RX channel in dBFS; very low disables effectively
   snr_control_enable: true  # Scale the clean simulated signal before AWGN to maintain target_snr_db
   target_snr_db: 40.0  # Initial target SNR in dB when snr_control_enable is true

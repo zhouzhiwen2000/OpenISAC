@@ -219,6 +219,7 @@ struct SimConfig {
     bool enable_comm_rx = true;                // produce the communication RX channel (run with UE)
     bool enable_sensing_rx = true;             // produce the monostatic sensing RX channels (one per antenna)
     bool enable_uplink = false;                // route the UE->BS uplink stream (UE TX -> BS uplink RX)
+    bool pacing_enabled = true;                // pace the simulator to wall-clock sample time
     double noise_power_dbfs = -100.0;          // AWGN power per RX channel (dBFS); very low = effectively off
     bool snr_control_enable = false;           // Enable target-SNR scaling of clean signal before AWGN
     double target_snr_db = 40.0;               // Target SNR when snr_control_enable is true
@@ -2371,6 +2372,7 @@ inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
     out << YAML::Key << "enable_comm_rx" << YAML::Value << sim.enable_comm_rx;
     out << YAML::Key << "enable_sensing_rx" << YAML::Value << sim.enable_sensing_rx;
     out << YAML::Key << "enable_uplink" << YAML::Value << sim.enable_uplink;
+    out << YAML::Key << "pacing_enabled" << YAML::Value << sim.pacing_enabled;
     out << YAML::Key << "noise_power_dbfs" << YAML::Value << sim.noise_power_dbfs;
     out << YAML::Key << "snr_control_enable" << YAML::Value << sim.snr_control_enable;
     out << YAML::Key << "target_snr_db" << YAML::Value << sim.target_snr_db;
@@ -2427,6 +2429,7 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
         if (sim_node["enable_comm_rx"]) sim.enable_comm_rx = sim_node["enable_comm_rx"].as<bool>();
         if (sim_node["enable_sensing_rx"]) sim.enable_sensing_rx = sim_node["enable_sensing_rx"].as<bool>();
         if (sim_node["enable_uplink"]) sim.enable_uplink = sim_node["enable_uplink"].as<bool>();
+        if (sim_node["pacing_enabled"]) sim.pacing_enabled = sim_node["pacing_enabled"].as<bool>();
         if (sim_node["noise_power_dbfs"]) sim.noise_power_dbfs = sim_node["noise_power_dbfs"].as<double>();
         if (sim_node["snr_control_enable"]) sim.snr_control_enable = sim_node["snr_control_enable"].as<bool>();
         if (sim_node["target_snr_db"]) sim.target_snr_db = sim_node["target_snr_db"].as<double>();
