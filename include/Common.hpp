@@ -1048,7 +1048,7 @@ struct NetworkOutputConfig {
     // ARQ link-layer retransmission
     bool arq_enabled = false;
     bool arq_ordered_delivery = false;
-    int arq_window_packets = 64;         // [1, 64] for first-pass 64-bit ACK bitmap
+    int arq_window_packets = 32767;      // [1, 32767]; must stay below half the 16-bit seq space
     int arq_ack_bitmap_bits = 64;        // fixed 64 for first pass
     int arq_retransmit_timeout_ms = 10;  // RTO in ms; 0 => derived from frame period
     int arq_max_retries = 0;             // 0 = unlimited within window
@@ -1062,7 +1062,7 @@ struct CpuCoresConfig {
 };
 
 struct RuntimeConfig {
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, demodulation, agc, align, snr, uplink, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, arq, demodulation, agc, align, snr, uplink, or "all"
 };
 
 struct MeasurementConfig {
@@ -3001,13 +3001,15 @@ inline void normalize_udp_egress_pacer_config(UdpEgressPacerConfig& pacer) {
 }
 
 inline void normalize_arq_config(NetworkOutputConfig& net) {
+    constexpr int kMaxArqWindowPackets = 32767;
     if (net.arq_window_packets < 1) {
         LOG_G_WARN() << "arq_window_packets < 1, clamping to 1.";
         net.arq_window_packets = 1;
     }
-    if (net.arq_window_packets > 64) {
-        LOG_G_WARN() << "arq_window_packets > 64 exceeds the first-pass ACK bitmap, clamping to 64.";
-        net.arq_window_packets = 64;
+    if (net.arq_window_packets > kMaxArqWindowPackets) {
+        LOG_G_WARN() << "arq_window_packets exceeds the 16-bit sequence half-space; clamping to "
+                     << kMaxArqWindowPackets << ".";
+        net.arq_window_packets = kMaxArqWindowPackets;
     }
     if (net.arq_ack_bitmap_bits != 64) {
         LOG_G_WARN() << "arq_ack_bitmap_bits must be 64 for first pass; overriding.";

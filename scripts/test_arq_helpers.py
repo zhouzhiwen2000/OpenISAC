@@ -276,6 +276,82 @@ void test_rx_window_ordered() {
     printf("  test_rx_window_ordered: OK\n");
 }
 
+// ---- Test ArqRxWindow: first accepted packet can start at nonzero seq ----
+void test_rx_window_nonzero_first_seq() {
+    NetworkOutputConfig net;
+    net.arq_window_packets = 16;
+    net.arq_ordered_delivery = false;
+    net.arq_ack_bitmap_bits = 64;
+    net.arq_feedback_interval_ms = 0;
+
+    ArqRxWindow rx;
+    rx.configure(net);
+    rx.set_direction(0);
+
+    std::vector<uint8_t> p10 = {10}, p11 = {11};
+    CHECK(rx.process_received(965, p10.data(), p10.size()), "accept nonzero first seq");
+    ArqFeedback ack = rx.generate_ack();
+    CHECK(ack.ack_base == 966, "nonzero first seq advances ack_base");
+    CHECK(ack.ack_bitmap == 0, "nonzero first seq cumulative bitmap clear");
+
+    CHECK(rx.process_received(966, p11.data(), p11.size()), "accept next nonzero seq");
+    ack = rx.generate_ack();
+    CHECK(ack.ack_base == 967, "next nonzero seq advances ack_base");
+
+    net.arq_ordered_delivery = true;
+    ArqRxWindow ordered_rx;
+    ordered_rx.configure(net);
+    ordered_rx.set_direction(0);
+    CHECK(ordered_rx.process_received(1200, p10.data(), p10.size()),
+          "ordered accept nonzero first seq");
+    std::vector<std::vector<uint8_t>> deliverable;
+    ordered_rx.get_deliverable(deliverable);
+    CHECK(deliverable.size() == 1, "ordered deliver nonzero first seq");
+    CHECK(deliverable[0][0] == 10, "ordered nonzero payload");
+
+    printf("  test_rx_window_nonzero_first_seq: OK\n");
+}
+
+// ---- Test ArqRxWindow: skip old gaps when future seq exceeds RX window ----
+void test_rx_window_skip_ahead() {
+    NetworkOutputConfig net;
+    net.arq_window_packets = 4;
+    net.arq_ordered_delivery = false;
+    net.arq_ack_bitmap_bits = 64;
+    net.arq_feedback_interval_ms = 0;
+
+    ArqRxWindow rx;
+    rx.configure(net);
+    rx.set_direction(0);
+
+    std::vector<uint8_t> p0 = {0}, p1 = {1}, p6 = {6};
+    CHECK(rx.process_received(0, p0.data(), p0.size()), "skip accept seq 0");
+    CHECK(rx.process_received(1, p1.data(), p1.size()), "skip accept seq 1");
+    CHECK(rx.process_received(6, p6.data(), p6.size()),
+          "skip accepts future seq outside window");
+    CHECK(rx.skip_count() == 1, "skip count increments");
+    ArqFeedback ack = rx.generate_ack();
+    CHECK(ack.ack_base == 3, "skip advances ack_base to include future seq");
+    CHECK(ack.ack_bitmap == (1ULL << 3), "skip ACKs future seq selectively");
+
+    net.arq_ordered_delivery = true;
+    ArqRxWindow ordered_rx;
+    ordered_rx.configure(net);
+    ordered_rx.set_direction(0);
+    CHECK(ordered_rx.process_received(0, p0.data(), p0.size()), "ordered skip accept 0");
+    std::vector<std::vector<uint8_t>> deliverable;
+    ordered_rx.get_deliverable(deliverable);
+    CHECK(deliverable.size() == 1, "ordered skip delivers initial seq");
+    CHECK(ordered_rx.process_received(6, p6.data(), p6.size()),
+          "ordered skip accepts future seq outside window");
+    CHECK(ordered_rx.expected_seq() == 3, "ordered skip advances expected seq");
+    deliverable.clear();
+    ordered_rx.get_deliverable(deliverable);
+    CHECK(deliverable.empty(), "ordered skip waits for new base after skip");
+
+    printf("  test_rx_window_skip_ahead: OK\n");
+}
+
 // ---- Test feedback frames do not create data-window gaps ----
 void test_feedback_frame_skips_data_window() {
     NetworkOutputConfig net;
@@ -319,26 +395,29 @@ void test_feedback_frame_skips_data_window() {
     printf("  test_feedback_frame_skips_data_window: OK\n");
 }
 
-// ---- Test first-pass ARQ window is clamped to the 64-bit ACK bitmap ----
-void test_window_clamp_64() {
+// ---- Test ARQ window is clamped below the 16-bit sequence half-space ----
+void test_window_clamp_sequence_half_space() {
     NetworkOutputConfig net;
-    net.arq_window_packets = 256;
+    net.arq_window_packets = 65536;
     net.arq_ack_bitmap_bits = 64;
     normalize_arq_config(net);
-    CHECK(net.arq_window_packets == 64, "normalize clamps ARQ window to 64");
+    CHECK(net.arq_window_packets == 32767, "normalize clamps ARQ window to 32767");
 
     ArqTxWindow tx;
     tx.configure(net);
-    CHECK(tx.window_size() == 64, "tx window size 64");
+    CHECK(tx.window_size() == 32767, "tx window size 32767");
 
     ArqRxWindow rx;
     rx.configure(net);
     std::vector<uint8_t> payload = {1};
     CHECK(rx.process_received(0, payload.data(), payload.size()), "rx accepts seq 0");
     CHECK(rx.process_received(64, payload.data(), payload.size()), "rx accepts seq 64 at bitmap edge");
-    CHECK(!rx.process_received(65, payload.data(), payload.size()), "rx rejects seq 65 outside bitmap");
+    CHECK(rx.process_received(65, payload.data(), payload.size()), "rx skips to accept seq 65 outside old bitmap");
+    CHECK(rx.skip_count() == 1, "rx skip count after bitmap edge");
+    ArqFeedback ack = rx.generate_ack();
+    CHECK(ack.ack_base == 2, "rx skip keeps ACK bitmap within 64 bits");
 
-    printf("  test_window_clamp_64: OK\n");
+    printf("  test_window_clamp_sequence_half_space: OK\n");
 }
 
 // ---- Test sequence diff helpers ----
@@ -420,8 +499,10 @@ int main() {
     test_tx_window_encoded();
     test_rx_window_unordered();
     test_rx_window_ordered();
+    test_rx_window_nonzero_first_seq();
+    test_rx_window_skip_ahead();
     test_feedback_frame_skips_data_window();
-    test_window_clamp_64();
+    test_window_clamp_sequence_half_space();
     test_drop_abandoned();
 
     printf("\nResults: %d passed, %d failed\n", tests_passed, tests_failed);

@@ -1020,8 +1020,8 @@ bs:
   - type: scalar
     key: arq_window_packets
     kind: int
-    comment: Max outstanding unacked packets [1, 64]
-    default: 64
+    comment: Max outstanding unacked packets [1, 32767]
+    default: 32767
     optional: true
     enabled_if:
       key: arq_enabled
@@ -1095,7 +1095,7 @@ bs:
   - type: scalar
     key: profiling_modules
     kind: string
-    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc), or "all"
+    comment: Comma-separated modules to profile (modulation, latency, ldpc_encode, sensing_proc, arq), or "all"
     default: ''
     optional: true
 ue:
@@ -1874,8 +1874,8 @@ ue:
   - type: scalar
     key: arq_window_packets
     kind: int
-    comment: Max outstanding unacked packets [1, 64]
-    default: 64
+    comment: Max outstanding unacked packets [1, 32767]
+    default: 32767
     optional: true
     enabled_if:
       key: arq_enabled

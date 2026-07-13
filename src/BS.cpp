@@ -513,12 +513,173 @@ private:
     std::mutex _arq_feedback_mutex;
     std::deque<std::vector<uint8_t>> _arq_pending_feedback; // feedback payloads to inject into DL TX
     std::atomic<uint16_t> _arq_feedback_seq{0}; // dedicated seq space for feedback frames
+    std::atomic<uint64_t> _arq_profile_last_log_ms{0};
+    std::atomic<uint64_t> _arq_dl_acks_received{0};
+    std::atomic<uint64_t> _arq_dl_ack_released_total{0};
+    std::atomic<uint64_t> _arq_dl_invalid_feedback{0};
+    std::atomic<uint64_t> _arq_dl_packets_tracked{0};
+    std::atomic<uint64_t> _arq_dl_track_failures{0};
+    std::atomic<uint64_t> _arq_dl_retransmit_enqueued{0};
+    std::atomic<uint64_t> _arq_dl_feedback_enqueued{0};
+    std::atomic<uint64_t> _arq_dl_feedback_transmitted{0};
+    std::atomic<uint64_t> _arq_dl_window_drops{0};
+    std::atomic<uint64_t> _arq_dl_window_stalls{0};
+    std::atomic<uint64_t> _arq_raw_udp_drops{0};
+    std::atomic<uint64_t> _arq_encoded_queue_full_events{0};
+    std::atomic<uint64_t> _arq_profile_frames{0};
+    std::atomic<uint64_t> _arq_profile_payload_re_used{0};
+    std::atomic<uint64_t> _arq_profile_packets_pulled{0};
+    std::atomic<uint64_t> _arq_profile_last_tracked{0};
+    std::atomic<uint64_t> _arq_profile_last_ack_released{0};
+    std::atomic<uint64_t> _arq_profile_last_retx_enqueued{0};
+    std::atomic<uint64_t> _arq_profile_last_raw_udp_drops{0};
+    std::atomic<uint64_t> _arq_profile_last_encoded_full{0};
+    std::atomic<uint64_t> _arq_profile_last_frames{0};
+    std::atomic<uint64_t> _arq_profile_last_payload_re_used{0};
+    std::atomic<uint64_t> _arq_profile_last_packets_pulled{0};
+    std::atomic<uint16_t> _arq_dl_last_ack_base{0};
+    std::atomic<uint64_t> _arq_dl_last_ack_bitmap{0};
+    std::atomic<uint64_t> _arq_dl_last_ack_released{0};
 
     struct EncodePacketProfile {
         double header_encode_us{0.0};
         double payload_encode_us{0.0};
         double enqueue_us{0.0};
     };
+
+    int64_t _estimate_arq_queue_delay_ms(size_t queued_packets_ahead,
+                                         size_t packet_qpsk_symbols) const {
+        if (_data_resource_layout.payload_re_count == 0 ||
+            _cfg.rf_sampling.sample_rate <= 0.0) {
+            return 0;
+        }
+        const size_t packet_symbols = std::max<size_t>(
+            packet_qpsk_symbols, LdpcPacketFraming::kControlSymbols);
+        const size_t packets_per_frame = std::max<size_t>(
+            1, _data_resource_layout.payload_re_count / packet_symbols);
+        const size_t frames_until_tx = (queued_packets_ahead / packets_per_frame) + 1;
+        const double frame_ms =
+            _cfg.samples_per_frame() / _cfg.rf_sampling.sample_rate * 1000.0;
+        return static_cast<int64_t>(std::ceil(frame_ms * frames_until_tx));
+    }
+
+    void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
+        if (!_arq_enabled || !_cfg.should_profile("arq")) {
+            return;
+        }
+        const uint64_t now = static_cast<uint64_t>(std::max<int64_t>(now_ms, 0));
+        uint64_t last = _arq_profile_last_log_ms.load(std::memory_order_relaxed);
+        if (last != 0 && now - last < 1000) {
+            return;
+        }
+        if (!_arq_profile_last_log_ms.compare_exchange_strong(
+                last, now, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            return;
+        }
+
+        size_t pending_feedback = 0;
+        {
+            std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
+            pending_feedback = _arq_pending_feedback.size();
+        }
+
+        std::vector<uint16_t> retransmit_due;
+        _dl_arq_tx.get_retransmit(retransmit_due, now_ms, 64);
+        const size_t outstanding = _dl_arq_tx.outstanding_count();
+        const uint16_t window = _dl_arq_tx.window_size();
+        const size_t raw_size = _raw_udp_buffer.size();
+        const size_t raw_cap = _raw_udp_buffer.capacity();
+        const size_t encoded_size = _data_packet_buffer.size();
+        const size_t encoded_cap = _data_packet_buffer.capacity();
+        const uint64_t tracked_total =
+            _arq_dl_packets_tracked.load(std::memory_order_relaxed);
+        const uint64_t ack_released_total =
+            _arq_dl_ack_released_total.load(std::memory_order_relaxed);
+        const uint64_t retx_total =
+            _arq_dl_retransmit_enqueued.load(std::memory_order_relaxed);
+        const uint64_t raw_udp_drops_total =
+            _arq_raw_udp_drops.load(std::memory_order_relaxed);
+        const uint64_t encoded_full_total =
+            _arq_encoded_queue_full_events.load(std::memory_order_relaxed);
+        const uint64_t frames_total =
+            _arq_profile_frames.load(std::memory_order_relaxed);
+        const uint64_t payload_re_used_total =
+            _arq_profile_payload_re_used.load(std::memory_order_relaxed);
+        const uint64_t packets_pulled_total =
+            _arq_profile_packets_pulled.load(std::memory_order_relaxed);
+
+        const uint64_t tracked_delta =
+            tracked_total - _arq_profile_last_tracked.exchange(
+                tracked_total, std::memory_order_relaxed);
+        const uint64_t ack_released_delta =
+            ack_released_total - _arq_profile_last_ack_released.exchange(
+                ack_released_total, std::memory_order_relaxed);
+        const uint64_t retx_delta =
+            retx_total - _arq_profile_last_retx_enqueued.exchange(
+                retx_total, std::memory_order_relaxed);
+        const uint64_t raw_udp_drop_delta =
+            raw_udp_drops_total - _arq_profile_last_raw_udp_drops.exchange(
+                raw_udp_drops_total, std::memory_order_relaxed);
+        const uint64_t encoded_full_delta =
+            encoded_full_total - _arq_profile_last_encoded_full.exchange(
+                encoded_full_total, std::memory_order_relaxed);
+        const uint64_t frames_delta =
+            frames_total - _arq_profile_last_frames.exchange(
+                frames_total, std::memory_order_relaxed);
+        const uint64_t payload_re_used_delta =
+            payload_re_used_total - _arq_profile_last_payload_re_used.exchange(
+                payload_re_used_total, std::memory_order_relaxed);
+        const uint64_t packets_pulled_delta =
+            packets_pulled_total - _arq_profile_last_packets_pulled.exchange(
+                packets_pulled_total, std::memory_order_relaxed);
+        const double frame_payload_fill_ratio =
+            (frames_delta > 0 && _data_resource_layout.payload_re_count > 0)
+                ? static_cast<double>(payload_re_used_delta) /
+                      (static_cast<double>(frames_delta) *
+                       static_cast<double>(_data_resource_layout.payload_re_count))
+                : 0.0;
+        const double packets_per_frame =
+            frames_delta > 0
+                ? static_cast<double>(packets_pulled_delta) /
+                      static_cast<double>(frames_delta)
+                : 0.0;
+
+        std::ostringstream oss;
+        oss << "[BS ARQ PROFILE] reason=" << reason
+            << " dl_outstanding=" << outstanding << "/" << window
+            << " dl_room=" << (_dl_arq_tx.has_room() ? "yes" : "no")
+            << " retx_due=" << retransmit_due.size()
+            << " raw_udp_queue=" << raw_size << "/" << raw_cap
+            << " encoded_queue=" << encoded_size << "/" << encoded_cap
+            << " pending_ul_ack_feedback=" << pending_feedback
+            << " ack_rx=" << _arq_dl_acks_received.load(std::memory_order_relaxed)
+            << " ack_released_total=" << ack_released_total
+            << " tracked_delta=" << tracked_delta
+            << " ack_released_delta=" << ack_released_delta
+            << " retx_delta=" << retx_delta
+            << " raw_udp_drop_delta=" << raw_udp_drop_delta
+            << " encoded_full_delta=" << encoded_full_delta
+            << " frame_payload_fill_ratio=" << std::fixed << std::setprecision(3)
+            << frame_payload_fill_ratio
+            << " packets_per_frame=" << packets_per_frame << std::defaultfloat
+            << " last_ack_base=" << _arq_dl_last_ack_base.load(std::memory_order_relaxed)
+            << " last_ack_released=" << _arq_dl_last_ack_released.load(std::memory_order_relaxed)
+            << " last_ack_bitmap=0x" << std::hex
+            << _arq_dl_last_ack_bitmap.load(std::memory_order_relaxed) << std::dec
+            << " tracked=" << tracked_total
+            << " track_fail=" << _arq_dl_track_failures.load(std::memory_order_relaxed)
+            << " retx_enqueued=" << retx_total
+            << " feedback_enqueued=" << _arq_dl_feedback_enqueued.load(std::memory_order_relaxed)
+            << " feedback_transmitted="
+            << _arq_dl_feedback_transmitted.load(std::memory_order_relaxed)
+            << " window_drops=" << _arq_dl_window_drops.load(std::memory_order_relaxed)
+            << " window_stalls=" << _arq_dl_window_stalls.load(std::memory_order_relaxed)
+            << " raw_udp_drops=" << raw_udp_drops_total
+            << " encoded_queue_full_events="
+            << encoded_full_total
+            << " invalid_feedback=" << _arq_dl_invalid_feedback.load(std::memory_order_relaxed);
+        LOG_G_INFO() << oss.str();
+    }
 
     LatencySnapshot _take_latency_snapshot_and_reset() {
         LatencySnapshot snapshot;
@@ -1591,19 +1752,20 @@ private:
             throw std::runtime_error("Unified LDPC packet symbol count mismatch.");
         }
 
-        // ARQ: store encoded packet in DL TX window for potential retransmission.
-        // Feedback frames are never tracked as data.
-        if (_arq_enabled && track_arq && !is_feedback) {
-            const uint16_t arq_seq = mini_header.seq;
-            AlignedIntVector arq_copy(packet); // copy before move into ring buffer
-            _dl_arq_tx.try_insert_encoded(arq_seq, payload_data, payload_len,
-                                          std::move(arq_copy), arq_now_ms());
+        const bool should_track_arq = _arq_enabled && track_arq && !is_feedback;
+        const uint16_t arq_seq = mini_header.seq;
+        AlignedIntVector arq_copy;
+        if (should_track_arq) {
+            arq_copy = packet; // copy before moving into the encoded queue
         }
 
         prof_step_start = ProfileClock::now();
         bool enqueued = false;
+        bool counted_full_wait = false;
+        size_t queued_packets_ahead = 0;
         SPSCBackoff enqueue_backoff;
         while (_running.load(std::memory_order_relaxed)) {
+            queued_packets_ahead = _data_packet_buffer.size();
             if (_data_packet_buffer.try_push(std::move(packet))) {
                 enqueued = true;
                 if (do_latency_profile) {
@@ -1613,11 +1775,33 @@ private:
                 }
                 break;
             }
+            if (_arq_enabled) {
+                if (!counted_full_wait) {
+                    _arq_encoded_queue_full_events.fetch_add(1, std::memory_order_relaxed);
+                    counted_full_wait = true;
+                }
+                _log_arq_profile_if_due("encoded_queue_full", arq_now_ms());
+            }
             enqueue_backoff.pause();
         }
         if (!enqueued) {
             _data_packet_pool.release(std::move(packet));
             return false;
+        }
+        // ARQ: only track packets after they are accepted by the encoded queue.
+        // The timeout starts at the estimated air time, not at LDPC encode time;
+        // otherwise a deep encoded queue triggers retransmission before first TX.
+        if (should_track_arq) {
+            const int64_t now = arq_now_ms();
+            const int64_t tx_due_ms =
+                now + _estimate_arq_queue_delay_ms(queued_packets_ahead, packet_qpsk_symbols);
+            if (_dl_arq_tx.try_insert_encoded(arq_seq, payload_data, payload_len,
+                                              std::move(arq_copy), tx_due_ms)) {
+                _arq_dl_packets_tracked.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                _arq_dl_track_failures.fetch_add(1, std::memory_order_relaxed);
+                _log_arq_profile_if_due("track_failed", now);
+            }
         }
         prof_step_end = ProfileClock::now();
         profile.enqueue_us =
@@ -1634,7 +1818,17 @@ private:
             // carry their own seq space and are never tracked in the UL RX window.
             ArqFeedback ack;
             if (ArqFeedback::try_unpack(data, len, ack)) {
-                _dl_arq_tx.process_ack(ack, arq_now_ms());
+                const int64_t now = arq_now_ms();
+                const size_t released = _dl_arq_tx.process_ack(ack, now);
+                _arq_dl_acks_received.fetch_add(1, std::memory_order_relaxed);
+                _arq_dl_ack_released_total.fetch_add(released, std::memory_order_relaxed);
+                _arq_dl_last_ack_base.store(ack.ack_base, std::memory_order_relaxed);
+                _arq_dl_last_ack_bitmap.store(ack.ack_bitmap, std::memory_order_relaxed);
+                _arq_dl_last_ack_released.store(released, std::memory_order_relaxed);
+                _log_arq_profile_if_due("dl_ack", now);
+            } else {
+                _arq_dl_invalid_feedback.fetch_add(1, std::memory_order_relaxed);
+                _log_arq_profile_if_due("invalid_feedback", arq_now_ms());
             }
             return true; // consumed; do not forward to UDP
         }
@@ -1650,7 +1844,9 @@ private:
                     std::lock_guard<std::mutex> lock(_arq_feedback_mutex);
                     _arq_pending_feedback.push_back(std::move(fb_payload));
                 }
+                _arq_dl_feedback_enqueued.fetch_add(1, std::memory_order_relaxed);
                 _ul_arq_rx.mark_ack_sent(now);
+                _log_arq_profile_if_due("ul_ack_feedback_enqueued", now);
             }
         }
         return false; // not consumed; let normal UDP output proceed
@@ -1834,6 +2030,10 @@ private:
             if (pkt == nullptr) {
                 static std::atomic<uint64_t> drop_count{0};
                 const uint64_t dc = drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (_arq_enabled) {
+                    _arq_raw_udp_drops.fetch_add(1, std::memory_order_relaxed);
+                    _log_arq_profile_if_due("raw_udp_full", arq_now_ms());
+                }
                 if (dc <= 20 || (dc % 100) == 0) {
                     LOG_G_WARN() << "UDP recv intermediate buffer full, dropping packet: dropped=" << dc;
                 }
@@ -1862,6 +2062,7 @@ private:
                 for (auto& fb : pending_fb) {
                     EncodePacketProfile profile;
                     _encode_and_enqueue_payload(fb.data(), fb.size(), 0, false, profile, false, true);
+                    _arq_dl_feedback_transmitted.fetch_add(1, std::memory_order_relaxed);
                 }
 
                 // ARQ: handle DL retransmissions (priority over new data)
@@ -1869,6 +2070,15 @@ private:
                 _dl_arq_tx.drop_abandoned(now);
                 _dl_arq_tx.get_retransmit(retransmit_seqs, now);
                 for (uint16_t seq : retransmit_seqs) {
+                    const size_t encoded_cap = _data_packet_buffer.capacity();
+                    const size_t encoded_size = _data_packet_buffer.size();
+                    const size_t retx_high_water =
+                        std::max<size_t>(1, (encoded_cap * 3) / 4);
+                    if (encoded_cap > 0 && encoded_size >= retx_high_water) {
+                        _log_arq_profile_if_due("retx_deferred_queue_high", now);
+                        break;
+                    }
+
                     ArqTxEntry entry;
                     if (!_dl_arq_tx.get_entry_copy(seq, entry)) {
                         continue;
@@ -1876,20 +2086,41 @@ private:
                     if (!entry.encoded_qpsk.empty()) {
                         // Cheap retransmit: push pre-encoded QPSK directly
                         AlignedIntVector retrans(entry.encoded_qpsk);
-                        SPSCBackoff bo;
-                        while (_running.load(std::memory_order_relaxed)) {
-                            if (_data_packet_buffer.try_push(std::move(retrans))) break;
-                            bo.pause();
+                        const size_t queued_packets_ahead = _data_packet_buffer.size();
+                        if (!_data_packet_buffer.try_push(std::move(retrans))) {
+                            _arq_encoded_queue_full_events.fetch_add(1, std::memory_order_relaxed);
+                            _log_arq_profile_if_due("retx_encoded_queue_full", arq_now_ms());
+                            break;
                         }
-                        _dl_arq_tx.mark_transmitted(seq, now);
+                        const int64_t estimated_tx_ms =
+                            now + _estimate_arq_queue_delay_ms(
+                                queued_packets_ahead, entry.encoded_qpsk.size());
+                        _arq_dl_retransmit_enqueued.fetch_add(1, std::memory_order_relaxed);
+                        _dl_arq_tx.mark_transmitted(seq, estimated_tx_ms);
                     } else {
+                        const size_t encoded_cap = _data_packet_buffer.capacity();
+                        const size_t encoded_size = _data_packet_buffer.size();
+                        const size_t retx_high_water =
+                            std::max<size_t>(1, (encoded_cap * 3) / 4);
+                        if (encoded_cap > 0 && encoded_size >= retx_high_water) {
+                            _log_arq_profile_if_due("retx_deferred_queue_high", now);
+                            break;
+                        }
                         EncodePacketProfile profile;
                         _encode_and_enqueue_payload(
                             entry.raw_payload.data(), entry.raw_payload.size(),
                             0, false, profile, false);
-                        _dl_arq_tx.mark_transmitted(seq, now);
+                        const size_t payload_blocks =
+                            LdpcPacketFraming::payload_blocks_for_len(entry.raw_payload.size());
+                        const size_t packet_qpsk_symbols =
+                            LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+                        const int64_t estimated_tx_ms =
+                            now + _estimate_arq_queue_delay_ms(encoded_size, packet_qpsk_symbols);
+                        _arq_dl_retransmit_enqueued.fetch_add(1, std::memory_order_relaxed);
+                        _dl_arq_tx.mark_transmitted(seq, estimated_tx_ms);
                     }
                 }
+                _log_arq_profile_if_due("periodic", arq_now_ms());
             }
 
             RawUdpPacket* pkt = nullptr;
@@ -1898,6 +2129,7 @@ private:
                 while (_running.load(std::memory_order_relaxed)) {
                     pkt = _raw_udp_buffer.consumer_slot();
                     if (pkt != nullptr) break;
+                    if (_arq_enabled) break;
                     std::this_thread::sleep_for(std::chrono::microseconds(200));
                 }
             }
@@ -1908,12 +2140,14 @@ private:
             }
             // ARQ: check window room before encoding new data
             if (_arq_enabled && !_dl_arq_tx.has_room()) {
-                static std::atomic<uint64_t> arq_drop_count{0};
-                const uint64_t dc = arq_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (dc <= 20 || (dc % 100) == 0) {
-                    LOG_G_WARN() << "[BS ARQ DL] TX window full, dropping new packet: dropped=" << dc;
+                const uint64_t stalls =
+                    _arq_dl_window_stalls.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (stalls <= 20 || (stalls % 100) == 0) {
+                    LOG_G_WARN() << "[BS ARQ DL] TX window full, pausing UDP intake: stalls="
+                                 << stalls;
                 }
-                _raw_udp_buffer.consumer_pop();
+                _log_arq_profile_if_due("window_full_stall", arq_now_ms());
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
                 continue;
             }
             EncodePacketProfile profile;
@@ -2033,6 +2267,11 @@ private:
             }
             prof_step_end = ProfileClock::now();
             prof_data_fetch_total += std::chrono::duration<double, std::micro>(prof_step_end - prof_step_start).count();
+            if (_arq_enabled && _cfg.should_profile("arq")) {
+                _arq_profile_frames.fetch_add(1, std::memory_order_relaxed);
+                _arq_profile_payload_re_used.fetch_add(data_pool.size(), std::memory_order_relaxed);
+                _arq_profile_packets_pulled.fetch_add(packets_pulled, std::memory_order_relaxed);
+            }
 
             modulated_data_pool.resize(data_pool.size());
             auto* __restrict__ mod_ptr = modulated_data_pool.data();

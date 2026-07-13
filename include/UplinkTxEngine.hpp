@@ -306,6 +306,7 @@ private:
                 while (_running.load(std::memory_order_relaxed)) {
                     pkt = _raw_udp_buffer.consumer_slot();
                     if (pkt != nullptr) break;
+                    if (_arq_enabled) break;
                     std::this_thread::sleep_for(std::chrono::microseconds(200));
                 }
             }

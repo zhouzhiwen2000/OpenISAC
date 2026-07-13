@@ -4817,8 +4817,9 @@ public:
     ArqTxWindow() = default;
 
     void configure(const NetworkOutputConfig& net) {
+        constexpr int kMaxArqWindowPackets = 32767;
         _window_size = static_cast<uint16_t>(
-            std::max(1, std::min<int>(net.arq_window_packets, 64)));
+            std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
         _rto_ms = net.arq_retransmit_timeout_ms > 0
             ? net.arq_retransmit_timeout_ms : 10;
         _max_retries = net.arq_max_retries;
@@ -5002,8 +5003,9 @@ public:
     ArqRxWindow() = default;
 
     void configure(const NetworkOutputConfig& net) {
+        constexpr int kMaxArqWindowPackets = 32767;
         _window_size = static_cast<uint16_t>(
-            std::max(1, std::min<int>(net.arq_window_packets, 64)));
+            std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
         _ordered = net.arq_ordered_delivery;
         _feedback_interval_ms = net.arq_feedback_interval_ms;
         _max_reorder_buf = static_cast<size_t>(_window_size);
@@ -5011,6 +5013,7 @@ public:
         _expected_seq = 0;
         _ack_base = 0;
         _ack_bitmap = 0;
+        _skip_count = 0;
         _reorder_buffer.clear();
     }
 
@@ -5029,6 +5032,9 @@ public:
     bool process_received(uint16_t seq, const uint8_t* payload, size_t len) {
         if (!_got_any) {
             _got_any = true;
+            _expected_seq = seq;
+            _ack_base = seq;
+            _ack_bitmap = 0;
         }
 
         const int16_t bit_idx = arq_seq_diff(seq, _ack_base);
@@ -5037,9 +5043,18 @@ public:
             return false;
         }
         if (bit_idx >= static_cast<int16_t>(_window_size) || bit_idx >= 64) {
+            _skip_to_include(seq);
+        }
+        const int16_t adjusted_bit_idx = arq_seq_diff(seq, _ack_base);
+        if (adjusted_bit_idx < 0) {
+            _dup_count++;
             return false;
         }
-        const uint64_t bit = static_cast<uint64_t>(1) << bit_idx;
+        if (adjusted_bit_idx >= static_cast<int16_t>(_window_size) ||
+            adjusted_bit_idx >= 64) {
+            return false;
+        }
+        const uint64_t bit = static_cast<uint64_t>(1) << adjusted_bit_idx;
         if (_ack_bitmap & bit) {
             _dup_count++;
             return false;
@@ -5105,8 +5120,45 @@ public:
     uint16_t expected_seq() const { return _expected_seq; }
     uint64_t dup_count() const { return _dup_count; }
     uint64_t accepted_count() const { return _accepted_count; }
+    uint64_t skip_count() const { return _skip_count; }
 
 private:
+    void _skip_to_include(uint16_t seq) {
+        const uint16_t ack_span = static_cast<uint16_t>(
+            std::min<size_t>(static_cast<size_t>(_window_size), 64u));
+        const uint16_t new_ack_base = static_cast<uint16_t>(
+            seq - static_cast<uint16_t>(ack_span - 1));
+        if (arq_seq_diff(new_ack_base, _ack_base) <= 0) {
+            return;
+        }
+
+        uint64_t new_bitmap = 0;
+        for (int i = 0; i < 64; ++i) {
+            if (!(_ack_bitmap & (static_cast<uint64_t>(1) << i))) {
+                continue;
+            }
+            const uint16_t old_seq = static_cast<uint16_t>(_ack_base + i);
+            const int16_t new_idx = arq_seq_diff(old_seq, new_ack_base);
+            if (new_idx >= 0 && new_idx < static_cast<int16_t>(ack_span)) {
+                new_bitmap |= static_cast<uint64_t>(1) << new_idx;
+            }
+        }
+
+        _ack_base = new_ack_base;
+        _ack_bitmap = new_bitmap;
+        if (arq_seq_diff(_expected_seq, _ack_base) < 0) {
+            _expected_seq = _ack_base;
+        }
+        for (auto it = _reorder_buffer.begin(); it != _reorder_buffer.end(); ) {
+            if (arq_seq_diff(it->first, _ack_base) < 0) {
+                it = _reorder_buffer.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        _skip_count++;
+    }
+
     void _advance_ack_base() {
         while (_ack_bitmap & 0x1u) {
             _ack_bitmap >>= 1;
@@ -5126,6 +5178,7 @@ private:
     int64_t _last_ack_time_ms = 0;
     uint64_t _dup_count = 0;
     uint64_t _accepted_count = 0;
+    uint64_t _skip_count = 0;
     std::map<uint16_t, std::vector<uint8_t>> _reorder_buffer;
 };
 
