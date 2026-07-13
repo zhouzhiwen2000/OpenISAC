@@ -105,3 +105,13 @@ If you find this repository useful, please cite our paper:
 - WeChat Official Account:
 
   <img src="docs/images/WeChat.jpg" width="150" alt="WeChat QR Code">
+
+## Paid Services and Companion Hardware
+
+For users who need higher real-time processing performance or a more complete experimental setup, we also plan to offer:
+
+- A CUDA-accelerated version of OpenISAC
+- A USB-controlled OCXO for clock calibration and frequency control
+- The SoftHertz phased-array controller for phased-array experiments and system integration
+
+For inquiries about the GPU-accelerated version, hardware, system integration, or customization, please email [zhiwen_zhou@seu.edu.cn](mailto:zhiwen_zhou@seu.edu.cn) or [yong_zeng@seu.edu.cn](mailto:yong_zeng@seu.edu.cn), or contact us via WeChat at `wxid_9hvmm83maklc22`.
