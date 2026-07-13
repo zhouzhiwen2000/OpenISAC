@@ -186,6 +186,30 @@ inline uint32_t splitmix32(uint32_t x) {
     return x ^ (x >> 16);
 }
 
+inline AlignedVector generate_cfo_training_freq(
+    size_t fft_size,
+    size_t period_samples,
+    uint32_t seed = 0x43464F54u)
+{
+    if (fft_size == 0 || period_samples == 0 || period_samples >= fft_size ||
+        (fft_size % period_samples) != 0) {
+        throw std::runtime_error(
+            "generate_cfo_training_freq requires period_samples to divide fft_size and be in [1, fft_size).");
+    }
+
+    AlignedVector symbol(fft_size, std::complex<float>(0.0f, 0.0f));
+    const size_t comb_spacing = fft_size / period_samples;
+    const float amp = std::sqrt(static_cast<float>(comb_spacing));
+    for (size_t m = 0; m < period_samples; ++m) {
+        const size_t k = m * comb_spacing;
+        const uint32_t rnd = splitmix32(seed ^ static_cast<uint32_t>(m));
+        const float re = (rnd & 1u) ? -M_SQRT1_2 : M_SQRT1_2;
+        const float im = (rnd & 2u) ? -M_SQRT1_2 : M_SQRT1_2;
+        symbol[k] = std::complex<float>(re * amp, im * amp);
+    }
+    return symbol;
+}
+
 /**
  * @brief Generate a deterministic BPSK pilot sequence for a frame symbol.
  *
@@ -1236,6 +1260,9 @@ public:
 
     /**
      * @brief Compute MMSE/regularized inverse: H_inv = conj(H) / (|H|^2 + noise_var).
+     *
+     * `noise_var` must be in the same received-frequency-domain scale as |H|^2
+     * for unit-power transmitted constellation symbols.
      */
     static void compute_mmse_inverse(
         const AlignedVector& H_est,
@@ -1378,6 +1405,39 @@ private:
  */
 class SyncProcessor {
 public:
+    struct SecSyncCoarseSyncResult {
+        int coarse_symbol_start = 0;
+        int coarse_useful_start = 0;
+        float max_metric = 0.0f;
+        double coarse_cfo_hz = 0.0;
+        bool valid = false;
+    };
+
+    struct SecSyncRefineResult {
+        struct AliasCandidate {
+            int alias_index = 0;
+            int max_pos = 0;
+            float max_corr = 0.0f;
+            float avg_corr = 0.0f;
+            double cfo_hz = 0.0;
+            bool valid = false;
+        };
+
+        int max_pos = 0;
+        float max_corr = 0.0f;
+        float avg_corr = 0.0f;
+        double cfo_hz = 0.0;
+        int alias_index = 0;
+        bool valid = false;
+        std::vector<AliasCandidate> alias_candidates;
+    };
+
+    struct CfoTrainingEstimate {
+        double cfo_hz = 0.0;
+        float metric = 0.0f;
+        bool valid = false;
+    };
+
     /**
      * @brief Construct a SyncProcessor with pre-allocated FFT plans and sync sequence.
      * @param data_len Expected data length (2 frames worth)
@@ -1451,6 +1511,7 @@ public:
           _ifft_corr(other._ifft_corr),
           _x_padded(std::move(other._x_padded)),
           _h_padded(std::move(other._h_padded)),
+          _tx_sync_symbol(std::move(other._tx_sync_symbol)),
           _X(std::move(other._X)),
           _H(std::move(other._H)),
           _corr_result(std::move(other._corr_result))
@@ -1475,50 +1536,319 @@ public:
         float& max_corr,
         float& avg_corr
     ) {
-        const size_t n_windows = sync_data.size() - _symbol_len + 1;
-        
-        // Clear x_padded buffer
-        std::fill(_x_padded.begin(), _x_padded.end(), std::complex<float>(0.0f, 0.0f));
-        
-        // Copy received data
-        std::copy(sync_data.begin(), sync_data.end(), _x_padded.begin());
-        
-        // Execute forward FFT on received data (_H is pre-computed)
-        fftwf_execute(_fft_x);
-        
-        // Frequency domain multiplication: X = X .* H
-        #pragma omp simd simdlen(16)
-        for (size_t i = 0; i < _fft_len; ++i) {
-            _X[i] *= _H[i];
+        find_sync_position_in_range(
+            sync_data,
+            0,
+            sync_data.size() >= _symbol_len ? (sync_data.size() - _symbol_len) : 0,
+            max_pos,
+            max_corr,
+            avg_corr);
+    }
+
+    void find_sync_position_in_range(
+        const AlignedVector& sync_data,
+        size_t search_start,
+        size_t search_end,
+        int& max_pos,
+        float& max_corr,
+        float& avg_corr
+    ) {
+        const size_t n_windows = sync_data.size() >= _symbol_len
+            ? (sync_data.size() - _symbol_len + 1)
+            : 0;
+        if (n_windows == 0) {
+            max_pos = 0;
+            max_corr = 0.0f;
+            avg_corr = 0.0f;
+            return;
         }
-        
-        // Execute inverse FFT
-        fftwf_execute(_ifft_corr);
-        
-        // Normalize IFFT output (FFTW doesn't do this automatically)
-        const float norm_factor = 1.0f / static_cast<float>(_fft_len);
-        #pragma omp simd simdlen(16)
-        for (size_t i = 0; i < _fft_len; ++i) {
-            _corr_result[i] *= norm_factor;
+
+        run_correlation(sync_data);
+
+        const size_t begin = std::min(search_start, n_windows - 1);
+        const size_t end = std::min(search_end, n_windows - 1);
+        if (begin > end) {
+            max_pos = 0;
+            max_corr = 0.0f;
+            avg_corr = 0.0f;
+            return;
         }
-        
-        // Find maximum correlation in valid range
-        // Note: convolution output index needs adjustment for correlation
-        // corr[n] corresponds to _corr_result[n + _symbol_len - 1]
+
         max_corr = 0.0f;
         avg_corr = 0.0f;
-        max_pos = 0;
-        
-        for (size_t i = 0; i < n_windows; ++i) {
+        max_pos = static_cast<int>(begin);
+        const size_t sample_count = end - begin + 1;
+
+        for (size_t i = begin; i <= end; ++i) {
             const float corr = std::norm(_corr_result[i + _symbol_len - 1]);
-            
             if (corr > max_corr) {
                 max_corr = corr;
                 max_pos = static_cast<int>(i);
             }
             avg_corr += corr;
         }
-        avg_corr /= n_windows;
+        avg_corr /= static_cast<float>(sample_count);
+    }
+
+    static SecSyncCoarseSyncResult detect_sec_sync_symbol(
+        const AlignedVector& data,
+        size_t fft_size,
+        size_t cp_length,
+        double sample_rate
+    ) {
+        SecSyncCoarseSyncResult result;
+        if (fft_size == 0 || sample_rate <= 0.0) {
+            return result;
+        }
+        const size_t symbol_len = fft_size + cp_length;
+        if (data.size() < 2 * symbol_len) {
+            return result;
+        }
+
+        const size_t max_symbol_start = data.size() - 2 * symbol_len;
+        std::complex<double> p_sum(0.0, 0.0);
+        double r_sum = 0.0;
+        const size_t useful_start0 = cp_length;
+        const size_t next_useful_start0 = symbol_len + cp_length;
+        for (size_t i = 0; i < fft_size; ++i) {
+            const auto& a = data[useful_start0 + i];
+            const auto& b = data[next_useful_start0 + i];
+            p_sum += std::conj(std::complex<double>(a.real(), a.imag())) *
+                     std::complex<double>(b.real(), b.imag());
+            r_sum += std::norm(b);
+        }
+
+        std::complex<double> best_p = p_sum;
+        double best_metric = 0.0;
+        size_t best_start = 0;
+        for (size_t symbol_start = 0; symbol_start <= max_symbol_start; ++symbol_start) {
+            const double denom = std::max(r_sum * r_sum, 1e-12);
+            const double metric = std::norm(p_sum) / denom;
+            if (metric > best_metric) {
+                best_metric = metric;
+                best_start = symbol_start;
+                best_p = p_sum;
+            }
+            if (symbol_start == max_symbol_start) {
+                break;
+            }
+
+            const size_t old_useful = symbol_start + cp_length;
+            const size_t old_useful_next = old_useful + symbol_len;
+            const size_t new_useful = old_useful + fft_size;
+            const size_t new_useful_next = old_useful_next + fft_size;
+            const auto& old_a = data[old_useful];
+            const auto& old_b = data[old_useful_next];
+            const auto& new_a = data[new_useful];
+            const auto& new_b = data[new_useful_next];
+            p_sum -= std::conj(std::complex<double>(old_a.real(), old_a.imag())) *
+                     std::complex<double>(old_b.real(), old_b.imag());
+            p_sum += std::conj(std::complex<double>(new_a.real(), new_a.imag())) *
+                     std::complex<double>(new_b.real(), new_b.imag());
+            r_sum -= std::norm(old_b);
+            r_sum += std::norm(new_b);
+        }
+
+        result.coarse_symbol_start = static_cast<int>(best_start);
+        result.coarse_useful_start = static_cast<int>(best_start + cp_length);
+        result.max_metric = static_cast<float>(best_metric);
+        result.coarse_cfo_hz =
+            std::arg(best_p) * sample_rate / (2.0 * M_PI * static_cast<double>(symbol_len));
+        result.valid = std::isfinite(result.coarse_cfo_hz) && std::isfinite(best_metric);
+        return result;
+    }
+
+    static void apply_cfo_compensation(
+        const AlignedVector& input,
+        double sample_rate,
+        double cfo_hz,
+        AlignedVector& output
+    ) {
+        output.resize(input.size());
+        if (input.empty()) {
+            return;
+        }
+        if (!(sample_rate > 0.0) || !std::isfinite(cfo_hz) || std::abs(cfo_hz) < 1e-12) {
+            std::copy(input.begin(), input.end(), output.begin());
+            return;
+        }
+
+        const double phase_step = -2.0 * M_PI * cfo_hz / sample_rate;
+        for (size_t i = 0; i < input.size(); ++i) {
+            const float phase = static_cast<float>(phase_step * static_cast<double>(i));
+            output[i] = input[i] * std::polar(1.0f, phase);
+        }
+    }
+
+    static CfoTrainingEstimate estimate_cfo_from_training_symbol(
+        const AlignedVector& data,
+        size_t cfo_symbol_start,
+        size_t fft_size,
+        size_t cp_length,
+        size_t period_samples,
+        double sample_rate)
+    {
+        CfoTrainingEstimate result;
+        if (fft_size == 0 || period_samples == 0 || period_samples >= fft_size ||
+            cp_length + fft_size == 0 || !(sample_rate > 0.0)) {
+            return result;
+        }
+        const size_t symbol_len = fft_size + cp_length;
+        if (cfo_symbol_start > data.size() ||
+            data.size() - cfo_symbol_start < symbol_len ||
+            fft_size <= period_samples) {
+            return result;
+        }
+
+        const size_t useful_start = cfo_symbol_start + cp_length;
+        const size_t pair_count = fft_size - period_samples;
+        std::complex<double> p_sum(0.0, 0.0);
+        double r0_sum = 0.0;
+        double r1_sum = 0.0;
+        for (size_t i = 0; i < pair_count; ++i) {
+            const auto& a = data[useful_start + i];
+            const auto& b = data[useful_start + i + period_samples];
+            p_sum += std::conj(std::complex<double>(a.real(), a.imag())) *
+                     std::complex<double>(b.real(), b.imag());
+            r0_sum += std::norm(a);
+            r1_sum += std::norm(b);
+        }
+
+        const double denom = std::max(r0_sum * r1_sum, 1e-12);
+        result.metric = static_cast<float>(std::norm(p_sum) / denom);
+        result.cfo_hz =
+            std::arg(p_sum) * sample_rate /
+            (2.0 * M_PI * static_cast<double>(period_samples));
+        result.valid = std::isfinite(result.cfo_hz) &&
+                       std::isfinite(result.metric) &&
+                       r0_sum > 0.0 &&
+                       r1_sum > 0.0;
+        return result;
+    }
+
+    static bool select_alias_closest_to_cfo_reference(
+        SecSyncRefineResult& result,
+        double reference_cfo_hz)
+    {
+        if (!std::isfinite(reference_cfo_hz) || result.alias_candidates.empty()) {
+            return false;
+        }
+
+        const SecSyncRefineResult::AliasCandidate* best_candidate = nullptr;
+        double best_error = std::numeric_limits<double>::infinity();
+        for (const auto& candidate : result.alias_candidates) {
+            if (!candidate.valid || !std::isfinite(candidate.cfo_hz)) {
+                continue;
+            }
+            const double err = std::abs(candidate.cfo_hz - reference_cfo_hz);
+            if (err < best_error) {
+                best_error = err;
+                best_candidate = &candidate;
+            }
+        }
+
+        if (best_candidate == nullptr) {
+            return false;
+        }
+
+        result.max_pos = best_candidate->max_pos;
+        result.max_corr = best_candidate->max_corr;
+        result.avg_corr = best_candidate->avg_corr;
+        result.cfo_hz = best_candidate->cfo_hz;
+        result.alias_index = best_candidate->alias_index;
+        result.valid = true;
+        return true;
+    }
+
+    SecSyncRefineResult refine_sync_cfo_alias(
+        const AlignedVector& sync_data,
+        double modulo_cfo_hz,
+        double alias_period_hz,
+        double sample_rate,
+        size_t search_start,
+        size_t search_end,
+        int max_alias_index,
+        AlignedVector& cfo_compensated_buffer,
+        bool collect_alias_candidates = false
+    ) const {
+        SecSyncRefineResult best;
+        if (!std::isfinite(modulo_cfo_hz) || !(alias_period_hz > 0.0) ||
+            !(sample_rate > 0.0) || _symbol_len == 0) {
+            return best;
+        }
+
+        const int alias_span = std::max(0, max_alias_index);
+        bool have_candidate = false;
+        for (int alias = -alias_span; alias <= alias_span; ++alias) {
+            const double candidate_cfo_hz =
+                modulo_cfo_hz + static_cast<double>(alias) * alias_period_hz;
+            apply_cfo_compensation(
+                sync_data,
+                sample_rate,
+                candidate_cfo_hz,
+                cfo_compensated_buffer);
+
+            int trial_pos = 0;
+            float trial_max_corr = 0.0f;
+            float trial_avg_corr = 0.0f;
+            find_sync_position_in_range_direct(
+                cfo_compensated_buffer,
+                search_start,
+                search_end,
+                trial_pos,
+                trial_max_corr,
+                trial_avg_corr);
+            SecSyncRefineResult::AliasCandidate candidate;
+            candidate.alias_index = alias;
+            candidate.max_pos = trial_pos;
+            candidate.max_corr = trial_max_corr;
+            candidate.avg_corr = trial_avg_corr;
+            candidate.cfo_hz = candidate_cfo_hz;
+            candidate.valid = std::isfinite(trial_max_corr) &&
+                              std::isfinite(trial_avg_corr) &&
+                              trial_avg_corr > 0.0f;
+            if (collect_alias_candidates) {
+                best.alias_candidates.push_back(candidate);
+            }
+            if (!candidate.valid) {
+                continue;
+            }
+            if (!have_candidate || trial_max_corr > best.max_corr) {
+                best.max_pos = trial_pos;
+                best.max_corr = trial_max_corr;
+                best.avg_corr = trial_avg_corr;
+                best.cfo_hz = candidate_cfo_hz;
+                best.alias_index = alias;
+                best.valid = true;
+                have_candidate = true;
+            }
+        }
+        return best;
+    }
+
+    SecSyncRefineResult refine_sec_sync_with_alias_search(
+        const AlignedVector& sync_data,
+        const SecSyncCoarseSyncResult& coarse,
+        double sample_rate,
+        size_t search_start,
+        size_t search_end,
+        int max_alias_index,
+        AlignedVector& cfo_compensated_buffer,
+        bool collect_alias_candidates = false
+    ) const {
+        if (!coarse.valid || _symbol_len == 0) {
+            return SecSyncRefineResult{};
+        }
+        return refine_sync_cfo_alias(
+            sync_data,
+            coarse.coarse_cfo_hz,
+            sample_rate / static_cast<double>(_symbol_len),
+            sample_rate,
+            search_start,
+            search_end,
+            max_alias_index,
+            cfo_compensated_buffer,
+            collect_alias_candidates);
     }
 
     /**
@@ -1578,6 +1908,77 @@ public:
     }
 
 private:
+    void find_sync_position_in_range_direct(
+        const AlignedVector& sync_data,
+        size_t search_start,
+        size_t search_end,
+        int& max_pos,
+        float& max_corr,
+        float& avg_corr
+    ) const {
+        const size_t n_windows = sync_data.size() >= _symbol_len
+            ? (sync_data.size() - _symbol_len + 1)
+            : 0;
+        if (n_windows == 0 || _tx_sync_symbol.size() != _symbol_len) {
+            max_pos = 0;
+            max_corr = 0.0f;
+            avg_corr = 0.0f;
+            return;
+        }
+
+        const size_t begin = std::min(search_start, n_windows - 1);
+        const size_t end = std::min(search_end, n_windows - 1);
+        if (begin > end) {
+            max_pos = 0;
+            max_corr = 0.0f;
+            avg_corr = 0.0f;
+            return;
+        }
+
+        max_corr = 0.0f;
+        avg_corr = 0.0f;
+        max_pos = static_cast<int>(begin);
+        const size_t sample_count = end - begin + 1;
+
+        for (size_t pos = begin; pos <= end; ++pos) {
+            double sum_real = 0.0;
+            double sum_imag = 0.0;
+            for (size_t i = 0; i < _symbol_len; ++i) {
+                const auto& x = sync_data[pos + i];
+                const auto& s = _tx_sync_symbol[i];
+                sum_real += x.real() * s.real() + x.imag() * s.imag();
+                sum_imag += x.imag() * s.real() - x.real() * s.imag();
+            }
+            const float corr = static_cast<float>(sum_real * sum_real + sum_imag * sum_imag);
+            if (corr > max_corr) {
+                max_corr = corr;
+                max_pos = static_cast<int>(pos);
+            }
+            avg_corr += corr;
+        }
+        avg_corr /= static_cast<float>(sample_count);
+    }
+
+    void run_correlation(const AlignedVector& sync_data) {
+        std::fill(_x_padded.begin(), _x_padded.end(), std::complex<float>(0.0f, 0.0f));
+        std::copy(sync_data.begin(), sync_data.end(), _x_padded.begin());
+
+        fftwf_execute(_fft_x);
+
+        #pragma omp simd simdlen(16)
+        for (size_t i = 0; i < _fft_len; ++i) {
+            _X[i] *= _H[i];
+        }
+
+        fftwf_execute(_ifft_corr);
+
+        const float norm_factor = 1.0f / static_cast<float>(_fft_len);
+        #pragma omp simd simdlen(16)
+        for (size_t i = 0; i < _fft_len; ++i) {
+            _corr_result[i] *= norm_factor;
+        }
+    }
+
     /**
      * @brief Generate sync sequence and prepare _h_padded for correlation.
      * Uses provided ZC sequence in frequency domain.
@@ -1597,17 +1998,17 @@ private:
         fftwf_destroy_plan(plan);
         
         // Add cyclic prefix to create tx_sync_symbol
-        AlignedVector tx_sync_symbol(_symbol_len);
+        _tx_sync_symbol.resize(_symbol_len);
         if (_cp_length > 0) {
-            std::copy(ifft_out.end() - _cp_length, ifft_out.end(), tx_sync_symbol.begin());
+            std::copy(ifft_out.end() - _cp_length, ifft_out.end(), _tx_sync_symbol.begin());
         }
-        std::copy(ifft_out.begin(), ifft_out.end(), tx_sync_symbol.begin() + _cp_length);
+        std::copy(ifft_out.begin(), ifft_out.end(), _tx_sync_symbol.begin() + _cp_length);
         
         // Prepare reversed and conjugated sync sequence in _h_padded
         // corr[i] = sum_j rx[i+j]*conj(sync[j]) = conv(rx, conj(sync_reversed))
         #pragma omp simd simdlen(16)
         for (size_t i = 0; i < _symbol_len; ++i) {
-            _h_padded[i] = std::conj(tx_sync_symbol[_symbol_len - 1 - i]);
+            _h_padded[i] = std::conj(_tx_sync_symbol[_symbol_len - 1 - i]);
         }
     }
 
@@ -1625,6 +2026,7 @@ private:
     // Work buffers
     AlignedVector _x_padded;
     AlignedVector _h_padded;  // Pre-computed: reversed + conjugated sync sequence
+    AlignedVector _tx_sync_symbol;
     AlignedVector _X;
     AlignedVector _H;         // Pre-computed: FFT of _h_padded
     AlignedVector _corr_result;

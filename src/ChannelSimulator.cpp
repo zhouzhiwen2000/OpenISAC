@@ -276,9 +276,12 @@ int main(int argc, char** argv) {
     NoiseGen noise_gen(0xC0FFEE);
 
     // --- Comm CFO ---
-    const double cfo_dphi = kTwoPi * sim.cfo_hz / fs;
-    cf cfo_step(static_cast<float>(std::cos(cfo_dphi)), static_cast<float>(std::sin(cfo_dphi)));
+    // `simulation.cfo_hz` is the injected transmitter/receiver carrier mismatch.
+    // The demodulator writes its simulated RX frequency correction into the shared
+    // control block, so the comm path rotates with the residual CFO after retuning.
     cf cfo_phasor(1.0f, 0.0f);
+    double last_logged_rx_freq_correction_hz = 0.0;
+    bool have_logged_rx_freq_correction = false;
 
     // --- Create shared-memory segments (hub is the creator) ---
     sim_shm::ShmControl ctrl;
@@ -401,6 +404,20 @@ int main(int argc, char** argv) {
 
         // --- Apply RX carrier frequency offset to the whole comm signal ---
         if (enable_comm) {
+            const double rx_freq_correction_hz = ctrl.comm_rx_freq_correction_hz();
+            const double residual_cfo_hz = sim.cfo_hz + rx_freq_correction_hz;
+            if (!have_logged_rx_freq_correction ||
+                std::abs(rx_freq_correction_hz - last_logged_rx_freq_correction_hz) > 1e-3) {
+                LOG_G_INFO() << "[ChannelSim] comm RX frequency correction="
+                             << rx_freq_correction_hz << " Hz, residual CFO="
+                             << residual_cfo_hz << " Hz";
+                last_logged_rx_freq_correction_hz = rx_freq_correction_hz;
+                have_logged_rx_freq_correction = true;
+            }
+            const double cfo_dphi = (fs > 0.0) ? (kTwoPi * residual_cfo_hz / fs) : 0.0;
+            const cf cfo_step(
+                static_cast<float>(std::cos(cfo_dphi)),
+                static_cast<float>(std::sin(cfo_dphi)));
             for (size_t n = 0; n < M; ++n) {
                 out_comm[n] *= cfo_phasor;
                 cfo_phasor *= cfo_step;

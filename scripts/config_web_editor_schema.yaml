@@ -40,7 +40,7 @@ common:
           default: -100.0
           optional: true
         - key: cfo_hz
-          comment: Carrier frequency offset injected on RX in Hz
+          comment: Initial carrier offset before demodulator RX correction in Hz
           kind: float
           default: 0.0
           optional: true
@@ -346,6 +346,33 @@ modulator:
       kind: int
       comment: Sync symbol index in one frame
       default: 1
+      optional: true
+  enable_sec_sync_symbol:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: enable_sec_sync_symbol
+      kind: bool
+      comment: Reserve sync_pos-1 as a duplicate ZC sync symbol
+      default: false
+      optional: true
+  enable_cfo_training_sequence:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: enable_cfo_training_sequence
+      kind: bool
+      comment: Reserve sync_pos+1 as a repeated CFO training field
+      default: false
+      optional: true
+  cfo_training_period_samples:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: cfo_training_period_samples
+      kind: int
+      comment: Repetition period of CFO training field in samples
+      default: 16
       optional: true
   num_symbols:
     title: OFDM Frame
@@ -762,6 +789,33 @@ demodulator:
       comment: Sync symbol index in one frame
       default: 1
       optional: true
+  enable_sec_sync_symbol:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: enable_sec_sync_symbol
+      kind: bool
+      comment: Reserve sync_pos-1 as a duplicate ZC sync symbol
+      default: false
+      optional: true
+  enable_cfo_training_sequence:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: enable_cfo_training_sequence
+      kind: bool
+      comment: Use sync_pos+1 CFO field to deambiguate CFO aliases
+      default: false
+      optional: true
+  cfo_training_period_samples:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: cfo_training_period_samples
+      kind: int
+      comment: Repetition period of CFO training field in samples
+      default: 16
+      optional: true
   num_symbols:
     title: OFDM Frame
     field:
@@ -806,6 +860,15 @@ demodulator:
       kind: int
       comment: Capacity of the sync-search batch queue
       default: 32
+      optional: true
+  sync_cfo_alias_search_range_hz:
+    title: OFDM Frame
+    field:
+      type: scalar
+      key: sync_cfo_alias_search_range_hz
+      kind: float
+      comment: Max absolute CFO range covered by sync alias search (Hz)
+      default: 800000.0
       optional: true
   reset_hold_s:
     title: OFDM Frame

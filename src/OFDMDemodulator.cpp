@@ -10,6 +10,7 @@
 #include <csignal>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -84,6 +85,47 @@ bool append_csv_row(
     }
 }
 
+double power_to_db(double value) {
+    return 10.0 * std::log10(std::max(value, 1e-30));
+}
+
+double peak_ratio_db(double peak, double avg) {
+    return (avg > 0.0) ? power_to_db(peak / avg) : -300.0;
+}
+
+int sync_cfo_alias_span_from_range(double range_hz, double alias_period_hz) {
+    if (!(range_hz > 0.0) || !(alias_period_hz > 0.0) ||
+        !std::isfinite(range_hz) || !std::isfinite(alias_period_hz)) {
+        return 0;
+    }
+    return static_cast<int>(std::ceil(range_hz / alias_period_hz));
+}
+
+std::string format_sync_alias_candidates(
+    const char* label,
+    const SyncProcessor::SecSyncRefineResult& result)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2)
+        << label << " alias candidates:";
+
+    if (result.alias_candidates.empty()) {
+        oss << "\n  []";
+        return oss.str();
+    }
+
+    for (const auto& candidate : result.alias_candidates) {
+        oss << "\n  "
+            << (result.valid && candidate.alias_index == result.alias_index ? "*" : " ")
+            << "k=" << candidate.alias_index
+            << " peak=" << power_to_db(candidate.max_corr) << "dB";
+        if (!candidate.valid) {
+            oss << " invalid";
+        }
+    }
+    return oss.str();
+}
+
 std::vector<AlignedVector> make_midframe_pilot_sequences(
     const Config& cfg,
     const DataResourceGridLayout& layout)
@@ -100,6 +142,16 @@ std::vector<AlignedVector> make_midframe_pilot_sequences(
             comb_pilot_seq));
     }
     return sequences;
+}
+
+AlignedVector make_cfo_training_sequence(const Config& cfg)
+{
+    if (!cfo_training_sequence_enabled(cfg)) {
+        return {};
+    }
+    return generate_cfo_training_freq(
+        cfg.fft_size,
+        cfg.cfo_training_period_samples);
 }
 } // namespace
 
@@ -121,6 +173,7 @@ public:
           _measurement_enabled(measurement_mode_enabled(cfg)),
           _data_resource_layout(build_data_resource_grid_layout(cfg)),
           zc_freq_(generate_zc_freq(cfg.fft_size, cfg.zc_root)),
+          _cfo_training_seq(make_cfo_training_sequence(cfg)),
           _midframe_pilot_seqs(make_midframe_pilot_sequences(cfg, _data_resource_layout)),
           _sensing_pilot_zc_root(select_known_sensing_pilot_zc_root(cfg.fft_size, cfg.zc_root)),
           sensing_pilot_freq_(generate_sensing_pilot_freq(cfg.fft_size, cfg.zc_root)),
@@ -299,11 +352,13 @@ private:
     }
 
     AlignedVector zc_freq_;
+    AlignedVector _cfo_training_seq;
     std::vector<AlignedVector> _midframe_pilot_seqs;
     int _sensing_pilot_zc_root = 0;
     AlignedVector sensing_pilot_freq_;
     AlignedVector tx_sync_symbol_; 
     AlignedVector _sync_scratch_buffer;
+    AlignedVector _sync_cfo_compensated_buffer;
     std::atomic<int> sync_offset_{0};
     std::atomic<bool> sync_done_{false};
     std::atomic<RxState> state_{RxState::SYNC_SEARCH};
@@ -676,13 +731,16 @@ private:
                     continue;
                 }
                 const std::complex<float> h = symbol_H_base[k];
-                const float h_mag_sq = std::max(std::norm(h), mag_floor);
+                const float h_mag_sq = std::norm(h);
+                if (!std::isfinite(h_mag_sq) || h_mag_sq <= mag_floor) {
+                    continue;
+                }
                 const float phase = phase_alpha + phase_beta *
                     static_cast<float>(_actual_subcarrier_indices[k]);
                 const std::complex<float> phase_rot(std::cos(phase), std::sin(phase));
                 const std::complex<float> pred = h * zc_freq_[k] * phase_rot;
                 const std::complex<float> err = symbol[k] - pred;
-                err_acc += static_cast<double>(std::norm(err) / h_mag_sq);
+                err_acc += static_cast<double>(std::norm(err));
                 ++err_count;
             }
         }
@@ -691,6 +749,34 @@ private:
             return fallback_noise_var;
         }
         return std::min(std::max(err_acc / static_cast<double>(err_count), 1e-6), 1e6);
+    }
+
+    double _average_channel_power(const AlignedVector& H_est) const {
+        const double floor_val = std::max(cfg_.equalizer_mag_floor, 1e-12);
+        double acc = 0.0;
+        size_t count = 0;
+        if (!cfg_.pilot_positions.empty()) {
+            for (const size_t k : cfg_.pilot_positions) {
+                if (k >= H_est.size()) {
+                    continue;
+                }
+                const double mag_sq = std::norm(H_est[k]);
+                if (std::isfinite(mag_sq) && mag_sq > floor_val) {
+                    acc += mag_sq;
+                    ++count;
+                }
+            }
+        }
+        if (count == 0) {
+            for (const auto& h : H_est) {
+                const double mag_sq = std::norm(h);
+                if (std::isfinite(mag_sq) && mag_sq > floor_val) {
+                    acc += mag_sq;
+                    ++count;
+                }
+            }
+        }
+        return (count > 0) ? std::max(acc / static_cast<double>(count), floor_val) : floor_val;
     }
 
     void _estimate_midframe_pilot_ls(
@@ -988,6 +1074,7 @@ private:
         current_rx_tune_.target_dsp_freq = 0.0;
         current_rx_tune_.actual_dsp_freq = 0.0;
         tune_initialized_ = true;
+        _sim_radio->set_comm_rx_freq_correction_hz(0.0);
         // No hardware gain in simulation; expose a benign range so AGC/sweep stay inert.
         _rx_gain_min_db = 0.0;
         _rx_gain_max_db = 0.0;
@@ -1051,6 +1138,14 @@ private:
                 return;
             }
             const size_t stride = value <= 0 ? 1 : static_cast<size_t>(value);
+            const std::string stride_error = dense_sensing_stride_cfo_training_error(
+                cfg_,
+                stride,
+                "Runtime STRD command");
+            if (!stride_error.empty()) {
+                LOG_G_WARN() << "Ignoring STRD command: " << stride_error;
+                return;
+            }
             _schedule_shared_sensing_update([stride](SharedSensingRuntime& cfg) {
                 cfg.sensing_symbol_stride = stride;
             });
@@ -1276,9 +1371,13 @@ private:
             new_tune_req.dsp_freq = 0.0; // Reset DSP frequency
         }
         // Apply new tune (update DSP only, fast and does not affect LO).
-        // In simulation there is no LO/DSP to retune; software CFO/delay correction
-        // already operates on the received samples, so skip the hardware retune.
-        if (!_sim_radio) {
+        if (_sim_radio) {
+            current_rx_tune_.target_rf_freq = new_tune_req.target_freq;
+            current_rx_tune_.actual_rf_freq = cfg_.center_freq;
+            current_rx_tune_.target_dsp_freq = new_tune_req.dsp_freq;
+            current_rx_tune_.actual_dsp_freq = new_tune_req.dsp_freq;
+            _sim_radio->set_comm_rx_freq_correction_hz(current_rx_tune_.actual_dsp_freq);
+        } else {
             current_rx_tune_ = usrp_->set_rx_freq(new_tune_req, cfg_.rx_channel);
         }
     }
@@ -1532,19 +1631,131 @@ private:
         const bool allow_alignment = _control_time_gates.allow_alignment(sync_time_ns);
         bool issued_freq_adjust = false;
         bool issued_alignment = false;
-        
-        // Use SyncProcessor for sync detection
+
+        constexpr float kZcEnergyThreshold = 100.0f;
+        constexpr float kSecSyncMetricThreshold = 0.10f;
+        constexpr float kCfoTrainingMetricThreshold = 0.10f;
+        const size_t local_zc_search_radius = 2 * cfg_.cp_length;
+        const bool log_sync_profile = cfg_.should_profile("sync");
+        const bool collect_alias_candidates =
+            log_sync_profile || cfo_training_sequence_enabled(cfg_);
+
         int max_pos = 0;
         float max_corr = 0.0f;
         float avg_corr = 0.0f;
-        _sync_processor.find_sync_position(sync_data, max_pos, max_corr, avg_corr);
-        
-        const float energy_threshold = 100.0f;
-        if (max_corr/avg_corr > energy_threshold) {
+        double initial_cfo_hz = 0.0;
+        bool used_sec_sync_symbol = false;
+        bool sync_found = false;
+        auto estimate_cfo_training = [&](int sync_pos_samples) {
+            SyncProcessor::CfoTrainingEstimate estimate;
+            if (!cfo_training_sequence_enabled(cfg_) || sync_pos_samples < 0) {
+                return estimate;
+            }
+            const size_t cfo_symbol_start =
+                static_cast<size_t>(sync_pos_samples) + symbol_len;
+            estimate = SyncProcessor::estimate_cfo_from_training_symbol(
+                sync_data,
+                cfo_symbol_start,
+                cfg_.fft_size,
+                cfg_.cp_length,
+                cfg_.cfo_training_period_samples,
+                cfg_.sample_rate);
+            if (log_sync_profile) {
+                LOG_RT_INFO() << "CFO training field estimate: metric="
+                              << estimate.metric
+                              << ", cfo=" << estimate.cfo_hz << " Hz"
+                              << ", symbol_start=" << cfo_symbol_start;
+            }
+            return estimate;
+        };
+
+        if (cfg_.enable_sec_sync_symbol) {
+            const auto sec_result = SyncProcessor::detect_sec_sync_symbol(
+                sync_data,
+                cfg_.fft_size,
+                cfg_.cp_length,
+                cfg_.sample_rate);
+            if (sec_result.valid && sec_result.max_metric > kSecSyncMetricThreshold) {
+                const int expected_zc_start = sec_result.coarse_symbol_start +
+                    static_cast<int>(symbol_len);
+                const int max_search_start = sync_data.size() >= symbol_len
+                    ? static_cast<int>(sync_data.size() - symbol_len)
+                    : 0;
+                const size_t search_start = static_cast<size_t>(std::max(
+                    0,
+                    expected_zc_start - static_cast<int>(local_zc_search_radius)));
+                const size_t search_end = static_cast<size_t>(std::max(
+                    0,
+                    std::min(
+                        max_search_start,
+                        expected_zc_start + static_cast<int>(local_zc_search_radius))));
+                const double sec_alias_period_hz =
+                    cfg_.sample_rate / static_cast<double>(symbol_len);
+                const int sec_alias_span = sync_cfo_alias_span_from_range(
+                    cfg_.sync_cfo_alias_search_range_hz,
+                    sec_alias_period_hz);
+
+                auto refine_result = _sync_processor.refine_sec_sync_with_alias_search(
+                    sync_data,
+                    sec_result,
+                    cfg_.sample_rate,
+                    search_start,
+                    search_end,
+                    sec_alias_span,
+                    _sync_cfo_compensated_buffer,
+                    collect_alias_candidates);
+                const auto cfo_training_est = estimate_cfo_training(refine_result.max_pos);
+                const bool cfo_training_alias_selected =
+                    cfo_training_est.valid &&
+                    cfo_training_est.metric > kCfoTrainingMetricThreshold &&
+                    SyncProcessor::select_alias_closest_to_cfo_reference(
+                        refine_result,
+                        cfo_training_est.cfo_hz);
+                if (log_sync_profile) {
+                    LOG_RT_INFO() << format_sync_alias_candidates(
+                        "Second sync ZC refine",
+                        refine_result);
+                }
+                max_pos = refine_result.max_pos;
+                max_corr = refine_result.max_corr;
+                avg_corr = refine_result.avg_corr;
+                if (avg_corr > 0.0f && (max_corr / avg_corr) > kZcEnergyThreshold) {
+                    used_sec_sync_symbol = true;
+                    sync_found = true;
+                    initial_cfo_hz = refine_result.cfo_hz;
+                    SyncProcessor::apply_cfo_compensation(
+                        sync_data,
+                        cfg_.sample_rate,
+                        initial_cfo_hz,
+                        _sync_cfo_compensated_buffer);
+                    LOG_RT_INFO() << "Second sync symbol coarse metric: " << sec_result.max_metric
+                                  << ", coarse symbol start: " << sec_result.coarse_symbol_start
+                                  << ", modulo CFO: " << sec_result.coarse_cfo_hz
+                                  << " Hz, alias index: " << refine_result.alias_index
+                                  << ", refined CFO: " << initial_cfo_hz << " Hz"
+                                  << (cfo_training_alias_selected ? " (CFO field deambiguated)" : "");
+                } else {
+                    LOG_RT_WARN() << "Second sync symbol coarse sync detected but local ZC refine failed."
+                                  << " metric=" << sec_result.max_metric
+                                  << " local_peak_ratio=" << (avg_corr > 0.0f ? (max_corr / avg_corr) : 0.0f)
+                                  << ". Falling back to legacy ZC sync search.";
+                }
+            }
+        }
+
+        if (!sync_found) {
+            _sync_processor.find_sync_position(sync_data, max_pos, max_corr, avg_corr);
+            sync_found = (avg_corr > 0.0f) && ((max_corr / avg_corr) > kZcEnergyThreshold);
+        }
+
+        if (sync_found) {
             _sync_search_gain_sweep.note_sync_found();
             LOG_RT_INFO() << "Sync found at pos: " << max_pos
-                          << " with value: " << max_corr
-                          << " Threshold: " << energy_threshold;
+                          << " with peak/avg: " << peak_ratio_db(max_corr, avg_corr)
+                          << " dB (peak=" << power_to_db(max_corr)
+                          << " dB, avg=" << power_to_db(avg_corr)
+                          << " dB) Threshold: " << power_to_db(kZcEnergyThreshold)
+                          << " dB";
             int symbol_offset = max_pos % symbol_len;
             // Calculate available symbol count
             const size_t available_symbols = std::min(
@@ -1554,11 +1765,66 @@ private:
             
             // Use SyncProcessor for CFO estimation
             if (available_symbols > 0) {
+                const AlignedVector& cfo_est_data =
+                    used_sec_sync_symbol ? _sync_cfo_compensated_buffer : sync_data;
                 double phase_diff = SyncProcessor::estimate_cfo_phase(
-                    sync_data, symbol_offset, available_symbols,
+                    cfo_est_data, symbol_offset, available_symbols,
                     symbol_len, cfg_.cp_length, cfg_.fft_size
                 );
-                double cfo = SyncProcessor::phase_to_cfo(phase_diff, cfg_.sample_rate, cfg_.fft_size);
+                const double residual_cfo_hz =
+                    SyncProcessor::phase_to_cfo(phase_diff, cfg_.sample_rate, cfg_.fft_size);
+                double cfo = used_sec_sync_symbol
+                    ? (initial_cfo_hz + residual_cfo_hz)
+                    : residual_cfo_hz;
+                if (!used_sec_sync_symbol) {
+                    const int max_search_start = sync_data.size() >= symbol_len
+                        ? static_cast<int>(sync_data.size() - symbol_len)
+                        : 0;
+                    const size_t cp_alias_search_start = static_cast<size_t>(std::max(
+                        0,
+                        max_pos - static_cast<int>(local_zc_search_radius)));
+                    const size_t cp_alias_search_end = static_cast<size_t>(std::max(
+                        0,
+                        std::min(
+                            max_search_start,
+                            max_pos + static_cast<int>(local_zc_search_radius))));
+                    const double cp_alias_period_hz =
+                        cfg_.sample_rate / static_cast<double>(cfg_.fft_size);
+                    const int cp_alias_span = sync_cfo_alias_span_from_range(
+                        cfg_.sync_cfo_alias_search_range_hz,
+                        cp_alias_period_hz);
+                    auto cp_refine = _sync_processor.refine_sync_cfo_alias(
+                        sync_data,
+                        residual_cfo_hz,
+                        cp_alias_period_hz,
+                        cfg_.sample_rate,
+                        cp_alias_search_start,
+                        cp_alias_search_end,
+                        cp_alias_span,
+                        _sync_cfo_compensated_buffer,
+                        collect_alias_candidates);
+                    const auto cfo_training_est = estimate_cfo_training(cp_refine.max_pos);
+                    const bool cfo_training_alias_selected =
+                        cfo_training_est.valid &&
+                        cfo_training_est.metric > kCfoTrainingMetricThreshold &&
+                        SyncProcessor::select_alias_closest_to_cfo_reference(
+                            cp_refine,
+                            cfo_training_est.cfo_hz);
+                    if (log_sync_profile) {
+                        LOG_RT_INFO() << format_sync_alias_candidates(
+                            "CP CFO ZC refine",
+                            cp_refine);
+                    }
+                    if (cp_refine.valid && cp_refine.avg_corr > 0.0f &&
+                        (cp_refine.max_corr / cp_refine.avg_corr) > kZcEnergyThreshold) {
+                        cfo = cp_refine.cfo_hz;
+                        max_pos = cp_refine.max_pos;
+                        LOG_RT_INFO() << "CP CFO alias refine: modulo CFO=" << residual_cfo_hz
+                                      << " Hz, alias index=" << cp_refine.alias_index
+                                      << ", refined CFO=" << cfo << " Hz"
+                                      << (cfo_training_alias_selected ? " (CFO field deambiguated)" : "");
+                    }
+                }
                 
                 LOG_RT_INFO() << "CFO estimate: " << cfo << " Hz (using " << available_symbols
                               << " symbols)";
@@ -1997,10 +2263,20 @@ private:
         uint64_t prof_eq_symbol_inv_count = 0;
         uint64_t prof_eq_pilot_phase_attempt = 0;
         uint64_t prof_eq_pilot_phase_success = 0;
-        const double impulse_noise_var = noise_variance_from_snr_linear(
+        const double equalized_noise_var = noise_variance_from_snr_linear(
             std::max<double>(corrected_impulse_snr_linear_est, 1e-6));
+        const double equalizer_noise_var_fallback =
+            equalized_noise_var * _average_channel_power(H_est);
+        const double equalizer_noise_var_est = (cfg_.equalizer_mode == kEqualizerModeMmse)
+            ? _estimate_equalizer_noise_var_from_pilots(
+                symbols,
+                H_est,
+                alpha,
+                beta,
+                equalizer_noise_var_fallback)
+            : 0.0;
         const float equalizer_noise_var = (cfg_.equalizer_mode == kEqualizerModeMmse)
-            ? static_cast<float>(impulse_noise_var)
+            ? static_cast<float>(equalizer_noise_var_est)
             : 0.0f;
 
         // Fine-grained equalization sub-timers add several ProfileClock::now()
@@ -2127,10 +2403,11 @@ private:
         
         if (sensing_enabled) {
             for (size_t i = 0; i < cfg_.num_symbols; ++i) {
-                // The sync symbol always remodulates to the dedicated sync sequence.
-                if (i == cfg_.sync_pos) {
-                    // Sync symbol uses original ZC sequence.
+                // Reserved sync symbols always use the original ZC sequence.
+                if (is_zc_sync_symbol(cfg_, i)) {
                     sense_frame.tx_symbols[i] = zc_freq_;
+                } else if (is_cfo_training_symbol(cfg_, i)) {
+                    sense_frame.tx_symbols[i] = _cfo_training_seq;
                 } else if (i < _data_resource_layout.midframe_pilot_symbol_to_rank.size() &&
                            _data_resource_layout.midframe_pilot_symbol_to_rank[i] >= 0) {
                     const size_t pilot_rank = static_cast<size_t>(

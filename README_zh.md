@@ -489,7 +489,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 * 提供启动相关选项，例如是否启用 CPU 隔离、以及是否覆盖默认的 isolate CPU 列表。
 * 每个 tab 都提供 CPU 预设命令，也支持自定义启动命令。
 * 可以在较大的时频资源网格画布上直接绘制 `data_resource_blocks` 的 payload / sensing-pilot 矩形块，或绘制 `sensing_mask_blocks` 的紧凑感知矩形块；绘制结果会吸附到整数 RE 格点边界，并可分别应用到发射端或接收端 YAML。
-* 内置 `Guard Band Grid` 预设，规则与 `scripts/plot_const.py` 一致：默认仅保留 `1..489` 和 `535..N-1` 这两段子载波，然后再继续套用 sync / pilot 的剔除规则。
+* 内置 `Guard Band Grid` 预设，规则与 `scripts/plot_const.py` 一致：默认仅保留 `1..489` 和 `535..N-1` 这两段子载波，然后再继续套用同步符号 / 梳状导频的剔除规则。
 
 说明：
 * 编辑器当前直接面向 `build/` 目录中的运行时 YAML，因为二进制程序会从各自工作目录读取 `Modulator.yaml` / `Demodulator.yaml`。
@@ -517,6 +517,9 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `fft_size` | `int` | `1024` | OFDM FFT 点数。 |
 | `cp_length` | `int` | `128` | 循环前缀长度（采样点）。 |
 | `sync_pos` | `int` | `1` | 同步符号在帧内的位置索引。 |
+| `enable_sec_sync_symbol` | `bool` | `false` | 预留 `sync_pos-1` 作为重复 ZC 第二同步符号。启用后，接收端会先用两个连续同步符号做类 Schmidl-Cox 粗定时/模糊 CFO 估计，再用 `sync_pos` 附近的局部 ZC 相关解析 CFO alias 并精修主同步。要求 `sync_pos >= 1`。 |
+| `enable_cfo_training_sequence` | `bool` | `false` | 预留 `sync_pos+1` 作为专用重复 CFO training field。接收端仍先依赖 ZC 或可选第二同步符号完成帧定位和 modulo CFO 估计；启用该字段时，它只用于 CFO alias 去模糊。发射端和接收端必须保持一致。 |
+| `cfo_training_period_samples` | `int` / 采样点 | `16` | CFO training field 的重复周期，必须整除 `fft_size`；无模糊 CFO 范围约为 `+-sample_rate/(2*period)`。 |
 | `sample_rate` | `float` / Hz | `50000000` | 基带采样率。 |
 | `bandwidth` | `float` / Hz | `50000000` | 模拟带宽。通常与 `sample_rate` 保持一致。 |
 | `center_freq` | `float` / Hz | `2400000000` | 射频中心频率。 |
@@ -529,8 +532,8 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `pilot_positions` | `int[]` | `[571,631,...,451]` | 分布在占用带宽内的可配置梳状导频子载波索引。 |
 | `midframe_pilot_symbols` | `int[]` | `[]` | 可选的帧内 BPSK 导频符号索引，例如 `[25,50,75]`。这些符号不参与 payload 映射；配置的梳状导频 RE 会保留梳状导频序列用于相位跟踪，其余 RE 使用确定性 BPSK。 |
 | `midframe_pilot_seed` | `int` | `1296453708` | 确定性帧内 BPSK 导频种子，`Modulator.yaml` 和 `Demodulator.yaml` 必须一致。 |
-| `data_resource_blocks` | `object[]` | 缺省 | 可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都承载 payload。设为 `[]` 表示完全不发送 payload。每个块是一个矩形，使用 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`，并可选 `kind`。`kind: payload` 表示这些 RE 承载真实业务数据；`kind: sensing_pilot` 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 `sensing_pilot` 误判成专用同步符号。未被 `payload` 块选中的其余非同步、非梳状导频、非帧内 BPSK 导频 RE 会发送预生成 QPSK。 |
-| `sensing_mask_blocks` | `object[]` | 缺省 | 可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 `sensing_output_mode=compact_mask` 时生效；`dense` 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许覆盖同步符号、梳状导频或帧内 BPSK 导频 RE，重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启。 |
+| `data_resource_blocks` | `object[]` | 缺省 | 可选的通信资源映射，用来回答“哪些 RE 用来放业务数据”。省略该键时保持旧行为：除预留同步符号和梳状导频 RE 外的所有 RE 都承载 payload。设为 `[]` 表示完全不发送 payload。每个块是一个矩形，使用 `symbol_start`、`symbol_count`、`subcarrier_start`、`subcarrier_count`，并可选 `kind`。`kind: payload` 表示这些 RE 承载真实业务数据；`kind: sensing_pilot` 表示这些 RE 不承载 payload，而是发送确定性的感知参考序列，便于感知侧把这些 RE 当作已知参考。该感知参考序列使用一个不同于帧同步符号的备选 Zadoff-Chu 根生成，避免把 `sensing_pilot` 误判成专用同步符号。未被 `payload` 块选中的其余非预留同步、非梳状导频、非帧内 BPSK 导频 RE 会发送预生成 QPSK。 |
+| `sensing_mask_blocks` | `object[]` | 缺省 | 可选的紧凑感知资源映射，用来回答“compact 感知时哪些 RE 要导出”。仅在 `sensing_output_mode=compact_mask` 时生效；`dense` 模式下会忽略。每个块也是矩形，坐标使用绝对帧符号索引和原始 FFT bin 索引。这里允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE；可选 CFO training field 会被拒绝，因为它不是合法感知符号。重叠块会自动并集，输出顺序固定为“先符号、后子载波”。如果每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启。 |
 | `device_args` | `string` | `""` | 通用 USRP 参数（TX/RX 兜底）。 |
 | `tx_device_args` | `string` | `""` | TX 专用 USRP 参数。 |
 | `rx_device_args` | `string` | `""` | 感知 RX 默认 USRP 参数。 |
@@ -566,7 +569,9 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 * `sensing_mask_blocks` 决定“compact 感知时哪些 RE 要导出”。
 * 前者影响 payload 映射，后者只影响感知输出，两者不是互相替代的关系。
 
-若启用 `data_resource_blocks`，请把相同的矩形块和 `kind` 同步写入 `Demodulator.yaml`。如果与 `sync_pos`、`midframe_pilot_symbols` 或 `pilot_positions` 重叠，内置的同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。优先级始终是“同步符号 > 梳状导频 RE > 帧内 BPSK 导频 > sensing_pilot > payload/预生成 QPSK”。
+若启用 `data_resource_blocks`，请把相同的矩形块和 `kind` 同步写入 `Demodulator.yaml`。如果与 `sync_pos`、可选的 `sync_pos-1` 第二同步符号、`midframe_pilot_symbols` 或 `pilot_positions` 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 `sync_pos+1` CFO training field 只服务于 CFO 捕获/去模糊，不是合法的 sensing-pilot 或 sensing-mask 符号。优先级始终是“ZC 同步符号 > CFO training field > 梳状导频 RE > 帧内 BPSK 导频 > sensing_pilot > payload/预生成 QPSK”。
+
+dense 感知模式下，如果配置的 `sensing_symbol_stride` 或运行时 `STRD` 会采到可选的 `sync_pos+1` CFO training field，会被直接拒绝。运行时修改 `STRD` 会在计划好的帧边界重启确定性采样相位，不会继承旧 stride 的漂移相位。
 
 当 `sensing_output_mode=compact_mask` 时，感知会变成“每个 OFDM 帧发送一条紧凑消息”，其中只包含 `sensing_mask_blocks` 选中的 RE。此时 `STRD` 会被忽略，因为采样图样已经由 mask 本身决定。若这个 mask 是“规则”的，也就是每个被选中的符号都使用相同的子载波集合，且这些符号在环形帧轴上等间隔，那么运行时 `MTI` 和本地 Delay-Doppler 处理也可以开启：`SKIP=1` 保持输出紧凑原始 RE，`SKIP=0` 切回基于该规则采样生成的 dense Delay-Doppler 输出。配置归一化还会按需要自动扩展 `range_fft_size` 和 `doppler_fft_size`，确保它们能覆盖所选子载波数和符号数。紧凑感知载荷格式为 `CompactSensingFrameHeader { magic/version, mask_hash, re_count, frame_start_symbol_index }`，后面跟着固定顺序的 `re_count` 个原始 `complex<float>` 数据。当前 `plot_sensing*.py` 还不能处理非“规则”的 compact 载荷。
 
@@ -602,6 +607,10 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `fft_size` | `int` | `1024` | OFDM FFT 点数。 |
 | `cp_length` | `int` | `128` | 循环前缀长度（采样点）。 |
 | `sync_pos` | `int` | `1` | 同步符号在帧内的位置索引。 |
+| `enable_sec_sync_symbol` | `bool` | `false` | 预留 `sync_pos-1` 作为重复 ZC 第二同步符号。启用后，初始同步先用两个连续同步符号做类 Schmidl-Cox 粗定时/模糊 CFO 估计，再用局部 ZC 相关解析 CFO alias 并精修主同步。发射端必须使用相同设置。 |
+| `enable_cfo_training_sequence` | `bool` | `false` | 使用 `sync_pos+1` 的专用 CFO training field 来解析 CFO alias。帧定位仍来自 ZC 或可选第二同步符号；接收端先估计 CP/第二同步 modulo CFO，再用 CFO Field 的重复训练 CFO 估计选择最近的 alias。发射端必须使用相同设置。 |
+| `cfo_training_period_samples` | `int` / 采样点 | `16` | CFO training field 的重复周期，必须整除 `fft_size`；无模糊 CFO 范围约为 `+-sample_rate/(2*period)`。 |
+| `sync_cfo_alias_search_range_hz` | `float` / Hz | `800000` | 同步 alias 解析覆盖的最大绝对 CFO 范围。接收端会根据 CP 和第二同步符号各自的 modulo 周期，把这个物理范围换算为整数 alias 搜索跨度。`profiling_modules` 包含 `sync` 时会打印逐 alias 峰值比较。 |
 | `sample_rate` | `float` / Hz | `50000000` | 基带采样率。 |
 | `bandwidth` | `float` / Hz | `50000000` | 模拟带宽。通常与 `sample_rate` 保持一致。 |
 | `center_freq` | `float` / Hz | `2400000000` | 射频中心频率。 |
@@ -629,8 +638,8 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `channel_tracking_mode` | `string` | `pilot_phase` | 每符号梳状导频跟踪模式。`off` 使用同步符号得到的固定信道，`pilot_phase` 对每个数据信号符号用梳状导频残差拟合公共相位和线性相位。 |
 | `equalizer_mag_floor` | `float` | `1e-6` | 信道幅度平方反演下限，`zf` 和 `mmse` 都会使用。 |
 | `channel_tracking_min_pilot_snr` | `float` | `1e-4` | 每符号跟踪接受梳状导频残差的最小功率/权重，低于该值时回退到同步符号信道。 |
-| `data_resource_blocks` | `object[]` | 缺省 | 接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都参与 payload 提取。设为 `[]` 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 `kind`。其中 `kind: payload` 的块会产生 payload LLR，`kind: sensing_pilot` 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。 |
-| `sensing_mask_blocks` | `object[]` | 缺省 | 接收侧的紧凑感知资源映射，用来回答“在 `compact_mask` 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许覆盖同步符号、梳状导频或帧内 BPSK 导频 RE，重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 `MTI` 和本地 Delay-Doppler 处理。 |
+| `data_resource_blocks` | `object[]` | 缺省 | 接收侧的通信资源映射，用来回答“哪些 RE 应该被当作 payload 来解调”。省略该键时保持旧行为：除同步符号和梳状导频 RE 外的所有 RE 都参与 payload 提取。设为 `[]` 表示完全不提取 payload LLR。应与发射端使用相同的矩形块和 `kind`。其中 `kind: payload` 的块会产生 payload LLR；`kind: sensing_pilot` 的块则会被当作已知参考 RE，不参与 payload 提取。该已知参考序列与发射端保持一致，也使用不同于帧同步符号的备选 Zadoff-Chu 根。 |
+| `sensing_mask_blocks` | `object[]` | 缺省 | 接收侧的紧凑感知资源映射，用来回答“在 `compact_mask` 模式下，双站感知要导出哪些 RE”。坐标系和行为与发射端一致：使用绝对帧符号索引和原始 FFT bin 索引，允许选择 ZC 同步符号、梳状导频或帧内 BPSK 导频 RE，但拒绝 CFO training field；重叠块自动并集，输出顺序固定为“先符号、后子载波”。如果 mask 满足规则采样条件，同样可以开启运行时 `MTI` 和本地 Delay-Doppler 处理。 |
 | `device_args` | `string` | `""` | USRP 参数。 |
 | `clock_source` | `string` | `internal/external/gpsdo` | 时钟源。 |
 | `wire_format_rx` | `string` | `sc16` | RX 链路数据格式，常用 `sc16` 或 `sc8`。 |
@@ -677,12 +686,13 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 | `measurement_payload_bytes` | `int` | `1024` | 每个测量载荷期望的字节数。若小于内部测量头长度，会自动钳制到最小合法值。 |
 | `measurement_prbs_seed` | `int` | `0x5A` | 用于重建确定性 PRBS 测量载荷的基础种子。 |
 | `measurement_packets_per_point` | `int` | `1` | 每个在线 `MRST` epoch 期望统计的测量载荷数。小于 `1` 时会钳制到 `1`。 |
-| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `demodulation`、`agc`、`align`、`snr`；`all` 表示全部。`agc` 控制 AGC 日志，`align` 控制运行时 `ALGN:` 日志，`snr` 会周期性打印当前解调路径的 `_snr_db / _noise_var / _llr_scale`。 |
+| `profiling_modules` | `string` | `""` | 性能统计模块列表，逗号分隔。常用值包括 `demodulation`、`sync`、`agc`、`align`、`snr`；`all` 表示全部。`sync` 控制逐 alias 同步峰值比较日志，`agc` 控制 AGC 日志，`align` 控制运行时 `ALGN:` 日志，`snr` 会周期性打印当前解调路径的 `_snr_db / _noise_var / _llr_scale`。 |
 | `cpu_cores` | `int[]` | `[0,1,2,3,4,5]` | 允许使用的 CPU 核列表。若核心数量有限，应先给主线程保留一个专用核心，其次优先 `rx_proc`，最后再考虑 `process_proc`、`sensing_process_proc` 和 `bit_processing_proc`，因为这些后级处理线程通常有更大的缓冲区，能更好吸收短时调度抖动。 |
 
 说明：
 * `data_resource_blocks` 通常应与发射端完全一致，包括 `kind`。
-* 如果资源块与 `sync_pos`、`midframe_pilot_symbols` 或 `pilot_positions` 重叠，内置的同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。优先级是“同步符号 > 梳状导频 RE > 帧内 BPSK 导频 > sensing_pilot > payload/预生成 QPSK”。
+* 如果资源块与 `sync_pos`、可选的 `sync_pos-1` 第二同步符号、`midframe_pilot_symbols` 或 `pilot_positions` 重叠，内置的 ZC 同步符号、梳状导频 RE 和帧内 BPSK 导频仍然优先。可选 `sync_pos+1` CFO training field 会在 sensing-pilot 和 sensing-mask 选择中被拒绝。优先级是“ZC 同步符号 > CFO training field > 梳状导频 RE > 帧内 BPSK 导频 > sensing_pilot > payload/预生成 QPSK”。
+* dense 模式下，如果 `sensing_symbol_stride` / 运行时 `STRD` 会采到可选的 `sync_pos+1` CFO training field，会被拒绝。运行时修改 `STRD` 会在计划好的帧边界重启确定性采样相位。
 * 当 `sensing_output_mode=compact_mask` 时，双站感知同样会变成“每个 OFDM 帧发送一条紧凑消息”，只包含 `sensing_mask_blocks` 选中的 RE；此时 `STRD` 会被忽略，因为 mask 已经定义了采样图样。
 * 紧凑载荷格式与发射端一致：`CompactSensingFrameHeader` 后面跟固定顺序的原始 `complex<float>` 数据。
 * RX AGC 分为两个阶段。`SYNC_SEARCH` 阶段会先把增益恢复到配置的 `rx_gain`，然后进行粗搜索扫描（每 10 个帧增加 `1 dB`，达到最大增益后回绕到最小增益）；锁定后进入跟踪阶段，使用 `rx_agc_low_threshold_db` / `rx_agc_high_threshold_db` 定义的窗口来细调增益。

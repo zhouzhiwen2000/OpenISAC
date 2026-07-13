@@ -129,6 +129,16 @@ uhd::time_spec_t SimRadio::time_now() const {
     return uhd::time_spec_t::from_ticks(static_cast<long long>(idx), tick_rate);
 }
 
+void SimRadio::set_comm_rx_freq_correction_hz(double value_hz) {
+    if (_ctrl) {
+        _ctrl->set_comm_rx_freq_correction_hz(value_hz);
+    }
+}
+
+double SimRadio::comm_rx_freq_correction_hz() const {
+    return _ctrl ? _ctrl->comm_rx_freq_correction_hz() : 0.0;
+}
+
 bool SimRadio::running() const {
     return _ctrl && _ctrl->running() != 0;
 }

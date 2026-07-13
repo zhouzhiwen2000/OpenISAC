@@ -215,7 +215,7 @@ struct SimConfig {
     bool enable_comm_rx = true;                // produce the communication RX channel (run with OFDMDemodulator)
     bool enable_sensing_rx = true;             // produce the monostatic sensing RX channels (one per antenna)
     double noise_power_dbfs = -100.0;          // AWGN power per RX channel (dBFS); very low = effectively off
-    double cfo_hz = 0.0;                        // Carrier frequency offset applied to RX (Hz)
+    double cfo_hz = 0.0;                        // Initial carrier offset before simulated RX correction (Hz)
     int timing_offset_samples = 0;             // Constant integer sample delay injected on RX
     // Physical ULA element spacing in meters. The steering vector's electrical spacing
     // (d/lambda) is derived from this and `center_freq`, so the simulated angles track
@@ -307,7 +307,8 @@ enum class SensingOnWireFormat : uint32_t {
  * @brief Shared payload-resource layout derived from Config.
  *
  * The flattened non-pilot order is:
- *   1. OFDM symbols in ascending absolute frame order, skipping sync_pos
+ *   1. OFDM symbols in ascending absolute frame order, skipping reserved sync
+ *      symbols and mid-frame pilots
  *   2. Within each data symbol, non-pilot subcarriers in ascending order
  *
  * payload_mask / payload_rank are indexed in that flattened order.
@@ -769,6 +770,10 @@ struct Config {
     size_t frame_queue_size = 8;       // Capacity of demod RX frame queue
     size_t sync_queue_size = 8;        // Capacity of demod sync-search queue
     size_t sync_pos = 1;               // Synchronization symbol position
+    bool enable_sec_sync_symbol = false; // Reserve sync_pos-1 for the duplicate second sync symbol
+    bool enable_cfo_training_sequence = false; // Reserve sync_pos+1 for a repeated CFO training symbol
+    size_t cfo_training_period_samples = 16; // Repetition period of the CFO training symbol in samples
+    double sync_cfo_alias_search_range_hz = 800000.0; // Max absolute CFO span covered by sync alias search
     int delay_adjust_step = 2;         // Delay adjustment step
     double reset_hold_s = 0.5;         // Time window of persistent invalid delay before forcing a hard reset
     int desired_peak_pos = 20;         // Desired delay peak position to include non-causal components
@@ -919,6 +924,136 @@ struct Config {
         return 2 * samples_per_frame(); 
     }
 };
+
+inline bool sec_sync_symbol_enabled(const Config& cfg) {
+    return cfg.enable_sec_sync_symbol;
+}
+
+inline bool cfo_training_sequence_enabled(const Config& cfg) {
+    return cfg.enable_cfo_training_sequence;
+}
+
+inline size_t cfo_training_symbol_index(const Config& cfg) {
+    return cfg.sync_pos + 1;
+}
+
+inline bool is_sec_sync_symbol(const Config& cfg, size_t symbol_idx) {
+    return sec_sync_symbol_enabled(cfg) &&
+           cfg.sync_pos > 0 &&
+           symbol_idx + 1 == cfg.sync_pos;
+}
+
+inline bool is_main_sync_symbol(const Config& cfg, size_t symbol_idx) {
+    return symbol_idx == cfg.sync_pos;
+}
+
+inline bool is_zc_sync_symbol(const Config& cfg, size_t symbol_idx) {
+    return is_main_sync_symbol(cfg, symbol_idx) || is_sec_sync_symbol(cfg, symbol_idx);
+}
+
+inline bool is_cfo_training_symbol(const Config& cfg, size_t symbol_idx) {
+    return cfo_training_sequence_enabled(cfg) &&
+           cfg.sync_pos < std::numeric_limits<size_t>::max() &&
+           symbol_idx == cfo_training_symbol_index(cfg);
+}
+
+inline bool is_reserved_sync_symbol(const Config& cfg, size_t symbol_idx) {
+    return is_zc_sync_symbol(cfg, symbol_idx) || is_cfo_training_symbol(cfg, symbol_idx);
+}
+
+inline const char* reserved_sync_symbol_label(const Config& cfg, size_t symbol_idx) {
+    if (is_main_sync_symbol(cfg, symbol_idx)) {
+        return "main ZC sync symbol";
+    }
+    if (is_sec_sync_symbol(cfg, symbol_idx)) {
+        return "second sync symbol";
+    }
+    if (is_cfo_training_symbol(cfg, symbol_idx)) {
+        return "CFO training field";
+    }
+    return "reserved sync/training symbol";
+}
+
+inline size_t reserved_sync_symbol_count(const Config& cfg) {
+    size_t count = 1;
+    if (sec_sync_symbol_enabled(cfg)) {
+        ++count;
+    }
+    if (cfo_training_sequence_enabled(cfg)) {
+        ++count;
+    }
+    return count;
+}
+
+inline bool validate_cfo_training_period(const Config& cfg, std::string* error = nullptr) {
+    if (!cfo_training_sequence_enabled(cfg)) {
+        return true;
+    }
+    if (cfg.cfo_training_period_samples == 0) {
+        if (error) *error = "cfo_training_period_samples must be greater than 0.";
+        return false;
+    }
+    if (cfg.cfo_training_period_samples >= cfg.fft_size) {
+        if (error) {
+            *error = "cfo_training_period_samples must be smaller than fft_size.";
+        }
+        return false;
+    }
+    if ((cfg.fft_size % cfg.cfo_training_period_samples) != 0) {
+        if (error) {
+            *error = "cfo_training_period_samples must divide fft_size so the CFO field repeats exactly.";
+        }
+        return false;
+    }
+    return true;
+}
+
+inline bool has_reserved_sync_symbol_overlap(const Config& cfg) {
+    if (!cfo_training_sequence_enabled(cfg)) {
+        return false;
+    }
+    const size_t cfo_sym = cfo_training_symbol_index(cfg);
+    return cfo_sym == cfg.sync_pos || is_sec_sync_symbol(cfg, cfo_sym);
+}
+
+inline bool dense_sensing_stride_hits_symbol(
+    const Config& cfg,
+    size_t stride,
+    size_t symbol_idx)
+{
+    if (cfg.num_symbols == 0 || stride == 0 || symbol_idx >= cfg.num_symbols) {
+        return false;
+    }
+    return (symbol_idx % std::gcd(stride, cfg.num_symbols)) == 0;
+}
+
+inline std::string dense_sensing_stride_cfo_training_error(
+    const Config& cfg,
+    size_t stride,
+    const std::string& context)
+{
+    if (cfg.num_symbols == 0 || stride == 0 || !cfo_training_sequence_enabled(cfg)) {
+        return {};
+    }
+    const size_t sym = cfo_training_symbol_index(cfg);
+    if (sym < cfg.num_symbols && dense_sensing_stride_hits_symbol(cfg, stride, sym)) {
+        return context + " selects symbol " + std::to_string(sym) + ", which is the CFO training field. "
+               "CFO training fields are not valid sensing symbols; choose a sensing_symbol_stride "
+               "that does not sample sync_pos+1.";
+    }
+    return {};
+}
+
+inline void validate_dense_sensing_stride(
+    const Config& cfg,
+    size_t stride,
+    const std::string& context)
+{
+    const std::string error = dense_sensing_stride_cfo_training_error(cfg, stride, context);
+    if (!error.empty()) {
+        throw std::runtime_error(error);
+    }
+}
 
 inline std::string normalize_sensing_output_mode_string(std::string mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
@@ -1112,6 +1247,12 @@ inline SensingMaskLayout build_sensing_mask_layout(const Config& cfg) {
         }
 
         for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
+            if (is_cfo_training_symbol(cfg, sym)) {
+                throw std::runtime_error(
+                    "sensing_mask_blocks[" + std::to_string(block_idx) +
+                    "] selects symbol " + std::to_string(sym) +
+                    ", which is the CFO training field. CFO training fields are not valid sensing symbols.");
+            }
             for (size_t sc = block.subcarrier_start; sc < block.subcarrier_start + block.subcarrier_count; ++sc) {
                 mask[flat_index(sym, sc)] = 1;
             }
@@ -1396,6 +1537,29 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             "sync_pos=" + std::to_string(cfg.sync_pos) +
             " is out of range for num_symbols=" + std::to_string(cfg.num_symbols) + '.');
     }
+    if (sec_sync_symbol_enabled(cfg)) {
+        if (cfg.num_symbols < 2) {
+            throw std::runtime_error("enable_sec_sync_symbol requires num_symbols >= 2.");
+        }
+        if (cfg.sync_pos == 0) {
+            throw std::runtime_error(
+                "enable_sec_sync_symbol requires sync_pos >= 1 so sync_pos-1 can hold the second sync symbol.");
+        }
+    }
+    if (cfo_training_sequence_enabled(cfg)) {
+        if (cfg.sync_pos + 1 >= cfg.num_symbols) {
+            throw std::runtime_error(
+                "enable_cfo_training_sequence requires sync_pos+1 to be inside the frame.");
+        }
+        std::string cfo_period_error;
+        if (!validate_cfo_training_period(cfg, &cfo_period_error)) {
+            throw std::runtime_error(cfo_period_error);
+        }
+        if (has_reserved_sync_symbol_overlap(cfg)) {
+            throw std::runtime_error(
+                "enable_cfo_training_sequence overlaps another reserved sync symbol.");
+        }
+    }
 
     DataResourceGridLayout layout;
     layout.num_symbols = cfg.num_symbols;
@@ -1411,10 +1575,10 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             }
             continue;
         }
-        if (sym == cfg.sync_pos) {
+        if (is_reserved_sync_symbol(cfg, sym)) {
             if (log_warnings) {
                 LOG_G_WARN() << "Ignoring midframe_pilot_symbols entry " << sym
-                             << " because it overlaps sync_pos.";
+                             << " because it overlaps a reserved sync symbol.";
             }
             continue;
         }
@@ -1427,7 +1591,13 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
         layout.midframe_pilot_symbol_mask[sym] = 1;
     }
     layout.midframe_pilot_symbol_count = layout.midframe_pilot_symbols.size();
-    layout.data_symbol_count = cfg.num_symbols - 1 - layout.midframe_pilot_symbol_count;
+    const size_t reserved_symbol_count = reserved_sync_symbol_count(cfg);
+    if (reserved_symbol_count + layout.midframe_pilot_symbol_count > cfg.num_symbols) {
+        throw std::runtime_error(
+            "Reserved sync/training symbols plus midframe_pilot_symbols exceed num_symbols.");
+    }
+    layout.data_symbol_count =
+        cfg.num_symbols - reserved_symbol_count - layout.midframe_pilot_symbol_count;
 
     layout.pilot_mask.assign(cfg.fft_size, 0);
     for (auto pos : cfg.pilot_positions) {
@@ -1452,7 +1622,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
     layout.data_symbol_to_actual_symbol.reserve(layout.data_symbol_count);
     layout.actual_symbol_to_data_symbol.assign(cfg.num_symbols, -1);
     for (size_t sym = 0; sym < cfg.num_symbols; ++sym) {
-        if (sym == cfg.sync_pos || layout.midframe_pilot_symbol_mask[sym] != 0) {
+        if (is_reserved_sync_symbol(cfg, sym) || layout.midframe_pilot_symbol_mask[sym] != 0) {
             continue;
         }
         layout.actual_symbol_to_data_symbol[sym] =
@@ -1502,9 +1672,18 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
             }
 
             for (size_t sym = block.symbol_start; sym < block.symbol_start + block.symbol_count; ++sym) {
-                // sync_pos and mid-frame pilot symbols keep their dedicated
+                // Reserved sync and mid-frame pilot symbols keep their dedicated
                 // content, so resource blocks never claim RE from those symbols.
-                if (sym == cfg.sync_pos || layout.midframe_pilot_symbol_mask[sym] != 0) {
+                if (is_reserved_sync_symbol(cfg, sym) ||
+                    layout.midframe_pilot_symbol_mask[sym] != 0) {
+                    if (block.kind == DataResourceBlockKind::SensingPilot &&
+                        is_cfo_training_symbol(cfg, sym)) {
+                        throw std::runtime_error(
+                            "data_resource_blocks[" + std::to_string(block_idx) +
+                            "] selects symbol " + std::to_string(sym) +
+                            " as sensing_pilot, but that symbol is the CFO training field. "
+                            "CFO training fields are not valid sensing symbols.");
+                    }
                     if (block.kind == DataResourceBlockKind::Payload) {
                         stripped_reserved_symbol_re += block.subcarrier_count;
                     }
@@ -1567,7 +1746,7 @@ inline DataResourceGridLayout build_data_resource_grid_layout(
         (stripped_reserved_symbol_re > 0 || stripped_pilot_re > 0)) {
         LOG_G_WARN() << "data_resource_blocks overlap stripped " << stripped_reserved_symbol_re
                      << " sync/mid-frame-pilot symbol RE and " << stripped_pilot_re
-                     << " pilot RE. sync_pos, pilot_positions, and midframe_pilot_symbols take precedence.";
+                     << " pilot RE. reserved sync symbols, pilot_positions, and midframe_pilot_symbols take precedence.";
     }
     if (log_warnings && payload_sensing_pilot_overlap_re > 0) {
         LOG_G_WARN() << "data_resource_blocks contain " << payload_sensing_pilot_overlap_re
@@ -1592,6 +1771,10 @@ inline void finalize_data_resource_grid_config(Config& cfg, const char* role_nam
 inline void finalize_sensing_mask_config(Config& cfg, const char* role_name) {
     cfg.sensing_output_mode = normalize_sensing_output_mode_string(cfg.sensing_output_mode);
     if (!sensing_output_mode_is_compact_mask(cfg)) {
+        validate_dense_sensing_stride(
+            cfg,
+            cfg.sensing_symbol_stride,
+            std::string(role_name) + " dense sensing stride");
         if (cfg.enable_backend_sensing_processing && !backend_sensing_processing_supported(cfg)) {
             LOG_G_WARN() << role_name
                          << " requested enable_backend_sensing_processing=1, but the current sensing mode "
@@ -2081,6 +2264,9 @@ inline Config make_default_modulator_config() {
     cfg.fft_size = 1024;
     cfg.cp_length = 128;
     cfg.sync_pos = 1;
+    cfg.enable_sec_sync_symbol = false;
+    cfg.enable_cfo_training_sequence = false;
+    cfg.cfo_training_period_samples = 16;
     cfg.sample_rate = 50e6;
     cfg.bandwidth = 50e6;
     cfg.center_freq = 2.4e9;
@@ -2129,6 +2315,11 @@ inline bool save_modulator_config_to_yaml(const Config& cfg, const std::string& 
     out << YAML::Key << "sensing_view_doppler_bins" << YAML::Value << cfg.sensing_view_doppler_bins;
     out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
     out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
+    out << YAML::Key << "enable_sec_sync_symbol" << YAML::Value << cfg.enable_sec_sync_symbol;
+    out << YAML::Key << "enable_cfo_training_sequence" << YAML::Value
+        << cfg.enable_cfo_training_sequence;
+    out << YAML::Key << "cfo_training_period_samples" << YAML::Value
+        << cfg.cfo_training_period_samples;
     out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
     out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
     out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
@@ -2233,6 +2424,17 @@ inline bool load_modulator_config_from_yaml(Config& cfg, const std::string& file
         }
         if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
         if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
+        if (config["enable_sec_sync_symbol"]) {
+            cfg.enable_sec_sync_symbol = config["enable_sec_sync_symbol"].as<bool>();
+        }
+        if (config["enable_cfo_training_sequence"]) {
+            cfg.enable_cfo_training_sequence =
+                config["enable_cfo_training_sequence"].as<bool>();
+        }
+        if (config["cfo_training_period_samples"]) {
+            cfg.cfo_training_period_samples =
+                config["cfo_training_period_samples"].as<size_t>();
+        }
         if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
         if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
         if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
@@ -2441,6 +2643,9 @@ inline Config make_default_demodulator_config() {
     Config cfg;
     cfg.fft_size = 1024;
     cfg.cp_length = 128;
+    cfg.enable_sec_sync_symbol = false;
+    cfg.enable_cfo_training_sequence = false;
+    cfg.cfo_training_period_samples = 16;
     cfg.center_freq = 2.4e9;
     cfg.pilot_positions = {571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451};
     cfg.midframe_pilot_symbols = {};
@@ -2453,6 +2658,7 @@ inline Config make_default_demodulator_config() {
     cfg.frame_queue_size = 8;
     cfg.sync_queue_size = 8;
     cfg.sync_pos = 1;
+    cfg.sync_cfo_alias_search_range_hz = 800000.0;
     cfg.reset_hold_s = 0.5;
     cfg.sample_rate = 50e6;
     cfg.bandwidth = 50e6;
@@ -2520,6 +2726,11 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "fft_size" << YAML::Value << cfg.fft_size;
     out << YAML::Key << "cp_length" << YAML::Value << cfg.cp_length;
     out << YAML::Key << "sync_pos" << YAML::Value << cfg.sync_pos;
+    out << YAML::Key << "enable_sec_sync_symbol" << YAML::Value << cfg.enable_sec_sync_symbol;
+    out << YAML::Key << "enable_cfo_training_sequence" << YAML::Value
+        << cfg.enable_cfo_training_sequence;
+    out << YAML::Key << "cfo_training_period_samples" << YAML::Value
+        << cfg.cfo_training_period_samples;
     out << YAML::Key << "sample_rate" << YAML::Value << cfg.sample_rate;
     out << YAML::Key << "bandwidth" << YAML::Value << cfg.bandwidth;
     out << YAML::Key << "center_freq" << YAML::Value << cfg.center_freq;
@@ -2539,6 +2750,8 @@ inline bool save_demodulator_config_to_yaml(const Config& cfg, const std::string
     out << YAML::Key << "cuda_demod_pipeline_slots" << YAML::Value << cfg.cuda_demod_pipeline_slots;
     out << YAML::Key << "frame_queue_size" << YAML::Value << cfg.frame_queue_size;
     out << YAML::Key << "sync_queue_size" << YAML::Value << cfg.sync_queue_size;
+    out << YAML::Key << "sync_cfo_alias_search_range_hz" << YAML::Value
+        << cfg.sync_cfo_alias_search_range_hz;
     out << YAML::Key << "reset_hold_s" << YAML::Value << cfg.reset_hold_s;
     out << YAML::Key << "range_fft_size" << YAML::Value << cfg.range_fft_size;
     out << YAML::Key << "doppler_fft_size" << YAML::Value << cfg.doppler_fft_size;
@@ -2638,6 +2851,17 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         if (config["fft_size"]) cfg.fft_size = config["fft_size"].as<size_t>();
         if (config["cp_length"]) cfg.cp_length = config["cp_length"].as<size_t>();
         if (config["sync_pos"]) cfg.sync_pos = config["sync_pos"].as<size_t>();
+        if (config["enable_sec_sync_symbol"]) {
+            cfg.enable_sec_sync_symbol = config["enable_sec_sync_symbol"].as<bool>();
+        }
+        if (config["enable_cfo_training_sequence"]) {
+            cfg.enable_cfo_training_sequence =
+                config["enable_cfo_training_sequence"].as<bool>();
+        }
+        if (config["cfo_training_period_samples"]) {
+            cfg.cfo_training_period_samples =
+                config["cfo_training_period_samples"].as<size_t>();
+        }
         if (config["sample_rate"]) cfg.sample_rate = config["sample_rate"].as<double>();
         if (config["bandwidth"]) cfg.bandwidth = config["bandwidth"].as<double>();
         if (config["center_freq"]) cfg.center_freq = config["center_freq"].as<double>();
@@ -2675,6 +2899,10 @@ inline bool load_demodulator_config_from_yaml(Config& cfg, const std::string& fi
         }
         if (config["frame_queue_size"]) cfg.frame_queue_size = config["frame_queue_size"].as<size_t>();
         if (config["sync_queue_size"]) cfg.sync_queue_size = config["sync_queue_size"].as<size_t>();
+        if (config["sync_cfo_alias_search_range_hz"]) {
+            cfg.sync_cfo_alias_search_range_hz =
+                config["sync_cfo_alias_search_range_hz"].as<double>();
+        }
         if (config["reset_hold_s"]) cfg.reset_hold_s = config["reset_hold_s"].as<double>();
         if (config["range_fft_size"]) cfg.range_fft_size = config["range_fft_size"].as<size_t>();
         if (config["doppler_fft_size"]) cfg.doppler_fft_size = config["doppler_fft_size"].as<size_t>();
@@ -2797,6 +3025,11 @@ inline void finalize_demodulator_network_defaults(Config& cfg) {
     if (cfg.sync_queue_size == 0) {
         LOG_G_WARN() << "sync_queue_size=0 is invalid. Clamping to 1.";
         cfg.sync_queue_size = 1;
+    }
+    if (cfg.sync_cfo_alias_search_range_hz < 0.0 ||
+        !std::isfinite(cfg.sync_cfo_alias_search_range_hz)) {
+        LOG_G_WARN() << "sync_cfo_alias_search_range_hz is invalid. Clamping to 0 Hz.";
+        cfg.sync_cfo_alias_search_range_hz = 0.0;
     }
     if (cfg.reset_hold_s <= 0.0) {
         LOG_G_WARN() << "reset_hold_s<=0 is invalid. Clamping to 0.5 s.";

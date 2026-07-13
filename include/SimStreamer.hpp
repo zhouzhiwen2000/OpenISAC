@@ -89,6 +89,10 @@ public:
     // Current simulated time from the hub's sample clock.
     uhd::time_spec_t time_now() const;
 
+    // Receiver-side frequency correction used by the ChannelSimulator comm path.
+    void set_comm_rx_freq_correction_hz(double value_hz);
+    double comm_rx_freq_correction_hz() const;
+
     bool running() const;
 
 private:

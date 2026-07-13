@@ -324,6 +324,7 @@ private:
     
     // Zadoff-Chu sequence
     AlignedVector _zc_seq;
+    AlignedVector _cfo_training_seq;
     std::vector<AlignedVector> _midframe_pilot_seqs;
     AlignedVector _sensing_pilot_seq;
     int _sensing_pilot_zc_root = 0;
@@ -703,6 +704,14 @@ private:
                 return;
             }
             size_t stride = value <= 0 ? 1 : static_cast<size_t>(value);
+            const std::string stride_error = dense_sensing_stride_cfo_training_error(
+                _cfg,
+                stride,
+                "Runtime STRD command");
+            if (!stride_error.empty()) {
+                LOG_G_WARN() << "Ignoring STRD command: " << stride_error;
+                return;
+            }
             _schedule_shared_sensing_update([stride](SharedSensingRuntime& cfg) {
                 cfg.sensing_symbol_stride = stride;
             });
@@ -1087,6 +1096,13 @@ private:
         _sensing_pilot_zc_root =
             select_known_sensing_pilot_zc_root(_cfg.fft_size, _cfg.zc_root);
         _sensing_pilot_seq = generate_zc_freq(_cfg.fft_size, _sensing_pilot_zc_root);
+        if (cfo_training_sequence_enabled(_cfg)) {
+            _cfo_training_seq = generate_cfo_training_freq(
+                _cfg.fft_size,
+                _cfg.cfo_training_period_samples);
+        } else {
+            _cfo_training_seq.clear();
+        }
         _midframe_pilot_seqs.clear();
         _midframe_pilot_seqs.reserve(_data_resource_layout.midframe_pilot_symbols.size());
         for (const int sym : _data_resource_layout.midframe_pilot_symbols) {
@@ -1120,9 +1136,14 @@ private:
         size_t pregen_offset = 0;
         for (size_t sym = 0; sym < _cfg.num_symbols; ++sym) {
             auto& template_symbol = _symbol_templates[sym];
-            // The sync symbol always keeps the dedicated sync ZC sequence.
-            if (sym == _cfg.sync_pos) {
+            // Reserved sync symbols always keep the dedicated sync ZC sequence.
+            if (is_zc_sync_symbol(_cfg, sym)) {
                 std::memcpy(template_symbol.data(), _zc_seq.data(),
+                            _cfg.fft_size * sizeof(std::complex<float>));
+                continue;
+            }
+            if (is_cfo_training_symbol(_cfg, sym)) {
+                std::memcpy(template_symbol.data(), _cfo_training_seq.data(),
                             _cfg.fft_size * sizeof(std::complex<float>));
                 continue;
             }
@@ -1624,7 +1645,7 @@ private:
                 prof_step_start = ProfileClock::now();
                 std::memcpy(_fft_in.data(), _symbol_templates[i].data(),
                             _cfg.fft_size * sizeof(std::complex<float>));
-                if (i != _cfg.sync_pos) {
+                if (!is_reserved_sync_symbol(_cfg, i)) {
                     const int data_symbol_idx_int = _data_resource_layout.actual_symbol_to_data_symbol[i];
                     if (data_symbol_idx_int >= 0) {
                         const size_t data_symbol_idx = static_cast<size_t>(data_symbol_idx_int);

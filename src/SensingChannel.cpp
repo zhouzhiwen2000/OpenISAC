@@ -2960,6 +2960,7 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
         return;
     }
 
+    const size_t previous_stride = _compute.active_stride;
     _compute.active_stride = std::max<size_t>(1, snapshot.sensing_symbol_stride);
     _compute.active_enable_mti = snapshot.enable_mti;
     _compute.active_skip_sensing_fft = backend_sensing_processing_supported(_cfg)
@@ -2972,7 +2973,8 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
     }
     _compute.applied_generation = snapshot.generation;
 
-    if (_compute.next_symbol_to_sample < snapshot.apply_symbol_index) {
+    if (_compute.next_symbol_to_sample < snapshot.apply_symbol_index ||
+        _compute.active_stride != previous_stride) {
         _compute.next_symbol_to_sample = snapshot.apply_symbol_index;
     }
 

@@ -4,6 +4,9 @@
 fft_size: 1024                 # FFT size (subcarrier count)
 cp_length: 128                 # Cyclic prefix length (samples)
 sync_pos: 1                    # Sync symbol index in one frame
+enable_sec_sync_symbol: false  # Reserve sync_pos-1 for the duplicate second sync symbol
+enable_cfo_training_sequence: false  # Reserve sync_pos+1 for CFO training field
+cfo_training_period_samples: 16  # Repetition period of CFO training field (samples)
 num_symbols: 100               # Number of OFDM symbols per frame
 sensing_symbol_num: 100        # Number of symbols used in sensing processing
 cuda_mod_pipeline_slots: 3     # Number of CUDA modulation pipeline slots

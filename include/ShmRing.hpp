@@ -16,9 +16,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -290,7 +292,8 @@ struct SimControlBlock {
     std::atomic<uint64_t> global_sample_index; // hub's sample clock (RX timeline)
     double tick_rate;                          // sample rate (Hz) for time conversions
     uint32_t num_sensing_channels;
-    char pad[28];
+    std::atomic<int64_t> comm_rx_freq_correction_millihz; // Receiver-side comm RX tune correction
+    char pad[16];
 };
 
 static constexpr uint64_t kShmCtrlMagic = 0x4F49534143435452ull; // "OISACCTR"
@@ -318,6 +321,7 @@ public:
         _blk->global_sample_index.store(0, std::memory_order_relaxed);
         _blk->tick_rate = tick_rate;
         _blk->num_sensing_channels = num_sensing_channels;
+        _blk->comm_rx_freq_correction_millihz.store(0, std::memory_order_relaxed);
         _blk->magic.store(kShmCtrlMagic, std::memory_order_release);
     }
 
@@ -352,6 +356,19 @@ public:
         if (_blk) _blk->global_sample_index.fetch_add(n, std::memory_order_release);
     }
     double tick_rate() const { return _blk ? _blk->tick_rate : 0.0; }
+    void set_comm_rx_freq_correction_hz(double value_hz) {
+        if (!_blk || !std::isfinite(value_hz)) return;
+        const double scaled = value_hz * 1000.0;
+        const double lo = static_cast<double>(std::numeric_limits<int64_t>::min());
+        const double hi = static_cast<double>(std::numeric_limits<int64_t>::max());
+        const auto quantized = static_cast<int64_t>(std::llround(std::clamp(scaled, lo, hi)));
+        _blk->comm_rx_freq_correction_millihz.store(quantized, std::memory_order_release);
+    }
+    double comm_rx_freq_correction_hz() const {
+        if (!_blk) return 0.0;
+        return static_cast<double>(
+            _blk->comm_rx_freq_correction_millihz.load(std::memory_order_acquire)) / 1000.0;
+    }
 
     void unlink() { if (!_name.empty()) ::shm_unlink(_name.c_str()); }
 
