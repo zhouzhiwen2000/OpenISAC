@@ -20,6 +20,8 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <cstdlib>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -42,6 +44,7 @@ private:
     struct UplinkRxFrame {
         AlignedVector samples;
         uint64_t generation = 0;
+        uint64_t frame_index = 0;
     };
 
     struct UplinkLlrFrame {
@@ -174,6 +177,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = start_time;
+            _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_G_WARN() << "[UL-RX] requested shared restart at "
@@ -185,6 +189,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = radio::TimeSpec(0.0);
+            _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_G_WARN() << "[UL-RX] requested restart without timed anchor";
@@ -359,12 +364,13 @@ public:
                     {
                         std::lock_guard<std::mutex> lock(_restart_mutex);
                         _pending_restart_time = radio::TimeSpec(0.0);
+                        _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
                     }
                     _restart_requested.store(true, std::memory_order_release);
                 }
                 break;
             }
-            if (first_idx && !got_idx && n > 0) {
+            if (first_idx && !got_idx && n > 0 && md.has_time_spec) {
                 *first_idx = md.time_spec.to_ticks(_tick_rate_for_idx());
                 got_idx = true;
             }
@@ -383,6 +389,36 @@ public:
         samples %= period;
         if (samples < 0) samples += period;
         return samples;
+    }
+
+    bool _frame_offset_from_first_sample(
+        int64_t first_sample_idx,
+        const radio::TimeSpec& stream_start_time,
+        int64_t applied_diff,
+        uint64_t& frame_offset,
+        int64_t& residual_samples) const
+    {
+        const int64_t period = static_cast<int64_t>(_period_samples);
+        const double tick_rate = _tick_rate_for_idx();
+        if (first_sample_idx == std::numeric_limits<int64_t>::min() ||
+            period <= 0 || tick_rate <= 0.0) {
+            return false;
+        }
+
+        const int64_t stream_start_idx = stream_start_time.to_ticks(tick_rate);
+        const int64_t pairing_samples =
+            (first_sample_idx - stream_start_idx) - applied_diff;
+        const int64_t abs_pairing = std::llabs(pairing_samples);
+        int64_t rounded_frame = (abs_pairing + period / 2) / period;
+        if (pairing_samples < 0) {
+            rounded_frame = -rounded_frame;
+        }
+        residual_samples = pairing_samples - rounded_frame * period;
+        if (rounded_frame < 0) {
+            return false;
+        }
+        frame_offset = static_cast<uint64_t>(rounded_frame);
+        return true;
     }
 
     radio::TimeSpec _next_frame_boundary_after(
@@ -411,6 +447,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = start_time;
+            _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_RT_WARN() << "[UL-RX] requested restart after " << reason
@@ -451,16 +488,21 @@ public:
             _read_exact(skip_buf.data(), static_cast<size_t>(n), nullptr, &start_time);
         };
 
-        auto start_stream_and_align = [&](const char* reason) {
+        uint64_t base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
+        uint64_t fallback_frame_offset = 0;
+        auto start_stream_and_align = [&](const char* reason, uint64_t frame_base) {
             issue_start(start_time);
             const uint64_t generation =
                 _stream_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
             const int64_t diff = _normalize_frame_offset(
                 _dl_ul_timing_diff.load(std::memory_order_relaxed));
             discard(diff);
+            base_frame_index = frame_base;
+            fallback_frame_offset = 0;
             LOG_RT_WARN() << "[UL-RX] stream generation " << generation
                           << " aligned after " << reason
-                          << " with DUTI=" << diff << " samples";
+                          << " with DUTI=" << diff
+                          << " samples, base_frame=" << base_frame_index;
             return diff;
         };
 
@@ -469,19 +511,21 @@ public:
                 return false;
             }
             radio::TimeSpec restart_time(0.0);
+            uint64_t restart_base_frame = 0;
             {
                 std::lock_guard<std::mutex> lock(_restart_mutex);
                 restart_time = _pending_restart_time;
+                restart_base_frame = _pending_restart_base_frame_index;
                 _pending_restart_time = radio::TimeSpec(0.0);
             }
             issue_stop();
             start_time = restart_time;
-            applied_diff = start_stream_and_align("restart");
+            applied_diff = start_stream_and_align("restart", restart_base_frame);
             return true;
         };
 
         // Deterministic frame anchoring — NO uplink-ZC correlation search.
-        int64_t applied_diff = start_stream_and_align("initial start");
+        int64_t applied_diff = start_stream_and_align("initial start", base_frame_index);
 
         while (_running.load(std::memory_order_relaxed)) {
             if (apply_pending_restart(applied_diff)) {
@@ -520,15 +564,38 @@ public:
             }
             const uint64_t frame_generation =
                 _stream_generation.load(std::memory_order_acquire);
+            int64_t first_sample_idx = std::numeric_limits<int64_t>::min();
             const size_t got = _read_exact(
                 frame->samples.data(),
                 _period_samples,
-                nullptr,
+                &first_sample_idx,
                 &start_time);
             if (got != _period_samples ||
                 _restart_requested.load(std::memory_order_acquire)) {
                 if (!_running.load(std::memory_order_relaxed)) break;
                 continue;
+            }
+            uint64_t frame_offset = 0;
+            int64_t residual_samples = 0;
+            if (_frame_offset_from_first_sample(
+                    first_sample_idx, start_time, applied_diff,
+                    frame_offset, residual_samples)) {
+                frame->frame_index = base_frame_index + frame_offset;
+                fallback_frame_offset = frame_offset + 1;
+                if (std::llabs(residual_samples) > static_cast<int64_t>(_period_samples / 8)) {
+                    LOG_RT_WARN_HZ(5) << "[UL-RX] frame boundary residual after "
+                                      << "metadata indexing: residual="
+                                      << residual_samples << " samples"
+                                      << ", frame_index=" << frame->frame_index;
+                }
+            } else {
+                if (first_sample_idx != std::numeric_limits<int64_t>::min()) {
+                    LOG_RT_WARN_HZ(5) << "[UL-RX] dropping stale RX frame before current "
+                                      << "stream anchor: first_sample_idx="
+                                      << first_sample_idx;
+                    continue;
+                }
+                frame->frame_index = base_frame_index + fallback_frame_offset++;
             }
             frame->generation = frame_generation;
             _rx_frame_queue.producer_commit();
@@ -550,7 +617,7 @@ public:
             backoff.reset();
             const uint64_t generation = frame->generation;
             if (generation == _stream_generation.load(std::memory_order_acquire)) {
-                _process_frame(frame->samples, generation);
+                _process_frame(frame->samples, generation, frame->frame_index);
             }
             _rx_frame_queue.consumer_pop();
         }
@@ -589,7 +656,7 @@ public:
         }
     }
 
-    void _process_frame(const AlignedVector& frame, uint64_t generation) {
+    void _process_frame(const AlignedVector& frame, uint64_t generation, uint64_t frame_index) {
         const std::complex<float>* win = frame.data() + _window_offset;
         const size_t sym_len = _cfg.ofdm.fft_size + _cfg.ofdm.cp_length;
 
@@ -671,10 +738,10 @@ public:
             if (_bs_frame_fn) {
                 const uint64_t bs_frame = _bs_frame_fn();
                 inv << ", bs_tx_frame=" << bs_frame
-                    << ", ul_rx-bs_tx_gap=" << (static_cast<int64_t>(_frame_count) -
+                    << ", ul_rx-bs_tx_gap_frames=" << (static_cast<int64_t>(frame_index) -
                                                 static_cast<int64_t>(bs_frame));
             }
-            LOG_G_INFO() << "[UL-RX] health: ul_rx_frame=" << _frame_count
+            LOG_G_INFO() << "[UL-RX] health: ul_rx_frame=" << frame_index
                          << ", pilot_noise_var=" << noise_var
                          << ", decoded=" << _decoded_count.load(std::memory_order_relaxed)
                          << inv.str();
@@ -697,7 +764,7 @@ public:
             if (llr_frame == nullptr) {
                 return;
             }
-            llr_frame->frame_index = _frame_count;
+            llr_frame->frame_index = frame_index;
             llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
             llr_frame->llr.resize(_layout.payload_re_count * 2);
@@ -725,7 +792,7 @@ public:
             if (llr_frame == nullptr) {
                 return;
             }
-            llr_frame->frame_index = _frame_count;
+            llr_frame->frame_index = frame_index;
             llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
             llr_frame->llr.resize(_layout.payload_re_count * 2);
@@ -1096,6 +1163,7 @@ public:
     std::atomic<int32_t> _dl_ul_timing_diff{0};
     std::mutex _restart_mutex;
     radio::TimeSpec _pending_restart_time{0.0};
+    uint64_t _pending_restart_base_frame_index{0};
     std::atomic<bool> _restart_requested{false};
     std::atomic<uint64_t> _stream_generation{0};
     std::atomic<uint64_t> _rx_error_count{0};
