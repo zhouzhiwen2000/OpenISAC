@@ -1,177 +1,122 @@
 ---
-title: UE Reception
-description: UE synchronization, CFO/SFO tracking, channel estimation, equalization, and payload recovery.
+title: Downlink Communication
+description: BS-to-UE channel estimation, CFO/SFO tracking, equalization, soft demapping, and LDPC decoding.
 ---
 
-The UE receive path is a two-state finite-state machine: `SYNC_SEARCH` and `NORMAL`. `SYNC_SEARCH` finds frame timing and coarse carrier offset. `NORMAL` demodulates frames, tracks residual timing/frequency offsets, and decodes payloads.
-
-![UE receive processing flow](/images/FlowGraph_UE.png)
-
-## ZC Timing Metric
-
-Let $N_s=N+N_\mathrm{CP}$ be the number of samples in one OFDM symbol. In the compact one-ZC configuration, the UE correlates the received block with the local time-domain ZC reference $s_\mathrm{ZC}[k]$:
+Downlink processing begins after the UE has acquired frame timing and formed the FFT grid $\boldsymbol Y_\gamma^\mathrm{DL}$. The complete chain is
 
 $$
-\Lambda_\mathrm{ZC}[u]
-=
-\frac{
-\left|\sum_{k=0}^{N_s-1}y_\mathrm{UE}[u+k]s_\mathrm{ZC}^{*}[k]\right|^2
-}{
-\left(\sum_{k=0}^{N_s-1}|y_\mathrm{UE}[u+k]|^2\right)
-\left(\sum_{k=0}^{N_s-1}|s_\mathrm{ZC}[k]|^2\right)
-}
+\text{ZC channel estimation}
+\rightarrow
+\text{pilot phase tracking}
+\rightarrow
+\text{per-symbol channel reconstruction}
+\rightarrow
+\text{equalization}
+\rightarrow
+\text{QPSK LLRs}
+\rightarrow
+\text{LDPC decoding}.
 $$
 
-The implementation compares the peak-to-average ratio
+TDD processes $m\in\mathcal S_\mathrm{DL}$, while FDD processes the complete frame on the downlink carrier.
+
+## Frequency-Domain Model
+
+With sufficient cyclic-prefix length and small intra-symbol Doppler,
 
 $$
-\rho_\mathrm{ZC}
-=
-\frac{\Lambda_\mathrm{ZC}[\hat{k}_\mathrm{peak}]}
-{\frac{1}{|\mathcal{U}|}\sum_{u\in\mathcal{U}}\Lambda_\mathrm{ZC}[u]}
-$$
-
-against a threshold. If accepted, the initial timing estimate is
-
-$$
-\hat{k}_\mathrm{TO}
-=
-\hat{k}_\mathrm{peak}-m_\mathrm{sync}N_s-N_\mathrm{lag}
-$$
-
-The $N_\mathrm{lag}$ margin leaves room for multipath components that arrive earlier than the strongest path.
-
-## Optional CFO Acquisition
-
-For larger initial CFO, an optional second ZC symbol supports a Schmidl-Cox-style metric:
-
-$$
-P_\mathrm{SC}[u]
-=
-\sum_{k=0}^{N-1}
-y_\mathrm{UE}^{*}[u+N_\mathrm{CP}+k]
-y_\mathrm{UE}[u+N_s+N_\mathrm{CP}+k]
-$$
-
-$$
-R_\mathrm{SC}[u]
-=
-\sum_{k=0}^{N-1}|y_\mathrm{UE}[u+N_s+N_\mathrm{CP}+k]|^2,
-\quad
-\Lambda_\mathrm{SC}[u]=\frac{|P_\mathrm{SC}[u]|^2}{R_\mathrm{SC}^2[u]}
-$$
-
-The modulo CFO estimate is
-
-$$
-\hat{f}_{o,\mathrm{mod}}
-=
-\frac{\angle P_\mathrm{SC}[\hat{u}]}{2\pi N_sT_s}
-$$
-
-The receiver then tests CFO candidates against the local ZC metric and refines the chosen frequency estimate with CP-tail correlation or the optional CFO training field.
-
-## NORMAL-State Channel Model
-
-After timing/frequency compensation, frame $\gamma$ is FFT-demodulated into
-
-$$
-(\boldsymbol{B}_{\mathrm{UE},\gamma})_{n,m}
-=
-b_{n,m,\gamma}(\boldsymbol{H}_{\mathrm{UE},\gamma})_{n,m}
-+(\boldsymbol{Z}_{\mathrm{UE},\gamma})_{n,m}
+Y_{n,m,\gamma}^\mathrm{DL}
+=b_{n,m,\gamma}^\mathrm{DL}
+H_{n,m,\gamma}^\mathrm{DL}
++Z_{n,m,\gamma}^\mathrm{DL},
 $$
 
 where
 
 $$
-(\boldsymbol{H}_{\mathrm{UE},\gamma})_{n,m}
-=
-\sum_{l=1}^{L}
-\alpha_l
-e^{j2\pi\left((f_{D,l}+\Delta\bar{f}_{c,\gamma})mT_O
--n\Delta f(\tau_l+\bar{\tau}_{d,\gamma,mN_s})\right)}
+H_{n,m,\gamma}^\mathrm{DL}
+=\sum_{l=1}^{L_\mathrm{DL}}
+\alpha_l^\mathrm{DL}
+e^{j2\pi\left[
+(f_{D,l}^\mathrm{DL}+\Delta\bar f_{c,\gamma}^\mathrm{DL})
+(m+\gamma M)T_O
+-\kappa_n\Delta f
+(\tau_l^\mathrm{DL}+\bar\tau_{d,\gamma,m}^\mathrm{DL})
+\right]}.
 $$
 
-The full-band ZC symbol gives the initial channel estimate:
+$\Delta\bar f_{c,\gamma}^\mathrm{DL}$ and $\bar\tau_{d,\gamma,m}^\mathrm{DL}$ are the residual frequency and timing offsets after current compensation.
+
+## Channel References and Intra-Frame Reconstruction
+
+The full-band ZC gives
 
 $$
-(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m_\mathrm{sync}}
-=
-\frac{(\boldsymbol{B}_{\mathrm{UE},\gamma})_{n,m_\mathrm{sync}}}{z_n}
+\hat H_{n,m_\mathrm{sync},\gamma}^\mathrm{LS}
+=\frac{Y_{n,m_\mathrm{sync},\gamma}^\mathrm{DL}}
+{z_n^\mathrm{DL}}.
 $$
 
-Its delay spectrum is
+Delay-support limiting and Wiener smoothing produce a lower-noise channel anchor. Optional mid-frame full-band references provide more anchors $\hat H_{n,m_a,\gamma}$. Between adjacent anchors $m_a<m<m_b$,
 
 $$
-\tilde{p}_{\mathrm{delay},\gamma}[k]
-=
-\frac{1}{\sqrt{N}}
-\sum_{n=0}^{N-1}
-(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m_\mathrm{sync}}
-e^{j2\pi nk/N}
+\hat H_{n,m,\gamma}^{\mathrm{base}}
+=(1-\xi_m)\hat H_{n,m_a,\gamma}
++\xi_m\hat H_{n,m_b,\gamma},
+\qquad
+\xi_m=\frac{m-m_a}{m_b-m_a}.
 $$
 
-and $|\tilde{p}_{\mathrm{delay},\gamma}[k]|^2$ is used for delay-peak tracking.
+The residual CFO/SFO phase from the pilots is then applied at each symbol time. With no additional anchors, this reduces to propagation from the synchronization symbol across the frame.
 
-## CFO/SFO Tracking
+## ZF and MMSE Equalization
 
-For pilot subcarriers $n\in\mathcal{P}$, the receiver forms cross-symbol autocorrelation:
-
-$$
-(\boldsymbol{R}_{\mathrm{UE},\gamma})_{n,m}
-=
-(\boldsymbol{B}_{\mathrm{UE},\gamma}^{*})_{n,m}
-(\boldsymbol{B}_{\mathrm{UE},\gamma})_{n,m+1}
-$$
-
-After averaging across OFDM symbols:
+The zero-forcing coefficient is
 
 $$
-\bar{R}_{\mathrm{UE},\gamma}[n]
-=
-\frac{1}{M-1}
-\sum_{m=0}^{M-2}
-(\boldsymbol{R}_{\mathrm{UE},\gamma})_{n,m}
+G_{n,m}^{\mathrm{ZF}}
+=\frac{(\hat H_{n,m}^\mathrm{DL})^*}
+{\max(|\hat H_{n,m}^\mathrm{DL}|^2,\epsilon)},
 $$
 
-the pilot phase is approximately linear in subcarrier index:
+while the regularized MMSE coefficient is
 
 $$
-\varphi_{\mathrm{UE},\gamma}[n]
-=
-\arg(\bar{R}_{\mathrm{UE},\gamma}[n])
+G_{n,m}^{\mathrm{MMSE}}
+=\frac{(\hat H_{n,m}^\mathrm{DL})^*}
+{|\hat H_{n,m}^\mathrm{DL}|^2+\hat\sigma_Z^2/E_s}.
+$$
+
+ZF preserves the constellation directly at high SNR; MMSE limits noise enhancement in deep fades. For data resources,
+
+$$
+\hat d_{n,m,\gamma}^\mathrm{DL}
+=G_{n,m}Y_{n,m,\gamma}^\mathrm{DL}.
+$$
+
+Equalized pilot errors estimate the effective noise variance:
+
+$$
+\hat\sigma_\mathrm{eq}^2
+=\frac{1}{|\Omega_\mathrm{ref}^\mathrm{DL}|}
+\sum_{(n,m)\in\Omega_\mathrm{ref}^\mathrm{DL}}
+|\hat p_{n,m}^\mathrm{DL}-p_{n,m}^\mathrm{DL}|^2.
+$$
+
+## QPSK Soft Information and LDPC
+
+For equalized symbol $\hat d$, the max-log LLR of bit $i$ is
+
+$$
+L_i(\hat d)
 \approx
-2\pi(f_{o,\gamma}T_O-n\Delta f\,N_s\Delta T_{s,\gamma})
+\frac{
+\min\limits_{a\in\mathcal A_i^{(1)}}|\hat d-a|^2
+-\min\limits_{a\in\mathcal A_i^{(0)}}|\hat d-a|^2
+}{\hat\sigma_\mathrm{eq}^2},
 $$
 
-Weighted linear regression over the pilot phases estimates
+where $\mathcal A_i^{(b)}$ is the QPSK subset whose $i$th label bit equals $b$. Keeping LLR magnitude gives the LDPC decoder reliability information that hard decisions discard.
 
-$$
-\hat{\boldsymbol{\theta}}_\gamma
-=
-\begin{bmatrix}
-\hat{f}_{o,\gamma}\\
-\Delta\hat{T}_{s,\gamma}
-\end{bmatrix}
-$$
-
-The full-frame channel estimate is then propagated from the ZC symbol:
-
-$$
-(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m}
-=
-(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m_\mathrm{sync}}
-e^{j2\pi(m-m_\mathrm{sync})(\hat{f}_{o,\gamma}T_O-n\Delta fN_s\Delta\hat{T}_{s,\gamma})}
-$$
-
-Finally, data symbols are equalized by a one-tap frequency-domain equalizer:
-
-$$
-\hat{b}_{n,m,\gamma}
-=
-\frac{(\boldsymbol{B}_{\mathrm{UE},\gamma})_{n,m}}
-{(\hat{\boldsymbol{H}}_{\mathrm{UE},\gamma})_{n,m}}
-$$
-
-The equalized symbols feed LLR computation, descrambling, and LDPC decoding.
+The transmit order is LDPC encoding, scrambling, interleaving, and QPSK mapping. The UE reverses this order with soft deinterleaving, soft descrambling, and LDPC decoding. The resulting $\hat H_{n,m,\gamma}^\mathrm{DL}$ and symbol decisions also feed [bistatic sensing](/docs/signal-processing/bistatic-sensing/).

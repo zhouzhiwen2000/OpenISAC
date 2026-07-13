@@ -1,111 +1,117 @@
 ---
 title: 信号模型
-description: OpenISAC 使用的 OFDM 通信、单站感知和双站感知模型。
+description: 双向 OFDM 通信、多通道 ULA 单站感知和 UE 双站感知的统一模型。
 ---
 
-OpenISAC 使用同一套连续 OFDM 波形支持下行通信、BS 侧单站感知和 UE 侧双站感知。当前公开平台是 SISO 原型：一个 BS 发射通道、一个 BS 感知接收通道和一个 UE 接收通道。
+当前 OpenISAC 系统包含一条 BS→UE 下行、一条 UE→BS 上行、$R$ 个 BS 单站感知接收通道，以及一个 UE 双站感知观测。BS 的下行波形同时承担通信和照射信号；UE 接收同一波形并同时用于通信解调与双站感知。
 
-![OpenISAC 系统与信道模型](/images/OpenISAC_SystemModel.png)
+## 双向通信信道
 
-BS 连续发送 OFDM 帧：
-
-$$
-s(t)=\sum_{\gamma=0}^{\infty}s_\gamma(t-\gamma T_F)
-$$
-
-其中 $T_F=MT_O$，$M$ 是每帧 OFDM 符号数，$T_O=T+T_\mathrm{CP}$ 是包含循环前缀的 OFDM 符号时长。
-
-第 $\gamma$ 帧的基带波形为：
+令 $x\in\{\mathrm{DL},\mathrm{UL}\}$ 表示下行或上行。链路 $x$ 的时变多径信道写为
 
 $$
-s_\gamma(t)=
-\sum_{m=0}^{M-1}\sum_{n=0}^{N-1}
-b_{n,m,\gamma}
-e^{j2\pi n\Delta f(t-mT_O-T_\mathrm{CP})}
-\cdot
-\operatorname{rect}\!\left(\frac{t-mT_O}{T_O}\right)
+h_x(t,\tau)=
+\sum_{l=1}^{L_x}
+\alpha_l^x
+\delta\!\left(\tau-\tau_l^x-\tau_d^x(t)\right)
+e^{j2\pi(f_{D,l}^x+\Delta f_c^x)t}.
 $$
 
-这里 $b_{n,m,\gamma}$ 是第 $n$ 个子载波、第 $m$ 个 OFDM 符号上的星座符号，$N$ 为 FFT 大小，$\Delta f$ 为子载波间隔。
+其中，$L_x$ 是可分辨路径数，$\alpha_l^x$、$\tau_l^x$ 和 $f_{D,l}^x$ 分别是第 $l$ 条路径的复系数、传播时延和多普勒频移；$\tau_d^x(t)$ 是两端参考时间不一致造成的链路定时偏移，$\Delta f_c^x$ 是载波频偏。
 
-## BS-UE 信道
-
-UE 观察到的下行通信信道也是双站感知信道：
+下行与上行分别满足
 
 $$
-h_\mathrm{UE}(t,\tau)
-=
-\sum_{l=1}^{L}
-\alpha_l
-\delta(\tau-\tau_l-\tau_d)
-e^{j2\pi(f_{D,l}+\Delta f_c)t}
+y_\mathrm{UE}^\mathrm{DL}(t)
+=\int h_\mathrm{DL}(t,\tau)s_\mathrm{DL}(t-\tau)\,d\tau
++z_\mathrm{UE}(t),
 $$
 
-其中 $\alpha_l$、$\tau_l$、$f_{D,l}$ 分别为第 $l$ 条路径的复系数、时延和多普勒频移。$\tau_d$ 和 $\Delta f_c$ 表示 BS-UE 时序偏移和载波频偏。
+$$
+y_\mathrm{BS}^\mathrm{UL}(t)
+=\int h_\mathrm{UL}(t,\tau)s_\mathrm{UL}(t-\tau)\,d\tau
++z_\mathrm{BS}^\mathrm{UL}(t).
+$$
 
-在双站感知中，低多普勒或零多普勒分量被视为 clutter，动态多径分量被解释为有效散射体。
+这里不要求 $h_\mathrm{DL}=h_\mathrm{UL}$。TDD 在信道相干时间内可以近似利用传播互易性，但两端定时、频率偏移和收发响应仍需分别估计；FDD 的两个载波则直接视为两条独立频率响应。
 
-## 单站信道
+## BS 多通道单站信道
 
-BS 侧单站感知信道单独建模为：
+将 $R$ 个 BS 感知通道视为均匀线阵（ULA）。阵元间距为 $d_a$，下行载波波长为 $\lambda=c/f_c$，入射角 $\theta$ 从阵列法向（broadside）计量。阵列导向矢量定义为
 
 $$
-h_\mathrm{BS}(t,\tau)
-=
-\sum_{p=1}^{P+C}
-\beta_p
+\boldsymbol a(\theta)=
+\begin{bmatrix}
+1 & e^{j\mu(\theta)} & \cdots & e^{j(R-1)\mu(\theta)}
+\end{bmatrix}^{T},
+\qquad
+\mu(\theta)=\frac{2\pi d_a}{\lambda}\sin\theta.
+$$
+
+设场景中共有 $Q=P+C$ 个可分辨反射分量，其中 $P$ 个为运动目标、$C$ 个为静态或近静态杂波。阵列信道为
+
+$$
+\boldsymbol h_\mathrm{BS}^{\mathrm{sens}}(t,\tau)
+=\sum_{p=1}^{Q}
+\beta_p\boldsymbol a(\theta_p)
 \delta(\tau-\tau_{s,p})
-e^{j2\pi f_{D,s,p}t}
+e^{j2\pi f_{D,s,p}t}.
 $$
 
-其中 $P$ 是动态目标数，$C$ 是近静态 clutter 回波数。与 BS-UE 链路不同，单站模型不包含 BS-UE 时序偏移或载波偏移，因为发射端和感知接收端同在 BS。
+因此多通道接收向量为
 
-对于距离 $d_p$、径向速度 $v_p$、载频 $f_c$、RCS 为 $\sigma_{\mathrm{RCS},p}$ 的反射：
+$$
+\boldsymbol y_\mathrm{BS}^{\mathrm{sens}}(t)
+=\int
+\boldsymbol h_\mathrm{BS}^{\mathrm{sens}}(t,\tau)
+s_\mathrm{DL}(t-\tau)\,d\tau
++\boldsymbol z_\mathrm{BS}^{\mathrm{sens}}(t),
+$$
+
+其中 $\boldsymbol z_\mathrm{BS}^{\mathrm{sens}}(t)\sim\mathcal{CN}(\boldsymbol 0,\sigma^2\boldsymbol I_R)$。对距离 $r_p$、径向速度 $v_p$ 和雷达散射截面 $\sigma_{\mathrm{RCS},p}$ 的点目标，窄带远场模型给出
 
 $$
 \beta_p=
-\sqrt{\frac{c^2\sigma_{\mathrm{RCS},p}}{(4\pi)^3d_p^4f_c^2}}
-e^{j\phi_p},
-\quad
-\tau_{s,p}=\frac{2d_p}{c},
-\quad
-f_{D,s,p}=\frac{2v_pf_c}{c}
+\sqrt{\frac{c^2\sigma_{\mathrm{RCS},p}}
+{(4\pi)^3r_p^4f_c^2}}e^{j\phi_p},
+\qquad
+\tau_{s,p}=\frac{2r_p}{c},
+\qquad
+f_{D,s,p}=\frac{2v_pf_c}{c}.
 $$
 
-对应的单站距离关系为：
+这里约定 $v_p>0$ 表示目标沿径向接近。单站距离和速度分别由 $r=c\tau/2$ 与 $v=cf_D/(2f_c)$ 得到。
+
+## UE 双站几何
+
+对经过第 $l$ 个散射体的 BS→UE 路径，设 BS 到散射体、散射体到 UE、BS 到 UE 的距离分别为 $d_{B,l}$、$d_{l,U}$ 与 $d_{B,U}$，则
 
 $$
-R\approx\frac{c\tau}{2}
+\tau_l^\mathrm{bi}=\frac{d_{B,l}+d_{l,U}}{c},
+\qquad
+\tau_\mathrm{LoS}=\frac{d_{B,U}}{c}.
 $$
 
-## 接收采样
-
-BS 感知接收端与发射端使用相同名义采样时钟：
+以直达径为定时参考后，双站感知观测的是超额时延
 
 $$
-y_\mathrm{BS}[k]
-=
-\sum_{p=1}^{P+C}
-\beta_p s(kT_s-\tau_{s,p})
-e^{j2\pi f_{D,s,p}kT_s}
-+z_\mathrm{BS}[k]
+\Delta\tau_l^\mathrm{bi}
+=\tau_l^\mathrm{bi}-\tau_\mathrm{LoS},
+\qquad
+\Delta d_l^\mathrm{bi}=c\Delta\tau_l^\mathrm{bi}.
 $$
 
-UE 可能使用略有差异的采样间隔 $T_{s,\mathrm{UE}}=T_s-\Delta T_s$：
+因此一个固定双站时延对应以 BS 和 UE 为两个焦点的椭圆，而不是单站模型中的圆。低多普勒分量通常归入杂波，动态多径则作为双站散射体。
+
+## 采样时钟偏差
+
+名义采样间隔为 $T_s=1/B$。若接收端的实际采样间隔为 $T_{s,q}=T_s-\Delta T_{s,q}$，则第 $l$ 条通信路径的离散样本可近似写为
 
 $$
-y_{\mathrm{UE}}[k]
-=
-\sum_{l=1}^{L}y_l[k]+z_{\mathrm{UE}}[k]
-$$
-
-第 $l$ 条路径可近似为：
-
-$$
-y_l[k]\approx
+y_{q,l}[k]\approx
 \alpha_l
-s(kT_s-\tau_l-\tau_d-k\Delta T_s)
-e^{j2\pi(f_{D,l}+\Delta f_c)kT_s}
+s\!\left(kT_s-\tau_l-\tau_d[0]-k\Delta T_{s,q}\right)
+e^{j2\pi(f_{D,l}+\Delta f_c)kT_s}.
 $$
 
-该近似忽略了多普勒/CFO 与采样间隔偏移之间的小交叉项，是 UE 时序、CFO、SFO 和双站感知补偿的起点。
+该式忽略了 $(f_{D,l}+\Delta f_c)\Delta T_{s,q}$ 的二阶小量。它揭示了三种可分离的影响：固定定时偏移移动帧起点，CFO 产生随时间累积的公共相位，SFO 则同时造成随时间增长的时偏和与子载波频率相关的相位斜率。

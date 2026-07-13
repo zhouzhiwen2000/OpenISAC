@@ -8,6 +8,12 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-07-10 - 双向多通道信号处理文档统一
+
+### Summary
+
+中英文信号处理章节按统一符号体系重写：补充 TDD/FDD 上行通信、BS 多通道 ULA 单站感知、UE 双站连续时偏补偿与 eRTM 双向定时关系，并新增处理总览和上行通信页面。全章聚焦连续的信号模型、估计和变换过程，不再沿用早期 SISO、仅下行表述。
+
 ## 2026-07-10 - eRTM TO 校正谱连续化
 
 ### Summary

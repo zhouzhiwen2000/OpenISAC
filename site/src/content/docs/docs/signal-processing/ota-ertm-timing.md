@@ -1,105 +1,145 @@
 ---
 title: OTA and eRTM Timing
-description: OTA timing compensation, eRTM timing terms, and MTI suppression ratio interpretation.
+description: From LoS-relative timing to joint downlink/uplink absolute timing-offset estimation and its effect on clutter suppression.
 ---
 
-OTA timing workflows estimate and correct the relative timing terms that affect bistatic sensing. The documentation separates two related layers:
+Bistatic sensing separates two related problems:
 
-- The paper-level OTA sensing compensation, which keeps UE-side sensing delay continuous.
-- The runtime eRTM timing variables, which expose semantic timing-offset terms used by the implementation.
+- **OTA LoS tracking** uses a stable direct path to remove continuous UE-to-BS drift, producing delay relative to the LoS.
+- **eRTM bidirectional timing** combines uplink and downlink channel delays with fixed group delays and transmit/receive timing relations to separate BS-side and UE-side offsets.
 
-## eRTM Timing Terms
+The first requires only a downlink observation and stabilizes relative delay. The second uses the current bidirectional link to construct an absolute delay reference.
 
-The eRTM timing model separates configured RF delays from live runtime timing values:
+## 1. Downlink/Uplink Delay-Profile Correlation
+
+Form $L_\mathrm{os}$-times oversampled delay profiles from the downlink observed at the UE and the uplink observed at the BS:
+
+$$
+p_\mathrm{DL}[k]
+=\operatorname{IFFT}_{L_\mathrm{os}N}
+\{\hat H_\mathrm{DL}[n]\},
+\qquad
+p_\mathrm{UL}[k]
+=\operatorname{IFFT}_{L_\mathrm{os}N}
+\{\hat H_\mathrm{UL}[n]\}.
+$$
+
+Their circular complex cross-correlation is
+
+$$
+C[q]
+=\sum_k p_\mathrm{UL}[k]
+p_\mathrm{DL}^*[k-q].
+$$
+
+If $\hat q$ maximizes $|C[q]|$ and $\hat\delta_q$ is a fractional-bin refinement,
+
+$$
+\hat\tau_\mathrm{TO,BS-UE}
+=\frac{\hat q+\hat\delta_q}{L_\mathrm{os}}
+\quad\text{samples}.
+$$
+
+Correlation uses the complete multipath shape rather than subtracting two independent peak locations. Its sign is fixed by the order above; exchanging the downlink and uplink profiles reverses the sign.
+
+## 2. eRTM Timing Equations
+
+Use samples for every quantity below; division by $B$ converts to seconds. Define $\tau_\mathrm{DL,RF}$ and $\tau_\mathrm{UL,RF}$ as calibrated fixed downlink and uplink group delays, $t_\mathrm{DL-UL,BS}$ as the BS-referenced downlink/uplink timing interval, $t_\mathrm{TA,UE}$ as UE timing advance, and $\tau_\mathrm{TO,BS-UE}$ as the differential offset from delay-profile correlation.
+
+First form
 
 $$
 \tau_c
-=
-\tau_\mathrm{DL,RF}+\tau_\mathrm{UL,RF}-t_\mathrm{DL-UL,BS}-t_\mathrm{TA,UE}
+=\tau_\mathrm{DL,RF}
++\tau_\mathrm{UL,RF}
+-t_\mathrm{DL-UL,BS}
+-t_\mathrm{TA,UE}.
 $$
 
-The bistatic timing relationship can then be interpreted as:
+The endpoint offsets satisfy
 
 $$
+\tau_\mathrm{TO,BS}+\tau_\mathrm{TO,UE}=\tau_c,
+$$
+
+$$
+\tau_\mathrm{TO,BS}-\tau_\mathrm{TO,UE}
+=\tau_\mathrm{TO,BS-UE}.
+$$
+
+Therefore
+
+$$
+\boxed{
 \tau_\mathrm{TO,UE}
-=
-\frac{\tau_c-\tau_\mathrm{TO,BS-UE}}{2}
+=\frac{\tau_c-\tau_\mathrm{TO,BS-UE}}{2}
+},
 $$
 
 $$
+\boxed{
 \tau_\mathrm{TO,BS}
-=
-\frac{\tau_c+\tau_\mathrm{TO,BS-UE}}{2}
+=\frac{\tau_c+\tau_\mathrm{TO,BS-UE}}{2}
+}.
 $$
 
-In implementation terms, RF-chain terms come from `uplink.ertm_dl_rf_delay_samples` and `uplink.ertm_ul_rf_delay_samples`, while DUTI/TADV-style runtime terms come from live control or timing state. The current runtime keeps these eRTM terms in samples, including fractional RF-chain delay samples. Keep raw display values separate from semantic timing-offset variables and correction values.
+$\tau_c$ provides the sum of endpoint offsets and bidirectional correlation provides their difference, so both are required for a unique decomposition. Fixed-delay calibration error produces a common bias; correlation error mainly perturbs the difference.
 
-## Why OTA Compensation Improves MTI
+## 3. From Timing Estimate to Frequency-Domain Compensation
 
-In a static bistatic scene, residual timing drift makes static clutter fail to cancel cleanly. OpenISAC uses the MTI suppression ratio (MSR) as a stability proxy:
+If $\hat\tau_\mathrm{TO}$ is in samples, positive delay creates phase $-2\pi\kappa_n\Delta f\hat\tau_\mathrm{TO}/B$. Removing it gives
+
+$$
+H_\mathrm{corr}[n]
+=H[n]
+\exp\!\left(
+j2\pi\kappa_n\Delta f
+\frac{\hat\tau_\mathrm{TO}}{B}
+\right).
+$$
+
+The physical timing estimate and the applied phase correction therefore have opposite signs. Integer frame-origin changes must also be added back into the observation coordinate so that absolute delay does not acquire artificial steps.
+
+## 4. Why Timing Compensation Improves MTI
+
+For one static bistatic path,
+
+$$
+F[n,m]
+\approx
+\alpha
+e^{-j2\pi\kappa_n\Delta f(\tau+\tau_d[m])}.
+$$
+
+Using a two-pulse canceller to illustrate MTI,
+
+$$
+\tilde F[n,m]=F[n,m]-F[n,m-1],
+$$
+
+which gives
+
+$$
+|\tilde F[n,m]|^2
+=4|\alpha|^2
+\sin^2\!\left[
+\pi\kappa_n\Delta f
+(\tau_d[m]-\tau_d[m-1])
+\right].
+$$
+
+An ideal static path cancels between adjacent slow-time samples. Residual timing drift changes its subcarrier phase and leaks energy through MTI. Continuous timing/SFO compensation reduces $\tau_d[m]-\tau_d[m-1]$ and therefore reduces static clutter residue.
+
+The MTI suppression ratio is
 
 $$
 \mathrm{MSR}
-=
-\frac{
-\sum_{m=m_\mathrm{start}}^{m_\mathrm{start}+M_\mathrm{avg}}
-\sum_{n=0}^{N-1}
-|(\grave{\boldsymbol{F}}_\mathrm{UE})_{n,m}|^2
-}{
-\sum_{m=m_\mathrm{start}}^{m_\mathrm{start}+M_\mathrm{avg}}
-\sum_{n=0}^{N-1}
-|(\tilde{\boldsymbol{F}}_\mathrm{UE})_{n,m}|^2
-}
+=\frac{\sum_{m,n}|F[n,m]|^2}
+{\sum_{m,n}|\tilde F[n,m]|^2}.
 $$
 
-Here $\grave{\boldsymbol{F}}_\mathrm{UE}$ is the pre-MTI bistatic TF-domain stream and $\tilde{\boldsymbol{F}}_\mathrm{UE}$ is the post-MTI stream.
+For the same static scene and MTI filter, higher MSR indicates that compensation has made the static component more coherent and easier to reject. MSR measures long-term phase stability; it is not itself target-detection SNR.
 
-For a single static component with $f_{D,1}=0$, the pre-MTI sample can be approximated as
+## 5. Applicability
 
-$$
-(\grave{\boldsymbol{F}}_\mathrm{UE})_{n,m}
-\approx
-\alpha_1
-e^{-j2\pi n\Delta f(\tau_1+\bar{\tau}_{d,\gamma,mN_s})}
-$$
-
-For intuition, a two-pulse MTI would produce
-
-$$
-\begin{aligned}
-(\tilde{\boldsymbol{F}}_\mathrm{UE})_{n,m}
-&\approx
-\alpha_1 e^{-j2\pi n\Delta f\tau_1}
-\\
-&\quad\cdot
-\left(
-e^{-j2\pi n\Delta f\bar{\tau}_{d,\gamma,mN_s}}
--
-e^{-j2\pi n\Delta f\bar{\tau}_{d,\gamma,(m-1)N_s}}
-\right)
-\end{aligned}
-$$
-
-Taking squared magnitude cancels the common phase:
-
-$$
-|(\tilde{\boldsymbol{F}}_\mathrm{UE})_{n,m}|^2
-=
-4|\alpha_1|^2
-\sin^2\!\left(
-\pi n\Delta f
-(\bar{\tau}_{d,\gamma,mN_s}
--
-\bar{\tau}_{d,\gamma,(m-1)N_s})
-\right)
-$$
-
-Larger inter-frame timing fluctuations therefore increase post-MTI residual energy and reduce achievable MSR. Although the runtime uses an IIR MTI filter rather than a two-pulse canceller, the same trend remains.
-
-## Measured Stability Impact
-
-![MSR improvement from OTA synchronization](/images/OpenISAC_MSRImprovement.png)
-
-In the paper experiment, MSR improvement was measured under two center frequencies, $f_c\in\{2.4,3.1\}$ GHz, and two bandwidths, $B\in\{50,100\}$ MHz. The improvement is near 0 dB around zero clock error, around 10--14 dB near $\pm0.25$ ppm, and around 17--22 dB near $\pm0.5$ ppm.
-
-The important operational interpretation is direct: when the UE clock is already well aligned, OTA compensation has little to correct; as clock error grows, continuous timing compensation prevents static-scene delay drift from leaking through MTI.
+OTA LoS tracking requires a persistent reference path; dominant-path switching can be mistaken for clock drift. eRTM additionally requires corresponding structure in the uplink and downlink delay profiles and calibrated fixed group delays. In FDD the complex channel gains need not be reciprocal, but delay-profile correlation can still constrain timing while the principal path delays correspond. If the two carriers expose very different path sets, correlation confidence decreases.

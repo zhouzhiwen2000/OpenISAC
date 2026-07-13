@@ -9,7 +9,7 @@ OpenISAC 包含用于可视化、配置、运行时控制和文档的脚本。
 
 - `scripts/plot_sensing_fast.py` 显示 BS 侧感知数据。
 - `scripts/plot_bi_sensing_fast.py` 显示双站感知数据。
-- `scripts/uplink_timing_control.py` 支持时序控制工作流。
+- `scripts/uplink_timing_control.py` 支持定时控制工作流。
 - `scripts/isolate_cpus.py`（封装：`isolate_cpus.bash`）按 YAML 关键核做 CPU 隔离，并用 `run` 启动后端（进程可用全部 CPU）。
 
 ## 配置

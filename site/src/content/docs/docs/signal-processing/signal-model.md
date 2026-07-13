@@ -1,111 +1,115 @@
 ---
 title: Signal Model
-description: OFDM communication, monostatic sensing, and bistatic sensing models used by OpenISAC.
+description: A unified model for bidirectional OFDM communication, multichannel ULA monostatic sensing, and UE bistatic sensing.
 ---
 
-OpenISAC uses one continuous OFDM waveform for downlink communication, BS-side monostatic sensing, and UE-side bistatic sensing. The current public platform is a SISO prototype: one BS transmit path, one BS sensing receive path, and one UE receive path.
+The current OpenISAC system contains a BS-to-UE downlink, a UE-to-BS uplink, $R$ monostatic sensing channels at the BS, and one bistatic observation at the UE. The BS downlink waveform is both the communication signal and the sensing illumination; the UE uses the same received waveform for downlink decoding and bistatic sensing.
 
-![OpenISAC system and channel model](/images/OpenISAC_SystemModel.png)
+## Bidirectional Communication Channels
 
-The BS transmits continuous OFDM frames:
-
-$$
-s(t)=\sum_{\gamma=0}^{\infty}s_\gamma(t-\gamma T_F)
-$$
-
-where $T_F=MT_O$, $M$ is the number of OFDM symbols per frame, and $T_O=T+T_\mathrm{CP}$ is the OFDM symbol duration including cyclic prefix.
-
-For frame $\gamma$, the baseband waveform is
+Let $x\in\{\mathrm{DL},\mathrm{UL}\}$ denote the downlink or uplink. Its time-varying multipath channel is
 
 $$
-s_\gamma(t)=
-\sum_{m=0}^{M-1}\sum_{n=0}^{N-1}
-b_{n,m,\gamma}
-e^{j2\pi n\Delta f(t-mT_O-T_\mathrm{CP})}
-\cdot
-\operatorname{rect}\!\left(\frac{t-mT_O}{T_O}\right)
+h_x(t,\tau)=
+\sum_{l=1}^{L_x}
+\alpha_l^x
+\delta\!\left(\tau-\tau_l^x-\tau_d^x(t)\right)
+e^{j2\pi(f_{D,l}^x+\Delta f_c^x)t}.
 $$
 
-Here $b_{n,m,\gamma}$ is the constellation symbol on subcarrier $n$ and OFDM symbol $m$, $N$ is the FFT size, and $\Delta f$ is the subcarrier spacing.
-
-## BS-UE Channel
-
-The downlink communication channel observed at the UE is also the bistatic sensing channel:
+$L_x$ is the number of resolvable paths. For path $l$, $\alpha_l^x$, $\tau_l^x$, and $f_{D,l}^x$ are its complex coefficient, propagation delay, and Doppler shift. The link timing offset is $\tau_d^x(t)$ and the carrier-frequency offset is $\Delta f_c^x$. The received signals are
 
 $$
-h_\mathrm{UE}(t,\tau)
-=
-\sum_{l=1}^{L}
-\alpha_l
-\delta(\tau-\tau_l-\tau_d)
-e^{j2\pi(f_{D,l}+\Delta f_c)t}
+y_\mathrm{UE}^\mathrm{DL}(t)
+=\int h_\mathrm{DL}(t,\tau)s_\mathrm{DL}(t-\tau)\,d\tau
++z_\mathrm{UE}(t),
 $$
 
-where $\alpha_l$, $\tau_l$, and $f_{D,l}$ are the complex coefficient, delay, and Doppler shift of path $l$. The terms $\tau_d$ and $\Delta f_c$ capture BS-UE timing offset and carrier-frequency offset.
+$$
+y_\mathrm{BS}^\mathrm{UL}(t)
+=\int h_\mathrm{UL}(t,\tau)s_\mathrm{UL}(t-\tau)\,d\tau
++z_\mathrm{BS}^\mathrm{UL}(t).
+$$
 
-For bistatic sensing, low- or zero-Doppler components are treated as clutter, while dynamic multipath components are interpreted as scatterers.
+The model does not require $h_\mathrm{DL}=h_\mathrm{UL}$. TDD may exploit propagation reciprocity within the channel coherence time, but timing offsets, frequency offsets, and endpoint responses still require separate estimation. FDD uses two carriers and therefore treats their frequency responses separately.
 
-## Monostatic Channel
+## Multichannel BS Monostatic Channel
 
-The BS-side monostatic sensing channel is modeled separately:
+Model the $R$ BS sensing channels as a uniform linear array (ULA) with element spacing $d_a$. Let $\lambda=c/f_c$ be the downlink wavelength and measure $\theta$ from array broadside. The steering vector is
 
 $$
-h_\mathrm{BS}(t,\tau)
-=
-\sum_{p=1}^{P+C}
-\beta_p
+\boldsymbol a(\theta)=
+\begin{bmatrix}
+1 & e^{j\mu(\theta)} & \cdots & e^{j(R-1)\mu(\theta)}
+\end{bmatrix}^{T},
+\qquad
+\mu(\theta)=\frac{2\pi d_a}{\lambda}\sin\theta.
+$$
+
+Let $Q=P+C$ denote $P$ moving-target components and $C$ static or near-static clutter components. The array-valued channel is
+
+$$
+\boldsymbol h_\mathrm{BS}^{\mathrm{sens}}(t,\tau)
+=\sum_{p=1}^{Q}
+\beta_p\boldsymbol a(\theta_p)
 \delta(\tau-\tau_{s,p})
-e^{j2\pi f_{D,s,p}t}
+e^{j2\pi f_{D,s,p}t},
 $$
 
-where $P$ is the number of dynamic targets and $C$ is the number of near-static clutter echoes. Unlike the BS-UE link, this model has no BS-UE timing offset or carrier offset because the monostatic transmitter and sensing receiver are co-located at the BS.
+and the received vector is
 
-For a reflection with range $d_p$, radial velocity $v_p$, carrier frequency $f_c$, and radar cross section $\sigma_{\mathrm{RCS},p}$:
+$$
+\boldsymbol y_\mathrm{BS}^{\mathrm{sens}}(t)
+=\int
+\boldsymbol h_\mathrm{BS}^{\mathrm{sens}}(t,\tau)
+s_\mathrm{DL}(t-\tau)\,d\tau
++\boldsymbol z_\mathrm{BS}^{\mathrm{sens}}(t),
+$$
+
+where $\boldsymbol z_\mathrm{BS}^{\mathrm{sens}}(t)\sim\mathcal{CN}(\boldsymbol0,\sigma^2\boldsymbol I_R)$. For a point target at range $r_p$, radial velocity $v_p$, and radar cross section $\sigma_{\mathrm{RCS},p}$,
 
 $$
 \beta_p=
-\sqrt{\frac{c^2\sigma_{\mathrm{RCS},p}}{(4\pi)^3d_p^4f_c^2}}
-e^{j\phi_p},
-\quad
-\tau_{s,p}=\frac{2d_p}{c},
-\quad
-f_{D,s,p}=\frac{2v_pf_c}{c}
+\sqrt{\frac{c^2\sigma_{\mathrm{RCS},p}}
+{(4\pi)^3r_p^4f_c^2}}e^{j\phi_p},
+\qquad
+\tau_{s,p}=\frac{2r_p}{c},
+\qquad
+f_{D,s,p}=\frac{2v_pf_c}{c}.
 $$
 
-This gives the usual monostatic range relationship:
+Positive $v_p$ denotes an approaching target. Monostatic range and velocity follow from $r=c\tau/2$ and $v=cf_D/(2f_c)$.
+
+## UE Bistatic Geometry
+
+For a BS-to-UE path through scatterer $l$, let $d_{B,l}$, $d_{l,U}$, and $d_{B,U}$ denote the BS-to-scatterer, scatterer-to-UE, and BS-to-UE distances. Then
 
 $$
-R\approx\frac{c\tau}{2}
+\tau_l^\mathrm{bi}=\frac{d_{B,l}+d_{l,U}}{c},
+\qquad
+\tau_\mathrm{LoS}=\frac{d_{B,U}}{c}.
 $$
 
-## Received Samples
-
-The BS sensing receiver samples with the same nominal clock as the transmitter:
+After using the line-of-sight path as the timing reference, bistatic sensing measures
 
 $$
-y_\mathrm{BS}[k]
-=
-\sum_{p=1}^{P+C}
-\beta_p s(kT_s-\tau_{s,p})
-e^{j2\pi f_{D,s,p}kT_s}
-+z_\mathrm{BS}[k]
+\Delta\tau_l^\mathrm{bi}
+=\tau_l^\mathrm{bi}-\tau_\mathrm{LoS},
+\qquad
+\Delta d_l^\mathrm{bi}=c\Delta\tau_l^\mathrm{bi}.
 $$
 
-The UE samples with a possibly different sampling interval $T_{s,\mathrm{UE}}=T_s-\Delta T_s$:
+A fixed bistatic delay therefore defines an ellipse with the BS and UE as its foci, rather than a monostatic range circle. Low-Doppler components are normally treated as clutter, while dynamic multipath components represent bistatic scatterers.
+
+## Sampling-Clock Mismatch
+
+The nominal sampling interval is $T_s=1/B$. If receiver $q$ uses $T_{s,q}=T_s-\Delta T_{s,q}$, one communication path is approximately
 
 $$
-y_{\mathrm{UE}}[k]
-=
-\sum_{l=1}^{L}y_l[k]+z_{\mathrm{UE}}[k]
-$$
-
-with the $l$th path approximated as
-
-$$
-y_l[k]\approx
+y_{q,l}[k]\approx
 \alpha_l
-s(kT_s-\tau_l-\tau_d-k\Delta T_s)
-e^{j2\pi(f_{D,l}+\Delta f_c)kT_s}
+s\!\left(kT_s-\tau_l-\tau_d[0]-k\Delta T_{s,q}\right)
+e^{j2\pi(f_{D,l}+\Delta f_c)kT_s}.
 $$
 
-This approximation ignores the small cross term between Doppler/CFO and sampling-interval offset. It is the starting point for the UE timing, CFO, SFO, and bistatic sensing compensation steps.
+This approximation neglects the second-order term $(f_{D,l}+\Delta f_c)\Delta T_{s,q}$. It separates three effects: a fixed timing offset moves the frame origin, CFO produces a common phase rotation over time, and SFO creates both accumulating timing drift and a subcarrier-dependent phase slope.
