@@ -444,6 +444,9 @@ const APP = window.__APP_STATE__;
     function moduleCpuValues(model) {
       const values = [];
       values.push(...parseCpuListText(findField(model, 'downlink_cpu_cores')?.value_text));
+      if (fieldBoolValue(model, 'sensing.bi_enabled', false)) {
+        values.push(...parseCpuListText(findField(model, 'sensing_cpu_cores')?.value_text));
+      }
       values.push(...parseCpuListText(findField(model, 'uplink_cpu_cores')?.value_text));
       for (const key of ['main_cpu_core']) {
         const field = findField(model, key);

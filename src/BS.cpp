@@ -785,15 +785,15 @@ private:
                     LOG_G_WARN() << "[Sensing Aggregate] scheduled batch reset at symbol "
                                  << _shared_batch_reset_symbol->load(std::memory_order_relaxed);
                 },
-                [this](const std::string& ip, int port) {
+                [this](const std::string&, int) {
                     if (_aggregated_sensing_sender) {
                         if (_control_handler.send_heartbeat_to_last_peer()) {
                             return;
                         }
-                        _control_handler.send_heartbeat(_cfg.network_output.mono_sensing_ip, _cfg.network_output.mono_sensing_port);
+                        _control_handler.send_heartbeat();
                         return;
                     }
-                    _control_handler.send_heartbeat(ip, port);
+                    _control_handler.send_heartbeat();
                 },
                 [](size_t) {
                     return std::nullopt;

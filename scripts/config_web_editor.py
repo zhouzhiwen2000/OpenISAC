@@ -27,7 +27,7 @@ SCHEMA_TEMPLATE_PATH = Path(__file__).with_name("config_web_editor_schema.yaml")
 
 PROFILING_OPTIONS: dict[str, tuple[str, ...]] = {
     "bs": ("all", "modulation", "latency", "ldpc_encode", "sensing_proc", "arq"),
-    "ue": ("all", "demodulation", "agc", "align", "uplink", "arq"),
+    "ue": ("all", "demodulation", "cfo", "agc", "align", "uplink", "arq"),
 }
 
 PROFILING_DESCRIPTIONS: dict[str, str] = {
@@ -38,6 +38,7 @@ PROFILING_DESCRIPTIONS: dict[str, str] = {
     "sensing_proc": "Profile sensing processing in the BS path, including per-channel sensing work.",
     "arq": "Show ARQ ACK, retransmission, queue, and feedback-carrier diagnostics.",
     "demodulation": "Show UE per-frame processing breakdown and load statistics.",
+    "cfo": "Enable UE CUDA CFO tracking diagnostics and CPU mirror comparison logs.",
     "agc": "Enable AGC-related runtime diagnostics and gain-adjust logs.",
     "align": "Enable runtime alignment diagnostics, including ALGN logs.",
     "uplink": "Enable UE uplink TX runtime diagnostics, including UL-TX timing and waveform logs.",
@@ -802,6 +803,8 @@ def unique_cpu_spec(values: list[int]) -> str:
 def configured_cpu_values(data: dict[str, Any]) -> list[int]:
     values: list[int] = []
     values.extend(int_or_zero(v) for v in (data.get("downlink_cpu_cores", []) or []))
+    if bool_value(data.get("sensing.bi_enabled", data.get("bi_enabled", False))):
+        values.extend(int_or_zero(v) for v in (data.get("sensing_cpu_cores", []) or []))
     values.extend(int_or_zero(v) for v in (data.get("uplink_cpu_cores", []) or []))
     main_core = data.get("main_cpu_core", -1)
     if main_core is not None:
@@ -859,6 +862,27 @@ def reject_top_level_config_values(raw_data: dict[str, Any], source: Path) -> No
 def normalize_loaded_config_values(data: dict[str, Any]) -> None:
     if "channel_tracking_mode" in data:
         data["channel_tracking_mode"] = normalize_channel_tracking_mode_value(data.get("channel_tracking_mode"))
+
+
+def enabled_if_rule_satisfied_for_data(data: dict[str, Any], rule: Any) -> bool:
+    if not rule:
+        return True
+    if isinstance(rule, list):
+        return all(enabled_if_rule_satisfied_for_data(data, item) for item in rule)
+    if not isinstance(rule, dict):
+        return True
+    if isinstance(rule.get("all"), list):
+        return all(enabled_if_rule_satisfied_for_data(data, item) for item in rule["all"])
+    if isinstance(rule.get("any"), list):
+        return any(enabled_if_rule_satisfied_for_data(data, item) for item in rule["any"])
+    key = rule.get("key")
+    if not key:
+        return True
+    expected = rule.get("value", True)
+    actual = data.get(str(key))
+    if isinstance(expected, bool):
+        return bool_value(actual) == expected
+    return str(actual) == str(expected)
 
 
 def enrich_mapping_list_layouts(layout: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1392,6 +1416,8 @@ def render_yaml(tab_name: str, layout: list[dict[str, Any]], data: dict[str, Any
             yaml_key = field_yaml_key(field)
             comment = field.get("comment", "")
             suffix = f"  # {comment}" if comment else ""
+            if not enabled_if_rule_satisfied_for_data(data, field.get("enabled_if")):
+                continue
             if field.get("optional") and key not in data:
                 continue
             if field["type"] == "mapping_list":

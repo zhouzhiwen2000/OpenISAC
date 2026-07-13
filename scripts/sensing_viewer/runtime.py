@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import struct
-
 
 @dataclass
 class FrameBuffer:
@@ -29,10 +27,6 @@ class FrameBuffer:
 
     def assemble_payload(self) -> tuple[int, bytes]:
         return self.frame_id, b"".join(self.buffer[:self.total_chunks])
-
-
-def pack_legacy_command(header: bytes, cmd_id: bytes, value: int) -> bytes:
-    return struct.pack("!4s4si", header, cmd_id, int(value))
 
 
 def drop_oldest_then_put(queue_obj, item) -> None:

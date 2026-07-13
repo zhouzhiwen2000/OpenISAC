@@ -1880,9 +1880,9 @@ private:
             nullptr,
             nullptr,
             nullptr,
-            [this](const std::string& ip, int port) {
+            [this](const std::string&, int) {
                 if (!_control_handler.send_heartbeat_to_last_peer()) {
-                    _control_handler.send_heartbeat(ip, port);
+                    _control_handler.send_heartbeat();
                 }
             },
             [](size_t) {
@@ -2083,7 +2083,7 @@ private:
     void rx_proc(uhd::time_spec_t stream_start_time) {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1.0, true);
-        bind_current_thread_from_downlink_hint(cfg_, 0);
+        bind_current_thread_from_ue_downlink_role(cfg_, 0);
         uhd::rx_metadata_t md;
         auto issue_start = [&](const uhd::time_spec_t& start_time) {
             uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
@@ -2579,7 +2579,7 @@ private:
     void process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1, true);
-        bind_current_thread_from_downlink_hint(cfg_, 1);
+        bind_current_thread_from_ue_downlink_role(cfg_, 1);
         
         using Clock = std::chrono::high_resolution_clock;
         Clock::time_point frame_start, frame_end;
@@ -3512,7 +3512,7 @@ private:
     void sensing_process_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::Realtime);
         uhd::set_thread_priority_safe(1);
-        bind_current_thread_from_downlink_hint(cfg_, 2);
+        bind_current_thread_from_sensing_hint(cfg_, 0);
         SPSCBackoff sensing_backoff;
         while (sensing_running_.load()) {
             SensingFrame frame;
@@ -3754,7 +3754,7 @@ private:
     void bit_processing_proc() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         uhd::set_thread_priority_safe();
-        bind_current_thread_from_downlink_hint(cfg_, 3);
+        bind_current_thread_from_ue_downlink_role(cfg_, 2);
         SPSCBackoff llr_backoff;
         const bool do_latency_profile =
             cfg_.should_profile("demodulation") && cfg_.should_profile("latency");

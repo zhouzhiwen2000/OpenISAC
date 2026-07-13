@@ -734,8 +734,9 @@ Use `config/UE_X310.yaml`, `config/UE_B210.yaml`, or `config/UE_B210_Duplex.yaml
 | `measurement_payload_bytes` | `int` | `1024` | Expected bytes per measurement payload. Values below the internal header size are clamped up. |
 | `measurement_prbs_seed` | `int` | `0x5A` | Base seed used to rebuild deterministic PRBS measurement payloads. |
 | `measurement_packets_per_point` | `int` | `1` | Expected measurement payload count for each online `MRST` epoch. Values below `1` are clamped to `1`. |
-| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `sync`, `agc`, `align`, `snr`, and `uplink`; `all` enables every module. `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates, and `uplink` gates `[UL-TX]` timing/waveform diagnostics. |
-| `downlink_cpu_cores` | `int[]` | `[]` | UE downlink CPU cores: indices `0..3` bind `rx_proc`, `process_proc`, `sensing_process_proc`, and `bit_processing_proc`. |
+| `profiling_modules` | `string` | `""` | Profiling module list, comma-separated. Common values include `demodulation`, `cfo`, `sync`, `agc`, `align`, `snr`, and `uplink`; `all` enables every module. `cfo` gates CUDA CFO diagnostics, `sync` gates per-alias synchronization peak comparisons, `agc` gates AGC logs, `align` gates runtime `ALGN:` logs, `snr` prints periodic `_snr_db / _noise_var / _llr_scale` updates, and `uplink` gates `[UL-TX]` timing/waveform diagnostics. |
+| `downlink_cpu_cores` | `int[]` | `[]` | UE downlink CPU cores: indices `0..2` bind `rx_proc`, `process_proc`, and `bit_processing_proc`. |
+| `sensing_cpu_cores` | `int[]` | `[]` | UE bistatic sensing CPU cores: index `0` binds `sensing_process_proc`. |
 | `uplink_cpu_cores` | `int[]` | `[]` | UE uplink CPU cores: indices `0..3` bind `UplinkTxEngine::_ldpc_encode_proc`, `_mod_proc`, `_tx_proc`, and `_udp_recv_proc`. |
 | `main_cpu_core` | `int` | `-1` | Main-thread CPU core. |
 

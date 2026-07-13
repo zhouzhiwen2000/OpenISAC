@@ -374,12 +374,6 @@ class BackendViewerRuntime:
         )
         return max(int(channel_count), highest_channel + 1)
 
-    def _update_sender(self, addr: tuple[str, int] | None, update_control_port: bool = False) -> None:
-        # With ZeroMQ the backend host/port are fixed connect targets, so there
-        # is nothing to discover from incoming packets. Retained as a no-op for
-        # call-site compatibility.
-        return
-
     def _handle_control_packet(self, data: bytes, addr: tuple[str, int], _prefix: str) -> bool:
         if len(data) < 8 or data[:4] != CTRL_HEADER:
             return False
@@ -388,10 +382,8 @@ class BackendViewerRuntime:
         if command == PARAMS_COMMAND:
             params = parse_params_packet(data)
             if params is not None:
-                self._update_sender(addr, update_control_port=True)
                 self._set_viewer_params(params)
         elif command == READY_COMMAND:
-            self._update_sender(addr, update_control_port=True)
             if self.get_viewer_params().version == 0 or self._last_error is not None:
                 self.request_viewer_params()
         return True

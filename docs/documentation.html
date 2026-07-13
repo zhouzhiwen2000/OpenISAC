@@ -1435,13 +1435,19 @@ Use <code>config/UE_X310.yaml</code>, <code>config/UE_B210.yaml</code>, or <code
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>sync</code>, <code>agc</code>, <code>align</code>, <code>snr</code>, and <code>uplink</code>; <code>all</code> enables every module. <code>sync</code> gates per-alias synchronization peak comparisons, <code>agc</code> gates AGC logs, <code>align</code> gates runtime <code>ALGN:</code> logs, <code>snr</code> prints periodic <code>_snr_db / _noise_var / _llr_scale</code> updates, and <code>uplink</code> gates <code>[UL-TX]</code> timing/waveform diagnostics.</td>
+<td style="text-align:left">Profiling module list, comma-separated. Common values include <code>demodulation</code>, <code>cfo</code>, <code>sync</code>, <code>agc</code>, <code>align</code>, <code>snr</code>, and <code>uplink</code>; <code>all</code> enables every module. <code>cfo</code> gates CUDA CFO diagnostics, <code>sync</code> gates per-alias synchronization peak comparisons, <code>agc</code> gates AGC logs, <code>align</code> gates runtime <code>ALGN:</code> logs, <code>snr</code> prints periodic <code>_snr_db / _noise_var / _llr_scale</code> updates, and <code>uplink</code> gates <code>[UL-TX]</code> timing/waveform diagnostics.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE downlink CPU cores: indices <code>0..3</code> bind <code>rx_proc</code>, <code>process_proc</code>, <code>sensing_process_proc</code>, and <code>bit_processing_proc</code>.</td>
+<td style="text-align:left">UE downlink CPU cores: indices <code>0..2</code> bind <code>rx_proc</code>, <code>process_proc</code>, and <code>bit_processing_proc</code>.</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE bistatic sensing CPU cores: index <code>0</code> binds <code>sensing_process_proc</code>.</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink_cpu_cores</code></td>

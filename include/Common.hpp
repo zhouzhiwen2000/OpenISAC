@@ -1057,13 +1057,14 @@ struct NetworkOutputConfig {
 };
 
 struct CpuCoresConfig {
-    std::vector<int> downlink_cpu_cores; // BS: TX/mod/LDPC-encode/UDP-recv; UE: RX/process/sensing/bit-processing
+    std::vector<int> downlink_cpu_cores; // BS: TX/mod/LDPC-encode/UDP-recv; UE: RX/process/bit-processing
+    std::vector<int> sensing_cpu_cores;  // Dedicated sensing processing cores; empty = no explicit sensing binding
     std::vector<int> uplink_cpu_cores;   // Dedicated uplink thread cores; empty = no explicit uplink binding
     int main_cpu_core = -1;              // Main-thread affinity; -1 = no explicit binding
 };
 
 struct RuntimeConfig {
-    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, arq, demodulation, agc, align, snr, uplink, or "all"
+    std::string profiling_modules = "";  // Comma-separated list of modules to profile: modulation, latency, sensing_proc, ldpc_encode, arq, demodulation, cfo, agc, align, snr, uplink, or "all"
 };
 
 struct MeasurementConfig {
@@ -2702,8 +2703,23 @@ inline std::optional<size_t> core_from_list_hint(const std::vector<int>& cores, 
     return configured_core_to_optional(cores[hint % cores.size()]);
 }
 
+inline std::optional<size_t> core_from_list_index(const std::vector<int>& cores, size_t index) {
+    if (index >= cores.size()) {
+        return std::nullopt;
+    }
+    return configured_core_to_optional(cores[index]);
+}
+
 inline std::optional<size_t> downlink_core_from_hint(const Config& cfg, size_t hint) {
     return core_from_list_hint(cfg.cpu_cores.downlink_cpu_cores, hint);
+}
+
+inline std::optional<size_t> ue_downlink_core_from_role(const Config& cfg, size_t role) {
+    return core_from_list_index(cfg.cpu_cores.downlink_cpu_cores, role);
+}
+
+inline std::optional<size_t> sensing_core_from_hint(const Config& cfg, size_t hint) {
+    return core_from_list_hint(cfg.cpu_cores.sensing_cpu_cores, hint);
 }
 
 inline std::optional<size_t> uplink_core_from_hint(const Config& cfg, size_t hint) {
@@ -2725,6 +2741,14 @@ inline bool bind_current_thread_to_core(const std::optional<size_t>& core) {
 
 inline bool bind_current_thread_from_downlink_hint(const Config& cfg, size_t hint) {
     return bind_current_thread_to_core(downlink_core_from_hint(cfg, hint));
+}
+
+inline bool bind_current_thread_from_ue_downlink_role(const Config& cfg, size_t role) {
+    return bind_current_thread_to_core(ue_downlink_core_from_role(cfg, role));
+}
+
+inline bool bind_current_thread_from_sensing_hint(const Config& cfg, size_t hint) {
+    return bind_current_thread_to_core(sensing_core_from_hint(cfg, hint));
 }
 
 inline bool bind_current_thread_from_uplink_hint(const Config& cfg, size_t hint) {
@@ -2774,15 +2798,6 @@ inline void load_value(const YAML::Node& section, const char* key, T& value) {
     if (section && section[key]) {
         value = section[key].as<T>();
     }
-}
-
-inline bool reject_legacy_key(const YAML::Node& config, const char* old_key, const char* new_key) {
-    if (config[old_key]) {
-        LOG_G_ERROR() << "Legacy YAML key '" << old_key
-                      << "' is no longer supported. Use '" << new_key << "' instead.";
-        return false;
-    }
-    return true;
 }
 
 inline bool yaml_node_is_blank_scalar(const YAML::Node& node) {
@@ -3030,16 +3045,6 @@ inline void normalize_arq_config(NetworkOutputConfig& net) {
     }
 }
 
-inline void load_legacy_arq_config(const YAML::Node& network, NetworkOutputConfig& net) {
-    config_detail::load_value(network, "arq_enabled", net.arq_enabled);
-    config_detail::load_value(network, "arq_ordered_delivery", net.arq_ordered_delivery);
-    config_detail::load_value(network, "arq_window_packets", net.arq_window_packets);
-    config_detail::load_value(network, "arq_ack_bitmap_bits", net.arq_ack_bitmap_bits);
-    config_detail::load_value(network, "arq_retransmit_timeout_ms", net.arq_retransmit_timeout_ms);
-    config_detail::load_value(network, "arq_max_retries", net.arq_max_retries);
-    config_detail::load_value(network, "arq_feedback_interval_ms", net.arq_feedback_interval_ms);
-}
-
 inline void load_bs_downlink_arq_config(const YAML::Node& downlink, NetworkOutputConfig& net) {
     config_detail::load_value(downlink, "arq_enabled", net.arq_enabled);
     config_detail::load_value(downlink, "arq_window_packets", net.arq_window_packets);
@@ -3245,9 +3250,6 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
             network, "uplink_constellation_port", cfg.network_output.uplink_constellation_port);
         config_detail::load_value(network, "control_port", cfg.network_output.control_port);
 
-        // Downlink ARQ. Read legacy network_output.arq_* first for backward
-        // compatibility, then let the new downlink.arq_* keys override it.
-        load_legacy_arq_config(network, cfg.network_output);
         load_bs_downlink_arq_config(downlink, cfg.network_output);
         normalize_arq_config(cfg.network_output);
         load_bs_uplink_arq_config(uplink, cfg.uplink_arq);
@@ -3656,9 +3658,6 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "self_pdf_ip", cfg.network_output.uplink_self_pdf_ip);
         config_detail::load_value(network, "self_pdf_port", cfg.network_output.uplink_self_pdf_port);
 
-        // Downlink ARQ. Read legacy network_output.arq_* first for backward
-        // compatibility, then let the new downlink.arq_* keys override it.
-        load_legacy_arq_config(network, cfg.network_output);
         load_ue_downlink_arq_config(downlink, cfg.network_output);
         normalize_arq_config(cfg.network_output);
         load_ue_uplink_arq_config(uplink, cfg.uplink_arq);
@@ -3673,8 +3672,14 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         load_duplex_config(config, cfg);
 
         config_detail::load_value(cpu, "downlink_cpu_cores", cfg.cpu_cores.downlink_cpu_cores);
+        config_detail::load_value(cpu, "sensing_cpu_cores", cfg.cpu_cores.sensing_cpu_cores);
         config_detail::load_value(cpu, "uplink_cpu_cores", cfg.cpu_cores.uplink_cpu_cores);
         config_detail::load_value(cpu, "main_cpu_core", cfg.cpu_cores.main_cpu_core);
+        if (cfg.cpu_cores.downlink_cpu_cores.size() > 3) {
+            throw std::runtime_error(
+                "UE downlink_cpu_cores now accepts [rx_proc, process_proc, bit_processing_proc]. "
+                "Move sensing_process_proc to cpu_cores.sensing_cpu_cores.");
+        }
 
         if (!config_detail::load_data_resource_blocks_from_yaml(
                 cfg, resource_preview, "UE config")) {
@@ -6325,10 +6330,8 @@ public:
 
     // Send a readiness/heartbeat ("RDY ") packet. With ZMQ the TCP link is
     // persistent (no NAT mapping to keep alive), but the RDY signal still tells
-    // connected viewers the backend is up. The ip/port arguments are retained
-    // for source compatibility but ignored: the message is broadcast to recent
-    // control peers (ROUTER can only address known DEALER ids).
-    void send_heartbeat(const std::string& /*dest_ip*/, int /*dest_port*/) {
+    // connected viewers the backend is up.
+    void send_heartbeat() {
         broadcast_heartbeat();
     }
 

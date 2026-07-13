@@ -73,12 +73,14 @@ def build_demod_role_map(demod_cfg: dict, pid: int) -> dict[tuple[int, str], str
         base_roles = [
             "debs:rx_proc",
             "debs:process_proc",
-            "debs:sensing_process_proc",
             "debs:bit_processing_proc",
         ]
         for idx, role in enumerate(base_roles):
             if idx < len(demod_cores) and demod_cores[idx] >= 0:
                 role_map[(pid, str(demod_cores[idx]))] = role
+    sensing_cores = [int(core) for core in demod_cfg.get("sensing_cpu_cores", [])]
+    if sensing_cores and sensing_cores[0] >= 0:
+        role_map[(pid, str(sensing_cores[0]))] = "debs:sensing_process_proc"
     uplink_cores = [int(core) for core in demod_cfg.get("uplink_cpu_cores", [])]
     uplink_roles = [
         "debs:uplink_ldpc_encode_proc",
@@ -100,6 +102,7 @@ def build_isolated_cpu_spec(*cfgs: dict) -> str:
     cpus: set[int] = set()
     for cfg in cfgs:
         cpus.update(int(cpu) for cpu in cfg.get("downlink_cpu_cores", []) if int(cpu) >= 0)
+        cpus.update(int(cpu) for cpu in cfg.get("sensing_cpu_cores", []) if int(cpu) >= 0)
         cpus.update(int(cpu) for cpu in cfg.get("uplink_cpu_cores", []) if int(cpu) >= 0)
         for key in ("main_cpu_core",):
             cpu = int(cfg.get(key, -1))

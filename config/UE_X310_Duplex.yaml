@@ -147,7 +147,7 @@ network_output:
 
 # ===== CPU Cores =====
 cpu_cores:
-  downlink_cpu_cores: [5, 6, -1, 7]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
+  downlink_cpu_cores: [5, 6, 7]  # UE downlink CPU cores: [rx_proc, process_proc, bit_processing_proc]
   uplink_cpu_cores: [-1, 13, 14, -1]  # UE uplink CPU cores: [UplinkTxEngine LDPC encode, modulation, TX send, UDP recv thread]
   main_cpu_core: 15  # Main-thread CPU core (-1 disables explicit binding)
 

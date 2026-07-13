@@ -1956,13 +1956,22 @@ ue:
   - type: flow_list
     key: downlink_cpu_cores
     item_kind: int
-    comment: 'UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]'
+    comment: 'UE downlink CPU cores: [rx_proc, process_proc, bit_processing_proc]'
     default:
     - 1
     - 2
     - 3
+    optional: true
+  - type: flow_list
+    key: sensing_cpu_cores
+    item_kind: int
+    comment: 'UE bistatic sensing CPU cores: [sensing_process_proc]'
+    default:
     - 4
     optional: true
+    enabled_if:
+      key: sensing.bi_enabled
+      value: true
   - type: flow_list
     key: uplink_cpu_cores
     item_kind: int

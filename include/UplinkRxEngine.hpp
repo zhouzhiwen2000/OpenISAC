@@ -107,6 +107,11 @@ public:
             reinterpret_cast<fftwf_complex*>(_ce_in.data()),
             reinterpret_cast<fftwf_complex*>(_ce_out.data()),
             FFTW_BACKWARD, FFTW_MEASURE);
+        _ce_fft_plan = fftwf_plan_dft_1d(
+            static_cast<int>(_cfg.ofdm.fft_size),
+            reinterpret_cast<fftwf_complex*>(_ce_out.data()),
+            reinterpret_cast<fftwf_complex*>(_ce_in.data()),
+            FFTW_FORWARD, FFTW_MEASURE);
         _udp_out = std::make_unique<UdpSender>(
             link_cfg.network_output.ul_udp_output_ip,
             static_cast<uint16_t>(link_cfg.network_output.ul_udp_output_port),
@@ -136,6 +141,7 @@ public:
         stop();
         if (_fft_plan) fftwf_destroy_plan(_fft_plan);
         if (_ce_ifft_plan) fftwf_destroy_plan(_ce_ifft_plan);
+        if (_ce_fft_plan) fftwf_destroy_plan(_ce_fft_plan);
     }
 
     UplinkRxEngine(const UplinkRxEngine&) = delete;
@@ -254,26 +260,64 @@ public:
         }
     }
 
-    // Received-domain noise variance for MMSE equalization. The sync channel
-    // impulse response concentrates signal energy within the CP; energy beyond it
-    // is noise (estimate_snr_from_impulse_response). Scaling the resulting
-    // signal-normalized noise variance by the mean channel power |H|^2 puts it in
-    // the same units as compute_mmse_inverse's |H|^2 + noise_var denominator.
-    float _estimate_mmse_noise_var() {
-        std::memcpy(_ce_in.data(), _h_est.data(), _cfg.ofdm.fft_size * sizeof(std::complex<float>));
-        fftwf_execute(_ce_ifft_plan);
-        const float snr = ChannelEstimator::estimate_snr_from_impulse_response(
-            _ce_out, _cfg.ofdm.cp_length);
-        const double norm_nv = noise_variance_from_snr_linear(std::max(snr, 1e-6f));
+    // Received-domain noise variance for MMSE equalization. Predicts comb
+    // pilots from H_est plus alpha/beta, accumulates residual power, and falls
+    // back to the sync impulse SNR if too few pilots are usable. The returned
+    // value is in the same units as |H|^2.
+    float _estimate_mmse_noise_var(float alpha, float beta) {
+        const size_t fft_size = _cfg.ofdm.fft_size;
+        const float floor_val = std::max(
+            static_cast<float>(_cfg.uplink.equalizer.equalizer_mag_floor), 1e-12f);
 
-        const auto* __restrict__ h = _h_est.data();
-        double avg_power = 0.0;
-        #pragma omp simd simdlen(16) reduction(+:avg_power)
-        for (size_t k = 0; k < _cfg.ofdm.fft_size; ++k) {
-            avg_power += h[k].real() * h[k].real() + h[k].imag() * h[k].imag();
+        double err_acc = 0.0;
+        size_t err_count = 0;
+        for (size_t sym = 0; sym < _data_symbols.size(); ++sym) {
+            const int actual_sym = _layout.data_symbol_to_actual_symbol[sym];
+            const int rel = actual_sym - static_cast<int>(_cfg.ofdm.sync_pos);
+            const float alpha_rel = alpha * static_cast<float>(rel);
+            const float beta_rel = beta * static_cast<float>(rel);
+            const auto& data_symbol = _data_symbols[sym];
+            for (size_t p = 0; p < _cfg.ofdm.pilot_positions.size(); ++p) {
+                const size_t k = _cfg.ofdm.pilot_positions[p];
+                if (k >= fft_size) continue;
+                const float phase = alpha_rel + beta_rel * static_cast<float>(_actual_subcarrier_indices[k]);
+                const std::complex<float> pred =
+                    (_h_est[k] * _zc_freq[k]) * std::polar(1.0f, phase);
+                const float h_mag_sq = std::norm(_h_est[k]);
+                if (!std::isfinite(h_mag_sq) || h_mag_sq <= floor_val) {
+                    continue;
+                }
+                err_acc += std::norm(data_symbol[k] - pred);
+                ++err_count;
+            }
         }
-        avg_power /= static_cast<double>(_cfg.ofdm.fft_size);
-        return static_cast<float>(norm_nv * avg_power);
+
+        double h_power_acc = 0.0;
+        size_t h_power_count = 0;
+        auto accumulate_h_power = [&](size_t k) {
+            if (k >= fft_size) return;
+            const float mag_sq = std::norm(_h_est[k]);
+            if (std::isfinite(mag_sq) && mag_sq > floor_val) {
+                h_power_acc += mag_sq;
+                ++h_power_count;
+            }
+        };
+        for (const size_t k : _cfg.ofdm.pilot_positions) {
+            accumulate_h_power(k);
+        }
+        if (h_power_count == 0) {
+            for (size_t k = 0; k < fft_size; ++k) {
+                accumulate_h_power(k);
+            }
+        }
+        const double avg_h_power = h_power_count > 0
+            ? std::max(h_power_acc / static_cast<double>(h_power_count), static_cast<double>(floor_val))
+            : static_cast<double>(floor_val);
+        double noise_var = avg_h_power / static_cast<double>(std::max(_sync_corrected_snr_linear, 1e-6f));
+        if (err_count > 8) {
+            noise_var = err_acc / static_cast<double>(err_count);
+        }
+        return static_cast<float>(std::min(std::max(noise_var, 1e-6), 1e6));
     }
 
     static int64_t _host_now_ns() {
@@ -542,9 +586,12 @@ public:
         const std::complex<float>* win = frame.data() + _window_offset;
         const size_t sym_len = _cfg.ofdm.fft_size + _cfg.ofdm.cp_length;
 
-        // 1) Channel estimate from the sync symbol (symbol 0 of the UL frame).
-        _fft_symbol(win + /*sym0*/ 0 * sym_len + _cfg.ofdm.cp_length, _sync_freq_buf);
-        ChannelEstimator::estimate_from_sync_ls(_sync_freq_buf, _zc_freq, _h_est);
+        // 1) Channel estimate from the uplink sync symbol. The derived uplink
+        //    config sets sync_pos relative to the uplink window, avoiding a
+        //    hard-coded symbol-0 assumption.
+        const size_t sync_pos = _cfg.ofdm.sync_pos;
+        _fft_symbol(win + sync_pos * sym_len + _cfg.ofdm.cp_length, _sync_freq_buf);
+        _estimate_sync_channel_ls_wiener(_sync_freq_buf, _zc_freq, _h_est);
 
         // 2) FFT every data symbol (scaled, pre-equalization). The frequency-domain
         //    symbols are produced before equalization so the pilot-phase tracker can
@@ -578,11 +625,11 @@ public:
             }
         }
 
-        // 4) Equalizer inverse. Honors equalizer_mode (ZF vs MMSE); MMSE uses a
-        //    received-domain noise variance from the sync impulse response.
+        // 4) Equalizer inverse. Honors equalizer_mode (ZF vs MMSE); MMSE uses
+        //    pilot-residual noise variance with sync-SNR fallback.
         if (_use_mmse) {
             ChannelEstimator::compute_mmse_inverse(
-                _h_est, _h_inv, _estimate_mmse_noise_var(),
+                _h_est, _h_inv, _estimate_mmse_noise_var(alpha, beta),
                 static_cast<float>(_cfg.uplink.equalizer.equalizer_mag_floor));
         } else {
             ChannelEstimator::compute_zf_inverse(
@@ -766,6 +813,93 @@ public:
         }
     }
 
+    void _estimate_sync_channel_ls_wiener(
+        const AlignedVector& rx_symbol,
+        const AlignedVector& tx_zc,
+        AlignedVector& h_est)
+    {
+        const size_t fft_size = _cfg.ofdm.fft_size;
+        const size_t cp_length = _cfg.ofdm.cp_length;
+        h_est.resize(fft_size);
+
+        // LS estimate into _ce_in. This mirrors ls_channel_estimate_kernel:
+        // complex divide by the known ZC, with a denominator guard.
+        const auto* __restrict__ rx = rx_symbol.data();
+        const auto* __restrict__ tx = tx_zc.data();
+        auto* __restrict__ h_ls = _ce_in.data();
+        #pragma omp simd simdlen(16)
+        for (size_t k = 0; k < fft_size; ++k) {
+            const float rx_re = rx[k].real();
+            const float rx_im = rx[k].imag();
+            const float tx_re = tx[k].real();
+            const float tx_im = tx[k].imag();
+            float denom = tx_re * tx_re + tx_im * tx_im;
+            if (denom < 1e-12f) denom = 1e-12f;
+            const float inv_denom = 1.0f / denom;
+            h_ls[k] = std::complex<float>(
+                (rx_re * tx_re + rx_im * tx_im) * inv_denom,
+                (rx_im * tx_re - rx_re * tx_im) * inv_denom);
+        }
+
+        // IFFT to impulse response and normalize by 1/N, matching cuFFT inverse
+        // followed by normalize_ifft_kernel.
+        fftwf_execute(_ce_ifft_plan);
+        const float inv_n = 1.0f / static_cast<float>(fft_size);
+        auto* __restrict__ h_time = _ce_out.data();
+        #pragma omp simd simdlen(16)
+        for (size_t i = 0; i < fft_size; ++i) {
+            h_time[i] *= inv_n;
+        }
+
+        double sig_energy = 0.0;
+        double noise_energy = 0.0;
+        double cpu_sig_energy = 0.0;
+        double cpu_noise_energy = 0.0;
+        #pragma omp simd simdlen(16) reduction(+:sig_energy,noise_energy,cpu_sig_energy,cpu_noise_energy)
+        for (size_t i = 0; i < fft_size; ++i) {
+            const double power = static_cast<double>(std::norm(h_time[i]));
+            if (i < cp_length || i > fft_size - cp_length) {
+                sig_energy += power;
+            } else {
+                noise_energy += power;
+            }
+            if (i < cp_length) {
+                cpu_sig_energy += power;
+            } else {
+                cpu_noise_energy += power;
+            }
+        }
+        const float snr = (noise_energy > 1e-12)
+            ? static_cast<float>(sig_energy / noise_energy)
+            : 1000.0f;
+        const float wiener = snr / (snr + 1.0f);
+        _sync_corrected_snr_linear = 1.0f;
+        if (fft_size > cp_length && cp_length > 0) {
+            double noise_power = cpu_noise_energy / static_cast<double>(fft_size - cp_length);
+            if (noise_power < 1e-10) noise_power = 1e-10;
+            double signal_power = cpu_sig_energy / static_cast<double>(cp_length) - noise_power;
+            if (signal_power < 0.0) signal_power = 0.0;
+            const double raw_snr = signal_power / noise_power;
+            _sync_corrected_snr_linear = static_cast<float>(
+                raw_snr * static_cast<double>(cp_length) / static_cast<double>(fft_size));
+        }
+        if (_sync_corrected_snr_linear < 1e-6f) {
+            _sync_corrected_snr_linear = 1e-6f;
+        }
+
+        #pragma omp simd simdlen(16)
+        for (size_t i = 0; i < fft_size; ++i) {
+            if (i < cp_length || i > fft_size - cp_length) {
+                h_time[i] *= wiener;
+            } else {
+                h_time[i] = {0.0f, 0.0f};
+            }
+        }
+
+        fftwf_execute(_ce_fft_plan);
+        std::memcpy(h_est.data(), _ce_in.data(), fft_size * sizeof(std::complex<float>));
+    }
+
     void _run_agc(const AlignedVector& frame) {
         if (!_rx_agc.enabled() || !_apply_gain) return;
         // Delay spectrum (impulse response) from the channel estimate.
@@ -877,11 +1011,13 @@ public:
     AlignedVector _delay_spectrum;
     AlignedVector _self_delay_spectrum;
     fftwf_plan _ce_ifft_plan = nullptr;
+    fftwf_plan _ce_fft_plan = nullptr;
 
     AlignedVector _sync_freq_buf, _h_est, _h_inv;
     AlignedVector _self_h_est;
     std::vector<AlignedVector> _data_symbols;
     std::vector<int> _payload_subcarrier_indices_flat;
+    float _sync_corrected_snr_linear = 1.0f;
 
     // Channel-tracking / equalizer-mode state (honors channel_tracking_mode and
     // equalizer_mode on the derived uplink config).

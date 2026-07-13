@@ -8,6 +8,95 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-06-29 - 移除旧兼容路径
+
+### Summary
+
+删除旧配置字段和旧接口的兼容路径，收敛到当前 YAML schema 与 ZMQ 控制接口。
+
+### Changes
+
+- BS/UE 配置加载不再从 `network_output` 读取 `arq_enabled`、`arq_ordered_delivery`、`arq_window_packets`、`arq_ack_bitmap_bits`、`arq_retransmit_timeout_ms`、`arq_max_retries` 或 `arq_feedback_interval_ms`。
+  影响：旧 ARQ 配置字段不会再悄悄生效；需要把下行 ARQ 参数放到 `downlink` section，上行 ARQ 参数放到 `uplink` section。
+
+- 控制心跳接口改为无参数广播，移除仅用于旧调用点兼容的 `send_heartbeat(ip, port)` 签名、Python viewer `_update_sender()` no-op 和未使用的 `pack_legacy_command()`。
+  影响：ZMQ 控制链路继续向已知 peer 广播 RDY；旧 UDP 发送端发现路径不再保留空实现。
+
+## 2026-06-29 - CUDA UE 失锁重同步上行窗口保持
+
+### Summary
+
+修复 CUDAUE normal-stage 失锁进入重搜时清空 UL-TX/RX alignment shift 的问题，使其与 CPU UE 的上行失锁重同步恢复语义一致。
+
+### Changes
+
+- CUDAUE 普通失锁重搜现在保留已收敛的 UL-TX/RX alignment anchor；只有共享 RX/UL-TX 流重启路径仍清空该 shift，因为重启会把 RX 和 UL-TX 一起重新锚定到新的 timed start。
+  影响：CUDAUE 失锁后重新同步时，上行 TX 窗口不会回退到 TADV-only 位置，避免 TX-RX 窗口关系被 normal resync 打乱。
+
+## 2026-06-29 - UE 感知线程 CPU 绑核拆分
+
+### Summary
+
+将 UE 的双站感知处理线程从 `downlink_cpu_cores` 中拆出，改为独立的 `sensing_cpu_cores` 配置项；Web 配置编辑器在 `sensing.bi_enabled=false` 时隐藏该字段。
+
+### Changes
+
+- UE / CUDAUE 的下行 CPU 绑核现在只覆盖 `rx_proc`、`process_proc` 和 `bit_processing_proc`，默认 `downlink_cpu_cores: [1, 2, 3]`；`sensing_process_proc` 改由 `sensing_cpu_cores[0]` 绑定，默认 `sensing_cpu_cores: [4]`。
+  影响：关闭双站感知时不再显示或需要配置感知处理核；开启时可单独给 sensing 线程分配 CPU，不再占用 downlink 列表槽位。
+
+## 2026-06-29 - CUDA UE 上行收发共享定时启动
+
+### Summary
+
+修复 CUDAUE 上行在真实硬件上不可见（BS `self_pdf` 无信号，而 CPU `UE` 正常）的根因：BS `UplinkRxEngine` 对上行不做 sync/相关搜索，只按固定窗口（`ul_sample_offset` + 被动 `bs_dl_ul_timing_diff`）提取上行，因此 UE 的 UL-TX 帧栅格必须和它的 RX/DL 帧栅格锁定到同一绝对时间锚点。CPU `UE` 用同一个 `stream_start_time` 同时定时启动 RX 流和 `set_timed_tx`；CUDAUE 之前 TX 定时在 `ceil(now+1)` 而 RX 用 `STREAM_MODE_START_CONTINUOUS`（立即启动），两个锚点相差约 1 秒（帧周期内近似随机相位），超出 `rx_alignment_shift` 细对齐能补偿的范围，上行落不进 BS 固定窗口。
+
+### Changes
+
+- CUDAUE 新增 `_next_timed_stream_start()`，在 `start()` 计算单一 `stream_start_time` 并同时用于 `set_timed_tx` 和 `rx_proc`；`rx_proc` 改为按该时刻定时启动 RX 流（`stream_start_time<=0`，即仿真路径，才用 stream_now 立即启动）。
+  影响：硬件 duplex 下 UE 的 UL-TX 帧栅格与 RX/DL 帧栅格共享绝对时间锚点，上行重新落入 BS 的确定性 UL 窗口，`self_pdf` 恢复信号；仿真路径（采样同步）行为不变。
+
+- 共享流重启路径同步改造：overflow / UL-TX async error 触发重启时，重新计算一个共享 `stream_start_time` 并同时用于 RX 定时启动和 `reschedule_timed_tx`，保证重启后上行仍与下行栅格对齐。
+
+## 2026-06-29 - CUDA UE 接收溢出帧丢弃
+
+### Summary
+
+定位并修复 CUDA UE 在真实硬件上 normal-stage pilot CFO 间歇性飞到 -5~-6 kHz 的根因：RX recv 循环未检查 `md.error_code`，USRP overflow 时把溢出前后时间不连续的样本拼接进同一帧，跨越间断点的 pilot pair 产生大相位跳变，被 CFO 估计读成大 residual。CPU UE 一直有 overflow 处理（丢弃残帧并重启共享流），CUDA UE 此前完全缺失。
+
+### Changes
+
+- CUDA UE 的 `handle_sync_search` / `handle_alignment` / `handle_normal_rx` recv 循环现在调用 `_handle_rx_metadata_error` 检查每次 recv 的元数据，遇到 overflow/late/broken-chain/alignment/bad-packet 时中断当前帧填充，并只提交/入队完整连续的帧（短读帧释放回池）。
+  影响：CUDA UE 不再 demod 跨 overflow 间断点的帧，消除 bimodal 的 -5~-6 kHz 假 residual CFO 观测；`_accept_normal_cfo_observation` 门限退化为纵深防御而非主修复。
+
+- CUDA UE 补齐 CPU UE 的共享 RX/UL-TX 流重启：RX 线程检测到 overflow 或 UL-TX async error 计数变化后停流、按租约时间重排 `CUDAUplinkTxEngine` 定时发送、执行 RX 侧状态复位（bump `_sync_generation`、清 alignment/计数、关 UL 波形、回到 SYNC_SEARCH）并重启流。
+  影响：硬件 duplex 下 overflow 后能恢复共享流时序；GPU pipeline 缓冲仍由 process 线程经 generation 检查丢弃在途帧，重启路径不跨线程触碰 GPU 缓冲。
+
+## 2026-06-28 - CUDA UE CFO 与对齐跟踪
+
+### Summary
+
+本次更新修复 CUDA UE 后续 CFO/SFO tracking 在 TDD uplink/guard 边界附近使用污染 pilot pair 的问题，并补齐 CUDA UE 与 CPU UE 的接收对齐和上行发送时序跟踪行为。
+
+### Changes
+
+- CUDA UE 的 GPU CFO/SFO 估计现在复用 CPU UE 的 TDD CFO tracking skip-mask 规则，跳过 uplink/guard 符号及其相邻符号后再累积相邻 pilot phase。
+  影响：初始大 CFO 捕获并调谐后，CUDA UE 的 residual CFO 跟踪不再把 TDD 边界附近的下行/上行过渡符号纳入平均，降低 `Average CFO` 在大 CFO 场景下突然飞到数百或数千 Hz 的风险。
+
+- CUDA UE 的 CFO/SFO phase-diff kernel 改为扫描整帧 clean adjacent downlink symbol pair，并在没有合法 pair 时像 CPU UE 一样跳过频率控制更新。
+  影响：复杂 TDD 资源图或 pilot 资源不足时不会把 0 Hz 或无效回归结果当作有效 CFO 观测喂给软件调谐或硬件同步。
+
+- CUDA UE 接收对齐现在补齐 CPU UE 的上行时序联动语义，同时保留 CUDA pipeline 的 alignment gate；同步处理负向 alignment、重置时清空 UL-TX/RX alignment shift，并把 gated fresh sync / residual delay 调整同步到 `CUDAUplinkTxEngine::rx_alignment_shift()`。
+  影响：TDD CUDA UE 的上行 TX 窗口会跟随下行 RX frame anchor 变化，避免下行重新对齐后上行仍停留在旧时序。
+
+- CUDA CFO/SFO kernel 现在按 CPU 的 `data_symbol_to_actual_symbol` 顺序筛选 physically adjacent data-symbol pair，并让 CUDA UE 负向 alignment 与 CPU 一样先清零帧缓冲再拷贝短读数据。
+  影响：避免 CUDA residual CFO tracking 使用和 CPU 不同的 symbol-pair 集合，同时避免负向对齐时把 RX frame pool 中的旧样本带入 FFT。
+
+- CUDA UE 增加 `profiling_modules: cfo` 诊断模式，低频在同一 RX frame 上运行 CPU mirror CFO estimator 并打印 GPU/CPU CFO、alpha、beta 对比。
+  影响：可以直接区分 CUDA kernel/phase branch 问题和 retune 后 stale/control 观测问题，默认不启用且不影响正常实时路径。
+
+- CUDA UE normal CFO 控制现在只累计通过 frequency-adjust gate 的新帧观测，并对 residual tracking 的离群/跳 branch CFO 样本做门限拒绝；每次 RX retune 后重置 434-frame 平均窗口。
+  影响：避免 retune 前后的 stale frame 或 pilot phase branch slip 污染下一轮平均 CFO，降低 residual CFO 追踪进入正反馈的风险。
+
 ## 2026-06-28 - 信道仿真器采样率偏差
 
 ### Summary
@@ -33,7 +122,7 @@
 - 新增 `network_output.arq_enabled`、`arq_ordered_delivery`、`arq_window_packets`、`arq_ack_bitmap_bits`、`arq_retransmit_timeout_ms`、`arq_max_retries` 和 `arq_feedback_interval_ms` 配置项，并同步到 BS/UE 配置模板、benchmark 模板和 Web 配置编辑器 schema。
   影响：默认 `arq_enabled: false` 保持原有低延迟 UDP 转发行为；开启后链路层会用 ACK bitmap 反馈确认并重传未确认空口 packet。
 
-- 将下行 ARQ YAML 主配置迁移到 `downlink.arq_*`，BS 端仅暴露发送端窗口/RTO/最大重传次数，UE 端仅暴露接收端保序/反馈间隔参数，并保留旧 `network_output.arq_*` 读取兼容。
+- 将下行 ARQ YAML 主配置迁移到 `downlink.arq_*`，BS 端仅暴露发送端窗口/RTO/最大重传次数，UE 端仅暴露接收端保序/反馈间隔参数；旧 `network_output.arq_*` 读取兼容已在后续更新中移除。
   影响：新配置模板为下行 ARQ 预留与后续上行 ARQ 分离的命名空间；默认 RTO 调整为 `100 ms`、最大重传次数为 `5`、ACK feedback 间隔为 `10 ms`。
 
 - 恢复上行 ARQ 并改为由 `uplink.arq_*` 单独控制，BS 端暴露上行接收/ACK 参数，UE 端暴露上行发送窗口/RTO/最大重传次数。

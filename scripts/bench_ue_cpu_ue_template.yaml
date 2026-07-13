@@ -51,7 +51,8 @@ downlink:
   arq_ordered_delivery: false  # Buffer downlink packets for in-order UDP delivery
   arq_window_packets: 32767  # Downlink ARQ receive/reorder window [1, 32767]
   arq_feedback_interval_ms: 10  # Downlink ARQ ACK feedback interval in ms
-  downlink_cpu_cores: [6, 10, 11, 12]  # UE downlink CPU cores: [rx_proc, process_proc, sensing_process_proc, bit_processing_proc]
+  downlink_cpu_cores: [6, 10, 12]  # UE downlink CPU cores: [rx_proc, process_proc, bit_processing_proc]
+  sensing_cpu_cores: [11]  # UE bistatic sensing CPU cores: [sensing_process_proc]
 
 # ===== Uplink =====
 uplink:

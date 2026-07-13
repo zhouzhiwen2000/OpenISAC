@@ -1435,13 +1435,19 @@ sudo ../scripts/isolate_cpus.bash run ./UE
 <td style="text-align:left"><code>profiling_modules</code></td>
 <td style="text-align:left"><code>string</code></td>
 <td style="text-align:left"><code>&quot;&quot;</code></td>
-<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>sync</code>、<code>agc</code>、<code>align</code>、<code>snr</code>、<code>uplink</code>；<code>all</code> 表示全部。<code>sync</code> 控制逐 alias 同步峰值比较日志，<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前 UE 接收路径的 <code>_snr_db / _noise_var / _llr_scale</code>，<code>uplink</code> 控制 <code>[UL-TX]</code> timing/waveform 诊断日志。</td>
+<td style="text-align:left">性能统计模块列表，逗号分隔。常用值包括 <code>demodulation</code>、<code>cfo</code>、<code>sync</code>、<code>agc</code>、<code>align</code>、<code>snr</code>、<code>uplink</code>；<code>all</code> 表示全部。<code>cfo</code> 控制 CUDA CFO 诊断日志，<code>sync</code> 控制逐 alias 同步峰值比较日志，<code>agc</code> 控制 AGC 日志，<code>align</code> 控制运行时 <code>ALGN:</code> 日志，<code>snr</code> 会周期性打印当前 UE 接收路径的 <code>_snr_db / _noise_var / _llr_scale</code>，<code>uplink</code> 控制 <code>[UL-TX]</code> timing/waveform 诊断日志。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>downlink_cpu_cores</code></td>
 <td style="text-align:left"><code>int[]</code></td>
 <td style="text-align:left"><code>[]</code></td>
-<td style="text-align:left">UE 下行 CPU 核列表：索引 <code>0..3</code> 分别绑定 <code>rx_proc</code>、<code>process_proc</code>、<code>sensing_process_proc</code> 和 <code>bit_processing_proc</code>。</td>
+<td style="text-align:left">UE 下行 CPU 核列表：索引 <code>0..2</code> 分别绑定 <code>rx_proc</code>、<code>process_proc</code> 和 <code>bit_processing_proc</code>。</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>sensing_cpu_cores</code></td>
+<td style="text-align:left"><code>int[]</code></td>
+<td style="text-align:left"><code>[]</code></td>
+<td style="text-align:left">UE 双站感知 CPU 核列表：索引 <code>0</code> 绑定 <code>sensing_process_proc</code>。</td>
 </tr>
 <tr>
 <td style="text-align:left"><code>uplink_cpu_cores</code></td>
