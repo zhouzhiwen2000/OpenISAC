@@ -1,4 +1,4 @@
-build*/
+/build*/
 capture/*.mat
 capture/plot_results
 *.log
