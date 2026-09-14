@@ -48,7 +48,9 @@ After calibration is complete, stop the backend(s), restore the normal antenna o
 
 ## Verify Hsys from the command line
 
-The standalone tool uses the existing backend calibration, with no viewer required:
+As an alternative to clicking the calibration button in the sensing viewer, you can calibrate Hsys from the command line. Choose either method. First follow the preparation steps above and start the backend: BS for monostatic sensing, or both BS and UE for bistatic sensing. Then open another terminal at the repository root and run the appropriate command below.
+
+For the command-line method, you do not need to launch the sensing viewer. The script connects to an already running backend; it does not start the backend or configure CPU isolation. If you use CPU isolation, set it up before starting the backend.
 
 ```bash
 # BS monostatic logical channel 0 (not necessarily USRP channel 0)
