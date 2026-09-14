@@ -10,7 +10,7 @@ usrp_device:
 # ===== Clock / Time Sources =====
 clock_time:
   clock_source: external  # Global clock source; internal/external/gpsdo
-  time_source: external  # Global time source; empty follows clock_source
+  time_source: external  # Shared PPS input for the distinct B210 TX and X310 sensing RX
 
 # ===== OFDM Frame =====
 ofdm_frame:
@@ -29,6 +29,7 @@ ofdm_frame:
 
 # ===== CUDA =====
 cuda:
+  cuda_precision_profile: fp32  # CUDA precision profile: fp32/mixed_fp16
   cuda_mod_pipeline_slots: 2  # Number of CUDA modulation pipeline slots
 
 # ===== Downlink =====
@@ -78,7 +79,7 @@ sensing:
     - usrp_channel: 0  # USRP RX channel index for this sensing path
       device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # Per-channel USRP args override (optional)
       clock_source: external  # Per-channel clock source override (optional)
-      time_source: internal  # Per-channel time source override (optional)
+      time_source: external  # Shared PPS input with the B210 TX
       wire_format: ""  # Per-channel wire format override (optional)
       rx_gain: 30  # Per-channel RX gain (dB)
       alignment: 103  # Per-channel timing alignment offset (samples)
@@ -89,7 +90,7 @@ sensing:
     - usrp_channel: 1  # USRP RX channel index for this sensing path
       device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=512, num_send_frames=512"  # Per-channel USRP args override (optional)
       clock_source: external  # Per-channel clock source override (optional)
-      time_source: internal  # Per-channel time source override (optional)
+      time_source: external  # Shared PPS input with the B210 TX
       wire_format: ""  # Per-channel wire format override (optional)
       rx_gain: 30  # Per-channel RX gain (dB)
       alignment: 103  # Per-channel timing alignment offset (samples)
@@ -130,4 +131,4 @@ logging:
   default_level: warn  # off|error|warn|info|debug — global default; Error always prints when force_error=true
   timestamps: false  # Prefix each line with local HH:MM:SS.uuuuuu
   force_error: true  # Always emit Error (unrecoverable failures only)
-  modules: {}  # Optional overrides, e.g. demod.ldpc: debug, cuda.demod: warn, ul_rx: warn
+  modules: {}  # Optional overrides, e.g. air_frame: info, mod: warn, ul_rx: warn

@@ -1,17 +1,13 @@
 import argparse
-import importlib
 import logging
 import numpy as np
 import sys
 import os
-import platform
-import subprocess
 import time
 import threading
 from queue import Queue, Empty, Full
 from collections import deque
 from pathlib import Path
-import socket
 import struct
 import datetime
 import scipy.io as sio
@@ -52,6 +48,9 @@ from viewer_panel_utils import (
     style_spectrum_plot,
 )
 from viewer_endpoint_store import load_endpoint, save_endpoint, save_settings
+from sensing_plot_axes import SensingPlotAxes
+from sensing_physical_axes import image_bounds_from_centers, physical_axes
+
 from sensing_detection import (
     CleanParams,
     build_detection_views,
@@ -65,30 +64,19 @@ from sensing_targets import (
     cluster_detected_targets as shared_cluster_detected_targets,
     run_os_cfar_2d as shared_run_os_cfar_2d,
 )
-from sensing_viewer.runtime import FrameBuffer
 from sensing_viewer.config import default_config
 
 # ====== Backend Detection ======
 from sensing_viewer.array_backend import (
-    BACKEND_NAME,
-    FORCED_BACKEND,
     HAVE_NUMBA,
     USE_APPLE_GPU,
-    USE_GPU,
     USE_INTEL_GPU,
     USE_NVIDIA_GPU,
     cp,
-    get_array_module,
     mx,
     njit,
     prange,
-    scalar_to_bool,
-    scalar_to_float,
-    scalar_to_int,
-    stft,
     to_cpu_array,
-    to_numpy,
-    xp,
 )
 
 
@@ -144,7 +132,7 @@ DISPLAY_RD_DB_MAX = DEFAULT_DISPLAY_DB_MAX
 DISPLAY_MD_DB_MIN = DEFAULT_DISPLAY_DB_MIN
 DISPLAY_MD_DB_MAX = DEFAULT_DISPLAY_DB_MAX
 
-LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
+PENDING_VIEWER_PARAMS = ViewerRuntimeParams(
     version=0,
     flags=0,
     frame_format=0,
@@ -546,10 +534,6 @@ class ChannelRuntime:
         self.udp_port = udp_port
         self.control_port = control_port
 
-        self.frame_buffer = FrameBuffer()
-        self.metadata_frame_buffer = FrameBuffer()
-        self.buffer_lock = threading.Lock()
-
         self.display_queue = Queue(maxsize=DISPLAY_QUEUE_SIZE)
 
         self.sender_ip = None
@@ -563,7 +547,7 @@ class ChannelRuntime:
 
         self.current_display_data = {}
         self.last_frame_id = None
-        self.viewer_params = LEGACY_VIEWER_PARAMS
+        self.viewer_params = PENDING_VIEWER_PARAMS
         self.viewer_params_lock = threading.Lock()
         self.last_param_summary = self.viewer_params.describe()
         self.last_param_error = None
@@ -615,7 +599,7 @@ aggregate_frame_queue = Queue(maxsize=AGGREGATE_FRAME_QUEUE_SIZE)
 startup_sync_queue = Queue(maxsize=8)
 startup_sync_lock = threading.Lock()
 startup_sync_queued_generation = None
-# Small queue for radio params received in the PARM packet (V6+).
+# Small queue for radio params received in the PARM packet.
 # The receiver thread pushes dicts; the Qt timer drains them on the main thread.
 radio_params_queue = Queue(maxsize=8)
 phase_bundle_lock = threading.Lock()
@@ -727,7 +711,7 @@ def reconnect_backend(host):
         with ch.sender_lock:
             ch.sender_ip = HOST
             ch.control_port = args.control_port
-        set_viewer_params(ch, LEGACY_VIEWER_PARAMS)
+        set_viewer_params(ch, PENDING_VIEWER_PARAMS)
         ch.last_frame_id = None
         ch.current_display_data = {}
         ch.last_param_error = None
@@ -752,7 +736,7 @@ def _ensure_channel_count(expected_count, reason="auto-detect"):
 
     base_control_port = CHANNELS[0].control_port if CHANNELS else args.control_port
     base_sender_ip = CHANNELS[0].sender_ip if CHANNELS else None
-    base_params = get_viewer_params(CHANNELS[0]) if CHANNELS else LEGACY_VIEWER_PARAMS
+    base_params = get_viewer_params(CHANNELS[0]) if CHANNELS else PENDING_VIEWER_PARAMS
 
     new_channels = []
     for ch_idx in range(expected_count):
@@ -1005,17 +989,6 @@ def _queue_aggregate_frame(frame_id, channel_frames):
         )
 
 
-def _update_detected_sender(target_channels, addr, update_control_port=False):
-    for ch in target_channels:
-        with ch.sender_lock:
-            if ch.sender_ip is None:
-                ch.sender_ip = addr[0]
-                print(f"[CH{ch.ch_id + 1}] Detected sender IP: {ch.sender_ip}")
-            if update_control_port and ch.control_port != addr[1]:
-                ch.control_port = addr[1]
-                print(f"[CH{ch.ch_id + 1}] Control port updated: {ch.sender_ip}:{ch.control_port}")
-
-
 def _handle_viewer_params(target_channels, params, prefix):
     if params.aggregated_stream():
         _ensure_channel_count(params.stream_channel_count, reason="viewer params")
@@ -1222,7 +1195,7 @@ def udp_receiver(port):
             data_payload, metadata_payload = frame
             _request_params_if_needed(f"{STREAM_PREFIX} Viewer params not yet received; requesting from backend...")
 
-            viewer_params = get_viewer_params(CHANNELS[0]) if CHANNELS else LEGACY_VIEWER_PARAMS
+            viewer_params = get_viewer_params(CHANNELS[0]) if CHANNELS else PENDING_VIEWER_PARAMS
 
             if IS_BI_MODE:
                 if viewer_params.version == 0:
@@ -1351,21 +1324,6 @@ if HAVE_NUMBA:
             for j in range(range_fft_size):
                 out[i, j] = range_time[i, j] * window[i, 0]
         return out
-
-    @njit(parallel=True, fastmath=True)
-    def cpu_calc_mag_db(doppler_fft_data, num_symbols, fft_size):
-        rows = doppler_fft_data.shape[0]
-        cols = doppler_fft_data.shape[1]
-        half_rows = rows // 2
-        out = np.empty((rows, cols), dtype=np.float32)
-        norm_factor = 1.0 / np.sqrt(num_symbols * fft_size)
-        for j in prange(cols):
-            for i in range(half_rows):
-                out[i, j] = 20.0 * np.log10(np.abs(doppler_fft_data[i + half_rows, j]) * norm_factor + 1e-12)
-            for i in range(half_rows):
-                out[i + half_rows, j] = 20.0 * np.log10(np.abs(doppler_fft_data[i, j]) * norm_factor + 1e-12)
-        return out
-
 
 def process_range_doppler(frame_data, viewer_params, max_view_range_bins=None):
     if backend_stream_unsupported(viewer_params):
@@ -3035,30 +2993,15 @@ def _finalize_channel_result(
         'md_extent': md_extent,
         'dsp_time': dsp_time,
         'viewer_params': viewer_params,
+        'range_fft_size': (viewer_params.range_fft_size if viewer_params.is_dense_range_doppler() else range_fft_size),
+        'doppler_fft_size': (viewer_params.doppler_fft_size if viewer_params.is_dense_range_doppler() else doppler_fft_size),
+        'source_doppler_rows': rd_spectrum.shape[0],
+        'display_doppler_bins': display_doppler_bins,
+        'display_downsample': DISPLAY_DOWNSAMPLE,
+        'display_range_downsample': 1 if delay_estimator_uses_superres() else DISPLAY_DOWNSAMPLE,
     }
 
     return result
-
-def _process_one_raw_item(ch, raw_item):
-    if isinstance(raw_item, tuple) and len(raw_item) == 2:
-        frame_id, raw_frame = raw_item
-    else:
-        frame_id, raw_frame = -1, raw_item
-
-    t_start = time.time()
-    viewer_params = get_viewer_params(ch)
-    rd_spectrum, range_time_view, rd_complex = process_range_doppler(raw_frame, viewer_params)
-    return _finalize_channel_result(
-        ch,
-        frame_id,
-        raw_frame,
-        viewer_params,
-        rd_spectrum,
-        range_time_view,
-        rd_complex,
-        t_start,
-    )
-
 
 def dsp_worker():
     global latest_phase_bundle_frame_id, latest_phase_bundle_rd_complex
@@ -3092,7 +3035,7 @@ def dsp_worker():
         frame_id, raw_frames = latest_bundle
         bundle_results = [None] * len(CHANNELS)
         bundle_rd_complex = [None] * len(CHANNELS)
-        viewer_params = get_viewer_params(CHANNELS[0]) if CHANNELS else LEGACY_VIEWER_PARAMS
+        viewer_params = get_viewer_params(CHANNELS[0]) if CHANNELS else PENDING_VIEWER_PARAMS
         active_frames = [
             (ch_idx, raw_frame)
             for ch_idx, raw_frame in enumerate(raw_frames)
@@ -3375,13 +3318,17 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(plot_widget, stretch=1)
 
         # Range-Doppler Plot
-        self.rd_plot = pg.PlotWidget(title="Range-Doppler Spectrum")
+        self.physical_plot_axes = SensingPlotAxes()
+        self.rd_plot = pg.PlotWidget(
+            title="Range-Doppler Spectrum",
+            axisItems={"left": self.physical_plot_axes.range, "bottom": self.physical_plot_axes.doppler},
+        )
         style_spectrum_plot(self.rd_plot)
         # RD uses col-major mapping: x <- first index(doppler), y <- second index(range)
         self.rd_img = pg.ImageItem(axisOrder='col-major')
         self.rd_plot.addItem(self.rd_img)
-        self.rd_plot.setLabel('left', 'Range Bin')
-        self.rd_plot.setLabel('bottom', 'Doppler Bin')
+        self.rd_plot.setLabel('left', 'Range / Relative Delay (waiting for parameters)')
+        self.rd_plot.setLabel('bottom', 'Doppler Frequency (Hz)')
         spectrum_cmap = sensing_colormap()
         self.rd_img.setLookupTable(spectrum_cmap.getLookupTable())
         rd_default_db_levels = get_delay_doppler_display_db_range()
@@ -3404,12 +3351,15 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout.addWidget(self.rd_plot)
 
         # Micro-Doppler Plot
-        self.md_plot = pg.PlotWidget(title="Micro-Doppler Spectrum")
+        self.md_plot = pg.PlotWidget(
+            title="Micro-Doppler Spectrum",
+            axisItems={"left": self.physical_plot_axes.micro_doppler, "bottom": self.physical_plot_axes.time},
+        )
         style_spectrum_plot(self.md_plot)
         # MD uses row-major mapping: x <- second index(time), y <- first index(doppler)
         self.md_img = pg.ImageItem(axisOrder='row-major')
         self.md_plot.addItem(self.md_img)
-        self.md_plot.setLabel('left', 'Doppler')
+        self.md_plot.setLabel('left', 'Doppler Frequency (Hz)')
         self.md_plot.setLabel('bottom', 'Time')
         self.md_img.setLookupTable(spectrum_cmap.getLookupTable())
         md_default_db_levels = get_micro_doppler_display_db_range()
@@ -3503,7 +3453,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_status_label_text(lbl, lbl.text())
         self.targets_text.setFont(fixed_font)
         self.targets_text.setPlainText("Top Targets: waiting detector hits")
-        self._load_range_scale_config()
         self._update_target_sector_background(
             max_range=float(self.target_sector_max_range_bins),
             axis_unit="bin",
@@ -4450,15 +4399,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_display_button_text()
         print(f"Display channel switched to CH{display_channel + 1}")
 
-    def toggle_display_channel(self):
-        global display_channel
-        if len(CHANNELS) < 2:
-            return
-        display_channel = (display_channel + 1) % len(CHANNELS)
-        self._force_ui_refresh = True
-        self.refresh_display_button_text()
-        print(f"Display channel switched to CH{display_channel + 1}")
-
     def set_range_bin(self):
         global selected_range_bin
         try:
@@ -4913,73 +4853,14 @@ class MainWindow(QtWidgets.QMainWindow):
         print("Phase calibration auto-load: no compatible saved calibration found")
         return False
 
-    def _load_range_scale_config(self):
-        self.range_scale_sample_rate_hz = None
-        self.range_scale_source = "range bin"
-
-        repo_root = Path(__file__).resolve().parent.parent
-        candidate_paths = []
-        for candidate in [
-            Path.cwd() / "BS.yaml",
-            Path.cwd() / "UE.yaml",
-            Path.cwd() / "build" / "BS.yaml",
-            Path.cwd() / "build" / "UE.yaml",
-            repo_root / "build" / "BS.yaml",
-            repo_root / "build" / "UE.yaml",
-        ]:
-            if candidate not in candidate_paths:
-                candidate_paths.append(candidate)
-
-        for path in candidate_paths:
-            if not path.is_file():
-                continue
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    data = yaml.safe_load(handle) or {}
-            except Exception as exc:
-                print(f"Target sector range scale skipped: failed to read {path}: {exc}")
-                continue
-
-            sample_rate = data.get("sample_rate")
-            if sample_rate is None:
-                continue
-            try:
-                sample_rate_hz = float(sample_rate)
-            except (TypeError, ValueError):
-                continue
-            if sample_rate_hz <= 0.0:
-                continue
-
-            self.range_scale_sample_rate_hz = sample_rate_hz
-            try:
-                self.range_scale_source = str(path.relative_to(repo_root))
-            except ValueError:
-                self.range_scale_source = str(path)
-            print(
-                "Target sector range scale: "
-                f"using sample_rate={sample_rate_hz:.3f} Hz from {self.range_scale_source}"
-            )
-            return
-
-        print("Target sector range scale: sample_rate unavailable; falling back to range bins")
-
     def _resolve_target_range_axis(self, ch):
-        if ch is None:
-            return 1.0, "bin", "range bin"
-
-        params = get_viewer_params(ch)
-        raw_cols = max(1, int(params.active_cols if params.active_cols > 0 else params.wire_cols))
-        range_fft_size = max(1, int(params.range_fft_size if params.range_fft_size > 0 else params.wire_cols))
-
-        if self.range_scale_sample_rate_hz is None or self.range_scale_sample_rate_hz <= 0.0:
-            return 1.0, "bin", "range bin"
-
-        delay_bin_s = float(raw_cols) / (float(range_fft_size) * float(self.range_scale_sample_rate_hz))
-        range_bin_spacing_m = 0.5 * C_LIGHT_MPS * delay_bin_s
-        if not np.isfinite(range_bin_spacing_m) or range_bin_spacing_m <= 0.0:
-            return 1.0, "bin", "range bin"
-
-        return float(range_bin_spacing_m), "m", f"approx m from {self.range_scale_source}"
+        if ch is None or not ch.current_display_data.get('viewer_params'):
+            return 1.0, "bin", "waiting for parameters"
+        frame = ch.current_display_data
+        axes = physical_axes(frame['viewer_params'], frame['range_fft_size'], frame['doppler_fft_size'])
+        if not np.isfinite(axes.range_bin_scale):
+            return 1.0, "bin", "nonuniform frequency grid: physical delay unavailable"
+        return axes.range_bin_scale * frame['display_range_downsample'], axes.range_unit, "relative to alignment reference"
 
     def _format_target_sector_scale_text(self, base_scale_text):
         return (
@@ -5172,8 +5053,8 @@ class MainWindow(QtWidgets.QMainWindow):
             centroid_r = float(cluster['centroid_range_idx'])
             relative_range_bins = float(r_idx) - float(self.target_sector_min_range_bin)
             range_value = relative_range_bins * float(range_scale)
-            if axis_unit == "m":
-                range_text = f"{range_value:+6.2f}m"
+            if axis_unit in {"m", "ns"}:
+                range_text = f"{range_value:+6.2f}{axis_unit}"
             else:
                 range_text = f"{relative_range_bins:+5.0f}bin"
 
@@ -5887,6 +5768,16 @@ class MainWindow(QtWidgets.QMainWindow):
             latest_disp = ch.current_display_data
             rd_data = latest_disp.get('rd')
             md_data = latest_disp.get('md')
+            if rd_data is not None:
+                self.physical_plot_axes.update(
+                    self.rd_plot, self.md_plot, latest_disp['viewer_params'],
+                    range_fft_size=latest_disp['range_fft_size'],
+                    doppler_fft_size=latest_disp['doppler_fft_size'],
+                    source_rows=latest_disp['source_doppler_rows'],
+                    display_bins=latest_disp['display_doppler_bins'],
+                    displayed_rows=rd_data.shape[0], downsample=latest_disp['display_downsample'],
+                    range_downsample=latest_disp['display_range_downsample'],
+                )
             overlay_points = self._get_overlay_cluster_points(latest_disp)
             frame_id = int(latest_disp.get('frame_id', -1))
             display_render_key = (display_channel, frame_id)
@@ -5923,7 +5814,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 rows, cols = rd_data.shape  # rows=doppler, cols=range
                 self.rd_doppler_min = -0.5 * float(rows)
                 self.rd_doppler_span = float(rows)
-                self.rd_img.setRect(QtCore.QRectF(self.rd_doppler_min, 0.0, self.rd_doppler_span, float(cols)))
+                self.rd_img.setRect(QtCore.QRectF(self.rd_doppler_min - 0.5, -0.5, self.rd_doppler_span, float(cols)))
                 if overlay_points is not None and len(overlay_points) > 0:
                     x_pts = self.rd_doppler_min + overlay_points[:, 0].astype(np.float32)
                     y_pts = overlay_points[:, 1].astype(np.float32)
@@ -5943,9 +5834,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.md_colorbar.setLevels(values=(md_low_level, md_high_level))
                 md_extent = latest_disp.get('md_extent')
                 if md_extent is not None and len(md_extent) == 4:
-                    x0, x1, y0, y1 = [float(v) for v in md_extent]
                     self.md_img.setRect(
-                        QtCore.QRectF(x0, y0, max(1e-6, x1 - x0), max(1e-6, y1 - y0))
+                        QtCore.QRectF(*image_bounds_from_centers(md_extent, *md_data.shape))
                     )
 
             with ch.sender_lock:

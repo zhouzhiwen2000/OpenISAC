@@ -242,4 +242,4 @@ logging:
   default_level: warn  # off|error|warn|info|debug — global default; Error always prints when force_error=true
   timestamps: false  # Prefix each line with local HH:MM:SS.uuuuuu
   force_error: true  # Always emit Error (unrecoverable failures only)
-  modules: {}  # Optional overrides, e.g. demod.ldpc: debug, cuda.demod: warn, ul_rx: warn
+  modules: {}  # Optional overrides, e.g. air_frame: info, mod: warn, ul_rx: warn

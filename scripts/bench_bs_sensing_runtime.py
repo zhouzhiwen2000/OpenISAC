@@ -236,7 +236,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("scripts/bench_bs_sensing_runtime_template.yaml"),
         help="Base BS YAML template used for the sensing runtime benchmark.",
     )
-    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
+    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.py"))
     parser.add_argument("--sample-rate", type=float, default=100e6)
     parser.add_argument("--fft-size", type=int, default=1024)
     parser.add_argument("--strides", default="1,2,5,10,20")

@@ -45,13 +45,6 @@ inline bool isNaN(float x) {
 }
 
 /**
- * @brief Convert FFT bin index to shifted index.
- */
-inline int fftshift_index(int original_index, int N) {
-    return (original_index + N / 2) % N;
-}
-
-/**
  * @brief Calculate effective RX center frequency in Hz for UHD tuning.
  *
  * UHD RX path effective center is RF - DSP.
@@ -71,6 +64,83 @@ inline double rx_tune_system_cfo_hz(double target_tx_center_freq_hz,
     return target_tx_center_freq_hz -
            rx_effective_center_hz(actual_rx_rf_freq_hz, actual_rx_dsp_freq_hz);
 }
+
+struct NormalCfoDealiasResult {
+    bool valid = false;
+    double modulo_hz = 0.0;
+    double dealiased_hz = 0.0;
+    int64_t alias_index = 0;
+};
+
+/** Resolve adjacent-symbol CFO onto the branch nearest the current tune offset. */
+inline NormalCfoDealiasResult dealias_normal_cfo_hz(
+    double modulo_cfo_hz,
+    double alias_period_hz,
+    double reference_cfo_hz)
+{
+    NormalCfoDealiasResult out;
+    out.modulo_hz = modulo_cfo_hz;
+    if (!std::isfinite(modulo_cfo_hz) ||
+        !std::isfinite(alias_period_hz) || alias_period_hz <= 0.0 ||
+        !std::isfinite(reference_cfo_hz)) {
+        return out;
+    }
+    const double branch =
+        std::round((reference_cfo_hz - modulo_cfo_hz) / alias_period_hz);
+    if (branch < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
+        branch > static_cast<double>(std::numeric_limits<int64_t>::max())) {
+        return out;
+    }
+    out.alias_index = static_cast<int64_t>(branch);
+    out.dealiased_hz =
+        modulo_cfo_hz + branch * alias_period_hz;
+    out.valid = std::isfinite(out.dealiased_hz);
+    return out;
+}
+
+/** Require a short continuous run before de-aliased normal CFO drives OCXO. */
+class NormalCfoQualityGate {
+public:
+    explicit NormalCfoQualityGate(
+        size_t min_consecutive = 3,
+        double max_step_fraction = 0.25)
+        : _min_consecutive(std::max<size_t>(min_consecutive, 1)),
+          _max_step_fraction(std::max(max_step_fraction, 0.0)) {}
+
+    void reset() {
+        _has_previous = false;
+        _previous_hz = 0.0;
+        _consecutive = 0;
+    }
+
+    bool update(const NormalCfoDealiasResult& estimate,
+                double alias_period_hz,
+                bool upstream_valid = true) {
+        if (!upstream_valid || !estimate.valid ||
+            !std::isfinite(estimate.dealiased_hz) ||
+            !std::isfinite(alias_period_hz) || alias_period_hz <= 0.0) {
+            reset();
+            return false;
+        }
+        const double max_step_hz = _max_step_fraction * alias_period_hz;
+        if (!_has_previous ||
+            std::abs(estimate.dealiased_hz - _previous_hz) > max_step_hz) {
+            _consecutive = 1;
+        } else {
+            ++_consecutive;
+        }
+        _previous_hz = estimate.dealiased_hz;
+        _has_previous = true;
+        return _consecutive >= _min_consecutive;
+    }
+
+private:
+    size_t _min_consecutive = 3;
+    double _max_step_fraction = 0.25;
+    bool _has_previous = false;
+    double _previous_hz = 0.0;
+    size_t _consecutive = 0;
+};
 
 /**
  * @brief Predict delay correction in samples from observed CFO and elapsed frame time.
@@ -268,31 +338,231 @@ struct LdpcMiniHeader {
     uint8_t flags = 0;
     uint16_t payload_len = 0;
     uint8_t payload_blocks = 0;
-    uint16_t seq = 0;
+    uint16_t seq = 0;  ///< ARQ / packet sequence (data path). Not air-frame index.
+    // Tier-1 Air-Frame Identity SIB (two BCH words after one marker):
+    //   word0: version4|flags4|epoch_lo16|seq_lo24|CRC16  (flag = AirFrameIdentity)
+    //   word1: version4|flags4|epoch_hi16|seq_hi8|pad8|CRC16 (flag = AirFrameIdentityHi)
+    // Combined: epoch32 (OTA canonical) + frame_seq32.
+    uint32_t timeline_epoch = 0;  ///< OTA epoch32 (matches AirFrameIdentity.timeline_epoch)
+    uint32_t air_frame_seq = 0;   ///< Full 32-bit air frame within epoch
 };
 
 struct ErtmTimingPayloadView {
     uint32_t fft_size = 0;
     double sample_rate = 0.0;
-    int32_t duti_samples = 0;
-    uint32_t seq = 0;
+    int32_t duti_samples = 0;              ///< DUTI applied on UL measure frame M
+    uint32_t seq = 0;                      ///< Diagnostic / de-dup only (not air frame)
+    uint32_t timeline_epoch = 0;           ///< Canonical OTA epoch32 of measure frame M
+    uint64_t ul_measure_frame_seq = 0;     ///< Absolute air-frame index M at BS UL-RX
+    bool bs_pps_anchor_valid = false;       ///< BS frame-0/PPS anchor is usable
+    int64_t bs_last_pps_ticks = -1;         ///< Raw BS time_last_pps() in BS clock ticks
+    int64_t bs_t0_to_pps_ticks = 0;        ///< wrap_1s(B_0 - P_B), in BS clock ticks
+    int64_t bs_frame_ticks = 0;             ///< BS air-frame period in clock ticks
+    double bs_tick_rate = 0.0;              ///< BS clock tick rate in ticks/s
     AlignedVector channel_freq;
 };
 
+struct ErtmPpsPhaseObservation {
+    bool valid = false;
+    double r_bs_samples = 0.0;
+    double r_ue_samples = 0.0;
+    double phase_error_samples = 0.0; ///< wrap_1s(P_U - P_B), target zero
+    int64_t bs_last_pps_ticks = -1;
+    int64_t bs_t0_to_pps_ticks = -1;
+    int64_t ue_last_pps_ns = -1;
+    double bs_tick_rate = 0.0;
+    double sample_rate = 0.0;
+};
+
+inline uint64_t add_mod_u64(uint64_t lhs, uint64_t rhs, uint64_t modulus) {
+    if (modulus == 0) {
+        return 0;
+    }
+    lhs %= modulus;
+    rhs %= modulus;
+    return lhs >= modulus - rhs
+        ? lhs - (modulus - rhs)
+        : lhs + rhs;
+}
+
+inline uint64_t mul_mod_u64(uint64_t lhs, uint64_t rhs, uint64_t modulus) {
+    if (modulus == 0) {
+        return 0;
+    }
+    uint64_t result = 0;
+    lhs %= modulus;
+    while (rhs != 0) {
+        if ((rhs & 1u) != 0u) {
+            result = add_mod_u64(result, lhs, modulus);
+        }
+        rhs >>= 1u;
+        if (rhs != 0) {
+            lhs = add_mod_u64(lhs, lhs, modulus);
+        }
+    }
+    return result;
+}
+
+inline uint64_t signed_mod_i64(int64_t value, uint64_t modulus) {
+    if (modulus == 0) {
+        return 0;
+    }
+    if (value >= 0) {
+        return static_cast<uint64_t>(value) % modulus;
+    }
+    const uint64_t magnitude = static_cast<uint64_t>(-(value + 1)) + 1u;
+    const uint64_t remainder = magnitude % modulus;
+    return remainder == 0 ? 0 : modulus - remainder;
+}
+
+/**
+ * @brief Wrap a sample-domain interval into [-0.5 s, 0.5 s).
+ */
+inline double wrap_pps_phase_samples(double samples, double sample_rate) {
+    if (!(sample_rate > 0.0) || !std::isfinite(sample_rate) ||
+        !std::isfinite(samples)) {
+        return 0.0;
+    }
+    double wrapped = std::fmod(samples + 0.5 * sample_rate, sample_rate);
+    if (wrapped < 0.0) {
+        wrapped += sample_rate;
+    }
+    return wrapped - 0.5 * sample_rate;
+}
+
+/**
+ * @brief Compute the UE-minus-BS PPS phase from one same-frame observation.
+ *
+ * For downlink frame N:
+ *   P_U - P_B = wrap_1s(tau_DL_RF - TO_UE + r_B(N) - r_U(N)).
+ * The BS anchor carried by each ERTM5 report is refreshed from time_last_pps()
+ * before that report is packed and is only used to reconstruct r_B(N). This
+ * function never reanchors either radio timeline or TO state.
+ */
+inline ErtmPpsPhaseObservation compute_ertm_pps_phase(
+    const ErtmTimingPayloadView& report,
+    uint64_t dl_frame_seq,
+    int64_t ue_frame_boundary_ns,
+    int64_t ue_last_pps_ns,
+    double tau_dl_rf_samples,
+    double to_ue_samples)
+{
+    ErtmPpsPhaseObservation out;
+    if (!report.bs_pps_anchor_valid || report.bs_frame_ticks <= 0 ||
+        !(report.bs_tick_rate > 0.0) || !std::isfinite(report.bs_tick_rate) ||
+        !(report.sample_rate > 0.0) || !std::isfinite(report.sample_rate) ||
+        ue_frame_boundary_ns < 0 || ue_last_pps_ns < 0 ||
+        !std::isfinite(tau_dl_rf_samples) || !std::isfinite(to_ue_samples)) {
+        return out;
+    }
+
+    if (report.bs_tick_rate >
+        static_cast<double>(std::numeric_limits<int64_t>::max())) {
+        return out;
+    }
+    const int64_t rounded_tick_rate =
+        static_cast<int64_t>(std::llround(report.bs_tick_rate));
+    if (rounded_tick_rate <= 0 ||
+        std::abs(report.bs_tick_rate - static_cast<double>(rounded_tick_rate)) >
+            0.5) {
+        return out;
+    }
+    const uint64_t second_ticks = static_cast<uint64_t>(rounded_tick_rate);
+    const uint64_t frame_phase_ticks = mul_mod_u64(
+        dl_frame_seq,
+        static_cast<uint64_t>(report.bs_frame_ticks) % second_ticks,
+        second_ticks);
+    const uint64_t r_bs_ticks = add_mod_u64(
+        signed_mod_i64(report.bs_t0_to_pps_ticks, second_ticks),
+        frame_phase_ticks,
+        second_ticks);
+    constexpr uint64_t kNanosecondsPerSecond = 1'000'000'000u;
+    const uint64_t ue_boundary_phase_ns =
+        signed_mod_i64(ue_frame_boundary_ns, kNanosecondsPerSecond);
+    const uint64_t ue_pps_phase_ns =
+        signed_mod_i64(ue_last_pps_ns, kNanosecondsPerSecond);
+    const uint64_t r_ue_ns = add_mod_u64(
+        ue_boundary_phase_ns,
+        ue_pps_phase_ns == 0 ? 0 : kNanosecondsPerSecond - ue_pps_phase_ns,
+        kNanosecondsPerSecond);
+
+    out.r_bs_samples = static_cast<double>(
+        static_cast<long double>(r_bs_ticks) *
+        static_cast<long double>(report.sample_rate) /
+        static_cast<long double>(second_ticks));
+    out.r_ue_samples = static_cast<double>(
+        static_cast<long double>(r_ue_ns) *
+        static_cast<long double>(report.sample_rate) /
+        static_cast<long double>(kNanosecondsPerSecond));
+    out.bs_last_pps_ticks = report.bs_last_pps_ticks;
+    out.bs_t0_to_pps_ticks = report.bs_t0_to_pps_ticks;
+    out.ue_last_pps_ns = ue_last_pps_ns;
+    out.bs_tick_rate = report.bs_tick_rate;
+    out.sample_rate = report.sample_rate;
+    out.phase_error_samples = wrap_pps_phase_samples(
+        tau_dl_rf_samples - to_ue_samples +
+            out.r_bs_samples - out.r_ue_samples,
+        report.sample_rate);
+    out.valid = true;
+    return out;
+}
+
+/**
+ * @brief eRTM UL channel report wire format (ERTM5).
+ *
+ * Layout (little-endian):
+ *   magic[5]='ERTM5'
+ *   fft_size u32, sample_rate f64, duti_samples i32, seq u32,
+ *   timeline_epoch u32, ul_measure_frame_seq u64,
+ *   pps_anchor_flags u32, bs_last_pps_ticks i64, bs_t0_to_pps_ticks i64,
+ *   bs_frame_ticks i64, bs_tick_rate f64,
+ *   channel_freq[fft_size] as interleaved f32 re/im.
+ *
+ * ERTM2/3/4 are rejected: ERTM2 lacks absolute frame identity, ERTM3 lacks
+ * the BS PPS/frame-epoch anchor, and ERTM4 lacks the raw BS PPS timestamp
+ * required to diagnose per-second PPS-anchor discontinuities.
+ */
 class ErtmTimingPayload {
 public:
-    static constexpr uint8_t kMagic[5] = {'E', 'R', 'T', 'M', '2'};
-    static constexpr size_t kHeaderBytes = 5 + 4 + 8 + 4 + 4;
+    static constexpr uint8_t kMagic[5] = {'E', 'R', 'T', 'M', '5'};
+    static constexpr uint8_t kMagicV2[5] = {'E', 'R', 'T', 'M', '2'};
+    static constexpr uint8_t kMagicV3[5] = {'E', 'R', 'T', 'M', '3'};
+    static constexpr uint8_t kMagicV4[5] = {'E', 'R', 'T', 'M', '4'};
+    static constexpr uint32_t kPpsAnchorValid = 0x01u;
+    // Base ERTM3 header (37) + PPS flags/raw/t0/frame/rate (36).
+    static constexpr size_t kHeaderBytes =
+        5 + 4 + 8 + 4 + 4 + 4 + 8 + 4 + 8 + 8 + 8 + 8;
 
     static bool looks_like(const uint8_t* data, size_t len) {
         return data != nullptr && len >= sizeof(kMagic) &&
                std::memcmp(data, kMagic, sizeof(kMagic)) == 0;
     }
 
+    static bool looks_like_v2(const uint8_t* data, size_t len) {
+        return data != nullptr && len >= sizeof(kMagicV2) &&
+               std::memcmp(data, kMagicV2, sizeof(kMagicV2)) == 0;
+    }
+
+    static bool looks_like_v3(const uint8_t* data, size_t len) {
+        return data != nullptr && len >= sizeof(kMagicV3) &&
+               std::memcmp(data, kMagicV3, sizeof(kMagicV3)) == 0;
+    }
+
+    static bool looks_like_v4(const uint8_t* data, size_t len) {
+        return data != nullptr && len >= sizeof(kMagicV4) &&
+               std::memcmp(data, kMagicV4, sizeof(kMagicV4)) == 0;
+    }
+
     static bool pack(uint32_t seq,
                      uint32_t fft_size,
                      double sample_rate,
                      int32_t duti_samples,
+                     uint32_t timeline_epoch,
+                     uint64_t ul_measure_frame_seq,
+                     int64_t bs_last_pps_ticks,
+                     int64_t bs_t0_to_pps_ticks,
+                     int64_t bs_frame_ticks,
+                     double bs_tick_rate,
                      const AlignedVector& channel_freq,
                      std::vector<uint8_t>& out,
                      std::string* error = nullptr) {
@@ -305,6 +575,13 @@ public:
         }
         if (!(sample_rate > 0.0) || !std::isfinite(sample_rate)) {
             set_error("sample_rate must be finite and positive");
+            return false;
+        }
+        if (bs_last_pps_ticks < 0 || bs_t0_to_pps_ticks < 0 || bs_frame_ticks <= 0 ||
+            !(bs_tick_rate > 0.0) || !std::isfinite(bs_tick_rate)) {
+            set_error(
+                "BS PPS ticks must be non-negative and frame/tick rates "
+                "must be finite and positive");
             return false;
         }
         const size_t total = kHeaderBytes + static_cast<size_t>(fft_size) * sizeof(float) * 2;
@@ -320,6 +597,13 @@ public:
         write_double(out, sample_rate);
         write_i32(out, duti_samples);
         write_u32(out, seq);
+        write_u32(out, timeline_epoch);
+        write_u64(out, ul_measure_frame_seq);
+        write_u32(out, kPpsAnchorValid);
+        write_i64(out, bs_last_pps_ticks);
+        write_i64(out, bs_t0_to_pps_ticks);
+        write_i64(out, bs_frame_ticks);
+        write_double(out, bs_tick_rate);
         for (const auto& v : channel_freq) {
             write_float(out, v.real());
             write_float(out, v.imag());
@@ -327,20 +611,32 @@ public:
         return true;
     }
 
-    static bool unpack(const uint8_t* data,
-                       size_t len,
-                       uint32_t expected_fft_size,
-                       ErtmTimingPayloadView& out,
-                       std::string* error = nullptr) {
+    /**
+     * @brief Parse ERTM5 scalar header fields without touching @p out.channel_freq.
+     *
+     * Used to select a reusable cache slot before channel unpack so the slot's
+     * existing channel buffer capacity can be preserved.
+     */
+    static bool peek(const uint8_t* data,
+                     size_t len,
+                     uint32_t expected_fft_size,
+                     ErtmTimingPayloadView& out,
+                     std::string* error = nullptr) {
         auto set_error = [error](const std::string& msg) {
             if (error) *error = msg;
         };
+        if ((looks_like_v2(data, len) || looks_like_v3(data, len) ||
+             looks_like_v4(data, len)) &&
+            !looks_like(data, len)) {
+            set_error("rejected legacy ERTM2/3/4 payload (raw PPS diagnostics required)");
+            return false;
+        }
         if (!looks_like(data, len)) {
-            set_error("missing ERTM2 magic");
+            set_error("missing ERTM5 magic");
             return false;
         }
         if (len < kHeaderBytes) {
-            set_error("payload shorter than ERTM2 header");
+            set_error("payload shorter than ERTM5 header");
             return false;
         }
 
@@ -353,18 +649,38 @@ public:
         off += 4;
         const uint32_t seq = read_u32(data, off);
         off += 4;
+        const uint32_t timeline_epoch = read_u32(data, off);
+        off += 4;
+        const uint64_t ul_measure_frame_seq = read_u64(data, off);
+        off += 8;
+        const uint32_t pps_anchor_flags = read_u32(data, off);
+        off += 4;
+        const int64_t bs_last_pps_ticks = read_i64(data, off);
+        off += 8;
+        const int64_t bs_t0_to_pps_ticks = read_i64(data, off);
+        off += 8;
+        const int64_t bs_frame_ticks = read_i64(data, off);
+        off += 8;
+        const double bs_tick_rate = read_double(data, off);
+        off += 8;
 
         if (fft_size == 0 || fft_size != expected_fft_size) {
-            set_error("ERTM2 fft_size mismatch");
+            set_error("ERTM5 fft_size mismatch");
             return false;
         }
         if (!(sample_rate > 0.0) || !std::isfinite(sample_rate)) {
-            set_error("ERTM2 sample_rate must be finite and positive");
+            set_error("ERTM5 sample_rate must be finite and positive");
+            return false;
+        }
+        if ((pps_anchor_flags & kPpsAnchorValid) == 0u ||
+            bs_last_pps_ticks < 0 || bs_t0_to_pps_ticks < 0 || bs_frame_ticks <= 0 ||
+            !(bs_tick_rate > 0.0) || !std::isfinite(bs_tick_rate)) {
+            set_error("ERTM5 BS PPS/frame anchor is invalid");
             return false;
         }
         const size_t expected_len = kHeaderBytes + static_cast<size_t>(fft_size) * sizeof(float) * 2;
         if (len != expected_len) {
-            set_error("ERTM2 payload length mismatch");
+            set_error("ERTM5 payload length mismatch");
             return false;
         }
 
@@ -372,8 +688,33 @@ public:
         out.sample_rate = sample_rate;
         out.duti_samples = duti_samples;
         out.seq = seq;
-        out.channel_freq.resize(fft_size);
-        for (uint32_t i = 0; i < fft_size; ++i) {
+        out.timeline_epoch = timeline_epoch;
+        out.ul_measure_frame_seq = ul_measure_frame_seq;
+        out.bs_pps_anchor_valid = true;
+        out.bs_last_pps_ticks = bs_last_pps_ticks;
+        out.bs_t0_to_pps_ticks = bs_t0_to_pps_ticks;
+        out.bs_frame_ticks = bs_frame_ticks;
+        out.bs_tick_rate = bs_tick_rate;
+        return true;
+    }
+
+    /**
+     * @brief Unpack ERTM5 into @p out, reusing @p out.channel_freq capacity when size matches.
+     */
+    static bool unpack(const uint8_t* data,
+                       size_t len,
+                       uint32_t expected_fft_size,
+                       ErtmTimingPayloadView& out,
+                       std::string* error = nullptr) {
+        if (!peek(data, len, expected_fft_size, out, error)) {
+            return false;
+        }
+        // Capacity-preserving resize: no allocation when already sized to fft_size.
+        if (out.channel_freq.size() != out.fft_size) {
+            out.channel_freq.resize(out.fft_size);
+        }
+        size_t off = kHeaderBytes;
+        for (uint32_t i = 0; i < out.fft_size; ++i) {
             const float re = read_float(data, off);
             off += 4;
             const float im = read_float(data, off);
@@ -391,8 +732,18 @@ private:
         out.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
     }
 
+    static void write_u64(std::vector<uint8_t>& out, uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            out.push_back(static_cast<uint8_t>((value >> (i * 8)) & 0xFFu));
+        }
+    }
+
     static void write_i32(std::vector<uint8_t>& out, int32_t value) {
         write_u32(out, static_cast<uint32_t>(value));
+    }
+
+    static void write_i64(std::vector<uint8_t>& out, int64_t value) {
+        write_u64(out, static_cast<uint64_t>(value));
     }
 
     static void write_float(std::vector<uint8_t>& out, float value) {
@@ -418,8 +769,20 @@ private:
                (static_cast<uint32_t>(data[off + 3]) << 24);
     }
 
+    static uint64_t read_u64(const uint8_t* data, size_t off) {
+        uint64_t bits = 0;
+        for (int i = 0; i < 8; ++i) {
+            bits |= static_cast<uint64_t>(data[off + static_cast<size_t>(i)]) << (i * 8);
+        }
+        return bits;
+    }
+
     static int32_t read_i32(const uint8_t* data, size_t off) {
         return static_cast<int32_t>(read_u32(data, off));
+    }
+
+    static int64_t read_i64(const uint8_t* data, size_t off) {
+        return static_cast<int64_t>(read_u64(data, off));
     }
 
     static float read_float(const uint8_t* data, size_t off) {
@@ -466,7 +829,16 @@ public:
     // sniffing payload bytes. Unknown flag bits are rejected on decode.
     static constexpr uint8_t kFlagArqFeedback = 0x01;
     static constexpr uint8_t kFlagErtmTiming = 0x02;
-    static constexpr uint8_t kKnownFlagsMask = 0x03;
+    /// Tier-1 Air-Frame Identity SIB word0 (BCH mini-header only, no LDPC payload).
+    static constexpr uint8_t kFlagAirFrameIdentity = 0x04;
+    /// Second BCH word of the expanded Identity SIB (seq high bits).
+    static constexpr uint8_t kFlagAirFrameIdentityHi = 0x08;
+    static constexpr uint8_t kKnownFlagsMask = 0x0F;
+    /// Marker + two mini-headers (epoch32 + full frame_seq32).
+    static constexpr size_t kIdentityMiniHeaderWords = 2;
+    static constexpr size_t kIdentityControlSymbols =
+        kMarkerSymbols + kIdentityMiniHeaderWords * kMiniHeaderSymbols;
+    static constexpr size_t kIdentityControlBits = kIdentityControlSymbols * 2;
     static constexpr uint8_t kPayloadBlocksExtended = std::numeric_limits<uint8_t>::max();
 
     static bool flags_are_known(uint8_t flags) {
@@ -487,6 +859,19 @@ public:
 
     static bool is_ertm_timing(const LdpcMiniHeader& header) {
         return is_ertm_timing_flags(header.flags);
+    }
+
+    static bool is_air_frame_identity_flags(uint8_t flags) {
+        // Word0 only — word1 uses kFlagAirFrameIdentityHi alone.
+        return flags == kFlagAirFrameIdentity;
+    }
+
+    static bool is_air_frame_identity(const LdpcMiniHeader& header) {
+        return is_air_frame_identity_flags(header.flags);
+    }
+
+    static bool is_air_frame_identity_hi_flags(uint8_t flags) {
+        return flags == kFlagAirFrameIdentityHi;
     }
     static constexpr float kMarkerMetricThreshold = 0.50f;
 
@@ -519,10 +904,6 @@ public:
         return field == static_cast<uint8_t>(blocks);
     }
 
-    static size_t padded_payload_len(size_t payload_len) {
-        return payload_blocks_for_len(payload_len) * kLdpcInfoBytesPerBlock;
-    }
-
     static size_t packet_qpsk_symbols(size_t payload_blocks) {
         return kControlSymbols + payload_blocks * kLdpcQpskSymbolsPerBlock;
     }
@@ -546,20 +927,74 @@ public:
 
     template<typename Out>
     static void write_mini_header_qpsk(const LdpcMiniHeader& header, Out* out) {
-        const uint64_t word = pack_header(header);
-        const auto code_bits = bch_encode_header(word);
-        for (size_t sym = 0; sym < kMiniHeaderSymbols; ++sym) {
-            const size_t bit_idx = sym * 2;
-            const int b0 = (bit_idx < kMiniHeaderBchBits) ? code_bits[bit_idx] : 0;
-            const int b1 = (bit_idx + 1 < kMiniHeaderBchBits) ? code_bits[bit_idx + 1] : 0;
-            out[sym] = static_cast<Out>((b0 << 1) | b1);
-        }
+        // Full expanded Identity SIB must use write_identity_control_qpsk.
+        // Per-word helpers support lo/hi for identity flag variants.
+        write_header_word_qpsk(pack_header(header), out);
     }
 
     template<typename Out>
     static void write_control_qpsk(const LdpcMiniHeader& header, Out* out) {
         write_marker_qpsk(out);
         write_mini_header_qpsk(header, out + kMarkerSymbols);
+    }
+
+    /**
+     * @brief Encode expanded Tier-1 Identity SIB: marker + 2× BCH mini-headers.
+     *
+     * word0: version|Identity|epoch_lo16|seq_lo24|CRC16
+     * word1: version|IdentityHi|epoch_hi16|seq_hi8|pad8|CRC16
+     * Combined: epoch32 | frame_seq32 (canonical OTA identity).
+     */
+    template<typename Out>
+    static void write_identity_control_qpsk(
+        uint32_t timeline_epoch32,
+        uint32_t air_frame_seq32,
+        Out* out)
+    {
+        write_marker_qpsk(out);
+        const uint16_t epoch_lo = static_cast<uint16_t>(timeline_epoch32 & 0xFFFFu);
+        const uint16_t epoch_hi = static_cast<uint16_t>((timeline_epoch32 >> 16) & 0xFFFFu);
+        const uint32_t seq_lo = air_frame_seq32 & 0x00FFFFFFu;
+        const uint32_t seq_hi = (air_frame_seq32 >> 24) & 0xFFu;
+        write_header_word_qpsk(
+            pack_identity_header_lo(epoch_lo, seq_lo),
+            out + kMarkerSymbols);
+        write_header_word_qpsk(
+            pack_identity_header_hi(epoch_hi, seq_hi),
+            out + kMarkerSymbols + kMiniHeaderSymbols);
+    }
+
+    /**
+     * @brief Decode expanded Identity SIB control block (marker already checked).
+     * @param header_llrs LLRs starting at first mini-header bit (after marker bits)
+     */
+    template<typename Llr>
+    static bool decode_identity_control_llrs(const Llr* header_llrs, LdpcMiniHeader& header_out) {
+        LdpcMiniHeader lo{};
+        LdpcMiniHeader hi{};
+        if (!decode_mini_header_llrs(header_llrs, lo)) {
+            return false;
+        }
+        if (!is_air_frame_identity(lo)) {
+            return false;
+        }
+        if (!decode_mini_header_llrs(
+                header_llrs + static_cast<std::ptrdiff_t>(kMiniHeaderEncodedBits),
+                hi)) {
+            return false;
+        }
+        if (!is_air_frame_identity_hi_flags(hi.flags) || hi.version != kVersion) {
+            return false;
+        }
+        // lo.timeline_epoch = epoch_lo16, hi.timeline_epoch = epoch_hi16
+        header_out = lo;
+        header_out.timeline_epoch =
+            (lo.timeline_epoch & 0xFFFFu) |
+            ((hi.timeline_epoch & 0xFFFFu) << 16);
+        header_out.air_frame_seq =
+            (lo.air_frame_seq & 0x00FFFFFFu) |
+            ((hi.air_frame_seq & 0xFFu) << 24);
+        return true;
     }
 
     template<typename Llr>
@@ -605,6 +1040,16 @@ public:
         if (header.version != kVersion || !flags_are_known(header.flags)) {
             throw std::runtime_error("LDPC mini-header version/flags mismatch.");
         }
+        if (is_air_frame_identity(header)) {
+            return pack_identity_header_lo(
+                static_cast<uint16_t>(header.timeline_epoch & 0xFFFFu),
+                header.air_frame_seq & 0x00FFFFFFu);
+        }
+        if (is_air_frame_identity_hi_flags(header.flags)) {
+            return pack_identity_header_hi(
+                static_cast<uint16_t>((header.timeline_epoch >> 16) & 0xFFFFu),
+                header.air_frame_seq & 0xFFu);
+        }
         if (!payload_len_fits(header.payload_len)) {
             throw std::runtime_error("LDPC mini-header payload length is too large.");
         }
@@ -619,12 +1064,33 @@ public:
         prefix |= (static_cast<uint64_t>(header.payload_blocks) << 16);
         prefix |= static_cast<uint64_t>(header.seq);
 
-        uint8_t bytes[6] = {};
-        for (int i = 0; i < 6; ++i) {
-            bytes[i] = static_cast<uint8_t>((prefix >> (40 - i * 8)) & 0xFFu);
-        }
-        const uint16_t crc = crc16_ccitt(bytes, sizeof(bytes));
-        return (prefix << 16) | static_cast<uint64_t>(crc);
+        return prefix_with_crc(prefix);
+    }
+
+    /**
+     * @brief Identity word0: version|Identity|epoch_lo16|seq_lo24|CRC16.
+     */
+    static uint64_t pack_identity_header_lo(uint16_t epoch_lo16, uint32_t seq_lo24) {
+        uint64_t prefix = 0;
+        prefix |= (static_cast<uint64_t>(kVersion & 0x0F) << 44);
+        prefix |= (static_cast<uint64_t>(kFlagAirFrameIdentity & 0x0F) << 40);
+        prefix |= (static_cast<uint64_t>(epoch_lo16) << 24);
+        prefix |= (static_cast<uint64_t>(seq_lo24) & 0x00FFFFFFull);
+        return prefix_with_crc(prefix);
+    }
+
+    /**
+     * @brief Identity word1: version|IdentityHi|epoch_hi16|seq_hi8|pad8|CRC16.
+     * Uses former pad bits to carry epoch high 16 → full epoch32 without more QPSK.
+     */
+    static uint64_t pack_identity_header_hi(uint16_t epoch_hi16, uint32_t seq_hi8) {
+        uint64_t prefix = 0;
+        prefix |= (static_cast<uint64_t>(kVersion & 0x0F) << 44);
+        prefix |= (static_cast<uint64_t>(kFlagAirFrameIdentityHi & 0x0F) << 40);
+        prefix |= (static_cast<uint64_t>(epoch_hi16) << 24);
+        prefix |= (static_cast<uint64_t>(seq_hi8 & 0xFFu) << 16);
+        // bits [15:8] reserved pad; [7:0] unused in prefix before CRC
+        return prefix_with_crc(prefix);
     }
 
     static bool unpack_header(uint64_t word, LdpcMiniHeader& header_out) {
@@ -642,13 +1108,34 @@ public:
         LdpcMiniHeader parsed;
         parsed.version = static_cast<uint8_t>((prefix >> 44) & 0x0Fu);
         parsed.flags = static_cast<uint8_t>((prefix >> 40) & 0x0Fu);
-        parsed.payload_len = static_cast<uint16_t>((prefix >> 24) & 0xFFFFu);
-        parsed.payload_blocks = static_cast<uint8_t>((prefix >> 16) & 0xFFu);
-        parsed.seq = static_cast<uint16_t>(prefix & 0xFFFFu);
 
         if (parsed.version != kVersion || !flags_are_known(parsed.flags)) {
             return false;
         }
+
+        if (is_air_frame_identity_flags(parsed.flags) ||
+            is_air_frame_identity_hi_flags(parsed.flags)) {
+            parsed.payload_len = 0;
+            parsed.payload_blocks = 0;
+            parsed.seq = 0;
+            // For lo: epoch_lo16; for hi: epoch_hi16 (combined in decode_identity).
+            parsed.timeline_epoch = static_cast<uint32_t>((prefix >> 24) & 0xFFFFu);
+            if (is_air_frame_identity_hi_flags(parsed.flags)) {
+                // seq_hi lives in bits [23:16] of the 48-bit prefix.
+                parsed.air_frame_seq = static_cast<uint32_t>((prefix >> 16) & 0xFFu);
+            } else {
+                parsed.air_frame_seq = static_cast<uint32_t>(prefix & 0x00FFFFFFu);
+            }
+            header_out = parsed;
+            return true;
+        }
+
+        parsed.payload_len = static_cast<uint16_t>((prefix >> 24) & 0xFFFFu);
+        parsed.payload_blocks = static_cast<uint8_t>((prefix >> 16) & 0xFFu);
+        parsed.seq = static_cast<uint16_t>(prefix & 0xFFFFu);
+        parsed.timeline_epoch = 0;
+        parsed.air_frame_seq = 0;
+
         if (!payload_len_fits(parsed.payload_len)) {
             return false;
         }
@@ -661,6 +1148,26 @@ public:
     }
 
 private:
+    static uint64_t prefix_with_crc(uint64_t prefix_48) {
+        uint8_t bytes[6] = {};
+        for (int i = 0; i < 6; ++i) {
+            bytes[i] = static_cast<uint8_t>((prefix_48 >> (40 - i * 8)) & 0xFFu);
+        }
+        const uint16_t crc = crc16_ccitt(bytes, sizeof(bytes));
+        return (prefix_48 << 16) | static_cast<uint64_t>(crc);
+    }
+
+    template<typename Out>
+    static void write_header_word_qpsk(uint64_t word, Out* out) {
+        const auto code_bits = bch_encode_header(word);
+        for (size_t sym = 0; sym < kMiniHeaderSymbols; ++sym) {
+            const size_t bit_idx = sym * 2;
+            const int b0 = (bit_idx < kMiniHeaderBchBits) ? code_bits[bit_idx] : 0;
+            const int b1 = (bit_idx + 1 < kMiniHeaderBchBits) ? code_bits[bit_idx + 1] : 0;
+            out[sym] = static_cast<Out>((b0 << 1) | b1);
+        }
+    }
+
     struct BchTables {
         std::array<uint8_t, 127> exp{};
         std::array<int16_t, 128> log{};
@@ -2400,15 +2907,6 @@ public:
     }
 
     /**
-     * @brief Calculate LLR scaling factor from noise variance.
-     * For QPSK Gray mapping: LLR_scale = 4 / noise_var
-     */
-    static double compute_llr_scale(double noise_var) {
-        double sigma2_dim = noise_var / 2.0;
-        return 2.0 / sigma2_dim;  // = 4 / noise_var
-    }
-
-    /**
      * @brief Compute LLR values for QPSK symbols.
      */
     static void compute_llr(
@@ -2595,274 +3093,664 @@ public:
 };
 
 /**
- * @brief Adaptive Kalman filter for CFO error (ppm) tracking.
+ * @brief Light-weight EWMA filter for residual CFO error (ppm).
  *
- * State model:
- * x = [error_ppm, drift_ppm_per_frame]^T
- * x(k+1) = F x(k) + Gw*w(k) + Grw*r(k)
- * z(k) = H x(k) + v(k), where z is raw error_ppm from CFO estimate
+ * Replaces the former adaptive Kalman filter. Used only as a pre-filter before
+ * OCXODiscipliner (Mode A Coarse/FLL CFO observation).
  *
- * The filter adapts q_wf/q_rw/R online using innovation ACF and a regularized
- * least-squares update on the linear model r_nu = Phi * theta.
+ *   filtered <- (1 - alpha) * filtered + alpha * raw
+ *
+ * Control actions (OCXO ppm steps) are injected so the filter does not treat
+ * self-induced residual steps as fresh measurement.
  */
-class AdaptiveCFOAKF {
+class CfoErrorEwma {
 public:
     struct Params {
         bool enable = true;
-        size_t bootstrap_frames = 64;
-        size_t innovation_window = 64;
-        size_t max_lag = 4;
-        size_t adapt_interval = 64;
-        double gate_sigma = 3.0;
-        double tikhonov_lambda = 1e-3;
-        double update_smooth = 0.2;
-        double q_wf_min = 1e-10;
-        double q_wf_max = 1e2;
-        double q_rw_min = 1e-12;
-        double q_rw_max = 1e1;
-        double r_min = 1e-8;
-        double r_max = 1e3;
+        double alpha = 0.02;  // 0..1; higher = faster tracking / less smoothing
     };
 
     struct UpdateResult {
         double raw_error_ppm = 0.0;
         double filtered_error_ppm = 0.0;
-        double innovation = 0.0;
-        double innovation_variance = 1.0;
-        double q_wf = 0.0;
-        double q_rw = 0.0;
-        double r = 1.0;
         bool initialized = false;
-        bool gated = false;
-        bool adapted = false;
     };
 
-    explicit AdaptiveCFOAKF(const Params& params, double frame_duration_s = 1.0)
-        : params_(sanitize_params(params)),
-          dt_s_(std::max(frame_duration_s, 1e-9)) {
-        reset();
-    }
+    CfoErrorEwma() { configure(Params{}); }
 
-    void configure(const Params& params, double frame_duration_s) {
-        params_ = sanitize_params(params);
-        dt_s_ = std::max(frame_duration_s, 1e-9);
-        reset();
-    }
+    explicit CfoErrorEwma(const Params& params) { configure(params); }
 
-    // Inject externally applied OCXO control action (delta ppm).
-    void notify_control_action(double delta_ppm) {
-        if (!params_.enable || !std::isfinite(delta_ppm)) {
-            return;
-        }
-        if (std::abs(delta_ppm) <= kControlDeltaEpsPpm) {
-            return;
-        }
-        pending_control_delta_ppm_ += delta_ppm;
-        adapt_freeze_countdown_ = std::max(adapt_freeze_countdown_, kAdaptFreezeFramesAfterControl);
+    void configure(const Params& params) {
+        params_ = sanitize(params);
+        reset();
     }
 
     void reset() {
         initialized_ = false;
-        bootstrap_samples_.clear();
-        innovations_.clear();
-        frame_counter_ = 0;
-        accepted_update_count_ = 0;
+        filtered_ = 0.0;
         pending_control_delta_ppm_ = 0.0;
-        adapt_freeze_countdown_ = 0;
+    }
 
-        x0_ = 0.0;
-        x1_ = 0.0;
-        p00_ = 1.0;
-        p01_ = 0.0;
-        p10_ = 0.0;
-        p11_ = 1.0;
-
-        q_wf_ = clamp(1e-4, params_.q_wf_min, params_.q_wf_max);
-        q_rw_ = clamp(1e-5, params_.q_rw_min, params_.q_rw_max);
-        r_ = clamp(1e-2, params_.r_min, params_.r_max);
-
-        last_innovation_ = 0.0;
-        last_s_ = std::max(r_, 1e-9);
-        last_k0_ = 0.0;
-        last_k1_ = 0.0;
-        has_valid_gain_ = false;
+    /**
+     * @brief Inject an applied OCXO command step (ppm of the UE clock).
+     *
+     * The Mode A plant has negative residual gain: a positive OCXO command step
+     * reduces a positive residual by the same ppm amount. Shift the filter
+     * prediction by the resulting residual step so the controller does not
+     * re-see its own action as a fresh disturbance.
+     */
+    void notify_control_action(double applied_delta_ppm) {
+        if (!params_.enable || !std::isfinite(applied_delta_ppm)) {
+            return;
+        }
+        if (std::abs(applied_delta_ppm) <= 1e-15) {
+            return;
+        }
+        pending_control_delta_ppm_ += applied_delta_ppm;
     }
 
     UpdateResult update(double raw_error_ppm) {
         UpdateResult out;
         out.raw_error_ppm = std::isfinite(raw_error_ppm) ? raw_error_ppm : 0.0;
-        out.q_wf = q_wf_;
-        out.q_rw = q_rw_;
-        out.r = r_;
 
         if (!params_.enable) {
             pending_control_delta_ppm_ = 0.0;
-            adapt_freeze_countdown_ = 0;
             out.filtered_error_ppm = out.raw_error_ppm;
-            out.innovation = 0.0;
-            out.innovation_variance = 1.0;
             out.initialized = false;
             return out;
         }
 
+        // Apply pending plant steps before the measurement update. Residual
+        // change is the negative of the applied actuator command.
+        if (initialized_ && std::abs(pending_control_delta_ppm_) > 1e-15) {
+            filtered_ -= pending_control_delta_ppm_;
+        }
+        pending_control_delta_ppm_ = 0.0;
+
         if (!initialized_) {
-            bootstrap_samples_.push_back(out.raw_error_ppm);
-            if (bootstrap_samples_.size() >= params_.bootstrap_frames) {
-                initialize_from_bootstrap();
-            } else if (bootstrap_samples_.size() > params_.bootstrap_frames) {
-                bootstrap_samples_.pop_front();
-            }
-            out.filtered_error_ppm = initialized_ ? x0_ : bootstrap_filtered_error();
-            out.innovation = 0.0;
-            out.innovation_variance = std::max(r_, 1e-9);
-            out.initialized = initialized_;
-            out.q_wf = q_wf_;
-            out.q_rw = q_rw_;
-            out.r = r_;
+            filtered_ = out.raw_error_ppm;
+            initialized_ = true;
+            out.filtered_error_ppm = filtered_;
+            out.initialized = true;
             return out;
         }
 
-        frame_counter_++;
-        const bool freeze_active = (adapt_freeze_countdown_ > 0);
-        if (adapt_freeze_countdown_ > 0) {
-            --adapt_freeze_countdown_;
-        }
-
-        const double control_delta_ppm = pending_control_delta_ppm_;
-        pending_control_delta_ppm_ = 0.0;
-        const double control_comp_ppm = -kControlToErrorGain * control_delta_ppm;
-
-        // Keep covariance symmetric in floating-point math.
-        const double p01_sym = 0.5 * (p01_ + p10_);
-        p01_ = p01_sym;
-        p10_ = p01_sym;
-
-        const double x0_pred = x0_ + dt_s_ * x1_ + control_comp_ppm;
-        const double x1_pred = x1_;
-
-        const double p00_pred = p00_ + dt_s_ * (p10_ + p01_) + dt_s_ * dt_s_ * p11_ + q_wf_;
-        const double p01_pred = p01_ + dt_s_ * p11_;
-        const double p10_pred = p10_ + dt_s_ * p11_;
-        const double p11_pred = p11_ + q_rw_;
-
-        const double s = std::max(p00_pred + r_, 1e-9);
-        const double innovation = out.raw_error_ppm - x0_pred;
-        const double gate_sigma_sq = params_.gate_sigma * params_.gate_sigma;
-        const double nis = innovation * innovation / s;
-        const bool gated = nis > gate_sigma_sq;
-
-        out.innovation = innovation;
-        out.innovation_variance = s;
-        out.gated = gated;
-
-        if (gated) {
-            x0_ = x0_pred;
-            x1_ = x1_pred;
-            p00_ = p00_pred;
-            p01_ = p01_pred;
-            p10_ = p10_pred;
-            p11_ = p11_pred;
-        } else {
-            const double k0 = p00_pred / s;
-            const double k1 = p10_pred / s;
-
-            x0_ = x0_pred + k0 * innovation;
-            x1_ = x1_pred + k1 * innovation;
-
-            // Joseph-form covariance update for numerical robustness.
-            const double a = 1.0 - k0;
-            const double b = -k1;
-
-            const double m00 = a * p00_pred;
-            const double m01 = a * p01_pred;
-            const double m10 = b * p00_pred + p10_pred;
-            const double m11 = b * p01_pred + p11_pred;
-
-            p00_ = m00 * a + k0 * k0 * r_;
-            p01_ = m00 * b + m01 + k0 * k1 * r_;
-            p10_ = m10 * a + k1 * k0 * r_;
-            p11_ = m10 * b + m11 + k1 * k1 * r_;
-
-            const double p_off = 0.5 * (p01_ + p10_);
-            p01_ = p_off;
-            p10_ = p_off;
-
-            last_k0_ = k0;
-            last_k1_ = k1;
-            has_valid_gain_ = true;
-            accepted_update_count_++;
-
-            if (!freeze_active) {
-                innovations_.push_back(innovation);
-                while (innovations_.size() > params_.innovation_window) {
-                    innovations_.pop_front();
-                }
-            }
-        }
-
-        bool adapted = false;
-        if (!freeze_active &&
-            has_valid_gain_ &&
-            (frame_counter_ % params_.adapt_interval == 0) &&
-            innovations_.size() >= std::max(params_.innovation_window, params_.max_lag + size_t(2))) {
-            adapted = adapt_qr_from_innovation_acf();
-        }
-
-        out.filtered_error_ppm = x0_;
-        out.q_wf = q_wf_;
-        out.q_rw = q_rw_;
-        out.r = r_;
-        out.initialized = initialized_;
-        out.adapted = adapted;
-        last_innovation_ = innovation;
-        last_s_ = s;
+        const double a = params_.alpha;
+        filtered_ = (1.0 - a) * filtered_ + a * out.raw_error_ppm;
+        out.filtered_error_ppm = filtered_;
+        out.initialized = true;
         return out;
     }
 
-    double filtered_error_ppm() const { return x0_; }
-    double q_wf() const { return q_wf_; }
-    double q_rw() const { return q_rw_; }
-    double r() const { return r_; }
-    double innovation() const { return last_innovation_; }
-    double innovation_variance() const { return last_s_; }
+    double filtered_error_ppm() const { return filtered_; }
     bool initialized() const { return initialized_; }
 
 private:
     Params params_{};
-    double dt_s_ = 1.0;
     bool initialized_ = false;
-    bool has_valid_gain_ = false;
-
-    std::deque<double> bootstrap_samples_;
-    std::deque<double> innovations_;
-    size_t frame_counter_ = 0;
-    size_t accepted_update_count_ = 0;
+    double filtered_ = 0.0;
     double pending_control_delta_ppm_ = 0.0;
-    size_t adapt_freeze_countdown_ = 0;
 
-    // State x=[error_ppm, drift_ppm_per_frame]
-    double x0_ = 0.0;
-    double x1_ = 0.0;
+    static Params sanitize(const Params& in) {
+        Params p = in;
+        if (!(p.alpha > 0.0) || !std::isfinite(p.alpha)) {
+            p.alpha = 0.02;
+        }
+        p.alpha = std::min(std::max(p.alpha, 1e-6), 1.0);
+        return p;
+    }
+};
 
-    // Covariance P
-    double p00_ = 1.0;
-    double p01_ = 0.0;
-    double p10_ = 0.0;
-    double p11_ = 1.0;
+/**
+ * @brief Staged OCXO frequency/phase disciplining loop.
+ *
+ * Mode A drives Coarse/FLL from residual CFO (same sign as the plant-oriented
+ * residual: +OCXO reduces +residual). Mode B estimates raw clock SFO from the
+ * Alignment-continuous eRTM TO_clock slope, then controls with the negated
+ * slope so UE-local OCXO is negative-feedback on the bench; debug still
+ * reports the raw slope in to_slope_ppm. Legacy Phase/Auto lock TO_clock with
+ * error (setpoint - to_clock); explicit PpsPhase locks measured UE-minus-BS
+ * PPS phase to zero after an optional one-shot PPSOUT placement.
+ */
+class OCXODiscipliner {
+public:
+    /** Maximum sync-loss interval that retains the active loop stage. */
+    static constexpr double kReacquisitionModeHoldS = 30.0;
+    /** Minimum continuous fault interval before an automatic stage downgrade. */
+    static constexpr double kDegradationHoldS = 10.0;
 
-    // Adaptive noise coefficients
-    double q_wf_ = 1e-4;
-    double q_rw_ = 1e-5;
-    double r_ = 1e-2;
+    enum class ModePolicy {
+        Auto,
+        Freq,
+        Phase,
+        PpsPhase
+    };
 
-    double last_innovation_ = 0.0;
-    double last_s_ = 1.0;
-    double last_k0_ = 0.0;
-    double last_k1_ = 0.0;
+    enum class ActiveMode {
+        Off,
+        FreqAlign,
+        PhaseLock
+    };
 
-    static constexpr double kControlToErrorGain = 1.0;
-    static constexpr double kControlDeltaEpsPpm = 1e-12;
-    static constexpr size_t kAdaptFreezeFramesAfterControl = 16;
+    enum class FrequencySource {
+        None,
+        Cfo,
+        ToSlope
+    };
+
+    enum class FllFastControlMode {
+        Pi,
+        HalfStep
+    };
+
+    enum class Stage {
+        Coarse,
+        FllFast,
+        FllSlow,
+        Phase,
+        Freeze
+    };
+
+    enum class TransitionReason {
+        None,
+        Reset,
+        CoarseComplete,
+        CoarseOvershoot,
+        FllStable,
+        FllUnstable,
+        PhaseReady,
+        PhaseSfoConfirmed,
+        ToStale,
+        ToJump,
+        FrequencySourceChanged,
+        ControlFrozen
+    };
+
+    enum class ReacquisitionAction {
+        Waiting,
+        Preserved,
+        Reset
+    };
+
+    struct ReacquisitionResult {
+        ReacquisitionAction action = ReacquisitionAction::Preserved;
+        Stage previous_stage = Stage::Freeze;
+        double elapsed_s = 0.0;
+    };
+
+    enum class SetpointMode {
+        FreezeOnLock,
+        Zero,
+        Fixed
+    };
+
+    struct Params {
+        ModePolicy policy = ModePolicy::Auto;
+        double samples_per_frame = 115200.0;
+        double max_abs_u_ppm = 0.45;
+
+        bool coarse_enable = true;
+        double coarse_gain = 1.0;
+        double coarse_max_abs_ppm = 0.2;
+        double coarse_obs_window_s = 1.0;
+        double coarse_control_period_s = 0.5;
+        double coarse_max_slew_ppm_per_s = 0.01;
+
+        double fll_fast_obs_window_s = 1.0;
+        double fll_fast_control_period_s = 0.5;
+        FllFastControlMode fll_fast_control_mode = FllFastControlMode::Pi;
+        double fll_fast_kp = 0.5;
+        double fll_fast_ki = 0.03;
+        double fll_fast_max_slew_ppm_per_s = 0.005;
+        double fll_slow_obs_window_s = 10.0;
+        double fll_slow_control_period_s = 2.0;
+        double fll_slow_kp = 0.1;
+        double fll_slow_ki = 0.007;
+        double fll_slow_deadzone_ppm = 5.0e-5;
+        double fll_slow_max_slew_ppm_per_s = 0.005;
+        double fll_slow_enter_abs_ppm = 0.0005;
+        double fll_fast_enter_abs_ppm = 0.01;
+        double fll_switch_hold_s = 30.0;
+
+        double phase_control_period_s = 5.0;
+        double phase_jump_gate_samples = 0.5;
+        uint64_t phase_max_report_age_frames = 256;
+        SetpointMode phase_setpoint_mode = SetpointMode::FreezeOnLock;
+        double phase_setpoint_fixed_samples = 0.0;
+        double phase_kp = 2.0e-4;
+        double phase_ki = 1.0e-6;
+        double phase_max_slew_ppm_per_s = 5.0e-5;
+        double phase_enter_sfo_abs_ppm = 2.0e-4;
+        double phase_enter_hold_s = 30.0;
+        double phase_exit_sfo_abs_ppm = 0.01;
+        double phase_exit_hold_s = kDegradationHoldS;
+    };
+
+    struct Observation {
+        bool cfo_valid = false;
+        double cfo_ppm = 0.0;
+        bool to_valid = false;
+        double to_ue_samples = 0.0;
+        int32_t to_alignment_samples = 0;
+        uint64_t to_timeline_epoch = 0;
+        uint64_t to_frame_seq = 0;
+        uint64_t to_sync_generation = 0;
+        uint64_t to_report_age_frames = 0;
+        bool to_is_new = false;
+        bool pps_phase_valid = false;
+        double pps_phase_error_samples = 0.0; ///< P_U-P_B, target zero
+        bool phase_control_ready = true; ///< false while one-shot AP is pending
+        bool allow_control = true;
+    };
+
+    struct UpdateResult {
+        bool request_control = false;
+        double desired_delta_ppm = 0.0;
+        double applied_delta_ppm = 0.0;
+        double command_ppm = 0.0;
+        double cfo_error_ppm = 0.0;
+        double frequency_error_ppm = 0.0; ///< Plant-oriented FLL error; Mode B is -to_slope_ppm
+        FrequencySource frequency_source = FrequencySource::None;
+        double to_raw = 0.0;
+        double to_clock = 0.0;
+        double to_err = 0.0; ///< Active Phase error: TO setpoint or PPS phase
+        double pps_phase_error_samples = 0.0;
+        double to_slope_ppm = 0.0; ///< Raw TO_clock regression slope before plant-sign mapping
+        bool to_slope_valid = false;
+        double alignment_feedforward_samples = 0.0;
+        double coarse_target_ppm = 0.0;
+        double coarse_outstanding_ppm = 0.0;
+        bool to_jump_rejected = false;
+        bool stage_changed = false;
+        ActiveMode mode = ActiveMode::Off;
+        Stage stage = Stage::Freeze;
+        TransitionReason transition_reason = TransitionReason::None;
+    };
+
+    OCXODiscipliner() { configure(Params{}); }
+
+    explicit OCXODiscipliner(const Params& params) { configure(params); }
+
+    void configure(const Params& params) {
+        params_ = sanitize_params(params);
+        reset_tracking_at_command(0.0);
+    }
+
+    /**
+     * @brief Reset observations and loop stages while retaining the command.
+     */
+    void reset() {
+        reset_tracking_at_command(u_ppm_);
+    }
+
+    /**
+     * @brief Reset observations and loop stages while retaining the DAC command.
+     *
+     * Long synchronization reacquisition restarts estimation, not the physical
+     * OCXO operating point. The retained command is clamped to the configured
+     * actuator range and becomes the initial integrator/output state.
+     */
+    void reset_tracking_at_command(double retained_command_ppm) {
+        stage_ = params_.coarse_enable ? Stage::Coarse : Stage::FllFast;
+        u_ppm_ = std::isfinite(retained_command_ppm)
+            ? clamp(retained_command_ppm,
+                    -params_.max_abs_u_ppm,
+                    params_.max_abs_u_ppm)
+            : 0.0;
+        prev_control_error_ = 0.0;
+        has_prev_error_ = false;
+        stable_time_s_ = 0.0;
+        phase_exit_time_s_ = 0.0;
+        degradation_pending_.fill(false);
+        degradation_started_.fill({});
+        pending_frequency_source_ = FrequencySource::None;
+        last_control_time_ = {};
+        has_control_time_ = false;
+        clear_observation_window();
+        coarse_target_valid_ = false;
+        coarse_target_ppm_ = 0.0;
+        last_applied_delta_ppm_ = 0.0;
+        frequency_source_ = FrequencySource::None;
+        frozen_ = false;
+        freeze_started_ = {};
+        pending_to_jump_ = false;
+        pending_to_discontinuity_ = false;
+        reacquisition_hold_active_ = false;
+        reacquisition_started_ = {};
+        reset_to_anchor(true);
+        refresh_debug_state();
+    }
+
+    void reanchor_to(bool allow_state_changes = true) {
+        if (reacquisition_hold_active_) {
+            reset_to_anchor(false);
+            pending_to_discontinuity_ = false;
+            refresh_debug_state();
+            return;
+        }
+        reset_to_anchor(allow_state_changes);
+    }
+
+    /** @brief Freeze loop time and retain the active stage during sync search. */
+    void begin_reacquisition_hold() {
+        begin_reacquisition_hold_at(std::chrono::steady_clock::now());
+    }
+
+    /** @brief Deterministic-time overload for reacquisition tests. */
+    void begin_reacquisition_hold_at(
+        std::chrono::steady_clock::time_point now)
+    {
+        if (!reacquisition_hold_active_) {
+            reacquisition_hold_active_ = true;
+            reacquisition_started_ = now;
+        }
+        enter_freeze(now);
+        reset_to_anchor(false);
+        pending_to_discontinuity_ = false;
+        refresh_debug_state();
+    }
+
+    /**
+     * @brief Decide whether recovered tracking may retain its previous stage.
+     *
+     * Phase remains frozen until the new timeline establishes a valid TO/PPS
+     * observation. A hold longer than @p preserve_mode_s resets loop stages
+     * while retaining the current DAC command.
+     */
+    ReacquisitionResult prepare_reacquisition_resume(
+        const Observation& obs,
+        double preserve_mode_s)
+    {
+        return prepare_reacquisition_resume_at(
+            obs, preserve_mode_s, std::chrono::steady_clock::now());
+    }
+
+    /** @brief Deterministic-time overload for reacquisition tests. */
+    ReacquisitionResult prepare_reacquisition_resume_at(
+        const Observation& obs,
+        double preserve_mode_s,
+        std::chrono::steady_clock::time_point now)
+    {
+        ReacquisitionResult result;
+        result.previous_stage = stage_;
+        if (!reacquisition_hold_active_) {
+            return result;
+        }
+
+        result.elapsed_s = std::max(
+            0.0,
+            std::chrono::duration<double>(now - reacquisition_started_).count());
+        if (result.elapsed_s > std::max(preserve_mode_s, 0.0)) {
+            const double retained_command_ppm = u_ppm_;
+            reset_tracking_at_command(retained_command_ppm);
+            result.action = ReacquisitionAction::Reset;
+            return result;
+        }
+
+        // A Phase loop cannot resume until the new timeline has established
+        // its TO/PPS anchor. update_at(allow_control=false) may ingest that
+        // anchor while the original stage remains frozen.
+        if (stage_ == Stage::Phase &&
+            (!phase_observation_is_fresh(obs) ||
+             (!uses_pps_phase() && !to_setpoint_valid_))) {
+            result.action = ReacquisitionAction::Waiting;
+            return result;
+        }
+
+        reacquisition_hold_active_ = false;
+        reacquisition_started_ = {};
+        result.action = ReacquisitionAction::Preserved;
+        return result;
+    }
+
+    /** @return True while a synchronization reacquisition hold is pending. */
+    bool reacquisition_hold_active() const {
+        return reacquisition_hold_active_;
+    }
+
+    double command_ppm() const { return u_ppm_; }
+    Stage stage() const { return stage_; }
+
+    void commit_applied_delta(double applied_delta_ppm) {
+        if (!std::isfinite(applied_delta_ppm)) {
+            applied_delta_ppm = 0.0;
+        }
+        const double before = u_ppm_;
+        u_ppm_ = clamp(u_ppm_ + applied_delta_ppm,
+                       -params_.max_abs_u_ppm,
+                       params_.max_abs_u_ppm);
+        const double committed = u_ppm_ - before;
+        last_applied_delta_ppm_ = committed;
+        refresh_debug_state();
+    }
+
+    UpdateResult debug_state() const { return debug_state_; }
+
+    static int stage_code(Stage s) {
+        switch (s) {
+            case Stage::Coarse: return 0;
+            case Stage::FllFast: return 1;
+            case Stage::FllSlow: return 2;
+            case Stage::Phase: return 3;
+            case Stage::Freeze: return 4;
+        }
+        return 4;
+    }
+
+    static const char* mode_policy_name(ModePolicy p) {
+        switch (p) {
+            case ModePolicy::Auto: return "auto";
+            case ModePolicy::Freq: return "freq";
+            case ModePolicy::Phase: return "phase";
+            case ModePolicy::PpsPhase: return "pps_phase";
+        }
+        return "auto";
+    }
+
+    static const char* active_mode_name(ActiveMode m) {
+        switch (m) {
+            case ActiveMode::Off: return "off";
+            case ActiveMode::FreqAlign: return "freq";
+            case ActiveMode::PhaseLock: return "phase";
+        }
+        return "off";
+    }
+
+    static const char* frequency_source_name(FrequencySource source) {
+        switch (source) {
+            case FrequencySource::None: return "none";
+            case FrequencySource::Cfo: return "cfo";
+            case FrequencySource::ToSlope: return "to_slope";
+        }
+        return "none";
+    }
+
+    static const char* stage_name(Stage s) {
+        switch (s) {
+            case Stage::Coarse: return "coarse";
+            case Stage::FllFast: return "fll_fast";
+            case Stage::FllSlow: return "fll_slow";
+            case Stage::Phase: return "phase";
+            case Stage::Freeze: return "freeze";
+        }
+        return "freeze";
+    }
+
+    static const char* transition_reason_name(TransitionReason reason) {
+        switch (reason) {
+            case TransitionReason::None: return "none";
+            case TransitionReason::Reset: return "reset";
+            case TransitionReason::CoarseComplete: return "coarse_complete";
+            case TransitionReason::CoarseOvershoot: return "coarse_overshoot";
+            case TransitionReason::FllStable: return "fll_stable";
+            case TransitionReason::FllUnstable: return "fll_unstable";
+            case TransitionReason::PhaseReady: return "phase_ready";
+            case TransitionReason::PhaseSfoConfirmed: return "phase_sfo_confirmed";
+            case TransitionReason::ToStale: return "to_stale";
+            case TransitionReason::ToJump: return "to_jump";
+            case TransitionReason::FrequencySourceChanged: return "frequency_source_changed";
+            case TransitionReason::ControlFrozen: return "control_frozen";
+        }
+        return "none";
+    }
+
+    UpdateResult update(const Observation& obs) {
+        return update_at(obs, std::chrono::steady_clock::now());
+    }
+
+    UpdateResult update_at(
+        const Observation& obs,
+        std::chrono::steady_clock::time_point now)
+    {
+        UpdateResult out;
+        out.command_ppm = u_ppm_;
+        out.stage = stage_;
+        out.cfo_error_ppm =
+            obs.cfo_valid && std::isfinite(obs.cfo_ppm) ? obs.cfo_ppm : 0.0;
+        out.to_raw = std::isfinite(obs.to_ue_samples) ? obs.to_ue_samples : 0.0;
+        pps_phase_valid_ =
+            obs.pps_phase_valid && std::isfinite(obs.pps_phase_error_samples);
+        if (pps_phase_valid_) {
+            pps_phase_error_samples_ = obs.pps_phase_error_samples;
+        }
+        if (obs.to_valid && obs.to_is_new) {
+            ingest_new_to_report(obs, now, out);
+        }
+        populate_to_debug(out);
+
+        if (!obs.allow_control) {
+            enter_freeze(now);
+            out.mode = ActiveMode::Off;
+            out.stage = Stage::Freeze;
+            out.transition_reason = TransitionReason::ControlFrozen;
+            debug_state_ = out;
+            return out;
+        }
+        leave_freeze(now);
+
+        if (apply_pending_to_event(now, out)) {
+            out.mode = stage_ == Stage::Phase
+                ? ActiveMode::PhaseLock
+                : ActiveMode::FreqAlign;
+            out.stage = stage_;
+            out.command_ppm = u_ppm_;
+            populate_to_debug(out);
+            debug_state_ = out;
+            return out;
+        }
+
+        const bool phase_observation_stale =
+            stage_ == Stage::Phase &&
+            (!phase_observation_is_fresh(obs) ||
+             (!uses_pps_phase() && !to_setpoint_valid_));
+        if (phase_observation_stale) {
+            if (degradation_confirmed(TransitionReason::ToStale, now)) {
+                transition_to(Stage::FllFast, TransitionReason::ToStale, out);
+            }
+            out.mode = stage_ == Stage::Phase
+                ? ActiveMode::PhaseLock
+                : ActiveMode::FreqAlign;
+            out.stage = stage_;
+            out.command_ppm = u_ppm_;
+            populate_to_debug(out);
+            debug_state_ = out;
+            return out;
+        }
+        clear_degradation_candidate(TransitionReason::ToStale);
+        if (to_slope_valid_) {
+            clear_degradation_candidate(TransitionReason::ToJump);
+        }
+        if (prepare_frequency_source(obs, now, out)) {
+            out.mode = stage_ == Stage::Phase
+                ? ActiveMode::PhaseLock
+                : ActiveMode::FreqAlign;
+            out.stage = stage_;
+            out.command_ppm = u_ppm_;
+            populate_to_debug(out);
+            debug_state_ = out;
+            return out;
+        }
+
+        switch (stage_) {
+            case Stage::Coarse:
+                out = update_coarse(obs, now, out);
+                break;
+            case Stage::FllFast:
+            case Stage::FllSlow:
+                out = update_fll(obs, now, out);
+                break;
+            case Stage::Phase:
+                out = update_phase(obs, now, out);
+                break;
+            case Stage::Freeze:
+                transition_to(Stage::FllFast, TransitionReason::ControlFrozen, out);
+                break;
+        }
+        out.mode = stage_ == Stage::Phase
+            ? ActiveMode::PhaseLock
+            : ActiveMode::FreqAlign;
+        out.stage = stage_;
+        out.command_ppm = u_ppm_;
+        populate_to_debug(out);
+        debug_state_ = out;
+        return out;
+    }
+
+private:
+    Params params_{};
+    Stage stage_ = Stage::Coarse;
+    double u_ppm_ = 0.0;
+    double prev_control_error_ = 0.0;
+    bool has_prev_error_ = false;
+    double stable_time_s_ = 0.0;
+    double phase_exit_time_s_ = 0.0;
+    std::chrono::steady_clock::time_point last_control_time_{};
+    bool has_control_time_ = false;
+
+    double obs_sum_ = 0.0;
+    size_t obs_count_ = 0;
+    std::chrono::steady_clock::time_point obs_window_start_{};
+    bool has_obs_window_ = false;
+
+    bool coarse_target_valid_ = false;
+    double coarse_target_ppm_ = 0.0;
+
+    bool to_anchor_valid_ = false;
+    double to_last_raw_ = 0.0;
+    int32_t to_last_alignment_ = 0;
+    uint64_t to_last_timeline_epoch_ = 0;
+    uint64_t to_last_frame_seq_ = 0;
+    uint64_t to_last_sync_generation_ = 0;
+    double to_clock_ = 0.0;
+    double to_setpoint_ = 0.0;
+    bool to_setpoint_valid_ = false;
+    double pps_phase_error_samples_ = 0.0;
+    bool pps_phase_valid_ = false;
+    double to_slope_ppm_ = 0.0;
+    bool to_slope_valid_ = false;
+    double alignment_feedforward_samples_ = 0.0;
+    double last_applied_delta_ppm_ = 0.0;
+
+    struct ToSlopePoint {
+        uint64_t frame_seq = 0;
+        double to_clock = 0.0;
+        std::chrono::steady_clock::time_point observed_at{};
+    };
+    std::deque<ToSlopePoint> to_slope_points_;
+    FrequencySource frequency_source_ = FrequencySource::None;
+    bool frozen_ = false;
+    std::chrono::steady_clock::time_point freeze_started_{};
+    bool pending_to_jump_ = false;
+    bool pending_to_discontinuity_ = false;
+    static constexpr size_t kTransitionReasonCount =
+        static_cast<size_t>(TransitionReason::ControlFrozen) + 1;
+    std::array<bool, kTransitionReasonCount> degradation_pending_{};
+    std::array<std::chrono::steady_clock::time_point,
+               kTransitionReasonCount> degradation_started_{};
+    FrequencySource pending_frequency_source_ = FrequencySource::None;
+    bool reacquisition_hold_active_ = false;
+    std::chrono::steady_clock::time_point reacquisition_started_{};
+    UpdateResult debug_state_{};
 
     static double clamp(double v, double lo, double hi) {
         return std::max(lo, std::min(hi, v));
@@ -2870,353 +3758,1154 @@ private:
 
     static Params sanitize_params(const Params& in) {
         Params p = in;
-        p.bootstrap_frames = std::max<size_t>(p.bootstrap_frames, 8);
-        p.innovation_window = std::max<size_t>(p.innovation_window, 8);
-        p.max_lag = std::max<size_t>(p.max_lag, 2);
-        p.max_lag = std::min(p.max_lag, p.innovation_window - 1);
-        p.adapt_interval = std::max<size_t>(p.adapt_interval, 1);
-        p.gate_sigma = std::max(p.gate_sigma, 1.0);
-        p.tikhonov_lambda = std::max(p.tikhonov_lambda, 0.0);
-        p.update_smooth = clamp(p.update_smooth, 0.0, 1.0);
-        if (p.q_wf_min > p.q_wf_max) std::swap(p.q_wf_min, p.q_wf_max);
-        if (p.q_rw_min > p.q_rw_max) std::swap(p.q_rw_min, p.q_rw_max);
-        if (p.r_min > p.r_max) std::swap(p.r_min, p.r_max);
-        p.q_wf_min = std::max(p.q_wf_min, 0.0);
-        p.q_rw_min = std::max(p.q_rw_min, 0.0);
-        p.r_min = std::max(p.r_min, 1e-12);
+        p.samples_per_frame = std::max(p.samples_per_frame, 1.0);
+        p.max_abs_u_ppm = std::max(p.max_abs_u_ppm, 0.0);
+        p.coarse_gain = std::max(p.coarse_gain, 0.0);
+        p.coarse_max_abs_ppm = std::max(p.coarse_max_abs_ppm, 0.0);
+        p.coarse_obs_window_s = std::max(p.coarse_obs_window_s, 0.0);
+        p.coarse_control_period_s = std::max(p.coarse_control_period_s, 0.01);
+        p.coarse_max_slew_ppm_per_s = std::max(p.coarse_max_slew_ppm_per_s, 0.0);
+        p.fll_fast_obs_window_s = std::max(p.fll_fast_obs_window_s, 0.0);
+        p.fll_fast_control_period_s = std::max(p.fll_fast_control_period_s, 0.01);
+        p.fll_fast_kp = std::max(p.fll_fast_kp, 0.0);
+        p.fll_fast_ki = std::max(p.fll_fast_ki, 0.0);
+        p.fll_fast_max_slew_ppm_per_s = std::max(p.fll_fast_max_slew_ppm_per_s, 0.0);
+        p.fll_slow_obs_window_s = std::max(p.fll_slow_obs_window_s, 0.0);
+        p.fll_slow_control_period_s = std::max(p.fll_slow_control_period_s, 0.01);
+        p.fll_slow_kp = std::max(p.fll_slow_kp, 0.0);
+        p.fll_slow_ki = std::max(p.fll_slow_ki, 0.0);
+        p.fll_slow_deadzone_ppm = std::max(p.fll_slow_deadzone_ppm, 0.0);
+        p.fll_slow_max_slew_ppm_per_s = std::max(p.fll_slow_max_slew_ppm_per_s, 0.0);
+        p.fll_slow_enter_abs_ppm = std::max(p.fll_slow_enter_abs_ppm, 0.0);
+        p.fll_fast_enter_abs_ppm =
+            std::max(p.fll_fast_enter_abs_ppm, p.fll_slow_enter_abs_ppm);
+        p.fll_switch_hold_s = std::max(p.fll_switch_hold_s, 0.0);
+        p.phase_control_period_s = std::max(p.phase_control_period_s, 0.1);
+        p.phase_jump_gate_samples = std::max(p.phase_jump_gate_samples, 0.0);
+        p.phase_kp = std::max(p.phase_kp, 0.0);
+        p.phase_ki = std::max(p.phase_ki, 0.0);
+        p.phase_max_slew_ppm_per_s = std::max(p.phase_max_slew_ppm_per_s, 0.0);
+        p.phase_enter_sfo_abs_ppm = std::max(p.phase_enter_sfo_abs_ppm, 0.0);
+        p.phase_enter_hold_s = std::max(p.phase_enter_hold_s, 0.0);
+        p.phase_exit_sfo_abs_ppm =
+            std::max(p.phase_exit_sfo_abs_ppm, p.phase_enter_sfo_abs_ppm);
+        p.phase_exit_hold_s = std::max(p.phase_exit_hold_s, kDegradationHoldS);
         return p;
     }
 
-    double bootstrap_filtered_error() const {
-        if (bootstrap_samples_.empty()) return 0.0;
-        const double sum = std::accumulate(bootstrap_samples_.begin(), bootstrap_samples_.end(), 0.0);
-        return sum / static_cast<double>(bootstrap_samples_.size());
+    bool valid_cfo(const Observation& obs) const {
+        return obs.cfo_valid && std::isfinite(obs.cfo_ppm);
     }
 
-    static double median_of_sorted(const std::vector<double>& sorted) {
-        if (sorted.empty()) return 0.0;
-        const size_t n = sorted.size();
-        if ((n & 1U) != 0U) return sorted[n / 2];
-        return 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]);
+    bool to_is_fresh(const Observation& obs) const {
+        return params_.policy != ModePolicy::Freq &&
+               obs.to_valid && to_anchor_valid_ &&
+               obs.to_report_age_frames <= params_.phase_max_report_age_frames &&
+               std::isfinite(obs.to_ue_samples);
     }
 
-    static double robust_variance(const std::deque<double>& samples) {
-        if (samples.empty()) return 1e-2;
-        std::vector<double> v(samples.begin(), samples.end());
-        std::sort(v.begin(), v.end());
-        const double med = median_of_sorted(v);
-        std::vector<double> abs_dev(v.size(), 0.0);
-        for (size_t i = 0; i < v.size(); ++i) {
-            abs_dev[i] = std::abs(v[i] - med);
+    bool uses_pps_phase() const {
+        return params_.policy == ModePolicy::PpsPhase;
+    }
+
+    bool phase_observation_is_fresh(const Observation& obs) const {
+        if (!to_is_fresh(obs)) {
+            return false;
         }
-        std::sort(abs_dev.begin(), abs_dev.end());
-        const double mad = median_of_sorted(abs_dev);
-        double sigma = 1.4826 * mad;
-        if (!(sigma > 1e-8) || !std::isfinite(sigma)) {
-            const double mean = std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
-            double var = 0.0;
-            for (double x : v) {
-                const double d = x - mean;
-                var += d * d;
-            }
-            var /= static_cast<double>(std::max<size_t>(1, v.size() - 1));
-            sigma = std::sqrt(std::max(var, 1e-8));
-        }
-        return std::max(sigma * sigma, 1e-8);
+        return !uses_pps_phase() ||
+            (obs.pps_phase_valid && std::isfinite(obs.pps_phase_error_samples));
     }
 
-    void initialize_from_bootstrap() {
-        std::vector<double> sorted(bootstrap_samples_.begin(), bootstrap_samples_.end());
-        std::sort(sorted.begin(), sorted.end());
-        const double med = median_of_sorted(sorted);
-        const double var = robust_variance(bootstrap_samples_);
-
-        x0_ = med;
-        x1_ = 0.0;
-        p00_ = std::max(var, 1e-6);
-        p01_ = 0.0;
-        p10_ = 0.0;
-        p11_ = std::max(var / std::max(dt_s_ * dt_s_, 1e-6), 1e-6);
-
-        q_wf_ = clamp(var * 0.05, params_.q_wf_min, params_.q_wf_max);
-        q_rw_ = clamp(var * 0.005, params_.q_rw_min, params_.q_rw_max);
-        r_ = clamp(var * 0.5, params_.r_min, params_.r_max);
-
-        initialized_ = true;
-        frame_counter_ = 0;
-        accepted_update_count_ = 0;
-        pending_control_delta_ppm_ = 0.0;
-        adapt_freeze_countdown_ = 0;
-        innovations_.clear();
-        last_innovation_ = 0.0;
-        last_s_ = std::max(r_, 1e-9);
-        last_k0_ = 0.0;
-        last_k1_ = 0.0;
-        has_valid_gain_ = false;
+    bool mode_b_requested(const Observation& obs) const {
+        if (params_.policy == ModePolicy::Phase ||
+            params_.policy == ModePolicy::PpsPhase) {
+            return true;
+        }
+        if (params_.policy == ModePolicy::Freq) {
+            return false;
+        }
+        return to_is_fresh(obs);
     }
 
-    static bool solve_discrete_lyapunov_2x2(
-        const std::array<double, 4>& a,
-        const std::array<double, 4>& q,
-        std::array<double, 4>& p
-    ) {
-        p = {0.0, 0.0, 0.0, 0.0};
-        constexpr int kMaxIter = 200;
-        constexpr double kTol = 1e-12;
-
-        for (int iter = 0; iter < kMaxIter; ++iter) {
-            const double ap00 = a[0] * p[0] + a[1] * p[2];
-            const double ap01 = a[0] * p[1] + a[1] * p[3];
-            const double ap10 = a[2] * p[0] + a[3] * p[2];
-            const double ap11 = a[2] * p[1] + a[3] * p[3];
-
-            std::array<double, 4> pn{};
-            pn[0] = ap00 * a[0] + ap01 * a[1] + q[0];
-            pn[1] = ap00 * a[2] + ap01 * a[3] + q[1];
-            pn[2] = ap10 * a[0] + ap11 * a[1] + q[2];
-            pn[3] = ap10 * a[2] + ap11 * a[3] + q[3];
-
-            double max_diff = 0.0;
-            for (size_t i = 0; i < 4; ++i) {
-                if (!std::isfinite(pn[i])) return false;
-                max_diff = std::max(max_diff, std::abs(pn[i] - p[i]));
-            }
-            p = pn;
-            if (max_diff < kTol) break;
-        }
-        const double sym = 0.5 * (p[1] + p[2]);
-        p[1] = sym;
-        p[2] = sym;
-        return true;
+    FrequencySource selected_frequency_source(const Observation& obs) const {
+        return mode_b_requested(obs) ? FrequencySource::ToSlope : FrequencySource::Cfo;
     }
 
-    static bool solve_3x3(std::array<double, 9> a, std::array<double, 3> b, std::array<double, 3>& x) {
-        for (int i = 0; i < 3; ++i) {
-            int pivot = i;
-            double max_abs = std::abs(a[i * 3 + i]);
-            for (int r = i + 1; r < 3; ++r) {
-                const double v = std::abs(a[r * 3 + i]);
-                if (v > max_abs) {
-                    max_abs = v;
-                    pivot = r;
-                }
-            }
-            if (max_abs < 1e-14) return false;
-            if (pivot != i) {
-                for (int c = i; c < 3; ++c) std::swap(a[i * 3 + c], a[pivot * 3 + c]);
-                std::swap(b[i], b[pivot]);
-            }
-            const double diag = a[i * 3 + i];
-            for (int c = i; c < 3; ++c) a[i * 3 + c] /= diag;
-            b[i] /= diag;
-
-            for (int r = i + 1; r < 3; ++r) {
-                const double f = a[r * 3 + i];
-                for (int c = i; c < 3; ++c) a[r * 3 + c] -= f * a[i * 3 + c];
-                b[r] -= f * b[i];
-            }
-        }
-        for (int i = 2; i >= 0; --i) {
-            double acc = b[i];
-            for (int c = i + 1; c < 3; ++c) acc -= a[i * 3 + c] * x[c];
-            x[i] = acc;
-        }
-        return std::isfinite(x[0]) && std::isfinite(x[1]) && std::isfinite(x[2]);
+    /**
+     * @brief Plant-oriented Mode B frequency error from TO_clock slope.
+     *
+     * Raw regression slope is retained in to_slope_ppm_ for debug. Bench with
+     * the OCXO on the local UE clock showed Mode B FLL as positive feedback when
+     * the loop used +to_slope as the control error (Mode A CFO residual was
+     * already negative-feedback). Negate once for Coarse/FLL so +OCXO ppm
+     * reduces the controlled error (same plant-gain convention as Mode A).
+     */
+    double mode_b_frequency_error_ppm() const {
+        return -to_slope_ppm_;
     }
 
-    std::array<double, 3> innovation_basis_coeffs(int basis_idx, size_t lag_max) const {
-        // H = [1, 0], F = [[1, dt], [0, 1]]
-        const double c0 = 1.0;
-        const double c1 = dt_s_;
+    /**
+     * @brief Plant-oriented legacy Phase error from Alignment-continuous TO.
+     *
+     * Uses the opposite of (to_clock - setpoint) so the velocity-form Phase PI
+     * matches the Mode B FLL sign on the same TO_clock state. PPS Phase keeps
+     * its own error (and ocxo_pps_initial_ap_polarity) unchanged.
+     */
+    double mode_b_to_phase_error_samples() const {
+        if (!to_setpoint_valid_) {
+            return 0.0;
+        }
+        return to_setpoint_ - to_clock_;
+    }
 
-        // A = I - K*H and Acl = A*F
-        const double a00 = 1.0 - last_k0_;
-        const double a01 = 0.0;
-        const double a10 = -last_k1_;
-        const double a11 = 1.0;
+    bool frequency_observation(const Observation& obs, double& error_ppm) const {
+        if (frequency_source_ == FrequencySource::ToSlope) {
+            if (!obs.to_is_new || !to_is_fresh(obs) || !to_slope_valid_) {
+                return false;
+            }
+            error_ppm = mode_b_frequency_error_ppm();
+            return true;
+        }
+        if (frequency_source_ == FrequencySource::Cfo && valid_cfo(obs)) {
+            error_ppm = obs.cfo_ppm;
+            return true;
+        }
+        return false;
+    }
 
-        std::array<double, 4> acl{
-            a00,
-            a00 * dt_s_ + a01,
-            a10,
-            a10 * dt_s_ + a11
-        };
+    double to_slope_window_s() const {
+        switch (stage_) {
+            case Stage::Coarse:
+                return params_.coarse_obs_window_s;
+            case Stage::FllFast:
+                return params_.fll_fast_obs_window_s;
+            case Stage::FllSlow:
+            case Stage::Phase:
+                return params_.fll_slow_obs_window_s;
+            case Stage::Freeze:
+                return params_.fll_fast_obs_window_s;
+        }
+        return params_.fll_fast_obs_window_s;
+    }
 
-        // B columns: process/measurement noises mapped into posterior error dynamics.
-        const std::array<double, 2> b_wf{a00, a10};      // A * [1, 0]^T
-        const std::array<double, 2> b_rw{a01, a11};      // A * [0, 1]^T
-        const std::array<double, 2> b_v{-last_k0_, -last_k1_}; // -K * v
+    double max_to_slope_window_s() const {
+        return std::max({params_.coarse_obs_window_s,
+                         params_.fll_fast_obs_window_s,
+                         params_.fll_slow_obs_window_s});
+    }
 
-        // D columns in innovation equation nu = C x_prev + D u.
-        const double d_wf = 1.0;
-        const double d_rw = 0.0;
-        const double d_v = 1.0;
+    void clear_to_slope_history() {
+        to_slope_points_.clear();
+        to_slope_ppm_ = 0.0;
+        to_slope_valid_ = false;
+    }
 
-        std::array<double, 2> b{};
-        double d = 0.0;
-        if (basis_idx == 0) {
-            b = b_wf;
-            d = d_wf;
-        } else if (basis_idx == 1) {
-            b = b_rw;
-            d = d_rw;
+    void update_to_slope_estimate(std::chrono::steady_clock::time_point now) {
+        const double max_window_s = max_to_slope_window_s();
+        while (to_slope_points_.size() > 2) {
+            const double second_age_s = std::chrono::duration<double>(
+                now - to_slope_points_[1].observed_at).count();
+            if (second_age_s <= max_window_s) {
+                break;
+            }
+            to_slope_points_.pop_front();
+        }
+
+        if (to_slope_points_.size() < 2) {
+            to_slope_ppm_ = 0.0;
+            to_slope_valid_ = false;
+            return;
+        }
+
+        const double required_window_s = to_slope_window_s();
+        size_t first = 0;
+        if (required_window_s <= 0.0) {
+            first = to_slope_points_.size() - 2;
         } else {
-            b = b_v;
-            d = d_v;
-        }
-
-        std::array<double, 4> q{
-            b[0] * b[0], b[0] * b[1],
-            b[1] * b[0], b[1] * b[1]
-        };
-        std::array<double, 4> p{};
-        if (!solve_discrete_lyapunov_2x2(acl, q, p)) {
-            return {0.0, 0.0, 0.0};
-        }
-
-        // g = E[x_k y_k] = Acl*P*C^T + b*d
-        const double pc0 = p[0] * c0 + p[1] * c1;
-        const double pc1 = p[2] * c0 + p[3] * c1;
-        std::array<double, 2> g{
-            acl[0] * pc0 + acl[1] * pc1 + b[0] * d,
-            acl[2] * pc0 + acl[3] * pc1 + b[1] * d
-        };
-
-        const double r0 = c0 * (p[0] * c0 + p[1] * c1) + c1 * (p[2] * c0 + p[3] * c1) + d * d;
-
-        std::array<double, 3> coeff_head{r0, 0.0, 0.0};
-        if (lag_max == 0) return coeff_head;
-
-        // Return only the first 3 entries used by the caller (actual lag loop computes full vector).
-        coeff_head[1] = c0 * g[0] + c1 * g[1];
-        if (lag_max >= 2) {
-            const std::array<double, 2> ag{
-                acl[0] * g[0] + acl[1] * g[1],
-                acl[2] * g[0] + acl[3] * g[1]
-            };
-            coeff_head[2] = c0 * ag[0] + c1 * ag[1];
-        }
-        return coeff_head;
-    }
-
-    void build_phi_matrix(size_t lag_max, std::vector<std::array<double, 3>>& phi) const {
-        phi.assign(lag_max + 1, {0.0, 0.0, 0.0});
-
-        // H = [1, 0], F = [[1, dt], [0, 1]]
-        const double c0 = 1.0;
-        const double c1 = dt_s_;
-
-        const double a00 = 1.0 - last_k0_;
-        const double a01 = 0.0;
-        const double a10 = -last_k1_;
-        const double a11 = 1.0;
-        std::array<double, 4> acl{
-            a00,
-            a00 * dt_s_ + a01,
-            a10,
-            a10 * dt_s_ + a11
-        };
-
-        const std::array<std::array<double, 2>, 3> b_cols{{
-            {a00, a10},             // wf
-            {a01, a11},             // rw
-            {-last_k0_, -last_k1_}  // v (measurement noise)
-        }};
-        const std::array<double, 3> d_cols{1.0, 0.0, 1.0};
-
-        for (int col = 0; col < 3; ++col) {
-            const auto& b = b_cols[col];
-            const double d = d_cols[col];
-            std::array<double, 4> q{
-                b[0] * b[0], b[0] * b[1],
-                b[1] * b[0], b[1] * b[1]
-            };
-            std::array<double, 4> p{};
-            if (!solve_discrete_lyapunov_2x2(acl, q, p)) {
-                continue;
-            }
-
-            const double pc0 = p[0] * c0 + p[1] * c1;
-            const double pc1 = p[2] * c0 + p[3] * c1;
-            std::array<double, 2> g{
-                acl[0] * pc0 + acl[1] * pc1 + b[0] * d,
-                acl[2] * pc0 + acl[3] * pc1 + b[1] * d
-            };
-
-            phi[0][col] = c0 * (p[0] * c0 + p[1] * c1) + c1 * (p[2] * c0 + p[3] * c1) + d * d;
-            if (lag_max == 0) continue;
-
-            std::array<double, 2> a_pow_g = g;
-            for (size_t lag = 1; lag <= lag_max; ++lag) {
-                if (lag > 1) {
-                    const std::array<double, 2> next{
-                        acl[0] * a_pow_g[0] + acl[1] * a_pow_g[1],
-                        acl[2] * a_pow_g[0] + acl[3] * a_pow_g[1]
-                    };
-                    a_pow_g = next;
+            while (first + 1 < to_slope_points_.size()) {
+                const double next_age_s = std::chrono::duration<double>(
+                    now - to_slope_points_[first + 1].observed_at).count();
+                if (next_age_s < required_window_s) {
+                    break;
                 }
-                phi[lag][col] = c0 * a_pow_g[0] + c1 * a_pow_g[1];
+                ++first;
             }
+            const double coverage_s = std::chrono::duration<double>(
+                to_slope_points_.back().observed_at -
+                to_slope_points_[first].observed_at).count();
+            if (coverage_s + 1e-12 < required_window_s) {
+                to_slope_ppm_ = 0.0;
+                to_slope_valid_ = false;
+                return;
+            }
+        }
+
+        const uint64_t base_frame = to_slope_points_[first].frame_seq;
+        double mean_x = 0.0;
+        double mean_y = 0.0;
+        size_t count = 0;
+        for (size_t i = first; i < to_slope_points_.size(); ++i) {
+            const double x = static_cast<double>(
+                to_slope_points_[i].frame_seq - base_frame) *
+                params_.samples_per_frame;
+            mean_x += x;
+            mean_y += to_slope_points_[i].to_clock;
+            ++count;
+        }
+        mean_x /= static_cast<double>(count);
+        mean_y /= static_cast<double>(count);
+
+        double covariance = 0.0;
+        double variance = 0.0;
+        for (size_t i = first; i < to_slope_points_.size(); ++i) {
+            const double x = static_cast<double>(
+                to_slope_points_[i].frame_seq - base_frame) *
+                params_.samples_per_frame;
+            const double dx = x - mean_x;
+            covariance += dx * (to_slope_points_[i].to_clock - mean_y);
+            variance += dx * dx;
+        }
+        to_slope_ppm_ = variance > 0.0
+            ? covariance / variance * 1.0e6
+            : 0.0;
+        to_slope_valid_ = variance > 0.0 && std::isfinite(to_slope_ppm_);
+        if (!to_slope_valid_) {
+            to_slope_ppm_ = 0.0;
         }
     }
 
-    bool adapt_qr_from_innovation_acf() {
-        const size_t n = innovations_.size();
-        if (n < 8) return false;
-        const size_t lag_max = std::min(params_.max_lag, n - 1);
-        if (lag_max < 2) return false;
+    void append_to_slope_point(uint64_t frame_seq,
+                               double to_clock,
+                               std::chrono::steady_clock::time_point now) {
+        to_slope_points_.push_back(ToSlopePoint{frame_seq, to_clock, now});
+        update_to_slope_estimate(now);
+    }
 
-        std::vector<double> v(innovations_.begin(), innovations_.end());
-        std::vector<double> r_hat(lag_max + 1, 0.0);
-        for (size_t lag = 0; lag <= lag_max; ++lag) {
-            double acc = 0.0;
-            const size_t count = n - lag;
-            for (size_t i = lag; i < n; ++i) {
-                acc += v[i] * v[i - lag];
-            }
-            r_hat[lag] = acc / static_cast<double>(count);
-        }
-
-        std::vector<std::array<double, 3>> phi;
-        build_phi_matrix(lag_max, phi);
-        if (phi.empty()) return false;
-
-        std::array<double, 9> normal{
-            params_.tikhonov_lambda, 0.0, 0.0,
-            0.0, params_.tikhonov_lambda, 0.0,
-            0.0, 0.0, params_.tikhonov_lambda
-        };
-        std::array<double, 3> rhs{
-            params_.tikhonov_lambda * q_wf_,
-            params_.tikhonov_lambda * q_rw_,
-            params_.tikhonov_lambda * r_
-        };
-
-        for (size_t lag = 0; lag <= lag_max; ++lag) {
-            const double w = 1.0 / static_cast<double>(lag + 1);
-            const auto& row = phi[lag];
-            for (int i = 0; i < 3; ++i) {
-                rhs[i] += w * row[i] * r_hat[lag];
-                for (int j = 0; j < 3; ++j) {
-                    normal[i * 3 + j] += w * row[i] * row[j];
+    bool prepare_frequency_source(const Observation& obs,
+                                  std::chrono::steady_clock::time_point now,
+                                  UpdateResult& out) {
+        const FrequencySource selected = selected_frequency_source(obs);
+        if (frequency_source_ == FrequencySource::None) {
+            frequency_source_ = selected;
+        } else if (frequency_source_ != selected) {
+            if (stage_ == Stage::FllSlow || stage_ == Stage::Phase) {
+                if (pending_frequency_source_ != selected) {
+                    clear_degradation_candidate(
+                        TransitionReason::FrequencySourceChanged);
+                    pending_frequency_source_ = selected;
+                }
+                if (!degradation_confirmed(
+                        TransitionReason::FrequencySourceChanged, now)) {
+                    out.frequency_source = frequency_source_;
+                    return false;
                 }
             }
+            frequency_source_ = selected;
+            pending_frequency_source_ = FrequencySource::None;
+            reset_control_history();
+            if (coarse_target_valid_) {
+                coarse_target_valid_ = false;
+                coarse_target_ppm_ = u_ppm_;
+                transition_to(
+                    Stage::FllFast,
+                    TransitionReason::FrequencySourceChanged,
+                    out);
+            } else if (stage_ == Stage::FllSlow || stage_ == Stage::Phase) {
+                transition_to(
+                    Stage::FllFast,
+                    TransitionReason::FrequencySourceChanged,
+                    out);
+            } else {
+                out.transition_reason = TransitionReason::FrequencySourceChanged;
+            }
+        } else {
+            pending_frequency_source_ = FrequencySource::None;
+            clear_degradation_candidate(
+                TransitionReason::FrequencySourceChanged);
         }
+        out.frequency_source = frequency_source_;
+        return out.stage_changed;
+    }
 
-        std::array<double, 3> theta{0.0, 0.0, 0.0};
-        if (!solve_3x3(normal, rhs, theta)) return false;
+    void clear_observation_window() {
+        obs_sum_ = 0.0;
+        obs_count_ = 0;
+        obs_window_start_ = {};
+        has_obs_window_ = false;
+    }
 
-        double q_wf_new = clamp(theta[0], params_.q_wf_min, params_.q_wf_max);
-        double q_rw_new = clamp(theta[1], params_.q_rw_min, params_.q_rw_max);
-        double r_new = clamp(theta[2], params_.r_min, params_.r_max);
+    void reset_control_history() {
+        clear_observation_window();
+        has_prev_error_ = false;
+        has_control_time_ = false;
+        stable_time_s_ = 0.0;
+        phase_exit_time_s_ = 0.0;
+    }
 
-        const double g = params_.update_smooth;
-        q_wf_ = clamp((1.0 - g) * q_wf_ + g * q_wf_new, params_.q_wf_min, params_.q_wf_max);
-        q_rw_ = clamp((1.0 - g) * q_rw_ + g * q_rw_new, params_.q_rw_min, params_.q_rw_max);
-        r_ = clamp((1.0 - g) * r_ + g * r_new, params_.r_min, params_.r_max);
+    bool degradation_confirmed(
+        TransitionReason reason,
+        std::chrono::steady_clock::time_point now)
+    {
+        const size_t index = static_cast<size_t>(reason);
+        if (index >= kTransitionReasonCount) {
+            return false;
+        }
+        if (!degradation_pending_[index]) {
+            degradation_pending_[index] = true;
+            degradation_started_[index] = now;
+            return false;
+        }
+        return std::chrono::duration<double>(
+                   now - degradation_started_[index]).count() >=
+               kDegradationHoldS;
+    }
+
+    void clear_degradation_candidate(TransitionReason reason) {
+        const size_t index = static_cast<size_t>(reason);
+        if (index >= kTransitionReasonCount) {
+            return;
+        }
+        degradation_pending_[index] = false;
+        degradation_started_[index] = {};
+    }
+
+    void clear_degradation_candidate() {
+        degradation_pending_.fill(false);
+        degradation_started_.fill({});
+        pending_frequency_source_ = FrequencySource::None;
+    }
+
+    void enter_freeze(std::chrono::steady_clock::time_point now) {
+        if (!frozen_) {
+            frozen_ = true;
+            freeze_started_ = now;
+        }
+    }
+
+    void leave_freeze(std::chrono::steady_clock::time_point now) {
+        if (!frozen_) {
+            return;
+        }
+        const auto frozen_duration = now - freeze_started_;
+        if (has_control_time_) {
+            last_control_time_ += frozen_duration;
+        }
+        if (has_obs_window_) {
+            obs_window_start_ += frozen_duration;
+        }
+        for (size_t i = 0; i < kTransitionReasonCount; ++i) {
+            if (degradation_pending_[i]) {
+                degradation_started_[i] += frozen_duration;
+            }
+        }
+        frozen_ = false;
+        freeze_started_ = {};
+    }
+
+    void cancel_coarse_target() {
+        coarse_target_valid_ = false;
+        coarse_target_ppm_ = u_ppm_;
+    }
+
+    bool apply_pending_to_event(
+        std::chrono::steady_clock::time_point now,
+        UpdateResult& out)
+    {
+        if (!pending_to_jump_ && !pending_to_discontinuity_) {
+            return false;
+        }
+        const bool jump = pending_to_jump_;
+        pending_to_jump_ = false;
+        pending_to_discontinuity_ = false;
+        if (jump) {
+            // Force a fresh absolute anchor so zero/fixed setpoints cannot hide
+            // the rejected offset indefinitely.
+            clear_to_slope_history();
+            to_anchor_valid_ = false;
+            out.to_jump_rejected = true;
+        }
+        if (!uses_pps_phase() &&
+            params_.phase_setpoint_mode == SetpointMode::FreezeOnLock) {
+            to_setpoint_valid_ = false;
+        }
+        const TransitionReason reason = jump
+            ? TransitionReason::ToJump
+            : TransitionReason::ToStale;
+        if ((stage_ == Stage::FllSlow || stage_ == Stage::Phase) &&
+            !degradation_confirmed(reason, now)) {
+            return true;
+        }
+        if (stage_ == Stage::FllFast) {
+            reset_control_history();
+            out.transition_reason = reason;
+        } else {
+            transition_to(Stage::FllFast, reason, out);
+        }
         return true;
+    }
+
+    void reset_to_anchor(bool allow_state_changes) {
+        to_anchor_valid_ = false;
+        to_last_raw_ = 0.0;
+        to_last_alignment_ = 0;
+        to_last_timeline_epoch_ = 0;
+        to_last_frame_seq_ = 0;
+        to_last_sync_generation_ = 0;
+        to_clock_ = 0.0;
+        to_setpoint_ = 0.0;
+        to_setpoint_valid_ = false;
+        pps_phase_error_samples_ = 0.0;
+        pps_phase_valid_ = false;
+        clear_to_slope_history();
+        alignment_feedforward_samples_ = 0.0;
+        if (!allow_state_changes) {
+            pending_to_discontinuity_ = true;
+            return;
+        }
+        if (!uses_pps_phase() &&
+            params_.phase_setpoint_mode == SetpointMode::FreezeOnLock) {
+            to_setpoint_valid_ = false;
+        }
+        if (stage_ == Stage::Phase || stage_ == Stage::FllSlow) {
+            pending_to_discontinuity_ = true;
+        }
+    }
+
+    void refresh_debug_state() {
+        debug_state_.command_ppm = u_ppm_;
+        debug_state_.applied_delta_ppm = last_applied_delta_ppm_;
+        debug_state_.coarse_target_ppm = coarse_target_ppm_;
+        debug_state_.coarse_outstanding_ppm =
+            coarse_target_valid_ ? coarse_target_ppm_ - u_ppm_ : 0.0;
+        debug_state_.to_clock = to_clock_;
+        debug_state_.to_err = uses_pps_phase()
+            ? (pps_phase_valid_ ? pps_phase_error_samples_ : 0.0)
+            : mode_b_to_phase_error_samples();
+        debug_state_.pps_phase_error_samples =
+            pps_phase_valid_ ? pps_phase_error_samples_ : 0.0;
+        debug_state_.to_slope_ppm = to_slope_ppm_;
+        debug_state_.to_slope_valid = to_slope_valid_;
+        debug_state_.alignment_feedforward_samples = alignment_feedforward_samples_;
+        debug_state_.stage = stage_;
+    }
+
+    void populate_to_debug(UpdateResult& out) const {
+        out.frequency_source = frequency_source_;
+        out.to_clock = to_clock_;
+        out.to_err = uses_pps_phase()
+            ? (pps_phase_valid_ ? pps_phase_error_samples_ : 0.0)
+            : mode_b_to_phase_error_samples();
+        out.pps_phase_error_samples =
+            pps_phase_valid_ ? pps_phase_error_samples_ : 0.0;
+        out.to_slope_ppm = to_slope_ppm_;
+        out.to_slope_valid = to_slope_valid_;
+        out.alignment_feedforward_samples = alignment_feedforward_samples_;
+        out.coarse_target_ppm = coarse_target_ppm_;
+        out.coarse_outstanding_ppm =
+            coarse_target_valid_ ? coarse_target_ppm_ - u_ppm_ : 0.0;
+        out.applied_delta_ppm = last_applied_delta_ppm_;
+    }
+
+    void transition_to(Stage next, TransitionReason reason, UpdateResult& out) {
+        if (stage_ == next) {
+            return;
+        }
+        if (stage_ == Stage::Coarse && next != Stage::Coarse) {
+            cancel_coarse_target();
+        }
+        stage_ = next;
+        out.stage_changed = true;
+        out.transition_reason = reason;
+        clear_degradation_candidate();
+        reset_control_history();
+        if (next == Stage::Phase) {
+            if (!uses_pps_phase()) {
+                if (params_.phase_setpoint_mode == SetpointMode::Zero) {
+                    to_setpoint_ = 0.0;
+                } else if (params_.phase_setpoint_mode == SetpointMode::Fixed) {
+                    to_setpoint_ = params_.phase_setpoint_fixed_samples;
+                } else {
+                    to_setpoint_ = to_clock_;
+                }
+                to_setpoint_valid_ = true;
+            }
+            // Phase uses velocity-form PI around the inherited FLL command.
+            // Seed at zero so fixed/zero TO setpoints and post-AP PPS errors
+            // receive the normal proportional response.
+            prev_control_error_ = 0.0;
+            has_prev_error_ = true;
+        }
+    }
+
+    bool collect_window(double value,
+                        double required_window_s,
+                        std::chrono::steady_clock::time_point now,
+                        double& average,
+                        double& elapsed_s) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+        if (!has_obs_window_) {
+            has_obs_window_ = true;
+            obs_window_start_ = now;
+        }
+        obs_sum_ += value;
+        ++obs_count_;
+        elapsed_s = std::chrono::duration<double>(now - obs_window_start_).count();
+        if (elapsed_s < required_window_s || obs_count_ == 0) {
+            return false;
+        }
+        average = obs_sum_ / static_cast<double>(obs_count_);
+        return true;
+    }
+
+    void request_delta(double desired_delta_ppm, UpdateResult& out) {
+        const double room_lo = -params_.max_abs_u_ppm - u_ppm_;
+        const double room_hi = params_.max_abs_u_ppm - u_ppm_;
+        desired_delta_ppm = clamp(desired_delta_ppm, room_lo, room_hi);
+        out.desired_delta_ppm = desired_delta_ppm;
+        out.request_control = std::abs(desired_delta_ppm) > 1e-15;
+    }
+
+    double velocity_pi_delta(double error_value,
+                             double kp,
+                             double ki,
+                             double deadzone_value,
+                             double max_slew_ppm_per_s,
+                             double dt) {
+        if (!std::isfinite(error_value) || dt <= 0.0) {
+            return 0.0;
+        }
+        double e = error_value;
+        if (std::abs(e) < deadzone_value) {
+            e = 0.0;
+        }
+        double de = 0.0;
+        if (has_prev_error_) {
+            de = e - prev_control_error_;
+        }
+        double delta = (kp * de + ki * dt * e);
+        const double max_step = max_slew_ppm_per_s * dt;
+        delta = clamp(delta, -max_step, max_step);
+        prev_control_error_ = e;
+        has_prev_error_ = true;
+        return delta;
+    }
+
+    UpdateResult update_coarse(const Observation& obs,
+                               std::chrono::steady_clock::time_point now,
+                               UpdateResult out) {
+        double frequency_error_ppm = 0.0;
+        if (!frequency_observation(obs, frequency_error_ppm)) {
+            return out;
+        }
+        out.frequency_error_ppm = frequency_error_ppm;
+        out.frequency_source = frequency_source_;
+        if (!coarse_target_valid_) {
+            double average = frequency_error_ppm;
+            if (frequency_source_ != FrequencySource::ToSlope) {
+                double elapsed_s = 0.0;
+                if (!collect_window(frequency_error_ppm, params_.coarse_obs_window_s,
+                                    now, average, elapsed_s)) {
+                    return out;
+                }
+            }
+            const double relative_target = clamp(
+                params_.coarse_gain * average,
+                -params_.coarse_max_abs_ppm,
+                params_.coarse_max_abs_ppm);
+            coarse_target_ppm_ = clamp(
+                u_ppm_ + relative_target,
+                -params_.max_abs_u_ppm,
+                params_.max_abs_u_ppm);
+            coarse_target_valid_ = true;
+            clear_observation_window();
+            last_control_time_ = now;
+            has_control_time_ = true;
+        }
+
+        const double outstanding = coarse_target_ppm_ - u_ppm_;
+        if (std::abs(outstanding) <= 1e-12) {
+            transition_to(Stage::FllFast, TransitionReason::CoarseComplete, out);
+            return out;
+        }
+        if (std::abs(frequency_error_ppm) <= 1e-12 ||
+            outstanding * frequency_error_ppm < 0.0) {
+            transition_to(Stage::FllFast, TransitionReason::CoarseOvershoot, out);
+            return out;
+        }
+
+        const double dt = has_control_time_
+            ? std::max(std::chrono::duration<double>(now - last_control_time_).count(),
+                       params_.coarse_control_period_s)
+            : params_.coarse_control_period_s;
+        if (has_control_time_ &&
+            std::chrono::duration<double>(now - last_control_time_).count() <
+                params_.coarse_control_period_s) {
+            return out;
+        }
+        request_delta(
+            clamp(outstanding,
+                  -params_.coarse_max_slew_ppm_per_s * dt,
+                  params_.coarse_max_slew_ppm_per_s * dt),
+            out);
+        last_control_time_ = now;
+        has_control_time_ = true;
+        return out;
+    }
+
+    UpdateResult update_fll(const Observation& obs,
+                            std::chrono::steady_clock::time_point now,
+                            UpdateResult out) {
+        double frequency_error_ppm = 0.0;
+        if (!frequency_observation(obs, frequency_error_ppm)) {
+            return out;
+        }
+        out.frequency_error_ppm = frequency_error_ppm;
+        out.frequency_source = frequency_source_;
+        const bool fast = stage_ == Stage::FllFast;
+        const double obs_window = fast
+            ? params_.fll_fast_obs_window_s
+            : params_.fll_slow_obs_window_s;
+        const double control_period = fast
+            ? params_.fll_fast_control_period_s
+            : params_.fll_slow_control_period_s;
+        const bool regression_slope =
+            frequency_source_ == FrequencySource::ToSlope;
+        double average = frequency_error_ppm;
+        double window_s = 0.0;
+        if (!regression_slope) {
+            if (!collect_window(frequency_error_ppm, obs_window, now, average, window_s)) {
+                return out;
+            }
+        }
+        double dt = has_control_time_
+            ? std::chrono::duration<double>(now - last_control_time_).count()
+            : (regression_slope ? control_period
+                                : std::max(window_s, control_period));
+        const bool fll_unstable =
+            !fast &&
+            std::abs(average) >= params_.fll_fast_enter_abs_ppm;
+        if (!fast && !fll_unstable) {
+            // Recovery cancels the downgrade dwell immediately, even when the
+            // normal FLL control period has not elapsed yet.
+            clear_degradation_candidate(TransitionReason::FllUnstable);
+        }
+        if (fll_unstable &&
+            degradation_confirmed(TransitionReason::FllUnstable, now)) {
+            transition_to(Stage::FllFast, TransitionReason::FllUnstable, out);
+            return out;
+        }
+        if (has_control_time_ && dt < control_period) {
+            return out;
+        }
+        if (!regression_slope) {
+            clear_observation_window();
+        }
+        dt = std::max(dt, control_period);
+        out.frequency_error_ppm = average;
+        out.frequency_source = frequency_source_;
+
+        if (fast) {
+            if (std::abs(average) <= params_.fll_slow_enter_abs_ppm) {
+                stable_time_s_ += dt;
+                if (stable_time_s_ >= params_.fll_switch_hold_s) {
+                    transition_to(Stage::FllSlow, TransitionReason::FllStable, out);
+                    return out;
+                }
+            } else {
+                stable_time_s_ = 0.0;
+            }
+        }
+
+        if (stage_ == Stage::FllSlow && phase_observation_is_fresh(obs) &&
+            frequency_source_ == FrequencySource::ToSlope &&
+            to_slope_valid_ &&
+            std::abs(average) <= params_.phase_enter_sfo_abs_ppm) {
+            stable_time_s_ += dt;
+            if (stable_time_s_ >= params_.phase_enter_hold_s) {
+                transition_to(Stage::Phase, TransitionReason::PhaseReady, out);
+                return out;
+            }
+        } else if (stage_ == Stage::FllSlow) {
+            stable_time_s_ = 0.0;
+        }
+
+        const bool now_fast = stage_ == Stage::FllFast;
+        double delta = 0.0;
+        if (now_fast &&
+            params_.fll_fast_control_mode == FllFastControlMode::HalfStep) {
+            const double max_step =
+                params_.fll_fast_max_slew_ppm_per_s * dt;
+            delta = clamp(
+                0.5 * average,
+                -max_step,
+                max_step);
+        } else {
+            delta = velocity_pi_delta(
+                average,
+                now_fast ? params_.fll_fast_kp : params_.fll_slow_kp,
+                now_fast ? params_.fll_fast_ki : params_.fll_slow_ki,
+                now_fast ? 0.0 : params_.fll_slow_deadzone_ppm,
+                now_fast ? params_.fll_fast_max_slew_ppm_per_s
+                         : params_.fll_slow_max_slew_ppm_per_s,
+                dt);
+        }
+        request_delta(delta, out);
+        last_control_time_ = now;
+        has_control_time_ = true;
+        return out;
+    }
+
+    void anchor_to(const Observation& obs,
+                   std::chrono::steady_clock::time_point now) {
+        to_anchor_valid_ = true;
+        to_last_raw_ = obs.to_ue_samples;
+        to_last_alignment_ = obs.to_alignment_samples;
+        to_last_timeline_epoch_ = obs.to_timeline_epoch;
+        to_last_frame_seq_ = obs.to_frame_seq;
+        to_last_sync_generation_ = obs.to_sync_generation;
+        to_clock_ = obs.to_ue_samples;
+        clear_to_slope_history();
+        append_to_slope_point(obs.to_frame_seq, to_clock_, now);
+        alignment_feedforward_samples_ = 0.0;
+    }
+
+    void ingest_new_to_report(const Observation& obs,
+                              std::chrono::steady_clock::time_point now,
+                              UpdateResult& out) {
+        if (!std::isfinite(obs.to_ue_samples) ||
+            obs.to_timeline_epoch == 0) {
+            return;
+        }
+        const bool same_timeline =
+            to_anchor_valid_ &&
+            obs.to_timeline_epoch == to_last_timeline_epoch_ &&
+            obs.to_sync_generation == to_last_sync_generation_ &&
+            obs.to_frame_seq > to_last_frame_seq_;
+        if (!same_timeline) {
+            const bool replaced_existing_anchor = to_anchor_valid_;
+            anchor_to(obs, now);
+            if (replaced_existing_anchor) {
+                pending_to_discontinuity_ = true;
+            }
+            if (!uses_pps_phase()) {
+                if (params_.phase_setpoint_mode == SetpointMode::FreezeOnLock) {
+                    if (reacquisition_hold_active_ && stage_ == Stage::Phase) {
+                        to_setpoint_ = to_clock_;
+                        to_setpoint_valid_ = true;
+                    }
+                } else {
+                    to_setpoint_ = params_.phase_setpoint_mode == SetpointMode::Zero
+                        ? 0.0
+                        : params_.phase_setpoint_fixed_samples;
+                    to_setpoint_valid_ = true;
+                }
+            }
+            return;
+        }
+
+        const double raw_delta = obs.to_ue_samples - to_last_raw_;
+        const double alignment_delta =
+            static_cast<double>(obs.to_alignment_samples) -
+            static_cast<double>(to_last_alignment_);
+        const double clock_delta = raw_delta - alignment_delta;
+        alignment_feedforward_samples_ = -alignment_delta;
+        to_last_raw_ = obs.to_ue_samples;
+        to_last_alignment_ = obs.to_alignment_samples;
+        to_last_frame_seq_ = obs.to_frame_seq;
+        if (std::abs(clock_delta) > params_.phase_jump_gate_samples) {
+            out.to_jump_rejected = true;
+            clear_to_slope_history();
+            pending_to_jump_ = true;
+            return;
+        }
+
+        to_clock_ += clock_delta;
+        append_to_slope_point(obs.to_frame_seq, to_clock_, now);
+    }
+
+    UpdateResult update_phase(const Observation& obs,
+                              std::chrono::steady_clock::time_point now,
+                              UpdateResult out) {
+        if (!phase_observation_is_fresh(obs) ||
+            (!uses_pps_phase() && !to_setpoint_valid_)) {
+            return out;
+        }
+        out.frequency_source = FrequencySource::ToSlope;
+        out.frequency_error_ppm = to_slope_valid_
+            ? mode_b_frequency_error_ppm()
+            : 0.0;
+        if (uses_pps_phase()) {
+            pps_phase_error_samples_ = obs.pps_phase_error_samples;
+            pps_phase_valid_ = true;
+        }
+        if (uses_pps_phase() && !obs.phase_control_ready) {
+            // AP is a one-shot coarse phase placement. Stay in Phase/PLL while
+            // it is queued/settling, but do not ask SF to chase the pre-AP error.
+            return out;
+        }
+        double control_dt = has_control_time_
+            ? std::chrono::duration<double>(now - last_control_time_).count()
+            : params_.phase_control_period_s;
+        if (has_control_time_ && control_dt < params_.phase_control_period_s) {
+            return out;
+        }
+        control_dt = std::max(control_dt, params_.phase_control_period_s);
+
+        const bool exit_confirmed =
+            to_slope_valid_ &&
+            std::abs(to_slope_ppm_) >= params_.phase_exit_sfo_abs_ppm;
+        phase_exit_time_s_ = exit_confirmed
+            ? phase_exit_time_s_ + control_dt
+            : 0.0;
+        if (phase_exit_time_s_ >= params_.phase_exit_hold_s) {
+            transition_to(
+                Stage::FllFast,
+                TransitionReason::PhaseSfoConfirmed,
+                out);
+            return out;
+        }
+
+        const double phase_error = uses_pps_phase()
+            ? obs.pps_phase_error_samples
+            : mode_b_to_phase_error_samples();
+        const double delta = velocity_pi_delta(
+            phase_error,
+            params_.phase_kp,
+            params_.phase_ki,
+            0.0,
+            params_.phase_max_slew_ppm_per_s,
+            control_dt);
+        request_delta(delta, out);
+        last_control_time_ = now;
+        has_control_time_ = true;
+        return out;
     }
 };
+
+/**
+ * @brief One-shot coarse PPSOUT placement gate for each Phase entry.
+ *
+ * AP changes only the external PPSDO output phase. It does not modify USRP
+ * time, the air-frame timeline, eRTM cache, TO_clock, or the PLL command. Each
+ * FllSlow-to-Phase entry rearms one AP transaction unless the residual is
+ * already inside the deadzone and the previous hardware transaction is in a
+ * terminal state. Once AP succeeds and a post-adjustment PPS observation
+ * arrives, the gate stays done for that Phase residence and the normal Phase SF
+ * loop remains active. Missing post-AP observations use bounded retries based
+ * on a fresh residual phase.
+ */
+class OCXOPpsInitialAligner {
+public:
+    enum class CommandStatus {
+        Idle,
+        Queued,
+        InFlight,
+        Succeeded,
+        Failed
+    };
+
+    enum class QueueResult {
+        Queued,
+        Busy,
+        Failed
+    };
+
+    enum class State {
+        Armed,
+        WaitingForCommand,
+        Settling,
+        Done,
+        Failed
+    };
+
+    struct Params {
+        bool enable = true;
+        double max_abs_adjust_ns = 500.0e6;
+        double settle_s = 2.0;
+        double command_timeout_s = 3.0;
+        size_t max_retries = 1;
+        double deadzone_ns = 10.0;
+        int command_polarity = 1;
+    };
+
+    struct Observation {
+        bool phase_stage = false;
+        bool phase_valid = false;
+        double phase_error_samples = 0.0;
+        double sample_rate = 0.0;
+        uint64_t publication_generation = 0;
+        CommandStatus command_status = CommandStatus::Idle;
+    };
+
+    struct UpdateResult {
+        bool request_adjust = false;
+        bool request_hardware_rearm = false;
+        bool phase_entry_rearm = false;
+        int64_t adjustment_ns = 0;
+        size_t retry_count = 0;
+        bool phase_control_ready = false;
+        bool state_changed = false;
+        State state = State::Armed;
+    };
+
+    OCXOPpsInitialAligner() { configure(Params{}); }
+    explicit OCXOPpsInitialAligner(const Params& params) { configure(params); }
+
+    void configure(const Params& params) {
+        params_ = params;
+        params_.max_abs_adjust_ns = std::clamp(
+            params_.max_abs_adjust_ns, 0.0, 500.0e6);
+        params_.settle_s = std::max(params_.settle_s, 0.0);
+        params_.command_timeout_s = std::max(params_.command_timeout_s, 0.1);
+        params_.deadzone_ns = std::max(params_.deadzone_ns, 0.0);
+        params_.command_polarity = params_.command_polarity < 0 ? -1 : 1;
+        reset();
+    }
+
+    void reset() {
+        arm_cycle();
+        phase_stage_active_ = false;
+    }
+
+    State state() const { return state_; }
+    bool phase_control_ready() const {
+        return state_ == State::Done || state_ == State::Failed;
+    }
+
+    bool notify_command_queue_result(QueueResult result) {
+        const State before = state_;
+        if (state_ == State::WaitingForCommand) {
+            if (result == QueueResult::Busy) {
+                state_ = State::Armed;
+                request_started_ = {};
+            } else if (result == QueueResult::Failed) {
+                state_ = State::Failed;
+            }
+        }
+        return state_ != before;
+    }
+
+    static int state_code(State state) {
+        switch (state) {
+            case State::Armed: return 0;
+            case State::WaitingForCommand: return 1;
+            case State::Settling: return 2;
+            case State::Done: return 3;
+            case State::Failed: return 4;
+        }
+        return 4;
+    }
+
+    static const char* state_name(State state) {
+        switch (state) {
+            case State::Armed: return "armed";
+            case State::WaitingForCommand: return "waiting_for_command";
+            case State::Settling: return "settling";
+            case State::Done: return "done";
+            case State::Failed: return "failed";
+        }
+        return "failed";
+    }
+
+    UpdateResult update(const Observation& obs) {
+        return update_at(obs, std::chrono::steady_clock::now());
+    }
+
+    UpdateResult update_at(
+        const Observation& obs,
+        std::chrono::steady_clock::time_point now)
+    {
+        UpdateResult out;
+        const State before = state_;
+        const bool phase_entry = obs.phase_stage && !phase_stage_active_;
+        phase_stage_active_ = obs.phase_stage;
+        const bool phase_observation_valid =
+            obs.phase_valid && std::isfinite(obs.phase_error_samples) &&
+            obs.sample_rate > 0.0 && std::isfinite(obs.sample_rate);
+        const double phase_error_ns = phase_observation_valid
+            ? obs.phase_error_samples * 1.0e9 / obs.sample_rate
+            : 0.0;
+        const bool command_terminal =
+            obs.command_status == CommandStatus::Idle ||
+            obs.command_status == CommandStatus::Succeeded ||
+            obs.command_status == CommandStatus::Failed;
+        const bool aligned_terminal_reentry =
+            phase_entry && params_.enable && phase_observation_valid &&
+            command_terminal &&
+            std::abs(phase_error_ns) <= params_.deadzone_ns;
+        if (phase_entry) {
+            arm_cycle();
+            if (aligned_terminal_reentry) {
+                state_ = State::Done;
+            } else {
+                out.request_hardware_rearm = params_.enable;
+                out.phase_entry_rearm = params_.enable;
+            }
+        }
+        out.retry_count = retry_count_;
+        if (state_ == State::Armed && obs.phase_stage &&
+            phase_observation_valid &&
+            obs.command_status == CommandStatus::Idle &&
+            (retry_count_ == 0 ||
+             obs.publication_generation > retry_after_publication_generation_)) {
+            if (std::abs(phase_error_ns) <= params_.deadzone_ns) {
+                state_ = State::Done;
+                out.state_changed = state_ != before;
+                out.state = state_;
+                out.phase_control_ready = true;
+                return out;
+            }
+            const double requested_ns = std::clamp(
+                static_cast<double>(params_.command_polarity) *
+                    phase_error_ns,
+                -params_.max_abs_adjust_ns,
+                params_.max_abs_adjust_ns);
+            out.adjustment_ns = static_cast<int64_t>(std::llround(requested_ns));
+            out.request_adjust = true;
+            request_publication_generation_ = obs.publication_generation;
+            request_started_ = now;
+            state_ = State::WaitingForCommand;
+        } else if (state_ == State::WaitingForCommand) {
+            if (obs.command_status == CommandStatus::Succeeded) {
+                settle_started_ = now;
+                state_ = State::Settling;
+            } else if (obs.command_status == CommandStatus::Failed) {
+                // Do not deadlock Phase if AP transport fails. The PLL may still
+                // converge through SF, while diagnostics preserve the failure.
+                state_ = State::Failed;
+            } else if (std::chrono::duration<double>(
+                           now - request_started_).count() >=
+                       params_.command_timeout_s + 0.5) {
+                // The serial worker owns the configured wall-clock deadline.
+                // This is only a guard for a missing terminal status update.
+                state_ = State::Failed;
+            }
+        } else if (state_ == State::Settling) {
+            const double elapsed_s = std::chrono::duration<double>(
+                now - settle_started_).count();
+            if (elapsed_s >= params_.settle_s && obs.phase_valid &&
+                obs.publication_generation > request_publication_generation_) {
+                state_ = State::Done;
+            } else if (elapsed_s >=
+                       params_.settle_s + params_.command_timeout_s) {
+                if (retry_count_ < params_.max_retries) {
+                    ++retry_count_;
+                    retry_after_publication_generation_ =
+                        request_publication_generation_;
+                    state_ = State::Armed;
+                    out.request_hardware_rearm = true;
+                } else {
+                    // Bounded fallback: do not block SF forever after all
+                    // post-AP observation retries have been exhausted.
+                    state_ = State::Failed;
+                }
+            }
+        }
+
+        out.state_changed = state_ != before;
+        out.state = state_;
+        out.retry_count = retry_count_;
+        out.phase_control_ready = phase_control_ready();
+        return out;
+    }
+
+private:
+    void arm_cycle() {
+        state_ = params_.enable ? State::Armed : State::Done;
+        request_publication_generation_ = 0;
+        retry_after_publication_generation_ = 0;
+        retry_count_ = 0;
+        request_started_ = {};
+        settle_started_ = {};
+    }
+    Params params_{};
+    State state_ = State::Armed;
+    bool phase_stage_active_ = false;
+    uint64_t request_publication_generation_ = 0;
+    uint64_t retry_after_publication_generation_ = 0;
+    size_t retry_count_ = 0;
+    std::chrono::steady_clock::time_point request_started_{};
+    std::chrono::steady_clock::time_point settle_started_{};
+};
+
+inline OCXODiscipliner::Params make_ocxo_discipliner_params(const Config& cfg) {
+    OCXODiscipliner::Params p;
+    const std::string& mode = cfg.sync_tracking.ocxo_mode;
+    if (mode == kOCXOModeFreq) {
+        p.policy = OCXODiscipliner::ModePolicy::Freq;
+    } else if (mode == kOCXOModePpsPhase) {
+        p.policy = OCXODiscipliner::ModePolicy::PpsPhase;
+    } else if (mode == kOCXOModePhase) {
+        p.policy = OCXODiscipliner::ModePolicy::Phase;
+    } else {
+        p.policy = OCXODiscipliner::ModePolicy::Auto;
+    }
+    p.samples_per_frame = static_cast<double>(cfg.samples_per_frame());
+    p.max_abs_u_ppm = cfg.sync_tracking.ocxo_max_abs_ppm;
+    p.coarse_enable = cfg.sync_tracking.ocxo_coarse_enable;
+    p.coarse_gain = cfg.sync_tracking.ocxo_coarse_gain;
+    p.coarse_max_abs_ppm = cfg.sync_tracking.ocxo_coarse_max_abs_ppm;
+    p.coarse_obs_window_s = cfg.sync_tracking.ocxo_coarse_obs_window_s;
+    p.coarse_control_period_s = cfg.sync_tracking.ocxo_coarse_control_period_s;
+    p.coarse_max_slew_ppm_per_s = cfg.sync_tracking.ocxo_coarse_max_slew_ppm_per_s;
+    p.fll_fast_obs_window_s = cfg.sync_tracking.ocxo_fll_fast_obs_window_s;
+    p.fll_fast_control_period_s = cfg.sync_tracking.ocxo_fll_fast_control_period_s;
+    p.fll_fast_control_mode =
+        cfg.sync_tracking.ocxo_fll_fast_control_mode ==
+                kOCXOFllFastControlHalfStep
+            ? OCXODiscipliner::FllFastControlMode::HalfStep
+            : OCXODiscipliner::FllFastControlMode::Pi;
+    p.fll_fast_kp = cfg.sync_tracking.ocxo_fll_fast_kp;
+    p.fll_fast_ki = cfg.sync_tracking.ocxo_fll_fast_ki;
+    p.fll_fast_max_slew_ppm_per_s = cfg.sync_tracking.ocxo_fll_fast_max_slew_ppm_per_s;
+    p.fll_slow_obs_window_s = cfg.sync_tracking.ocxo_fll_slow_obs_window_s;
+    p.fll_slow_control_period_s = cfg.sync_tracking.ocxo_fll_slow_control_period_s;
+    p.fll_slow_kp = cfg.sync_tracking.ocxo_fll_slow_kp;
+    p.fll_slow_ki = cfg.sync_tracking.ocxo_fll_slow_ki;
+    p.fll_slow_deadzone_ppm = cfg.sync_tracking.ocxo_fll_slow_deadzone_ppm;
+    p.fll_slow_max_slew_ppm_per_s = cfg.sync_tracking.ocxo_fll_slow_max_slew_ppm_per_s;
+    p.fll_slow_enter_abs_ppm = cfg.sync_tracking.ocxo_fll_slow_enter_abs_ppm;
+    p.fll_fast_enter_abs_ppm = cfg.sync_tracking.ocxo_fll_fast_enter_abs_ppm;
+    p.fll_switch_hold_s = cfg.sync_tracking.ocxo_fll_switch_hold_s;
+    p.phase_control_period_s = cfg.sync_tracking.ocxo_phase_control_period_s;
+    p.phase_jump_gate_samples = cfg.sync_tracking.ocxo_phase_jump_gate_samples;
+    p.phase_max_report_age_frames = cfg.sync_tracking.ocxo_phase_max_report_age_frames;
+    const std::string& setpoint_mode = cfg.sync_tracking.ocxo_phase_setpoint_mode;
+    if (setpoint_mode == kOCXOPhaseSetpointZero) {
+        p.phase_setpoint_mode = OCXODiscipliner::SetpointMode::Zero;
+    } else if (setpoint_mode == kOCXOPhaseSetpointFixed) {
+        p.phase_setpoint_mode = OCXODiscipliner::SetpointMode::Fixed;
+    } else {
+        p.phase_setpoint_mode = OCXODiscipliner::SetpointMode::FreezeOnLock;
+    }
+    p.phase_setpoint_fixed_samples =
+        cfg.sync_tracking.ocxo_phase_setpoint_fixed_samples;
+    p.phase_kp = cfg.sync_tracking.ocxo_phase_kp;
+    p.phase_ki = cfg.sync_tracking.ocxo_phase_ki;
+    p.phase_max_slew_ppm_per_s = cfg.sync_tracking.ocxo_phase_max_slew_ppm_per_s;
+    p.phase_enter_sfo_abs_ppm = cfg.sync_tracking.ocxo_phase_enter_sfo_abs_ppm;
+    p.phase_enter_hold_s = cfg.sync_tracking.ocxo_phase_enter_hold_s;
+    p.phase_exit_sfo_abs_ppm = cfg.sync_tracking.ocxo_phase_exit_sfo_abs_ppm;
+    p.phase_exit_hold_s = cfg.sync_tracking.ocxo_phase_exit_hold_s;
+    return p;
+}
+
+inline OCXOPpsInitialAligner::Params make_ocxo_pps_initial_aligner_params(
+    const Config& cfg)
+{
+    OCXOPpsInitialAligner::Params p;
+    p.enable = cfg.sync_tracking.ocxo_pps_initial_ap_enable;
+    p.max_abs_adjust_ns = cfg.sync_tracking.ocxo_pps_initial_ap_max_abs_ns;
+    p.settle_s = cfg.sync_tracking.ocxo_pps_initial_ap_settle_s;
+    p.command_timeout_s = cfg.sync_tracking.ocxo_pps_initial_ap_command_timeout_s;
+    p.max_retries = cfg.sync_tracking.ocxo_pps_initial_ap_max_retries;
+    p.deadzone_ns = cfg.sync_tracking.ocxo_pps_initial_ap_deadzone_ns;
+    p.command_polarity = cfg.sync_tracking.ocxo_pps_initial_ap_polarity;
+    return p;
+}
+
 /**
  * @brief Delay Spectrum Processor.
  * 
@@ -3430,15 +5119,20 @@ public:
         const float abs1 = std::abs(delta1);
         const float abs2 = std::abs(delta2);
         
+        float estimate = 0.0f;
         if (abs1 > 2.0f && abs2 > 2.0f) {
-            return 0.5f;
+            estimate = 0.5f;
         } else if (abs1 > 2.0f) {
-            return delta2;
+            estimate = delta2;
         } else if (abs2 > 2.0f) {
-            return delta1;
+            estimate = delta1;
         } else {
-            return (delta1 > 0.0f && delta2 > 0.0f) ? delta2 : delta1;
+            estimate = (delta1 > 0.0f && delta2 > 0.0f) ? delta2 : delta1;
         }
+        // Quinn's estimate is meaningful only within the selected FFT bin.
+        // Low-quality/noise peaks can otherwise produce values outside the
+        // documented half-bin interval and contaminate SFO tracking.
+        return std::max(-0.5f, std::min(0.5f, estimate));
     }
 
 private:
@@ -3910,14 +5604,6 @@ public:
     }
 
     /**
-     * @brief Initialize Hamming windows for range and Doppler processing.
-     */
-    void init_windows(AlignedFloatVector& range_window, AlignedFloatVector& doppler_window) {
-        WindowGenerator::generate_hamming(range_window, _params.fft_size);
-        WindowGenerator::generate_hamming(doppler_window, _params.sensing_symbol_num);
-    }
-
-    /**
      * @brief Apply MTI filter to the internal channel buffer.
      * 
      * @param enabled Whether to enable MTI filtering. If false, does nothing.
@@ -3973,53 +5659,6 @@ public:
             if (_params.range_fft_size > fft_size) {
                 std::fill(ch_data + fft_size, ch_data + _params.range_fft_size,
                           std::complex<float>(0.0f, 0.0f));
-            }
-        }
-    }
-
-    /**
-     * @brief Channel estimation with division.
-     * @deprecated Not used - remodulated QPSK symbols have unit magnitude, use channel_estimate_with_shift instead.
-     */
-    void channel_estimate_with_division(
-        AlignedVector& channel_buffer,
-        const std::vector<AlignedVector>& tx_symbols,
-        size_t fft_size
-    ) {
-        for (size_t i = 0; i < _params.sensing_symbol_num; ++i) {
-            auto* __restrict__ ch_data = channel_buffer.data() + i * _params.range_fft_size;
-            const auto* __restrict__ tx_data = tx_symbols[i].data();
-            
-            #pragma omp simd simdlen(16) aligned(ch_data, tx_data: 64)
-            for (size_t k = 0; k < fft_size; ++k) {
-                float rx_real = ch_data[k].real();
-                float rx_imag = ch_data[k].imag();
-                float tx_real = tx_data[k].real();
-                float tx_imag = tx_data[k].imag();
-                float denom = tx_real * tx_real + tx_imag * tx_imag;
-                float inv_denom = 1.0f / denom;
-                ch_data[k] = std::complex<float>(
-                    (rx_real * tx_real + rx_imag * tx_imag) * inv_denom,
-                    (rx_imag * tx_real - rx_real * tx_imag) * inv_denom
-                );
-            }
-        }
-    }
-
-    /**
-     * @brief In-place FFT shift for each symbol in buffer.
-     */
-    void fft_shift_symbols(AlignedVector& buffer, size_t fft_size) {
-        const size_t half_size = fft_size / 2;
-        
-        for (size_t i = 0; i < _params.sensing_symbol_num; ++i) {
-            auto* symbol_data = buffer.data() + i * _params.range_fft_size;
-            
-            #pragma omp simd simdlen(16) aligned(symbol_data: 64)
-            for (size_t j = 0; j < half_size; ++j) {
-                std::complex<float> temp = symbol_data[j];
-                symbol_data[j] = symbol_data[j + half_size];
-                symbol_data[j + half_size] = temp;
             }
         }
     }
@@ -4905,6 +6544,7 @@ public:
         _cumulative_delay_offset = 0.0f;
         _cumulative_sensing_delay_offset = 0.0f;
         _sfo_per_frame = 0.0f;
+        _has_sfo_estimate = false;
         _first_delay_offset_reading = true;
         std::fill(_delay_offsets.begin(), _delay_offsets.end(), 0.0f);
     }
@@ -4912,20 +6552,18 @@ public:
     // Update delay offset estimation and calculate SFO/SIO
     void update(float delay_offset_reading, float Alignment) {
         if (!_first_delay_offset_reading) {
-            if (Alignment != 0.0f) {
-                _cumulative_delay_offset += Alignment;
-            }
+            apply_alignment_without_observation(Alignment);
             _delay_offsets[_count] = delay_offset_reading + _cumulative_delay_offset;
             if (++_count >= _window_size) {
                 _sfo_per_frame = linearRegression(_delay_offsets_indices, _delay_offsets).first;
                 _count = 0;
                 _cumulative_delay_offset = 0.0f;
+                _has_sfo_estimate = true;
             }
             if (std::abs(_sfo_per_frame) > 1.0f) {
                 _sfo_per_frame = 0.0f;
             }
             _cumulative_sensing_delay_offset += _sfo_per_frame;
-            _cumulative_sensing_delay_offset -= Alignment;
             auto err = delay_offset_reading - _cumulative_sensing_delay_offset;
             if (std::abs(err) > 0.1f) {
                 _err_large_count++;
@@ -4947,8 +6585,25 @@ public:
         }
     }
 
+    /**
+     * @brief Preserve delay-coordinate continuity when an RX alignment commits
+     *        on a frame whose delay peak is not trustworthy.
+     *
+     * The alignment receipt must still update the accumulated coordinate, but
+     * the invalid delay observation itself must not enter the SFO regression.
+     */
+    void apply_alignment_without_observation(float alignment) {
+        if (_first_delay_offset_reading || alignment == 0.0f) {
+            return;
+        }
+        _cumulative_delay_offset += alignment;
+        _cumulative_sensing_delay_offset -= alignment;
+    }
+
     float get_sfo_per_frame() const { return _sfo_per_frame; }
     float get_sensing_delay_offset() const { return _cumulative_sensing_delay_offset; }
+    /** True after the first full regression window has produced an SFO estimate. */
+    bool has_estimate() const { return _has_sfo_estimate; }
 
 private:
     size_t _window_size;
@@ -4963,6 +6618,7 @@ private:
     bool _first_delay_offset_reading = true;
     float _sfo_per_frame = 0.0f;
     float _cumulative_sensing_delay_offset = 0.0f;
+    bool _has_sfo_estimate = false;
 };
 
 // ============================================================================
@@ -5062,15 +6718,39 @@ public:
     ArqTxWindow() = default;
 
     void configure(const NetworkOutputConfig& net) {
+        std::lock_guard<std::mutex> lock(_mutex);
         _window_size = static_cast<uint16_t>(
             std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
         _rto_ms = net.arq_retransmit_timeout_ms > 0
             ? net.arq_retransmit_timeout_ms : 100;
         _max_retries = net.arq_max_retries;
-        _direction = 0; // set by caller
+        // direction left unchanged; use reset() or set_direction()
     }
 
-    void set_direction(uint8_t dir) { _direction = dir; }
+    void set_direction(uint8_t dir) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _direction = dir;
+    }
+
+    /** Drop all outstanding entries (e.g. BS timeline epoch change). */
+    void clear() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _entries.clear();
+    }
+
+    /**
+     * @brief Atomically clear + reconfigure (safe across producer/consumer threads).
+     */
+    void reset(const NetworkOutputConfig& net, uint8_t direction) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _entries.clear();
+        _window_size = static_cast<uint16_t>(
+            std::max(1, std::min<int>(net.arq_window_packets, kMaxArqWindowPackets)));
+        _rto_ms = net.arq_retransmit_timeout_ms > 0
+            ? net.arq_retransmit_timeout_ms : 100;
+        _max_retries = net.arq_max_retries;
+        _direction = direction;
+    }
 
     /** Insert a new packet. Returns false if window is full (backpressure). */
     bool try_insert(uint16_t seq, const uint8_t* payload, size_t len,
@@ -5193,8 +6873,6 @@ public:
     }
 
     uint16_t window_size() const { return _window_size; }
-    int rto_ms() const { return _rto_ms; }
-
     /** Drop entries that exceeded max_retries (if nonzero). Returns count. */
     size_t drop_abandoned(int64_t now_ms) {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -5364,7 +7042,6 @@ public:
         _last_ack_time_ms = now_ms;
     }
 
-    bool got_any() const { return _got_any; }
     uint16_t expected_seq() const { return _expected_seq; }
     uint16_t ack_base() const { return _ack_base; }
     uint64_t ack_bitmap() const { return _ack_bitmap; }

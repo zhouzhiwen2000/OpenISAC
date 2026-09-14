@@ -9,7 +9,7 @@ description: Minimal launch sequence for an end-to-end over-the-air OpenISAC tes
 - Start from the sample YAML that is closest to your hardware. The repository includes X310/B210 examples, but it is not limited to those USRP models.
 - Copy runtime YAMLs into `build/`, because both binaries read `BS.yaml` or `UE.yaml` from their working directory.
 - If the frontend runs on another machine, point the Python viewer at the backend with `--host <backend-ip>` or the viewer's Backend IP field. `default_out_ip` is only for destination-style output IPs, not UDP/ZMQ listen addresses.
-- If you care about stable real-time behavior, run `scripts/set_performance.bash`, then apply CPU isolation with `sudo ../scripts/isolate_cpus.py` (asks BS/UE/BS+UE, or pass `--role`), and only then launch via `sudo ../scripts/isolate_cpus.py run ...`.
+- If you care about stable real-time behavior, run `scripts/set_performance.bash`, then apply CPU isolation with `sudo ../scripts/isolate_cpus.py` (asks BS/UE/BS+UE and, when enough kernel-isolated CPUs exist, optionally configures NIC IRQ isolation/RX-TX splitting), and only then launch via `sudo ../scripts/isolate_cpus.py run ...`.
 
 ## Typical Usage Example
 

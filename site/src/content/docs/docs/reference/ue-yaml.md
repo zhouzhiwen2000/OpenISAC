@@ -62,6 +62,18 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | :--- | :--- | :--- | :--- |
 | `usrp_device.device_args` | `string` | `addr=...` | USRP device args. |
 | `usrp_device.clock_source` | `string` | `external` | UE clock source: `internal`, `external`, or `gpsdo`. |
+| `usrp_device.time_source` | `string` | `internal` | UE time/PPS source. Empty resolves to `internal`; `pps_phase` requires this and `clock_source` to both be `external`. |
+
+Whenever `usrp_device.clock_source` is non-empty, CPU, CUDA, and HIP UE perform
+strict device-time alignment before any stream starts, independently of the
+selected `sync_tracking.ocxo_mode`. This includes `time_source: internal`;
+`time_source` selects the PPS input but does not disable startup alignment.
+Startup observes one PPS transition, arms `set_time_next_pps(0)`, and waits until
+the device time counter actually resets and `time_last_pps=0`. A missing PPS,
+unsupported backend, or failed verification aborts startup. With `gpsdo`, alignment intentionally
+replaces any UTC-like device-time epoch with zero. It aligns the software time
+origin but retains the X310's 5 ns PPS capture quantization at a 200 MHz master
+clock.
 
 ### `ofdm_frame`
 
@@ -85,6 +97,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
+| `cuda.cuda_precision_profile` | `string` | `fp32` | `fp32` preserves the existing path. `mixed_fp16` uses FP16 for bulk OFDM FFT/IFFT and GPU LDPC messages while retaining FP32 for channel estimation, tracking, equalization, sensing, and LLR generation. Unsupported FP16 FFT shapes fall back to FP32. |
 | `cuda.cuda_demod_pipeline_slots` | `int` | `3` | CUDA demodulation pipeline slots. |
 | `cuda.cuda_ldpc_decoder_backend` | `string` | `gpu` | CUDA demod LDPC decoder backend: `gpu` or `cpu`. |
 | `cuda.cuda_ldpc_worker_buffers` | `int` | `3` | CUDA LDPC async worker batch buffers. |
@@ -142,6 +155,11 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Uplink ARQ retransmission timeout. |
 | `uplink.arq_max_retries` | `int` | `5` | Max uplink retransmission retries; `0` means unlimited within the window. |
 
+With timed uplink enabled on a real radio, CPU, CUDA, and HIP UE startup queries
+the device's actual RX and TX sample rates. A difference greater than 1 Hz aborts
+startup before worker threads are launched because exact uplink identity mapping
+requires both directions to use the same sample-time grid.
+
 ### `sync_tracking`
 
 | Path | Type/Unit | Typical Value | Description |
@@ -151,32 +169,86 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `sync_tracking.reset_hold_s` | `float` / s | `0.5` | Invalid-delay duration before a hard reset to sync search. |
 | `sync_tracking.software_sync` | `bool` | `true` | Enable software sync tracking. |
 | `sync_tracking.predictive_delay` | `bool` | `true` | Use CFO-based predictive delay compensation. |
-| `sync_tracking.hardware_sync` | `bool` | `false` | Enable hardware synchronization mode. |
-| `sync_tracking.hardware_sync_tty` | `string` | `/dev/ttyUSB0` | Serial device for the hardware sync controller. |
-| `sync_tracking.ocxo_pi_kp_fast` | `float` | `30` | Fast-stage OCXO PI proportional gain. |
-| `sync_tracking.ocxo_pi_ki_fast` | `float` | `1` | Fast-stage OCXO PI integral gain. |
-| `sync_tracking.ocxo_pi_kp_slow` | `float` | `30` | Slow-stage OCXO PI proportional gain. |
-| `sync_tracking.ocxo_pi_ki_slow` | `float` | `0.05` | Slow-stage OCXO PI integral gain. |
-| `sync_tracking.ocxo_pi_switch_abs_error_ppm` | `float` / ppm | `0.0002` | Error threshold for switching to slow OCXO PI stage. |
-| `sync_tracking.ocxo_pi_switch_hold_s` | `float` / s | `60` | Hold time below threshold before switching stages. |
-| `sync_tracking.ocxo_pi_max_step_fast_ppm` | `float` / ppm | `0.01` | Fast-stage maximum OCXO adjustment per update. |
-| `sync_tracking.ocxo_pi_max_step_slow_ppm` | `float` / ppm | `0.01` | Slow-stage maximum OCXO adjustment per update. |
-| `sync_tracking.ocxo_pi_max_step_ppm` | `float` / ppm | optional | Legacy alias applied to both fast and slow max-step fields. |
-| `sync_tracking.akf_enable` | `bool` | `true` | Enable adaptive Kalman filter on hardware-sync `error_ppm`. |
-| `sync_tracking.akf_bootstrap_frames` | `int` | `64` | Cold-start frames before normal AKF updates. |
-| `sync_tracking.akf_innovation_window` | `int` | `64` | Innovation history window for adaptation. |
-| `sync_tracking.akf_max_lag` | `int` | `4` | Maximum innovation autocorrelation lag. |
-| `sync_tracking.akf_adapt_interval` | `int` | `64` | Frame interval for adaptive `Q/R` updates. |
-| `sync_tracking.akf_gate_sigma` | `float` | `3` | Innovation gate in sigma units. |
-| `sync_tracking.akf_tikhonov_lambda` | `float` | `1e-3` | Tikhonov regularization for LS adaptation. |
-| `sync_tracking.akf_update_smooth` | `float` | `0.2` | Exponential smoothing for updated `Q/R`. |
-| `sync_tracking.akf_q_wf_min` | `float` | `1e-10` | White-frequency-noise lower bound. |
-| `sync_tracking.akf_q_wf_max` | `float` | `1e2` | White-frequency-noise upper bound. |
-| `sync_tracking.akf_q_rw_min` | `float` | `1e-12` | Random-walk-frequency-noise lower bound. |
-| `sync_tracking.akf_q_rw_max` | `float` | `1e1` | Random-walk-frequency-noise upper bound. |
-| `sync_tracking.akf_r_min` | `float` | `1e-8` | Observation-noise variance lower bound. |
-| `sync_tracking.akf_r_max` | `float` | `1e3` | Observation-noise variance upper bound. |
+| `sync_tracking.hardware_sync` | `bool` | `false` | Enable hardware OCXO discipline. |
+| `sync_tracking.hardware_sync_tty` | `string` | `/dev/ttyUSB0` | Serial device for the OCXO DAC controller. |
+| `sync_tracking.ocxo_mode` | `string` | `auto` | `auto`, `freq`, and `phase` retain the legacy TO-based behavior; `pps_phase` explicitly selects PPS phase locking. |
+| `sync_tracking.ocxo_dac_ppm_per_lsb` | `float` | `9.71e-7` | Calibrated DAC ppm per LSB (MV197 map). |
+| `sync_tracking.ocxo_dac_zero_word` | `int` | `493367` | DAC word for 0 ppm. |
+| `sync_tracking.ocxo_dac_state_file` | `string` | `.openisac_ocxo_dac_state.yaml` | Persist the last SF word acknowledged by the DAC. A relative path is resolved from the UE working directory; an empty value disables restart persistence. |
+| `sync_tracking.ocxo_max_abs_ppm` | `float` / ppm | `0.45` | Absolute OCXO command clamp. |
+| `sync_tracking.ocxo_actuator_max_slew_ppm_per_s` | `float` / ppm/s | `0.01` | Hard actuator slew limit; applied steps are fed back to the controller. |
+| `sync_tracking.ocxo_coarse_*` | various | see presets | One-target startup correction: Mode A averages residual CFO; Mode B regresses Alignment-continuous `TO_clock` against absolute frame sequence over the coarse window. |
+| `sync_tracking.ocxo_fll_fast_*`, `ocxo_fll_slow_*` | various | see presets | Fast/slow FLL on residual CFO in Mode A or rolling `TO_clock` regression SFO in Mode B, with threshold hysteresis and dwell. |
+| `sync_tracking.ocxo_fll_slow_kp` | `float` | `0.1` | Slow FLL proportional gain. |
+| `sync_tracking.ocxo_fll_slow_ki` | `float` | `0.007` | Slow FLL integral gain. |
+| `sync_tracking.ocxo_fll_slow_max_slew_ppm_per_s` | `float` / ppm/s | `0.005` | Slow FLL command slew limit. |
+| `sync_tracking.ocxo_fll_slow_enter_abs_ppm` | `float` / ppm | `0.0005` | Residual threshold for entering Slow FLL from Fast FLL. |
+| `sync_tracking.ocxo_phase_setpoint_mode` | `string` | `freeze_on_lock` | Legacy `auto`/`phase` target: freeze `TO_clock` on Phase entry, use zero, or use a fixed target. |
+| `sync_tracking.ocxo_phase_setpoint_fixed_samples` | `float` / samples | `0.0` | Legacy fixed `TO_clock` target when the setpoint mode is `fixed`. |
+| `sync_tracking.ocxo_phase_*` | various | see presets | Velocity-form Phase PI. Its error is `setpoint-TO_clock` in legacy `auto`/`phase`, or wrapped `P_U-P_B` in `pps_phase`; entry/exit still uses `TO_clock` SFO regression. |
+| `sync_tracking.ocxo_pps_initial_ap_enable` | `bool` | `true` | Legacy key name. In `pps_phase`, start one PPSOUT alignment transaction on every `FllSlow -> Phase` entry before releasing SF phase tracking. Disabling it emits a startup warning because a large residual may converge very slowly through the slew-limited PI. |
+| `sync_tracking.ocxo_pps_initial_ap_max_abs_ns` | `float` / ns | `500000000` | Absolute AP clamp, matching the PPSDO hardware range. |
+| `sync_tracking.ocxo_pps_initial_ap_settle_s` | `float` / s | `2.0` | Minimum AP settling time; a newer eRTM/PPS observation is also required. |
+| `sync_tracking.ocxo_pps_initial_ap_command_timeout_s` | `float` / s | `3.0` | Total AP worker wall-clock budget, including all `JAMSYNCING` retries. The aligner waits a 0.5 s terminal-status grace; no AP copy is sent after the worker deadline. |
+| `sync_tracking.ocxo_pps_initial_ap_max_retries` | `int` | `1` | Bounded retries (`0..3`) when AP was accepted but no fresh post-AP publication arrived by `settle_s + command_timeout_s`. A retry waits for a new valid publication and recomputes AP from its residual. |
+| `sync_tracking.ocxo_pps_initial_ap_deadzone_ns` | `float` / ns | `10.0` | Skip AP and the settling wait when the PPS error at Phase entry is already within this range. |
+| `sync_tracking.ocxo_pps_initial_ap_polarity` | `int` | `1` | AP command sign for a positive `P_U-P_B` error. The default is the polarity confirmed by the PPSOUT bench measurement; `-1` remains available for different hardware/firmware polarity. |
+| `sync_tracking.cfo_ewma_enable` | `bool` | `true` | EWMA pre-filter on residual CFO ppm for Mode A Coarse/FLL. |
+| `sync_tracking.cfo_ewma_alpha` | `float` | `0.02` | EWMA weight on new residual samples (`0..1`; higher = faster, noisier). |
 | `sync_tracking.desired_peak_pos` | `int` | `20` | Target delay-peak position for alignment logic. |
+
+The hardware presets use `ocxo_fll_slow_kp=0.1`, `ocxo_fll_slow_ki=0.007`,
+`ocxo_fll_slow_max_slew_ppm_per_s=0.005`, and
+`ocxo_fll_slow_enter_abs_ppm=0.0005`. They retain
+`ocxo_fll_slow_deadzone_ppm=5.0e-5`, `ocxo_phase_kp=2.0e-4`,
+`ocxo_phase_ki=1.0e-6`, and `ocxo_phase_enter_sfo_abs_ppm=2.0e-4`.
+The PPSOUT AP correction is enabled on every Phase entry and uses the
+bench-confirmed positive command polarity by default.
+
+Normal synchronization reacquisition resets OCXO observations, dwell timers,
+and loop stages without writing the DAC zero word. The discipliner restarts at
+the actuator's retained command. The actuator rebases its slew timer at the
+first actual nonzero post-lock correction, so time spent searching cannot
+inflate that correction. After an `SF` command receives `OK`, the non-real-time
+serial worker durably updates
+`ocxo_dac_state_file`. On the next UE/CUDAUE process start, that acknowledged
+raw word initializes both the DAC and controller instead of starting at zero.
+During graceful shutdown, the serial worker is stopped first and the last SF
+word that actually received `OK` is saved again; a newer unacknowledged queued
+word is never promoted to the steady-state restart value.
+Restore also requires the saved serial device, `zero_word`, and `ppm_per_lsb`
+to match the active configuration. A missing file starts from the calibrated
+zero word and is created after an acknowledged command. A corrupt, mismatched,
+or out-of-range file also falls back to zero, but remains unchanged and disables
+persistence for that process run; fix or remove it before restarting. This
+assumes the external DAC itself remains powered and retains its word while the
+UE process restarts.
+
+`auto` and `phase` preserve the existing Phase anchor: the PI controls
+`setpoint - TO_clock`, including `freeze_on_lock`, `zero`, and `fixed`. They do
+not read `time_last_pps()` or run the AP gate.
+
+`pps_phase` is a separate explicit mode. For downlink frame `N`, eRTM
+reconstructs `r_B=B_N-P_B` from the BS anchor refreshed immediately before each
+ERTM5 report is packed, and obtains
+`r_U=U_N-P_U` from the UE frame-boundary and PPS timestamps. Its Phase error is
+`wrap_1s(tau_DL_RF - TO_UE + r_B - r_U) = wrap_1s(P_U-P_B)`, with target zero.
+This mode is rejected unless `sync_tracking.hardware_sync=true`,
+`uplink.ertm_to_enable=true`, and both `usrp_device.clock_source` and
+`usrp_device.time_source` are explicitly `external`; an empty `time_source`
+means `internal`. The BS must likewise use the PPSDO-connected external clock
+and time sources when producing the PPS anchor. The BS anchor refresh runs at
+the eRTM report cadence configured by
+`uplink.ertm_report_interval_frames`, outside the TX/modulation real-time path.
+On every `FllSlow -> Phase` transition, the AP
+gate is rearmed and computes one correction from the latest valid PPS residual.
+It remains done throughout that Phase residence, so normal Phase updates and
+Freeze do not repeat AP. If Phase falls back through FLL and later re-enters,
+one new correction is allowed. `AP` changes PPSDO PPSOUT only and never resets
+USRP time, reanchors the air-frame clock, clears eRTM state, or rebuilds TO. If
+the previous AP is still queued or in flight, the new entry waits for hardware
+`Idle` instead of treating it as a terminal queue failure. `JAMSYNCING` retries
+reuse the same AP request.
 
 ### `sensing`
 
@@ -240,6 +312,8 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `network_output.self_pdf_port` | `int` | `12351` | UE self-delay-spectrum debug PUB port. |
 | `network_output.ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | UE eRTM debug PUB IP. |
 | `network_output.ertm_debug_port` | `int` | `12362` | UE eRTM debug PUB port. |
+| `network_output.ocxo_debug_ip` | `string` / IPv4 | `0.0.0.0` | OCXO debug ZMQ PUB bind IP. |
+| `network_output.ocxo_debug_port` | `int` | `12347` | OCXO debug ZMQ PUB port. |
 | `network_output.control_port` | `int` | `10001` | ZMQ ROUTER port for runtime control. |
 
 ### `cpu_cores`
@@ -257,9 +331,36 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP and VOFA+ outputs when specific IP fields are empty. |
-| `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug destination IP; empty uses `default_out_ip`. |
-| `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug destination port. |
+| `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | Default destination IP for UDP outputs when a specific IP field is empty. |
+
+When hardware sync is enabled, the `OCXODBG3` ZeroMQ packet retains these 16 fixed channels:
+
+| Channel | Signal | Channel | Signal |
+| :--- | :--- | :--- | :--- |
+| 0 | modulo CFO (Hz) | 8 | active-window `TO_clock` regression SFO (ppm) |
+| 1 | de-aliased CFO (Hz) | 9 | cumulative Alignment (samples) |
+| 2 | raw residual CFO (ppm) | 10 | Alignment feedforward (samples) |
+| 3 | filtered control CFO (ppm) | 11 | desired OCXO delta (ppm) |
+| 4 | OFDM delay-track SFO (ppm; channel compensation only) | 12 | applied OCXO delta (ppm) |
+| 5 | raw `TO_UE` (samples) | 13 | applied OCXO command (ppm) |
+| 6 | continuous `TO_clock` (samples) | 14 | coarse target outstanding (ppm) |
+| 7 | active Phase error: legacy `setpoint-TO_clock` or `pps_phase` `P_U-P_B` (samples) | 15 | stage (`0..4`: Coarse, Fast, Slow, Phase, Freeze) |
+
+The packet is a fixed 152-byte little-endian frame: magic, version, channel count,
+sequence, Unix-nanosecond source timestamp, the original 16 `float32` values, and
+a typed PPS diagnostic trailer. The trailer and CSV append `r_bs_samples` and
+`r_ue_samples` (`float64`), `bs_last_pps_ticks`, `bs_t0_to_pps_ticks`, and
+`ue_last_pps_ns` (exact `int64`), plus `bs_tick_rate` and `sample_rate` (`float64`).
+These fields distinguish BS-anchor, UE-PPS-latch, and TO discontinuities without
+passing absolute timestamps through `float32`. The viewer still accepts legacy
+`OCXODBG2` packets. Launch the
+rolling viewer with `python3 scripts/plot_ocxo_debug.py`. Use `--channels 6,7,8,13,15`
+to choose initial curves and `--record capture/ocxo.csv` to start CSV recording;
+automatic names use `ocxo_debug_YYYYMMDD_01.csv` and increment to `_02`, `_03`,
+and so on for later captures on the same day. Recording always stores all channels
+even when only a subset is visible. Periodic
+state packets are supplemented by immediate control, stage-transition, TO-jump,
+and Alignment event packets so one-frame delta channels are not lost.
 
 ### `logging`
 

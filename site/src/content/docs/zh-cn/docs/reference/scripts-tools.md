@@ -19,6 +19,16 @@ python3 scripts/plot_bi_sensing_fast.py
 
 如果窗口能打开但没有数据，先检查 YAML 中的感知输出开关、IP/端口和后端日志，而不是重复启动查看器。
 
+## OCXO 调试
+
+```bash
+python3 scripts/plot_ocxo_debug.py --host 127.0.0.1 --port 12347
+python3 scripts/plot_ocxo_debug.py --channels 6,7,8,13,15 --record capture/ocxo.csv
+```
+
+查看器按单位分组显示曲线，保留可配置的滚动历史，并可暂停绘图而不中断接收和 CSV 记录。
+通道勾选只影响曲线显示，CSV 始终保存完整的 16 通道数据包。
+
 ## 上行定时控制
 
 `uplink_timing_control.py` 通过 BS 和 UE 的 ZMQ 控制端口读取、调整 `DUTI` 和 `TADV` 定时值：
@@ -41,7 +51,7 @@ sudo ../scripts/isolate_cpus.py
 sudo ../scripts/isolate_cpus.py run ./BS
 ```
 
-默认命令会询问本机角色是 BS、UE 还是 BS+UE。`run` 不会把整个进程限制在隔离核上；YAML 中的关键线程仍按指定 CPU 运行，其他线程可使用系统核。
+默认命令会询问本机角色是 BS、UE 还是 BS+UE。只要存在内核隔离 CPU 就会显示网卡 IRQ 二级菜单；至少有两个可用的隔离物理核心时才显示双队列 RX/TX 分流。`run` 允许 YAML 关键线程使用指定 CPU，同时会从进程中排除专用网卡 IRQ 核。
 
 ## 网页配置台
 
@@ -65,3 +75,17 @@ npm run build
 ```
 
 `npm run build` 会先生成 `site/dist/`，再调用 `scripts/publish_docs_site.py` 更新 `docs/`。不要直接修改 `docs/` 下的生成 HTML。
+
+## 感知物理坐标
+
+fast viewer 和 backend sensing viewer 的 Doppler 坐标统一显示 **Hz**。单站频谱显示**距离（m）**，双站频谱显示**相对时延（ns）**；微多普勒时间轴显示秒。检测器参数和 bin 选择控件仍以 bin 索引配置。
+
+后端与 viewer 必须一同更新：仅接收 **V9 `PARM` 参数包**，旧版本或未知格式将被拒绝。后端提供原始 OFDM FFT 长度、CP 长度、实际感知符号步长及均匀子载波步长；viewer 使用实际处理 FFT 长度（包括补零）换算坐标。显示裁剪或降采样不会改变物理标定。非均匀 compact 子载波集合不存在统一的 FFT-bin 时延比例，此时明确显示物理时延不可用。
+
+设采样率为 $F_s$，OFDM FFT 长度为 $N$，CP 长度为 $N_{CP}$，符号步长为 $S_t$，子载波步长为 $S_f$，处理 FFT 长度为 $N_R,N_D$：
+
+$$
+f_{slow}=\frac{F_s}{(N+N_{CP})S_t},\quad \Delta f_D=\frac{f_{slow}}{N_D},\quad \Delta\tau=\frac{N}{F_s S_f N_R}.
+$$
+
+单站按 $R=c\tau/2$ 换算距离；双站按 $10^9\tau$ 显示 ns，**零点相对于当前同步／对齐参考**，不能当作发射机或接收机到目标的绝对距离。单站零距离也依赖系统时延对齐标定。改变 FFT 长度会改变坐标的 bin 间隔，不会改变波形本身的物理分辨率。

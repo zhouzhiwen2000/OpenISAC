@@ -19,6 +19,17 @@ python3 scripts/plot_bi_sensing_fast.py
 
 If a window opens without data, check the sensing-output switch, IP/port settings, and backend logs before restarting the viewer.
 
+## OCXO debug
+
+```bash
+python3 scripts/plot_ocxo_debug.py --host 127.0.0.1 --port 12347
+python3 scripts/plot_ocxo_debug.py --channels 6,7,8,13,15 --record capture/ocxo.csv
+```
+
+The viewer groups channels by unit, keeps a configurable rolling history, and
+can pause rendering without pausing reception or CSV recording. Channel selection
+only affects the plots; CSV output always contains the full 16-channel packet.
+
 ## Uplink timing control
 
 `uplink_timing_control.py` reads and adjusts the BS `DUTI` and UE `TADV` values through their ZMQ control ports:
@@ -41,7 +52,7 @@ sudo ../scripts/isolate_cpus.py
 sudo ../scripts/isolate_cpus.py run ./BS
 ```
 
-The default command asks whether the host runs BS, UE, or both. `run` does not restrict the whole process to isolated CPUs: YAML-pinned critical threads stay on their assigned CPUs while other threads may use system CPUs.
+The default command asks whether the host runs BS, UE, or both. When any kernel-isolated CPU is available, a second menu can isolate NIC IRQs; RX/TX splitting is shown only with at least two eligible isolated physical cores. `run` lets YAML-pinned critical threads use their assigned CPUs while excluding any dedicated NIC IRQ cores from the process.
 
 ## Web Config Console
 
@@ -65,3 +76,17 @@ npm run build
 ```
 
 `npm run build` creates `site/dist/` and then runs `scripts/publish_docs_site.py` to update `docs/`. Do not edit generated HTML under `docs/` directly.
+
+## Physical sensing coordinates
+
+Both the fast viewers and backend sensing viewers display Doppler frequency in **Hz**. Monostatic spectra display **range in metres**, while bistatic spectra display **relative delay in nanoseconds (ns)**. Micro-Doppler time is displayed in seconds. Detector configuration and bin-selection controls still use bin indices.
+
+The backend and viewer must be updated together: sensing `PARM` **V9 is required**, and older or unknown layouts are rejected. The packet supplies the original OFDM FFT size, CP length, active sensing symbol stride and uniform subcarrier stride; the viewer uses the actual processing FFT lengths, including zero padding. Cropping or display downsampling does not change the physical calibration. A nonuniform compact subcarrier grid has no single FFT-bin delay scale and is marked unavailable instead of being assigned an incorrect distance.
+
+With sample rate $F_s$, OFDM FFT size $N$, CP length $N_{CP}$, symbol stride $S_t$, subcarrier stride $S_f$, and processing FFT sizes $N_R,N_D$:
+
+$$
+f_{slow}=\frac{F_s}{(N+N_{CP})S_t},\quad \Delta f_D=\frac{f_{slow}}{N_D},\quad \Delta\tau=\frac{N}{F_s S_f N_R}.
+$$
+
+Monostatic range uses $R=c\tau/2$; bistatic delay uses $10^9\tau$ ns and is **relative to the current synchronization/alignment reference**. It is not an absolute transmitter-to-target or receiver-to-target distance. Monostatic zero range likewise depends on the system-delay alignment calibration. Changing the processing FFT length changes the displayed bin spacing, not the waveform's physical resolution.

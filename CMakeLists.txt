@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.18)
 project(OpenISAC CXX)
 
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(TxBurstRecoveryTest tests/tx_burst_recovery_test.cpp)
+    target_include_directories(TxBurstRecoveryTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME TxBurstRecovery COMMAND TxBurstRecoveryTest)
+    set_tests_properties(TxBurstRecovery PROPERTIES LABELS "cpu;recovery")
+endif()
+
 if(POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif()
@@ -21,6 +32,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find required libraries
+find_package(Boost 1.66 CONFIG QUIET)
+if(Boost_FOUND AND Boost_VERSION VERSION_GREATER_EQUAL 1.89.0)
+    find_package(boost_system ${Boost_VERSION} EXACT CONFIG QUIET)
+    if(NOT boost_system_FOUND)
+        # Some Boost 1.89+ packages omit the standalone Boost.System CMake
+        # component, but UHD 4.10 and older package configs still request it.
+        set(OPENISAC_BOOST_VERSION "${Boost_VERSION}")
+        set(boost_system_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/boost_system")
+        message(STATUS
+            "Using header-only Boost.System compatibility target for Boost ${Boost_VERSION}"
+        )
+    endif()
+endif()
 find_package(UHD REQUIRED)
 
 set(Boost_NO_BOOST_CMAKE ON)
@@ -234,7 +258,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
     endif()
 
     if(ARCH_OPTS)
-        add_compile_options(${ARCH_OPTS})
+        add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_OPTS}>")
         message(STATUS "Enabled SIMD optimizations: ${ARCH_OPTS}")
     endif()
 endif()

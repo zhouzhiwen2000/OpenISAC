@@ -27,6 +27,13 @@ namespace radio {
 // sim_shm::sample_t).
 using sample_t = std::complex<float>;
 
+// Native signed 16-bit complex samples for transmitters configured with an
+// "sc16" CPU format.  Keeping this distinct from sample_t prevents an FC32
+// buffer from being submitted to a streamer whose converter expects SC16.
+using sc16_t = std::complex<int16_t>;
+static_assert(sizeof(sc16_t) == 2 * sizeof(int16_t),
+              "sc16_t must be an interleaved I/Q pair");
+
 // ---------------------------------------------------------------------------
 // TimeSpec — sample-precise time, mirroring uhd::time_spec_t semantics.
 //

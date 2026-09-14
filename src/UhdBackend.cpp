@@ -137,6 +137,13 @@ public:
         return _s->send(b, nsamps, to_uhd(md), timeout);
     }
 
+    size_t send(const sc16_t* buff, size_t nsamps, const TxMetadata& md,
+                double timeout) override {
+        static const sc16_t dummy{0, 0};
+        const void* b = buff ? static_cast<const void*>(buff) : static_cast<const void*>(&dummy);
+        return _s->send(b, nsamps, to_uhd(md), timeout);
+    }
+
     bool recv_async_msg(AsyncMetadata& md, double timeout) override {
         uhd::async_metadata_t um;
         if (!_s->recv_async_msg(um, timeout)) return false;

@@ -103,7 +103,7 @@
 <li>使用 <code dir="auto">-1</code>、<code dir="auto">[]</code> 或省略可选字段表示该模块不做显式绑核。</li>
 <li>运行面板展示 <strong>Isolated / Bound / Process / System</strong> CPU 列表。默认 isolate 只覆盖最敏感线程（USRP 收发、main；BS sensing RX），不含 OFDM 调制/解调。</li>
 <li>勾选 <strong>BS+UE (isolate both sides)</strong> 时合并两侧 YAML 的敏感核；不勾选则只 isolate 当前 tab。</li>
-<li><strong>Save + Start</strong> / <strong>Apply Isolation</strong> 调用 <code dir="auto">scripts/isolate_cpus.py</code>；开启隔离时进程 <code dir="auto">AllowedCPUs</code> 为全部逻辑核。</li>
+<li><strong>Save + Start</strong> / <strong>Apply Isolation</strong> 调用 <code dir="auto">scripts/isolate_cpus.py</code>；该非交互路径不会主动修改网卡 IRQ，需另行通过 CLI 的 <code dir="auto">--nic-irq isolate|split</code> 启用。保存状态启用网卡策略后，进程 <code dir="auto">AllowedCPUs</code> 会排除专用 IRQ 核。</li>
 <li><strong>Override isolated CPU list</strong> 可手动指定本次 isolate 列表。</li>
 <li><strong>Reset Isolation</strong> 将系统 slice 恢复为可用全部 CPU。</li>
 <li><strong>安全提示</strong>：该控制台可以执行网页中填写的启动命令。请保持默认监听地址 <code dir="auto">127.0.0.1</code>，或仅绑定到可信网络。</li>

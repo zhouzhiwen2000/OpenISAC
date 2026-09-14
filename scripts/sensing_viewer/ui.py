@@ -12,14 +12,5 @@ def _load_viewer_module(mode: str):
     return viewer
 
 
-def FastSensingWindow(mode: str):
-    """Construct the mode-specific fast viewer window.
-
-    The current implementation keeps the mode-heavy Qt classes in mode-specific
-    modules, while this factory gives callers a unified UI entry point.
-    """
-    return _load_viewer_module(mode).MainWindow()
-
-
 def run_fast_viewer(mode: str) -> int:
     return _load_viewer_module(mode).run_app()

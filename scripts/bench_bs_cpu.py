@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("scripts/bench_bs_cpu_template.yaml"),
         help="Base BS YAML template used for reproducible CPU benchmark runs.",
     )
-    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
+    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.py"))
     parser.add_argument("--sample-rates", type=str, default="50e6,100e6,200e6")
     parser.add_argument("--fft-sizes", type=str, default="256,512,1024,2048")
     parser.add_argument("--duration", type=float, default=10.0)
@@ -87,7 +87,7 @@ def build_isolated_cpu_spec(mod_cfg: dict) -> str:
             if cpu >= 0:
                 cpus.add(cpu)
     if not cpus:
-        raise RuntimeError("BS config must define at least one non-negative module CPU entry for isolate_cpus.bash")
+        raise RuntimeError("BS config must define at least one non-negative module CPU entry for isolate_cpus.py")
     return ",".join(str(cpu) for cpu in sorted(cpus))
 
 
@@ -99,7 +99,7 @@ def launch_bs_with_isolation(
     unit_name: str,
 ) -> tuple[subprocess.Popen[bytes], int, float]:
     if os.geteuid() != 0:
-        raise RuntimeError("bench_bs_cpu.py must run as root to use isolate_cpus.bash")
+        raise RuntimeError("bench_bs_cpu.py must run as root to use isolate_cpus.py")
 
     build_dir = build_dir.resolve()
     run_dir = run_dir.resolve()

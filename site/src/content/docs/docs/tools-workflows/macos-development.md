@@ -7,7 +7,7 @@ This page covers local development and demonstration use on macOS. Ubuntu 24.04 
 
 Before you begin:
 
-- Real-time tuning helpers such as `isolate_cpus.bash` are Linux-only.
+- Real-time tuning helpers such as `isolate_cpus.py` are Linux-only.
 - Keep only one UHD package source; do not mix Homebrew and MacPorts UHD installations in the same shell environment.
 - Validate UHD, USRP, real-time scheduling, USB, and network-throughput behavior on the Linux hardware host.
 

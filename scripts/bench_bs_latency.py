@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark end-to-end BS latency (UDP ingest → TX send) across configurations.
 
-Requires root (for isolate_cpus.bash) and a connected USRP.
+Requires root (for isolate_cpus.py) and a connected USRP.
 
 Usage:
     sudo python3 scripts/bench_bs_latency.py --mod-config scripts/bench_bs_latency_template.yaml
@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("scripts/bench_bs_latency_template.yaml"),
         help="Base BS YAML template used for reproducible latency benchmark runs.",
     )
-    p.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
+    p.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.py"))
     p.add_argument("--sample-rates", default="50e6,100e6,200e6")
     p.add_argument("--fft-sizes", default="1024")
     p.add_argument("--num-symbols-list", default="50,100,200",

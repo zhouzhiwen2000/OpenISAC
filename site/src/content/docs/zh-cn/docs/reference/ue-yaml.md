@@ -62,6 +62,16 @@ description: UE 运行配置参数、取值和作用说明。
 | :--- | :--- | :--- | :--- |
 | `usrp_device.device_args` | `string` | `addr=...` | USRP 设备参数，例如网络地址。 |
 | `usrp_device.clock_source` | `string` | `external` | UE 时钟源：`internal`、`external` 或 `gpsdo`。 |
+| `usrp_device.time_source` | `string` | `internal` | UE 时间/PPS 源。空值按 `internal` 处理；`pps_phase` 要求它与 `clock_source` 都显式为 `external`。 |
+
+只要 `usrp_device.clock_source` 非空，CPU、CUDA 和 HIP UE 都会在任何 stream
+开始前执行严格的 device-time 对齐，该步骤与所选 `sync_tracking.ocxo_mode` 无关。
+这也包括 `time_source: internal`；`time_source` 只选择 PPS 输入，不再决定是否
+执行启动对齐。启动过程先观察一次 PPS 跳变，再武装 `set_time_next_pps(0)`，并等待
+device time 计数器确实回跳且 `time_last_pps=0`；PPS 缺失、backend 不支持或验证
+失败都会中止启动。对 `gpsdo`，对齐会有意
+用零点替换原有的类 UTC device-time epoch。该步骤对齐软件时间原点，但 X310
+在 200 MHz master clock 下仍保留 5 ns 的 PPS 捕获量化。
 
 ### `ofdm_frame`
 
@@ -85,6 +95,7 @@ description: UE 运行配置参数、取值和作用说明。
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
+| `cuda.cuda_precision_profile` | `string` | `fp32` | `fp32` 完全保留现有路径；`mixed_fp16` 对批量 OFDM FFT/IFFT 和 GPU LDPC 消息使用 FP16，信道估计、跟踪、均衡、感知和 LLR 生成仍使用 FP32。不支持的 FP16 FFT 形状会自动回退 FP32。 |
 | `cuda.cuda_demod_pipeline_slots` | `int` | `3` | CUDA 解调流水线 slot 数。 |
 | `cuda.cuda_ldpc_decoder_backend` | `string` | `gpu` | CUDA 解调使用的 LDPC 解码后端：`gpu` 或 `cpu`。 |
 | `cuda.cuda_ldpc_worker_buffers` | `int` | `3` | CUDA LDPC 异步批处理工作缓冲区数。 |
@@ -142,6 +153,10 @@ description: UE 运行配置参数、取值和作用说明。
 | `uplink.arq_retransmit_timeout_ms` | `int` / ms | `100` | 上行 ARQ 重传超时。 |
 | `uplink.arq_max_retries` | `int` | `5` | 上行最大重传次数；`0` 表示窗口内不限次数。 |
 
+真实无线设备开启 timed uplink 时，CPU、CUDA 和 HIP UE 会在启动阶段读取设备实际的
+RX/TX 采样率。两者相差超过 1 Hz 会在创建工作线程前中止启动，因为精确的上行身份映射
+要求收发方向使用同一采样时间网格。
+
 ### `sync_tracking`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
@@ -154,29 +169,70 @@ description: UE 运行配置参数、取值和作用说明。
 | `sync_tracking.hardware_sync` | `bool` | `false` | 开启硬件同步模式。 |
 | `sync_tracking.hardware_sync_tty` | `string` | `/dev/ttyUSB0` | 硬件同步控制器串口设备。 |
 | `sync_tracking.desired_peak_pos` | `int` | `20` | 定时对齐逻辑使用的目标时延峰位置。 |
-| `sync_tracking.ocxo_pi_kp_fast` | `float` | `30` | OCXO PI 快速阶段比例增益。 |
-| `sync_tracking.ocxo_pi_ki_fast` | `float` | `1` | OCXO PI 快速阶段积分增益。 |
-| `sync_tracking.ocxo_pi_kp_slow` | `float` | `30` | OCXO PI 慢速阶段比例增益。 |
-| `sync_tracking.ocxo_pi_ki_slow` | `float` | `0.05` | OCXO PI 慢速阶段积分增益。 |
-| `sync_tracking.ocxo_pi_switch_abs_error_ppm` | `float` / ppm | `0.0002` | 切换到慢速阶段的 error 阈值。 |
-| `sync_tracking.ocxo_pi_switch_hold_s` | `float` / s | `60` | 低于阈值后切换阶段所需持续时间。 |
-| `sync_tracking.ocxo_pi_max_step_fast_ppm` | `float` / ppm | `0.01` | 快速阶段单次最大 OCXO 调整量。 |
-| `sync_tracking.ocxo_pi_max_step_slow_ppm` | `float` / ppm | `0.01` | 慢速阶段单次最大 OCXO 调整量。 |
-| `sync_tracking.ocxo_pi_max_step_ppm` | `float` / ppm | 可选 | 旧版别名，同时设置 fast/slow max-step。 |
-| `sync_tracking.akf_enable` | `bool` | `true` | 对硬件同步 `error_ppm` 开启自适应 Kalman filter。 |
-| `sync_tracking.akf_bootstrap_frames` | `int` | `64` | AKF 正常更新前的冷启动帧数。 |
-| `sync_tracking.akf_innovation_window` | `int` | `64` | 自适应使用的新息历史窗口。 |
-| `sync_tracking.akf_max_lag` | `int` | `4` | 最大新息自相关 lag。 |
-| `sync_tracking.akf_adapt_interval` | `int` | `64` | 自适应 `Q/R` 更新帧间隔。 |
-| `sync_tracking.akf_gate_sigma` | `float` | `3` | 新息门限 sigma。 |
-| `sync_tracking.akf_tikhonov_lambda` | `float` | `1e-3` | LS 自适应 Tikhonov 正则项。 |
-| `sync_tracking.akf_update_smooth` | `float` | `0.2` | 更新后 `Q/R` 的指数平滑系数。 |
-| `sync_tracking.akf_q_wf_min` | `float` | `1e-10` | 白频率噪声下界。 |
-| `sync_tracking.akf_q_wf_max` | `float` | `1e2` | 白频率噪声上界。 |
-| `sync_tracking.akf_q_rw_min` | `float` | `1e-12` | 随机游走频率噪声下界。 |
-| `sync_tracking.akf_q_rw_max` | `float` | `1e1` | 随机游走频率噪声上界。 |
-| `sync_tracking.akf_r_min` | `float` | `1e-8` | 观测噪声方差下界。 |
-| `sync_tracking.akf_r_max` | `float` | `1e3` | 观测噪声方差上界。 |
+| `sync_tracking.ocxo_mode` | `string` | `auto` | `auto`、`freq`、`phase` 保留原 TO 锚定语义；`pps_phase` 显式选择 PPS 相位锁定。 |
+| `sync_tracking.ocxo_dac_ppm_per_lsb` | `float` | `9.71e-7` | 标定后的 DAC 每 LSB 对应 ppm（MV197）。 |
+| `sync_tracking.ocxo_dac_zero_word` | `int` | `493367` | 0 ppm 对应的 DAC 码字。 |
+| `sync_tracking.ocxo_dac_state_file` | `string` | `.openisac_ocxo_dac_state.yaml` | 保存 DAC 已确认 `OK` 的最后一个 SF 码字。相对路径按 UE 当前工作目录解析；空值关闭跨重启持久化。 |
+| `sync_tracking.ocxo_max_abs_ppm` | `float` / ppm | `0.45` | OCXO 绝对命令限幅。 |
+| `sync_tracking.ocxo_actuator_max_slew_ppm_per_s` | `float` / ppm/s | `0.01` | 执行器硬斜率限制；实际执行量会反馈给控制器。 |
+| `sync_tracking.ocxo_coarse_*` | 多项 | 见预设 | 启动单目标粗调：Mode A 平均 residual CFO；Mode B 在 coarse 窗内对 Alignment 连续化后的 `TO_clock` 与绝对帧序号做线性回归。 |
+| `sync_tracking.ocxo_fll_fast_*`, `ocxo_fll_slow_*` | 多项 | 见预设 | 快/慢 FLL：Mode A 使用 residual CFO，Mode B 使用滚动 `TO_clock` 回归得到的钟 SFO，并带阈值滞回和 dwell。 |
+| `sync_tracking.ocxo_fll_slow_kp` | `float` | `0.1` | Slow FLL 比例增益。 |
+| `sync_tracking.ocxo_fll_slow_ki` | `float` | `0.007` | Slow FLL 积分增益。 |
+| `sync_tracking.ocxo_fll_slow_max_slew_ppm_per_s` | `float` / ppm/s | `0.005` | Slow FLL 命令变化率上限。 |
+| `sync_tracking.ocxo_fll_slow_enter_abs_ppm` | `float` / ppm | `0.0005` | 从 Fast FLL 进入 Slow FLL 的残差阈值。 |
+| `sync_tracking.ocxo_phase_setpoint_mode` | `string` | `freeze_on_lock` | 原 `auto`/`phase` 的目标：进入 Phase 时冻结 `TO_clock`、取零或使用固定值。 |
+| `sync_tracking.ocxo_phase_setpoint_fixed_samples` | `float` / samples | `0.0` | setpoint mode 为 `fixed` 时的原 TO_clock 固定目标。 |
+| `sync_tracking.ocxo_phase_*` | 多项 | 见预设 | Phase 增量式 PI：原 `auto`/`phase` 使用 `setpoint-TO_clock`，`pps_phase` 使用 wrap 后的 `P_U-P_B`；进退判据仍使用 `TO_clock` 钟 SFO 回归。 |
+| `sync_tracking.ocxo_pps_initial_ap_enable` | `bool` | `true` | 保留的旧键名。在 `pps_phase` 中，每次 `FllSlow -> Phase` 都启动一次 PPSOUT 对齐事务，再放行 SF Phase 跟踪。关闭时启动日志会告警：大 residual 只能由限斜率 PI 处理，可能收敛很慢。 |
+| `sync_tracking.ocxo_pps_initial_ap_max_abs_ns` | `float` / ns | `500000000` | AP 绝对限幅，与 PPSDO 硬件范围一致。 |
+| `sync_tracking.ocxo_pps_initial_ap_settle_s` | `float` / s | `2.0` | AP 最短稳定时间；同时必须等到更新后的 eRTM/PPS 观测。 |
+| `sync_tracking.ocxo_pps_initial_ap_command_timeout_s` | `float` / s | `3.0` | AP worker 的总墙钟预算，包含全部 `JAMSYNCING` 重试；aligner 额外等待 0.5 s 终态余量，worker 截止后不再发送该 AP。 |
+| `sync_tracking.ocxo_pps_initial_ap_max_retries` | `int` | `1` | AP 已接受但在 `settle_s + command_timeout_s` 内没有新 publication 时的有界重试次数（`0..3`）；重试会等待新的有效观测并按残差重算 AP。 |
+| `sync_tracking.ocxo_pps_initial_ap_deadzone_ns` | `float` / ns | `10.0` | 进入 Phase 时 PPS 误差已落在该范围内则跳过 AP 和稳定等待。 |
+| `sync_tracking.ocxo_pps_initial_ap_polarity` | `int` | `1` | `P_U-P_B` 为正时的 AP 命令符号。默认值采用 PPSOUT 台架实测确认的极性；不同硬件或固件极性仍可显式设为 `-1`。 |
+| `sync_tracking.cfo_ewma_enable` | `bool` | `true` | 对 residual CFO ppm 做 EWMA 预滤波，仅供 Mode A Coarse/FLL 使用。 |
+| `sync_tracking.cfo_ewma_alpha` | `float` | `0.02` | EWMA 对新样本权重（`0..1`；越大跟踪越快、噪声越大）。 |
+
+硬件预设使用 `ocxo_fll_slow_kp=0.1`、`ocxo_fll_slow_ki=0.007`、
+`ocxo_fll_slow_max_slew_ppm_per_s=0.005` 和
+`ocxo_fll_slow_enter_abs_ppm=0.0005`，并保留
+`ocxo_fll_slow_deadzone_ppm=5.0e-5`、`ocxo_phase_kp=2.0e-4`、
+`ocxo_phase_ki=1.0e-6` 与 `ocxo_phase_enter_sfo_abs_ppm=2.0e-4`。
+每次进入 Phase 的 PPSOUT AP 校正默认开启，并使用台架实测确认的正命令极性。
+
+普通重新同步只重置 OCXO 观测、dwell 计时和控制阶段，不再向 DAC 写入零码字。
+控制器从执行器保留的 command 重新起步；执行器在重新入锁后的第一条实际非零修正时
+才重置 slew 时间基准，因此 search 时长不会放大第一步。每条 `SF` 收到 `OK` 后，
+非实时串口 worker 会持久化更新
+`ocxo_dac_state_file`；下次启动 UE/CUDAUE 进程时，DAC 与控制器都从该已确认的 raw
+word 恢复，而不是从零开始。正常退出时先结束串口 worker，再次保存最后一条实际收到
+`OK` 的 SF word；更新但未确认的 queued word 不会被提升为下次启动的稳态值。
+恢复时还要求文件中的串口设备、`zero_word` 和 `ppm_per_lsb` 与当前配置一致。文件缺失时
+从校准零码字启动，并在命令确认后创建状态；文件损坏、设备或标定不匹配、word 越界时也
+回退到零码字，但原文件保持不变，且本次进程关闭持久化，需修复或删除该文件后再重启。
+该机制假定仅重启 UE 进程时外部 DAC 仍保持供电并保留原码字。
+
+`auto` 和 `phase` 保留原来的 Phase anchor：PI 控制
+`setpoint - TO_clock`，继续支持 `freeze_on_lock`、`zero`、`fixed`；这两个
+模式不会读取 `time_last_pps()`，也不会进入 AP gate。
+
+`pps_phase` 是单独的显式模式。对下行帧 `N`，eRTM 根据每份 ERTM5 报告
+打包前实时刷新的 BS frame-0/PPS 锚点重建 `r_B=B_N-P_B`，根据 UE 帧边界
+与 PPS 时间戳得到
+`r_U=U_N-P_U`。Phase 误差为
+`wrap_1s(tau_DL_RF - TO_UE + r_B - r_U) = wrap_1s(P_U-P_B)`，目标为零。
+该模式要求 `sync_tracking.hardware_sync=true`、`uplink.ertm_to_enable=true`，
+并要求 `usrp_device.clock_source` 与 `usrp_device.time_source` 都显式配置为
+`external`；空 `time_source` 按 `internal` 处理。任一条件不满足都会报配置错误。
+BS 侧生成 PPS anchor 时也必须使用连接 PPSDO 的 external clock/time source。
+BS anchor 的刷新频率由 `uplink.ertm_report_interval_frames` 的 eRTM 报告周期决定，
+并在 TX/调制实时路径之外执行。每次 `FllSlow -> Phase` 时，AP gate 都会重新武装，
+并根据最新有效 PPS residual 计算一次校正；在同一次 Phase 停留期间保持 Done，
+普通 Phase 更新和 Freeze 不会重复 AP。若 Phase 退回 FLL 后再次进入，则允许一次
+新的校正。`AP` 仅改变 PPSDO 的 PPSOUT，不会重设 USRP 时间、重锚 air-frame
+clock、清空 eRTM 状态或重新建立 TO。若旧 AP 仍处于 Queued/InFlight，新一次进入会
+等待硬件回到 Idle，而不是把 Busy 当作终端失败；`JAMSYNCING` 重试仍属于同一次 AP 请求。
 
 ### `sensing`
 
@@ -241,6 +297,8 @@ description: UE 运行配置参数、取值和作用说明。
 | `network_output.self_pdf_port` | `int` | `12351` | UE self-delay-spectrum debug PUB 端口。 |
 | `network_output.ertm_debug_ip` | `string` / IPv4 | `0.0.0.0` | UE eRTM debug PUB IP。 |
 | `network_output.ertm_debug_port` | `int` | `12362` | UE eRTM debug PUB 端口。 |
+| `network_output.ocxo_debug_ip` | `string` / IPv4 | `0.0.0.0` | OCXO debug ZMQ PUB 绑定 IP。 |
+| `network_output.ocxo_debug_port` | `int` | `12347` | OCXO debug ZMQ PUB 端口。 |
 
 ### `cpu_cores`
 
@@ -257,9 +315,32 @@ description: UE 运行配置参数、取值和作用说明。
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | 特定输出 IP 为空时，UDP 和 VOFA+ 输出使用的默认目标 IP。 |
-| `runtime.vofa_debug_ip` | `string` / IPv4 | `""` | VOFA+ debug 目标 IP；空字符串使用 `default_out_ip`。 |
-| `runtime.vofa_debug_port` | `int` | `12347` | VOFA+ debug 目标端口。 |
+| `runtime.default_out_ip` | `string` / IPv4 | `127.0.0.1` | 特定输出 IP 为空时，UDP 输出使用的默认目标 IP。 |
+
+硬件同步启用时，`OCXODBG3` ZeroMQ 数据包保留以下 16 个固定通道：
+
+| 通道 | 信号 | 通道 | 信号 |
+| :--- | :--- | :--- | :--- |
+| 0 | 模值 CFO（Hz） | 8 | 当前阶段窗口的 `TO_clock` 回归钟 SFO（ppm） |
+| 1 | 解模糊 CFO（Hz） | 9 | 累计 Alignment（samples） |
+| 2 | 原始 residual CFO（ppm） | 10 | Alignment 前馈（samples） |
+| 3 | 滤波后的控制 CFO（ppm） | 11 | 期望 OCXO 步进（ppm） |
+| 4 | OFDM delay-track SFO（ppm；仅信道补偿） | 12 | 实际 OCXO 步进（ppm） |
+| 5 | 原始 `TO_UE`（samples） | 13 | 已应用 OCXO command（ppm） |
+| 6 | 连续 `TO_clock`（samples） | 14 | 粗调未完成量（ppm） |
+| 7 | 当前 Phase 误差：原 `setpoint-TO_clock` 或 `pps_phase` 的 `P_U-P_B`（samples） | 15 | stage（`0..4`：Coarse、Fast、Slow、Phase、Freeze） |
+
+数据包是固定 152 字节的小端帧：magic、版本、通道数、序号、Unix 纳秒源时间戳，
+随后为原有 16 个 `float32` 和 typed PPS diagnostic trailer。trailer 与 CSV 追加
+`r_bs_samples`、`r_ue_samples`（`float64`）、`bs_last_pps_ticks`、
+`bs_t0_to_pps_ticks`、`ue_last_pps_ns`（精确 `int64`）、`bs_tick_rate` 和
+`sample_rate`（`float64`）。这些字段用于区分 BS anchor、UE PPS latch 与 TO
+造成的相位跳变；绝对 timestamp 不经过 `float32`。viewer 仍兼容旧
+`OCXODBG2` 数据包。使用 `python3 scripts/plot_ocxo_debug.py` 启动滚动查看器；
+`--channels 6,7,8,13,15` 可指定初始显示通道，`--record capture/ocxo.csv`
+可在启动时记录 CSV。自动文件名按天使用 `ocxo_debug_YYYYMMDD_01.csv`，同日
+依次递增为 `_02`、`_03`。无论界面勾选哪些曲线，文件始终保存全部通道。除周期状态包外，
+控制、阶段切换、TO jump 和 Alignment 会立即额外发布事件包，避免单帧 delta 通道被降采样遗漏。
 
 ### `logging`
 

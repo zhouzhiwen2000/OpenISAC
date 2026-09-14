@@ -9,15 +9,28 @@ import time
 
 
 MAX_DAC_VALUE = (1 << 20) - 1
-MID_DAC_VALUE = MAX_DAC_VALUE // 2
-OCXO_FREQ_RANGE = 4.0e-7
+# Calibrated MV197 map from docs/OCXO_PPM_MAPPING.md (linear fit).
+DEFAULT_PPM_PER_LSB = 9.708797e-7
+DEFAULT_ZERO_WORD = 493367
 
 
-def ppm_to_ocxo_control_word(ppm: float) -> int:
-    ratio = ppm * 1e-6
-    fraction = ratio / (2.0 * OCXO_FREQ_RANGE)
-    dac_value = MID_DAC_VALUE + fraction * MAX_DAC_VALUE
-    return max(0, min(MAX_DAC_VALUE, int(round(dac_value))))
+def ppm_to_ocxo_control_word(
+    ppm: float,
+    *,
+    ppm_per_lsb: float = DEFAULT_PPM_PER_LSB,
+    zero_word: int = DEFAULT_ZERO_WORD,
+) -> int:
+    word = zero_word + ppm / max(ppm_per_lsb, 1e-18)
+    return max(0, min(MAX_DAC_VALUE, int(round(word))))
+
+
+def ocxo_control_word_to_ppm(
+    control_word: int,
+    *,
+    ppm_per_lsb: float = DEFAULT_PPM_PER_LSB,
+    zero_word: int = DEFAULT_ZERO_WORD,
+) -> float:
+    return (int(control_word) - int(zero_word)) * ppm_per_lsb
 
 
 def build_ocxo_set_frequency_command(control_word: int) -> bytes:
@@ -88,7 +101,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tty", default="/dev/ttyUSB0", help="OCXO serial device.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--word", type=int, help="Raw 20-bit OCXO DAC control word.")
-    group.add_argument("--ppm", type=float, help="Nominal ppm converted with the built-in DAC formula.")
+    group.add_argument(
+        "--ppm",
+        type=float,
+        help="Absolute ppm offset converted with the calibrated DAC map.",
+    )
+    parser.add_argument(
+        "--ppm-per-lsb",
+        type=float,
+        default=DEFAULT_PPM_PER_LSB,
+        help="Plant gain: ppm per DAC LSB.",
+    )
+    parser.add_argument(
+        "--zero-word",
+        type=int,
+        default=DEFAULT_ZERO_WORD,
+        help="DAC word corresponding to 0 ppm.",
+    )
     parser.add_argument("--timeout", type=float, default=0.5, help="Serial response timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Print the command without writing serial data.")
     return parser.parse_args()
@@ -96,18 +125,28 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    control_word = args.word if args.word is not None else ppm_to_ocxo_control_word(args.ppm)
+    if args.word is not None:
+        control_word = args.word
+    else:
+        control_word = ppm_to_ocxo_control_word(
+            args.ppm, ppm_per_lsb=args.ppm_per_lsb, zero_word=args.zero_word
+        )
     control_word = max(0, min(MAX_DAC_VALUE, int(control_word)))
     command = build_ocxo_set_frequency_command(control_word)
+    ppm = ocxo_control_word_to_ppm(
+        control_word, ppm_per_lsb=args.ppm_per_lsb, zero_word=args.zero_word
+    )
 
     if args.dry_run:
         print(f"tty={args.tty}")
         print(f"control_word={control_word}")
+        print(f"approx_ppm={ppm:.9f}")
         print(f"command={command.decode('ascii').rstrip()}")
         return 0
 
     response = set_ocxo_control_word(args.tty, control_word, args.timeout)
     print(f"control_word={control_word}")
+    print(f"approx_ppm={ppm:.9f}")
     print(f"command={command.decode('ascii').rstrip()}")
     if response:
         print(f"response={response.decode('ascii', errors='replace').rstrip()}")

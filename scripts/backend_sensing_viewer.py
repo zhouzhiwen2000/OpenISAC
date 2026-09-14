@@ -19,6 +19,9 @@ import scipy.io as sio
 import yaml
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from sensing_plot_axes import SensingPlotAxes
+from sensing_physical_axes import image_bounds_from_centers, physical_axes
+
 from sensing_detection import build_detection_views
 import zmq
 
@@ -74,7 +77,7 @@ def _drop_report_due(previous: int, total: int) -> bool:
     return total <= 20 or previous // 100 != total // 100
 
 
-LEGACY_VIEWER_PARAMS = ViewerRuntimeParams(
+PENDING_VIEWER_PARAMS = ViewerRuntimeParams(
     version=0,
     flags=0,
     frame_format=0,
@@ -136,6 +139,8 @@ class DisplayFrame:
     md: np.ndarray | None
     md_extent: list[float] | None
     viewer_params: ViewerRuntimeParams
+    display_downsample: int = 1
+    display_doppler_bins: int = DEFAULT_DISPLAY_DOPPLER_BINS
 
 
 def load_launch_defaults(
@@ -186,7 +191,7 @@ class BackendViewerRuntime:
     def __init__(self, launch_cfg: ViewerLaunchConfig) -> None:
         self.launch_cfg = launch_cfg
         self._running = True
-        self._viewer_params = LEGACY_VIEWER_PARAMS
+        self._viewer_params = PENDING_VIEWER_PARAMS
         self._params_lock = threading.Lock()
         self._channel_lock = threading.Lock()
         self._pending_lock = threading.Lock()
@@ -217,7 +222,7 @@ class BackendViewerRuntime:
         self._phase_bundle_lock = threading.Lock()
         self._latest_phase_bundle_frame_id: int | None = None
         self._latest_phase_bundle_rd_complex: list[np.ndarray | None] | None = None
-        # Radio params received from PARM V6 packets; drained by the Qt timer.
+        # Radio params received from PARM packets; drained by the Qt timer.
         self.radio_params_queue: Queue[dict] = Queue(maxsize=8)
         self.ensure_channel_count(launch_cfg.channels)
         self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
@@ -257,7 +262,7 @@ class BackendViewerRuntime:
         self._last_error = None
         self._warned_non_backend = False
         with self._params_lock:
-            self._viewer_params = LEGACY_VIEWER_PARAMS
+            self._viewer_params = PENDING_VIEWER_PARAMS
         with self._pending_lock:
             pending_dropped = len(self._pending_bundles)
             self._pending_bundles.clear()
@@ -751,6 +756,8 @@ class BackendViewerRuntime:
             md=md_data,
             md_extent=md_extent,
             viewer_params=viewer_params,
+            display_downsample=self.launch_cfg.downsample,
+            display_doppler_bins=display_doppler_bins,
         )
 
     def _handle_completed_payload(self, frame_id_hint: int, payload: bytes, is_metadata: bool) -> None:
@@ -981,9 +988,13 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         root_layout.addWidget(plot_panel, stretch=4)
 
-        self.rd_plot = pg.PlotWidget(title="Range-Doppler Spectrum")
-        self.rd_plot.setLabel("left", "Range Bin")
-        self.rd_plot.setLabel("bottom", "Doppler Bin")
+        self.physical_plot_axes = SensingPlotAxes()
+        self.rd_plot = pg.PlotWidget(
+            title="Range-Doppler Spectrum",
+            axisItems={"left": self.physical_plot_axes.range, "bottom": self.physical_plot_axes.doppler},
+        )
+        self.rd_plot.setLabel("left", "Range / Relative Delay (waiting for parameters)")
+        self.rd_plot.setLabel("bottom", "Doppler Frequency (Hz)")
         self.rd_plot.showGrid(x=True, y=True, alpha=0.2)
         self.rd_img = pg.ImageItem(axisOrder="col-major")
         self.rd_img.setLookupTable(self._rd_colormap.getLookupTable())
@@ -1001,8 +1012,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rd_plot.scene().sigMouseClicked.connect(self.on_rd_mouse_clicked)
         plot_layout.addWidget(self.rd_plot, stretch=3)
 
-        self.md_plot = pg.PlotWidget(title="Micro-Doppler Spectrum")
-        self.md_plot.setLabel("left", "Doppler")
+        self.md_plot = pg.PlotWidget(
+            title="Micro-Doppler Spectrum",
+            axisItems={"left": self.physical_plot_axes.micro_doppler, "bottom": self.physical_plot_axes.time},
+        )
+        self.md_plot.setLabel("left", "Doppler Frequency (Hz)")
         self.md_plot.setLabel("bottom", "Time")
         self.md_plot.showGrid(x=True, y=True, alpha=0.2)
         self.md_img = pg.ImageItem(axisOrder="row-major")
@@ -1333,7 +1347,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         control_layout.addStretch(1)
         self.refresh_display_button_text()
-        self._load_range_scale_config()
         self._update_target_sector_background(
             max_range=float(self.target_sector_max_range_bins),
             axis_unit="bin",
@@ -1568,6 +1581,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             print(f"Invalid antenna spacing: {self.txt_antenna_spacing_mm.text()}")
             self.txt_antenna_spacing_mm.setText(f"{self.antenna_spacing_m * 1e3:.3f}")
+
+    def set_target_sector_range(self) -> None:
         try:
             zero_bin = max(0, int(self.txt_sector_zero_bin.text()))
             max_bin = max(1, int(self.txt_sector_max_bin.text()))
@@ -1713,55 +1728,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
         return False
 
-    def _load_range_scale_config(self) -> None:
-        self.range_scale_sample_rate_hz = None
-        self.range_scale_source = "range bin"
-        repo_root = Path(__file__).resolve().parent.parent
-        candidate_paths = []
-        for candidate in [
-            Path.cwd() / "BS.yaml",
-            Path.cwd() / "UE.yaml",
-            Path.cwd() / "build" / "BS.yaml",
-            Path.cwd() / "build" / "UE.yaml",
-            repo_root / "build" / "BS.yaml",
-            repo_root / "build" / "UE.yaml",
-        ]:
-            if candidate not in candidate_paths:
-                candidate_paths.append(candidate)
-        for path in candidate_paths:
-            if not path.is_file():
-                continue
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    data = yaml.safe_load(handle) or {}
-            except Exception:
-                continue
-            sample_rate = data.get("sample_rate")
-            if sample_rate is None:
-                continue
-            try:
-                sample_rate_hz = float(sample_rate)
-            except (TypeError, ValueError):
-                continue
-            if sample_rate_hz <= 0.0:
-                continue
-            self.range_scale_sample_rate_hz = sample_rate_hz
-            self.range_scale_source = str(path)
-            return
-
     def _resolve_target_range_axis(self, frame: DisplayFrame | None) -> tuple[float, str, str]:
         if frame is None:
-            return 1.0, "bin", "range bin"
+            return 1.0, "bin", "waiting for parameters"
         params = frame.viewer_params
-        raw_cols = max(1, int(params.active_cols if params.active_cols > 0 else params.wire_cols))
-        range_fft_size = max(1, int(params.range_fft_size if params.range_fft_size > 0 else params.wire_cols))
-        if self.range_scale_sample_rate_hz is None or self.range_scale_sample_rate_hz <= 0.0:
-            return 1.0, "bin", "range bin"
-        delay_bin_s = float(raw_cols) / (float(range_fft_size) * float(self.range_scale_sample_rate_hz))
-        range_bin_spacing_m = 0.5 * C_LIGHT_MPS * delay_bin_s
-        if not np.isfinite(range_bin_spacing_m) or range_bin_spacing_m <= 0.0:
-            return 1.0, "bin", "range bin"
-        return float(range_bin_spacing_m), "m", f"approx m from {self.range_scale_source}"
+        axes = physical_axes(params, params.range_fft_size, params.doppler_fft_size)
+        if not np.isfinite(axes.range_bin_scale):
+            return 1.0, "bin", "nonuniform frequency grid: physical delay unavailable"
+        return axes.range_bin_scale, axes.range_unit, "relative to alignment reference"
 
     def _format_target_sector_scale_text(self, base_scale_text: str) -> str:
         return (
@@ -1870,7 +1844,7 @@ class MainWindow(QtWidgets.QMainWindow):
             centroid_r = float(cluster["centroid_range_idx"])
             relative_range_bins = float(r_idx) - float(self.target_sector_zero_range_bin)
             range_value = relative_range_bins * float(range_scale)
-            range_text = f"{range_value:+6.2f}m" if axis_unit == "m" else f"{relative_range_bins:+5.0f}bin"
+            range_text = f"{range_value:+6.2f}{axis_unit}"
             aoa_deg = None
             aoa_text = "AoA=wait" if self.runtime.channel_count() >= 2 else "AoA=n/a"
             if have_auto_aoa:
@@ -2323,7 +2297,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _refresh(self) -> None:
-        # Apply radio params received from PARM V6 packets on this (Qt main) thread.
+        # Apply radio params received from PARM packets on this (Qt main) thread.
         while True:
             try:
                 radio = self.runtime.radio_params_queue.get_nowait()
@@ -2423,10 +2397,18 @@ class MainWindow(QtWidgets.QMainWindow):
             rd_data = frame.rd
             self.rd_img.setImage(rd_data, autoLevels=False)
             rows, cols = rd_data.shape
+            self.physical_plot_axes.update(
+                self.rd_plot, self.md_plot, frame.viewer_params,
+                range_fft_size=frame.viewer_params.range_fft_size,
+                doppler_fft_size=frame.viewer_params.doppler_fft_size,
+                source_rows=frame.viewer_params.wire_rows,
+                display_bins=frame.display_doppler_bins,
+                displayed_rows=rows, downsample=frame.display_downsample,
+            )
             doppler_min = -0.5 * float(rows)
             self.rd_doppler_min = doppler_min
             self.rd_doppler_span = float(rows)
-            self.rd_img.setRect(QtCore.QRectF(doppler_min, 0.0, float(rows), float(cols)))
+            self.rd_img.setRect(QtCore.QRectF(doppler_min - 0.5, -0.5, float(rows), float(cols)))
 
             if frame.cfar_points.size > 0:
                 x_pts = doppler_min + frame.cfar_points[:, 0].astype(np.float32)
@@ -2445,9 +2427,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if frame.md is not None and getattr(frame.md, "size", 0) > 0:
                 self.md_img.setImage(frame.md, autoLevels=False)
                 if frame.md_extent is not None and len(frame.md_extent) == 4:
-                    x0, x1, y0, y1 = [float(v) for v in frame.md_extent]
                     self.md_img.setRect(
-                        QtCore.QRectF(x0, y0, max(1e-6, x1 - x0), max(1e-6, y1 - y0))
+                        QtCore.QRectF(*image_bounds_from_centers(frame.md_extent, *frame.md.shape))
                     )
             else:
                 self.md_img.setImage(np.zeros((1, 1), dtype=np.float32), autoLevels=False)

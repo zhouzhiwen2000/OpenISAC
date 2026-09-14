@@ -24,6 +24,8 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
+#include <filesystem>
 #include <iostream>
 #include <iterator>
 #include <optional>
@@ -42,6 +44,7 @@
 #include <functional>
 #include <unordered_map>
 #include "RadioTypes.hpp"
+#include "AirFrameClock.hpp"
 #include <uhd/types/metadata.hpp>
 #include <uhd/utils/thread.hpp>
 #include <uhd/types/time_spec.hpp>
@@ -335,6 +338,58 @@ inline std::string normalize_sensing_delay_correction_mode_string(const std::str
         "'. Supported values: los_tracking, ertm_absolute.");
 }
 
+inline constexpr const char* kOCXOModeAuto = "auto";
+inline constexpr const char* kOCXOModeFreq = "freq";
+inline constexpr const char* kOCXOModePhase = "phase";
+inline constexpr const char* kOCXOModePpsPhase = "pps_phase";
+inline constexpr const char* kOCXOFllFastControlPi = "pi";
+inline constexpr const char* kOCXOFllFastControlHalfStep = "half_step";
+inline constexpr const char* kOCXOPhaseSetpointFreezeOnLock = "freeze_on_lock";
+inline constexpr const char* kOCXOPhaseSetpointZero = "zero";
+inline constexpr const char* kOCXOPhaseSetpointFixed = "fixed";
+
+inline std::string normalize_ocxo_mode_string(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode == kOCXOModeAuto || mode == kOCXOModeFreq ||
+        mode == kOCXOModePhase || mode == kOCXOModePpsPhase) {
+        return mode;
+    }
+    throw std::runtime_error(
+        "Invalid sync_tracking.ocxo_mode='" + mode +
+        "'. Supported values: auto, freq, phase, pps_phase.");
+}
+
+inline std::string normalize_ocxo_fll_fast_control_mode_string(
+    std::string mode)
+{
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode == kOCXOFllFastControlPi ||
+        mode == kOCXOFllFastControlHalfStep) {
+        return mode;
+    }
+    throw std::runtime_error(
+        "Invalid sync_tracking.ocxo_fll_fast_control_mode='" + mode +
+        "'. Supported values: pi, half_step.");
+}
+
+inline std::string normalize_ocxo_phase_setpoint_mode_string(std::string mode) {
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode == kOCXOPhaseSetpointFreezeOnLock ||
+        mode == kOCXOPhaseSetpointZero ||
+        mode == kOCXOPhaseSetpointFixed) {
+        return mode;
+    }
+    throw std::runtime_error(
+        "Invalid sync_tracking.ocxo_phase_setpoint_mode='" + mode +
+        "'. Supported values: freeze_on_lock, zero, fixed.");
+}
+
 inline std::string normalize_ertm_timing_metric_string(std::string metric) {
     std::transform(metric.begin(), metric.end(), metric.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
@@ -380,17 +435,6 @@ enum class DataResourceBlockKind : uint8_t {
 inline constexpr const char* kDataResourceBlockKindPayload = "payload";
 inline constexpr const char* kDataResourceBlockKindSensingPilot = "sensing_pilot";
 
-inline const char* data_resource_block_kind_to_string(DataResourceBlockKind kind) {
-    switch (kind) {
-    case DataResourceBlockKind::Payload:
-        return kDataResourceBlockKindPayload;
-    case DataResourceBlockKind::SensingPilot:
-        return kDataResourceBlockKindSensingPilot;
-    default:
-        return kDataResourceBlockKindPayload;
-    }
-}
-
 inline bool parse_data_resource_block_kind_string(
     const std::string& raw_kind,
     DataResourceBlockKind& out_kind)
@@ -429,6 +473,8 @@ inline constexpr const char* kSensingOnWireFormatCf32 = "cf32";
 inline constexpr const char* kSensingOnWireFormatCf16 = "cf16";
 inline constexpr const char* kCudaLdpcDecoderBackendGpu = "gpu";
 inline constexpr const char* kCudaLdpcDecoderBackendCpu = "cpu";
+inline constexpr const char* kCudaPrecisionProfileFp32 = "fp32";
+inline constexpr const char* kCudaPrecisionProfileMixedFp16 = "mixed_fp16";
 
 enum class SensingOnWireFormat : uint32_t {
     ComplexFloat32 = 0,
@@ -470,9 +516,6 @@ struct DataResourceGridLayout {
     std::vector<size_t> payload_offsets;
     std::vector<size_t> non_pilot_offsets;
 
-    size_t flat_non_pilot_index(size_t data_symbol_idx, size_t non_pilot_idx) const {
-        return non_pilot_offsets[data_symbol_idx] + non_pilot_idx;
-    }
 };
 
 /**
@@ -914,6 +957,172 @@ private:
 };
 
 /**
+ * @brief BS-side eRTM UL measurement bound to one absolute air frame.
+ *
+ * Published only after UL Identity SIB MATCH so (epoch, frame_seq) describe the
+ * UE period that actually produced the waveform in the BS UL-RX window.
+ */
+struct ErtmUlMeasurement {
+    uint32_t timeline_epoch = 0;
+    uint64_t frame_seq = 0;
+    uint64_t ul_rx_generation = 0;
+    int32_t applied_duti_samples = 0;
+    AlignedVector channel_freq;
+};
+
+/**
+ * @brief Seqlocked latest-value snapshot of a full ErtmUlMeasurement.
+ *
+ * One writer publishes channel + metadata under a single seqlock so readers never
+ * pair DUTI/frame identity from one measurement with the channel of another.
+ */
+class SeqlockedErtmUlMeasurement {
+public:
+    void resize(size_t n) {
+        _size = n;
+        _buf = std::make_unique<std::atomic<uint64_t>[]>(n);
+        const uint64_t zero = pack_complex(std::complex<float>(0.0f, 0.0f));
+        for (size_t i = 0; i < n; ++i) {
+            _buf[i].store(zero, std::memory_order_relaxed);
+        }
+        _timeline_epoch.store(0, std::memory_order_relaxed);
+        _frame_seq.store(0, std::memory_order_relaxed);
+        _ul_rx_generation.store(0, std::memory_order_relaxed);
+        _applied_duti_samples.store(0, std::memory_order_relaxed);
+        _seq.store(0, std::memory_order_relaxed);
+    }
+
+    void clear() {
+        if (!_buf) {
+            return;
+        }
+        const uint32_t s = _seq.load(std::memory_order_relaxed);
+        _seq.store(s + 1, std::memory_order_release);
+        const uint64_t zero = pack_complex(std::complex<float>(0.0f, 0.0f));
+        for (size_t i = 0; i < _size; ++i) {
+            _buf[i].store(zero, std::memory_order_relaxed);
+        }
+        _timeline_epoch.store(0, std::memory_order_relaxed);
+        _frame_seq.store(0, std::memory_order_relaxed);
+        _ul_rx_generation.store(0, std::memory_order_relaxed);
+        _applied_duti_samples.store(0, std::memory_order_relaxed);
+        // Leave seq odd->even at 0 to mark "never published" for load().
+        _seq.store(0, std::memory_order_release);
+    }
+
+    // Single-writer only. `channel_freq.size()` must equal resize() size.
+    void store(uint32_t timeline_epoch,
+               uint64_t frame_seq,
+               uint64_t ul_rx_generation,
+               int32_t applied_duti_samples,
+               const AlignedVector& channel_freq) {
+        if (!_buf || channel_freq.size() != _size) {
+            return;
+        }
+        const uint32_t s = _seq.load(std::memory_order_relaxed);
+        _seq.store(s + 1, std::memory_order_release);
+        _timeline_epoch.store(timeline_epoch, std::memory_order_relaxed);
+        _frame_seq.store(frame_seq, std::memory_order_relaxed);
+        _ul_rx_generation.store(ul_rx_generation, std::memory_order_relaxed);
+        _applied_duti_samples.store(applied_duti_samples, std::memory_order_relaxed);
+        for (size_t i = 0; i < _size; ++i) {
+            _buf[i].store(pack_complex(channel_freq[i]), std::memory_order_relaxed);
+        }
+        _seq.store(s + 2, std::memory_order_release);
+    }
+
+    bool load(ErtmUlMeasurement& out) const {
+        for (;;) {
+            const uint32_t s1 = _seq.load(std::memory_order_acquire);
+            if (s1 & 1u) {
+                continue;
+            }
+            if (s1 == 0) {
+                return false;
+            }
+            if (!_buf) {
+                return false;
+            }
+            if (out.channel_freq.size() != _size) {
+                out.channel_freq.resize(_size);
+            }
+            out.timeline_epoch = _timeline_epoch.load(std::memory_order_relaxed);
+            out.frame_seq = _frame_seq.load(std::memory_order_relaxed);
+            out.ul_rx_generation = _ul_rx_generation.load(std::memory_order_relaxed);
+            out.applied_duti_samples = _applied_duti_samples.load(std::memory_order_relaxed);
+            for (size_t i = 0; i < _size; ++i) {
+                out.channel_freq[i] = unpack_complex(_buf[i].load(std::memory_order_relaxed));
+            }
+            const uint32_t s2 = _seq.load(std::memory_order_acquire);
+            if (s1 == s2) {
+                return true;
+            }
+        }
+    }
+
+private:
+    static uint64_t pack_complex(const std::complex<float>& value) {
+        uint32_t re_bits = 0;
+        uint32_t im_bits = 0;
+        const float re = value.real();
+        const float im = value.imag();
+        std::memcpy(&re_bits, &re, sizeof(re_bits));
+        std::memcpy(&im_bits, &im, sizeof(im_bits));
+        return static_cast<uint64_t>(re_bits) |
+               (static_cast<uint64_t>(im_bits) << 32);
+    }
+
+    static std::complex<float> unpack_complex(uint64_t bits) {
+        const uint32_t re_bits = static_cast<uint32_t>(bits & 0xffffffffu);
+        const uint32_t im_bits = static_cast<uint32_t>(bits >> 32);
+        float re = 0.0f;
+        float im = 0.0f;
+        std::memcpy(&re, &re_bits, sizeof(re));
+        std::memcpy(&im, &im_bits, sizeof(im));
+        return std::complex<float>(re, im);
+    }
+
+    std::atomic<uint32_t> _seq{0};
+    size_t _size = 0;
+    std::unique_ptr<std::atomic<uint64_t>[]> _buf;
+    std::atomic<uint32_t> _timeline_epoch{0};
+    std::atomic<uint64_t> _frame_seq{0};
+    std::atomic<uint64_t> _ul_rx_generation{0};
+    std::atomic<int32_t> _applied_duti_samples{0};
+};
+
+/**
+ * @brief UE UL-TX timing state at an absolute air-frame boundary.
+ *
+ * Records the state actually used at period start (not when a control command
+ * was accepted). Queried as state_at(epoch, M) for eRTM stale-UL compensation.
+ */
+struct UlTxTimingStateEntry {
+    uint32_t timeline_epoch = 0;
+    uint64_t effective_from_frame = 0;
+    uint64_t period_generation = 0;
+    int32_t tadv_samples = 0;
+    int32_t rx_alignment_shift_samples = 0;
+};
+
+/**
+ * @brief Resolve when a sampled UL-TX timing state becomes physically effective.
+ *
+ * A continuous burst needs one frame of deferral only when its aggregate sample
+ * shift changes the next transmitted boundary. Component-only changes whose
+ * TADV and Alignment deltas cancel are effective for the current frame.
+ */
+inline uint64_t ul_tx_timing_effective_from_frame(
+    uint64_t current_frame_seq,
+    bool continuous_stream,
+    bool boundary_shift_pending)
+{
+    return (continuous_stream && boundary_shift_pending)
+        ? (current_frame_seq + 1)
+        : current_frame_seq;
+}
+
+/**
  * @brief Relax the CPU without leaving the core (hard real-time safe).
  *
  * Prefer this over yield/sleep on TX/RX sample paths: once a SCHED_FIFO thread
@@ -1036,6 +1245,7 @@ struct OfdmFrameConfig {
 };
 
 struct CudaConfig {
+    std::string cuda_precision_profile = kCudaPrecisionProfileFp32; // CUDA numeric profile: fp32/mixed_fp16
     size_t cuda_mod_pipeline_slots = 2;   // Number of CUDA mod pipeline slots
     size_t cuda_demod_pipeline_slots = 3; // Number of CUDA demod pipeline slots
     std::string cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu; // CUDA demod LDPC backend: gpu/cpu
@@ -1061,7 +1271,7 @@ struct UsrpDeviceConfig {
 
 struct ClockTimeConfig {
     std::string clock_source = "internal"; // Clock source
-    std::string time_source = "";         // Time source; empty means follow clock_source
+    std::string time_source = "";         // Time source; UE empty resolves to internal
 };
 
 struct SyncTrackingConfig {
@@ -1074,28 +1284,66 @@ struct SyncTrackingConfig {
     bool software_sync = true;         // Software synchronization flag
     bool hardware_sync = false;        // Hardware synchronization flag
     std::string hardware_sync_tty = "/dev/ttyUSB0"; // Hardware sync TTY device
-    double ocxo_pi_kp_fast = 30.0;    // Fast-stage PI proportional gain Kp
-    double ocxo_pi_ki_fast = 1.0;     // Fast-stage PI integral gain Ki
-    double ocxo_pi_kp_slow = 30.0;    // Slow-stage PI proportional gain Kp
-    double ocxo_pi_ki_slow = 0.05;    // Slow-stage PI integral gain Ki
-    double ocxo_pi_switch_abs_error_ppm = 0.0002; // Switch threshold: absolute error_ppm
-    double ocxo_pi_switch_hold_s = 60.0;    // Required stable duration below threshold (seconds)
-    double ocxo_pi_max_step_fast_ppm = 0.01; // Fast-stage per-update OCXO adjustment clamp (ppm)
-    double ocxo_pi_max_step_slow_ppm = 0.01; // Slow-stage per-update OCXO adjustment clamp (ppm)
-    bool akf_enable = true;           // Enable adaptive Kalman filter for hardware sync error_ppm
-    size_t akf_bootstrap_frames = 64; // Cold-start frame count before KF update starts
-    size_t akf_innovation_window = 64; // Innovation history length used for ACF/LS adaptation
-    size_t akf_max_lag = 4;           // Maximum innovation autocorrelation lag
-    size_t akf_adapt_interval = 64;   // Frames between Q/R adaptation updates
-    double akf_gate_sigma = 3.0;      // Innovation gating threshold in sigma units
-    double akf_tikhonov_lambda = 1e-3; // Tikhonov regularization for LS adaptation
-    double akf_update_smooth = 0.2;   // Smoothing factor for adapted Q/R updates
-    double akf_q_wf_min = 1e-10;      // Lower bound of white-frequency-noise coefficient
-    double akf_q_wf_max = 1e2;        // Upper bound of white-frequency-noise coefficient
-    double akf_q_rw_min = 1e-12;      // Lower bound of random-walk-frequency-noise coefficient
-    double akf_q_rw_max = 1e1;        // Upper bound of random-walk-frequency-noise coefficient
-    double akf_r_min = 1e-8;          // Lower bound of observation noise variance R
-    double akf_r_max = 1e3;           // Upper bound of observation noise variance R
+
+    // OCXO discipline (MV197 defaults). auto/phase keep the legacy TO setpoint;
+    // pps_phase explicitly selects the UE-minus-BS PPS phase anchor.
+    // Mode: auto | freq | phase | pps_phase
+    std::string ocxo_mode = "auto";
+    // Plant / actuator (calibrated DAC map from docs/OCXO_PPM_MAPPING.md)
+    double ocxo_dac_ppm_per_lsb = 9.708797e-7;
+    int32_t ocxo_dac_zero_word = 493367;
+    std::string ocxo_dac_state_file = ".openisac_ocxo_dac_state.yaml";
+    double ocxo_max_abs_ppm = 0.45;
+    double ocxo_actuator_max_slew_ppm_per_s = 0.01;
+    // Startup one-target correction (Mode A: CFO, Mode B: TO_clock-slope SFO)
+    bool ocxo_coarse_enable = true;
+    double ocxo_coarse_gain = 1.0;
+    double ocxo_coarse_max_abs_ppm = 0.2;
+    double ocxo_coarse_obs_window_s = 1.0;
+    double ocxo_coarse_control_period_s = 0.5;
+    double ocxo_coarse_max_slew_ppm_per_s = 0.01;
+    // Fast/slow frequency lock (Mode A: CFO, Mode B: TO_clock-slope SFO)
+    double ocxo_fll_fast_obs_window_s = 1.0;
+    double ocxo_fll_fast_control_period_s = 0.5;
+    std::string ocxo_fll_fast_control_mode = kOCXOFllFastControlPi;
+    double ocxo_fll_fast_kp = 0.5;
+    double ocxo_fll_fast_ki = 0.03;
+    double ocxo_fll_fast_max_slew_ppm_per_s = 0.005;
+    double ocxo_fll_slow_obs_window_s = 10.0;
+    double ocxo_fll_slow_control_period_s = 2.0;
+    double ocxo_fll_slow_kp = 0.1;
+    double ocxo_fll_slow_ki = 0.007;
+    double ocxo_fll_slow_deadzone_ppm = 5.0e-5;
+    double ocxo_fll_slow_max_slew_ppm_per_s = 0.005;
+    double ocxo_fll_slow_enter_abs_ppm = 0.0005;
+    double ocxo_fll_fast_enter_abs_ppm = 0.01;
+    double ocxo_fll_switch_hold_s = 30.0;
+    // Phase mode locks Alignment-continuous TO_clock to a configured setpoint;
+    // PPS Phase is a separate explicit mode with a fixed zero PPS-phase target.
+    double ocxo_phase_control_period_s = 5.0;
+    double ocxo_phase_jump_gate_samples = 0.5;
+    uint64_t ocxo_phase_max_report_age_frames = 256;
+    std::string ocxo_phase_setpoint_mode = "freeze_on_lock";
+    double ocxo_phase_setpoint_fixed_samples = 0.0;
+    // Legacy key name; enables one PPSOUT AP transaction per Phase entry.
+    bool ocxo_pps_initial_ap_enable = true;
+    double ocxo_pps_initial_ap_max_abs_ns = 500.0e6;
+    double ocxo_pps_initial_ap_settle_s = 2.0;
+    double ocxo_pps_initial_ap_command_timeout_s = 3.0;
+    size_t ocxo_pps_initial_ap_max_retries = 1;
+    double ocxo_pps_initial_ap_deadzone_ns = 10.0;
+    int ocxo_pps_initial_ap_polarity = 1; // AP command sign for positive P_U-P_B
+    double ocxo_phase_kp = 2.0e-4;
+    double ocxo_phase_ki = 1.0e-6;
+    double ocxo_phase_max_slew_ppm_per_s = 5.0e-5;
+    double ocxo_phase_enter_sfo_abs_ppm = 2.0e-4;
+    double ocxo_phase_enter_hold_s = 30.0;
+    double ocxo_phase_exit_sfo_abs_ppm = 0.01;
+    double ocxo_phase_exit_hold_s = 10.0;
+
+    // Residual-CFO pre-filter for Mode A OCXO Coarse/FLL (EWMA, not AKF).
+    bool cfo_ewma_enable = true;
+    double cfo_ewma_alpha = 0.02;     // EWMA weight on new residual_ppm samples [0, 1]
 
 };
 
@@ -1215,8 +1463,8 @@ struct NetworkOutputConfig {
     int pdf_port = 12349;
     std::string constellation_ip = "0.0.0.0";
     int constellation_port = 12346;
-    std::string vofa_debug_ip = "127.0.0.1";
-    int vofa_debug_port = 12347;
+    std::string ocxo_debug_ip = "0.0.0.0";
+    int ocxo_debug_port = 12347;
     std::string ertm_debug_ip = "0.0.0.0";
     int ertm_debug_port = 12362;
     std::string udp_output_ip = "127.0.0.1";
@@ -1395,17 +1643,6 @@ inline const char* reserved_sync_symbol_label(const Config& cfg, size_t symbol_i
         return "CFO training field";
     }
     return "reserved sync/training symbol";
-}
-
-inline size_t reserved_sync_symbol_count(const Config& cfg) {
-    size_t count = 1;
-    if (sec_sync_symbol_enabled(cfg)) {
-        ++count;
-    }
-    if (cfo_training_sequence_enabled(cfg)) {
-        ++count;
-    }
-    return count;
 }
 
 /**
@@ -1811,6 +2048,22 @@ inline std::string normalize_cuda_ldpc_decoder_backend_string(std::string backen
     throw std::runtime_error(
         "Invalid cuda_ldpc_decoder_backend='" + backend +
         "'. Supported values: gpu, cpu.");
+}
+
+inline std::string normalize_cuda_precision_profile_string(std::string profile) {
+    std::transform(profile.begin(), profile.end(), profile.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (profile.empty()) {
+        return kCudaPrecisionProfileFp32;
+    }
+    if (profile == kCudaPrecisionProfileFp32 ||
+        profile == kCudaPrecisionProfileMixedFp16) {
+        return profile;
+    }
+    throw std::runtime_error(
+        "Invalid cuda_precision_profile='" + profile +
+        "'. Supported values: fp32, mixed_fp16.");
 }
 
 inline bool cuda_ldpc_decoder_backend_is_cpu(const Config& cfg) {
@@ -2570,59 +2823,6 @@ inline bool radio_is_sim(const Config& cfg) {
 }
 
 /**
- * @brief Emit the radio_backend + simulation block to a YAML emitter.
- *
- * Shared by the BS and UE config writers so the two stay in sync.
- */
-inline void emit_simulation_config(YAML::Emitter& out, const Config& cfg) {
-    out << YAML::Key << "radio_backend" << YAML::Value << cfg.radio.radio_backend;
-    out << YAML::Key << "simulation" << YAML::Value << YAML::BeginMap;
-    const SimConfig& sim = cfg.simulation;
-    out << YAML::Key << "session" << YAML::Value << sim.session;
-    out << YAML::Key << "enable_comm_rx" << YAML::Value << sim.enable_comm_rx;
-    out << YAML::Key << "enable_sensing_rx" << YAML::Value << sim.enable_sensing_rx;
-    out << YAML::Key << "enable_uplink" << YAML::Value << sim.enable_uplink;
-    out << YAML::Key << "pacing_enabled" << YAML::Value << sim.pacing_enabled;
-    out << YAML::Key << "noise_power_dbfs" << YAML::Value << sim.noise_power_dbfs;
-    out << YAML::Key << "snr_control_enable" << YAML::Value << sim.snr_control_enable;
-    out << YAML::Key << "target_snr_db" << YAML::Value << sim.target_snr_db;
-    out << YAML::Key << "control_port" << YAML::Value << sim.control_port;
-    out << YAML::Key << "cfo_hz" << YAML::Value << sim.cfo_hz;
-    out << YAML::Key << "sample_rate_offset_ppm" << YAML::Value << sim.sample_rate_offset_ppm;
-    out << YAML::Key << "timing_offset_samples" << YAML::Value << sim.timing_offset_samples;
-    out << YAML::Key << "array_spacing_m" << YAML::Value << sim.array_spacing_m;
-    out << YAML::Key << "array_spacing_lambda" << YAML::Value << sim.array_spacing_lambda;
-    out << YAML::Key << "ring_capacity_samples" << YAML::Value << sim.ring_capacity_samples;
-    out << YAML::Key << "steering_override_file" << YAML::Value << sim.steering_override_file;
-    out << YAML::Key << "comm_multipath_taps" << YAML::Value << YAML::BeginSeq;
-    for (const auto& tap : sim.comm_multipath_taps) {
-        out << YAML::BeginMap;
-        out << YAML::Key << "delay_samples" << YAML::Value << tap.delay_samples;
-        out << YAML::Key << "gain_db" << YAML::Value << tap.gain_db;
-        out << YAML::Key << "phase_deg" << YAML::Value << tap.phase_deg;
-        out << YAML::EndMap;
-    }
-    out << YAML::EndSeq;
-    auto emit_target_seq = [&out](const std::vector<SimTarget>& list) {
-        out << YAML::BeginSeq;
-        for (const auto& tgt : list) {
-            out << YAML::BeginMap;
-            out << YAML::Key << "range_m" << YAML::Value << tgt.range_m;
-            out << YAML::Key << "velocity_mps" << YAML::Value << tgt.velocity_mps;
-            out << YAML::Key << "gain_db" << YAML::Value << tgt.gain_db;
-            out << YAML::Key << "angle_deg" << YAML::Value << tgt.angle_deg;
-            out << YAML::EndMap;
-        }
-        out << YAML::EndSeq;
-    };
-    out << YAML::Key << "targets" << YAML::Value;
-    emit_target_seq(sim.targets);
-    out << YAML::Key << "bistatic_targets" << YAML::Value;
-    emit_target_seq(sim.bistatic_targets);
-    out << YAML::EndMap;
-}
-
-/**
  * @brief Parse the radio_backend + simulation block from a YAML node.
  *
  * Shared by the BS and UE config loaders. Missing keys keep their
@@ -3139,42 +3339,6 @@ inline void load_optional_int_yaml(const YAML::Node& node, int& value) {
     value = node.as<int>();
 }
 
-inline void emit_resource_blocks_yaml(
-    YAML::Emitter& out,
-    const char* key,
-    const std::vector<DataResourceBlock>& blocks)
-{
-    out << YAML::Key << key << YAML::Value << YAML::BeginSeq;
-    for (const auto& block : blocks) {
-        out << YAML::BeginMap;
-        if (std::strcmp(key, "data_resource_blocks") == 0 &&
-            block.kind != DataResourceBlockKind::Payload) {
-            out << YAML::Key << "kind" << YAML::Value
-                << data_resource_block_kind_to_string(block.kind);
-        }
-        out << YAML::Key << "symbol_start" << YAML::Value << block.symbol_start;
-        out << YAML::Key << "symbol_count" << YAML::Value << block.symbol_count;
-        out << YAML::Key << "subcarrier_start" << YAML::Value << block.subcarrier_start;
-        out << YAML::Key << "subcarrier_count" << YAML::Value << block.subcarrier_count;
-        out << YAML::EndMap;
-    }
-    out << YAML::EndSeq;
-}
-
-inline void emit_data_resource_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
-    if (!cfg.resource_preview.data_resource_blocks_configured) {
-        return;
-    }
-    emit_resource_blocks_yaml(out, "data_resource_blocks", cfg.resource_preview.data_resource_blocks);
-}
-
-inline void emit_sensing_mask_blocks_yaml(YAML::Emitter& out, const Config& cfg) {
-    if (cfg.sensing.mask_blocks.empty()) {
-        return;
-    }
-    emit_resource_blocks_yaml(out, "mask_blocks", cfg.sensing.mask_blocks);
-}
-
 inline bool load_resource_blocks_from_yaml(
     std::vector<DataResourceBlock>& out_blocks,
     const YAML::Node& config,
@@ -3299,6 +3463,7 @@ inline Config make_default_bs_config() {
     cfg.sensing.on_wire_format = SensingOnWireFormat::ComplexFloat32;
     cfg.sensing.backend_processing_enabled = false;
     cfg.cuda.cuda_mod_pipeline_slots = 2;
+    cfg.cuda.cuda_precision_profile = kCudaPrecisionProfileFp32;
     cfg.network_output.mono_sensing_output_enabled = true;
     cfg.network_output.mono_sensing_ip = "";
     cfg.network_output.mono_sensing_port = 8888;
@@ -3416,7 +3581,6 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node usrp = config_detail::section_node(config, "usrp_device");
         const YAML::Node clock = config_detail::section_node(config, "clock_time");
         const YAML::Node downlink = config_detail::section_node(config, "downlink");
-        const YAML::Node downlink_pipeline = config_detail::section_node(config, "downlink_pipeline");
         const YAML::Node uplink = config_detail::section_node(config, "uplink");
         const YAML::Node measurement = config_detail::section_node(config, "measurement");
         const YAML::Node network = config_detail::section_node(config, "network_output");
@@ -3448,6 +3612,10 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         }
         config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.ofdm.midframe_pilot_seed);
 
+        if (cuda["cuda_precision_profile"]) {
+            cfg.cuda.cuda_precision_profile = normalize_cuda_precision_profile_string(
+                cuda["cuda_precision_profile"].as<std::string>());
+        }
         config_detail::load_value(cuda, "cuda_mod_pipeline_slots", cfg.cuda.cuda_mod_pipeline_slots);
 
         config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
@@ -3517,9 +3685,9 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(downlink, "tx_time_source", cfg.downlink.tx_time_source);
         config_detail::load_value(downlink, "wire_format_tx", cfg.downlink.wire_format_tx);
         config_detail::load_value(
-            downlink_pipeline, "tx_circular_buffer_size", cfg.downlink_pipeline.tx_circular_buffer_size);
+            downlink, "tx_circular_buffer_size", cfg.downlink_pipeline.tx_circular_buffer_size);
         config_detail::load_value(
-            downlink_pipeline, "data_packet_buffer_size", cfg.downlink_pipeline.data_packet_buffer_size);
+            downlink, "data_packet_buffer_size", cfg.downlink_pipeline.data_packet_buffer_size);
 
         config_detail::load_value(uplink, "rx_gain", cfg.uplink.rx_gain);
         config_detail::load_value(uplink, "rx_channel", cfg.uplink.rx_channel);
@@ -3613,6 +3781,8 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
 inline void normalize_bs_sensing_channels(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "BS sensing");
     normalize_sensing_view_bins(cfg, "BS sensing");
+    cfg.cuda.cuda_precision_profile =
+        normalize_cuda_precision_profile_string(cfg.cuda.cuda_precision_profile);
     if (cfg.cuda.cuda_mod_pipeline_slots == 0) {
         LOG_G_WARN_M(Cuda) << "cuda_mod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda.cuda_mod_pipeline_slots = 1;
@@ -3746,6 +3916,7 @@ inline Config make_default_ue_config() {
     cfg.ofdm.num_symbols = 100;
     cfg.ofdm.sensing_symbol_num = 100;
     cfg.cuda.cuda_demod_pipeline_slots = 3;
+    cfg.cuda.cuda_precision_profile = kCudaPrecisionProfileFp32;
     cfg.cuda.cuda_ldpc_decoder_backend = kCudaLdpcDecoderBackendGpu;
     cfg.cuda.cuda_ldpc_worker_buffers = 3;
     cfg.cuda.cuda_ldpc_cross_frame_flush_frames = 2;
@@ -3780,25 +3951,13 @@ inline Config make_default_ue_config() {
     cfg.network_output.uplink_self_pdf_port = 12351;
     cfg.network_output.constellation_ip = "0.0.0.0";
     cfg.network_output.constellation_port = 12346;
-    cfg.network_output.vofa_debug_ip = "";
-    cfg.network_output.vofa_debug_port = 12347;
+    cfg.network_output.ocxo_debug_ip = "0.0.0.0";
+    cfg.network_output.ocxo_debug_port = 12347;
     cfg.network_output.udp_output_ip = "";
     cfg.sync_tracking.software_sync = true;
     cfg.sync_tracking.predictive_delay = true;
-    cfg.sync_tracking.akf_enable = true;
-    cfg.sync_tracking.akf_bootstrap_frames = 64;
-    cfg.sync_tracking.akf_innovation_window = 64;
-    cfg.sync_tracking.akf_max_lag = 4;
-    cfg.sync_tracking.akf_adapt_interval = 64;
-    cfg.sync_tracking.akf_gate_sigma = 3.0;
-    cfg.sync_tracking.akf_tikhonov_lambda = 1e-3;
-    cfg.sync_tracking.akf_update_smooth = 0.2;
-    cfg.sync_tracking.akf_q_wf_min = 1e-10;
-    cfg.sync_tracking.akf_q_wf_max = 1e2;
-    cfg.sync_tracking.akf_q_rw_min = 1e-12;
-    cfg.sync_tracking.akf_q_rw_max = 1e1;
-    cfg.sync_tracking.akf_r_min = 1e-8;
-    cfg.sync_tracking.akf_r_max = 1e3;
+    cfg.sync_tracking.cfo_ewma_enable = true;
+    cfg.sync_tracking.cfo_ewma_alpha = 0.02;
     cfg.downlink.equalizer.equalizer_mode = kEqualizerModeMmse;
     cfg.downlink.equalizer.channel_tracking_mode = kChannelTrackingModePilotPhase;
     cfg.downlink.equalizer.equalizer_mag_floor = 1e-6;
@@ -3818,6 +3977,48 @@ inline Config make_default_ue_config() {
     cfg.measurement.measurement_packets_per_point = 1;
     cfg.measurement.measurement_max_packets_per_frame = 1;
     return cfg;
+}
+
+inline std::string resolve_ue_time_source(const Config& cfg) {
+    return cfg.clock_time.time_source.empty()
+        ? std::string("internal")
+        : cfg.clock_time.time_source;
+}
+
+inline void validate_ue_pps_phase_config(const Config& cfg) {
+    if (cfg.sync_tracking.ocxo_mode != kOCXOModePpsPhase) {
+        return;
+    }
+    if (!cfg.sync_tracking.hardware_sync) {
+        throw std::runtime_error(
+            "sync_tracking.ocxo_mode=pps_phase requires "
+            "sync_tracking.hardware_sync=true.");
+    }
+    if (!cfg.uplink.ertm_to_enable) {
+        throw std::runtime_error(
+            "sync_tracking.ocxo_mode=pps_phase requires "
+            "uplink.ertm_to_enable=true.");
+    }
+    const std::string time_source = resolve_ue_time_source(cfg);
+    if (cfg.clock_time.clock_source != "external" ||
+        time_source != "external") {
+        throw std::runtime_error(
+            "sync_tracking.ocxo_mode=pps_phase requires "
+            "usrp_device.clock_source=external and "
+            "usrp_device.time_source=external; got clock_source='" +
+            cfg.clock_time.clock_source + "', time_source='" +
+            time_source + "'.");
+    }
+    if (cfg.sync_tracking.ocxo_pps_initial_ap_max_retries > 3) {
+        throw std::runtime_error(
+            "sync_tracking.ocxo_pps_initial_ap_max_retries must be in [0, 3].");
+    }
+    if (!cfg.sync_tracking.ocxo_pps_initial_ap_enable) {
+        LOG_G_WARN_M(Config)
+            << "sync_tracking.ocxo_mode=pps_phase has phase-entry AP disabled; "
+               "a large PPS residual may remain and the slew-limited "
+               "Phase PI may not remove it quickly.";
+    }
 }
 
 inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
@@ -3868,6 +4069,10 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         }
         config_detail::load_value(ofdm, "midframe_pilot_seed", cfg.ofdm.midframe_pilot_seed);
 
+        if (cuda["cuda_precision_profile"]) {
+            cfg.cuda.cuda_precision_profile = normalize_cuda_precision_profile_string(
+                cuda["cuda_precision_profile"].as<std::string>());
+        }
         config_detail::load_value(cuda, "cuda_demod_pipeline_slots", cfg.cuda.cuda_demod_pipeline_slots);
         if (cuda["cuda_ldpc_decoder_backend"]) {
             cfg.cuda.cuda_ldpc_decoder_backend = normalize_cuda_ldpc_decoder_backend_string(
@@ -3910,6 +4115,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
 
         config_detail::load_value(usrp, "device_args", cfg.usrp_device.device_args);
         config_detail::load_value(usrp, "clock_source", cfg.clock_time.clock_source);
+        config_detail::load_value(usrp, "time_source", cfg.clock_time.time_source);
 
         config_detail::load_value(downlink, "center_freq", cfg.downlink.center_freq);
         config_detail::load_value(downlink, "rx_wire_format", cfg.downlink.rx_wire_format);
@@ -3935,35 +4141,167 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(sync, "predictive_delay", cfg.sync_tracking.predictive_delay);
         config_detail::load_value(sync, "hardware_sync", cfg.sync_tracking.hardware_sync);
         config_detail::load_value(sync, "hardware_sync_tty", cfg.sync_tracking.hardware_sync_tty);
-        config_detail::load_value(sync, "ocxo_pi_kp_fast", cfg.sync_tracking.ocxo_pi_kp_fast);
-        config_detail::load_value(sync, "ocxo_pi_ki_fast", cfg.sync_tracking.ocxo_pi_ki_fast);
-        config_detail::load_value(sync, "ocxo_pi_kp_slow", cfg.sync_tracking.ocxo_pi_kp_slow);
-        config_detail::load_value(sync, "ocxo_pi_ki_slow", cfg.sync_tracking.ocxo_pi_ki_slow);
-        config_detail::load_value(
-            sync, "ocxo_pi_switch_abs_error_ppm", cfg.sync_tracking.ocxo_pi_switch_abs_error_ppm);
-        config_detail::load_value(
-            sync, "ocxo_pi_switch_hold_s", cfg.sync_tracking.ocxo_pi_switch_hold_s);
-        config_detail::load_value(sync, "ocxo_pi_max_step_fast_ppm", cfg.sync_tracking.ocxo_pi_max_step_fast_ppm);
-        config_detail::load_value(sync, "ocxo_pi_max_step_slow_ppm", cfg.sync_tracking.ocxo_pi_max_step_slow_ppm);
-        if (sync["ocxo_pi_max_step_ppm"]) {
-            const auto max_step = sync["ocxo_pi_max_step_ppm"].as<double>();
-            cfg.sync_tracking.ocxo_pi_max_step_fast_ppm = max_step;
-            cfg.sync_tracking.ocxo_pi_max_step_slow_ppm = max_step;
+        if (sync["ocxo_mode"]) {
+            cfg.sync_tracking.ocxo_mode =
+                normalize_ocxo_mode_string(sync["ocxo_mode"].as<std::string>());
         }
-        config_detail::load_value(sync, "akf_enable", cfg.sync_tracking.akf_enable);
-        config_detail::load_value(sync, "akf_bootstrap_frames", cfg.sync_tracking.akf_bootstrap_frames);
-        config_detail::load_value(sync, "akf_innovation_window", cfg.sync_tracking.akf_innovation_window);
-        config_detail::load_value(sync, "akf_max_lag", cfg.sync_tracking.akf_max_lag);
-        config_detail::load_value(sync, "akf_adapt_interval", cfg.sync_tracking.akf_adapt_interval);
-        config_detail::load_value(sync, "akf_gate_sigma", cfg.sync_tracking.akf_gate_sigma);
-        config_detail::load_value(sync, "akf_tikhonov_lambda", cfg.sync_tracking.akf_tikhonov_lambda);
-        config_detail::load_value(sync, "akf_update_smooth", cfg.sync_tracking.akf_update_smooth);
-        config_detail::load_value(sync, "akf_q_wf_min", cfg.sync_tracking.akf_q_wf_min);
-        config_detail::load_value(sync, "akf_q_wf_max", cfg.sync_tracking.akf_q_wf_max);
-        config_detail::load_value(sync, "akf_q_rw_min", cfg.sync_tracking.akf_q_rw_min);
-        config_detail::load_value(sync, "akf_q_rw_max", cfg.sync_tracking.akf_q_rw_max);
-        config_detail::load_value(sync, "akf_r_min", cfg.sync_tracking.akf_r_min);
-        config_detail::load_value(sync, "akf_r_max", cfg.sync_tracking.akf_r_max);
+        config_detail::load_value(sync, "ocxo_dac_ppm_per_lsb", cfg.sync_tracking.ocxo_dac_ppm_per_lsb);
+        config_detail::load_value(sync, "ocxo_dac_zero_word", cfg.sync_tracking.ocxo_dac_zero_word);
+        config_detail::load_value(sync, "ocxo_dac_state_file", cfg.sync_tracking.ocxo_dac_state_file);
+        config_detail::load_value(sync, "ocxo_max_abs_ppm", cfg.sync_tracking.ocxo_max_abs_ppm);
+        config_detail::load_value(
+            sync, "ocxo_actuator_max_slew_ppm_per_s", cfg.sync_tracking.ocxo_actuator_max_slew_ppm_per_s);
+        config_detail::load_value(sync, "ocxo_coarse_enable", cfg.sync_tracking.ocxo_coarse_enable);
+        config_detail::load_value(sync, "ocxo_coarse_gain", cfg.sync_tracking.ocxo_coarse_gain);
+        config_detail::load_value(
+            sync, "ocxo_coarse_max_abs_ppm", cfg.sync_tracking.ocxo_coarse_max_abs_ppm);
+        config_detail::load_value(
+            sync, "ocxo_coarse_obs_window_s", cfg.sync_tracking.ocxo_coarse_obs_window_s);
+        config_detail::load_value(
+            sync, "ocxo_coarse_control_period_s", cfg.sync_tracking.ocxo_coarse_control_period_s);
+        config_detail::load_value(
+            sync, "ocxo_coarse_max_slew_ppm_per_s",
+            cfg.sync_tracking.ocxo_coarse_max_slew_ppm_per_s);
+        config_detail::load_value(
+            sync, "ocxo_fll_fast_obs_window_s", cfg.sync_tracking.ocxo_fll_fast_obs_window_s);
+        config_detail::load_value(
+            sync, "ocxo_fll_fast_control_period_s", cfg.sync_tracking.ocxo_fll_fast_control_period_s);
+        if (sync["ocxo_fll_fast_control_mode"]) {
+            cfg.sync_tracking.ocxo_fll_fast_control_mode =
+                normalize_ocxo_fll_fast_control_mode_string(
+                    sync["ocxo_fll_fast_control_mode"].as<std::string>());
+        }
+        config_detail::load_value(sync, "ocxo_fll_fast_kp", cfg.sync_tracking.ocxo_fll_fast_kp);
+        config_detail::load_value(sync, "ocxo_fll_fast_ki", cfg.sync_tracking.ocxo_fll_fast_ki);
+        config_detail::load_value(
+            sync, "ocxo_fll_fast_max_slew_ppm_per_s",
+            cfg.sync_tracking.ocxo_fll_fast_max_slew_ppm_per_s);
+        config_detail::load_value(
+            sync, "ocxo_fll_slow_obs_window_s", cfg.sync_tracking.ocxo_fll_slow_obs_window_s);
+        config_detail::load_value(
+            sync, "ocxo_fll_slow_control_period_s", cfg.sync_tracking.ocxo_fll_slow_control_period_s);
+        config_detail::load_value(sync, "ocxo_fll_slow_kp", cfg.sync_tracking.ocxo_fll_slow_kp);
+        config_detail::load_value(sync, "ocxo_fll_slow_ki", cfg.sync_tracking.ocxo_fll_slow_ki);
+        config_detail::load_value(
+            sync, "ocxo_fll_slow_deadzone_ppm", cfg.sync_tracking.ocxo_fll_slow_deadzone_ppm);
+        config_detail::load_value(
+            sync, "ocxo_fll_slow_max_slew_ppm_per_s",
+            cfg.sync_tracking.ocxo_fll_slow_max_slew_ppm_per_s);
+        config_detail::load_value(
+            sync, "ocxo_fll_slow_enter_abs_ppm", cfg.sync_tracking.ocxo_fll_slow_enter_abs_ppm);
+        config_detail::load_value(
+            sync, "ocxo_fll_fast_enter_abs_ppm", cfg.sync_tracking.ocxo_fll_fast_enter_abs_ppm);
+        config_detail::load_value(
+            sync, "ocxo_fll_switch_hold_s", cfg.sync_tracking.ocxo_fll_switch_hold_s);
+        config_detail::load_value(
+            sync, "ocxo_phase_control_period_s", cfg.sync_tracking.ocxo_phase_control_period_s);
+        config_detail::load_value(
+            sync, "ocxo_phase_jump_gate_samples",
+            cfg.sync_tracking.ocxo_phase_jump_gate_samples);
+        config_detail::load_value(
+            sync, "ocxo_phase_max_report_age_frames",
+            cfg.sync_tracking.ocxo_phase_max_report_age_frames);
+        if (sync["ocxo_phase_setpoint_mode"]) {
+            cfg.sync_tracking.ocxo_phase_setpoint_mode =
+                normalize_ocxo_phase_setpoint_mode_string(
+                    sync["ocxo_phase_setpoint_mode"].as<std::string>());
+        }
+        config_detail::load_value(
+            sync, "ocxo_phase_setpoint_fixed_samples",
+            cfg.sync_tracking.ocxo_phase_setpoint_fixed_samples);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_enable",
+            cfg.sync_tracking.ocxo_pps_initial_ap_enable);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_max_abs_ns",
+            cfg.sync_tracking.ocxo_pps_initial_ap_max_abs_ns);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_settle_s",
+            cfg.sync_tracking.ocxo_pps_initial_ap_settle_s);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_command_timeout_s",
+            cfg.sync_tracking.ocxo_pps_initial_ap_command_timeout_s);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_max_retries",
+            cfg.sync_tracking.ocxo_pps_initial_ap_max_retries);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_deadzone_ns",
+            cfg.sync_tracking.ocxo_pps_initial_ap_deadzone_ns);
+        config_detail::load_value(
+            sync, "ocxo_pps_initial_ap_polarity",
+            cfg.sync_tracking.ocxo_pps_initial_ap_polarity);
+        config_detail::load_value(sync, "ocxo_phase_kp", cfg.sync_tracking.ocxo_phase_kp);
+        config_detail::load_value(sync, "ocxo_phase_ki", cfg.sync_tracking.ocxo_phase_ki);
+        config_detail::load_value(
+            sync, "ocxo_phase_max_slew_ppm_per_s",
+            cfg.sync_tracking.ocxo_phase_max_slew_ppm_per_s);
+        config_detail::load_value(
+            sync, "ocxo_phase_enter_sfo_abs_ppm",
+            cfg.sync_tracking.ocxo_phase_enter_sfo_abs_ppm);
+        config_detail::load_value(
+            sync, "ocxo_phase_enter_hold_s", cfg.sync_tracking.ocxo_phase_enter_hold_s);
+        config_detail::load_value(
+            sync, "ocxo_phase_exit_sfo_abs_ppm",
+            cfg.sync_tracking.ocxo_phase_exit_sfo_abs_ppm);
+        config_detail::load_value(
+            sync, "ocxo_phase_exit_hold_s", cfg.sync_tracking.ocxo_phase_exit_hold_s);
+        if (sync["ocxo_freq_use_cfo"] || sync["ocxo_freq_use_sfo"] ||
+            sync["ocxo_freq_obs_window_s"] || sync["ocxo_freq_control_period_s"] ||
+            sync["ocxo_freq_kp_capture"] || sync["ocxo_freq_ki_capture"] ||
+            sync["ocxo_freq_kp_hold"] || sync["ocxo_freq_ki_hold"] ||
+            sync["ocxo_freq_deadzone_ppm"] ||
+            sync["ocxo_freq_max_slew_capture_ppm_per_s"] ||
+            sync["ocxo_freq_max_slew_hold_ppm_per_s"] ||
+            sync["ocxo_freq_switch_abs_ppm"] || sync["ocxo_freq_switch_hold_s"] ||
+            sync["ocxo_freq_unlock_abs_ppm"] ||
+            sync["ocxo_phase_unwrap_jump_gate_samples"] ||
+            sync["ocxo_phase_kf_capture"] || sync["ocxo_phase_kf_hold"] ||
+            sync["ocxo_phase_max_slew_capture_ppm_per_s"] ||
+            sync["ocxo_phase_max_slew_hold_ppm_per_s"] ||
+            sync["ocxo_phase_lock_to_err_samples"] ||
+            sync["ocxo_phase_lock_slope_ppm"] || sync["ocxo_phase_lock_hold_s"] ||
+            sync["ocxo_phase_unlock_to_err_samples"] ||
+            sync["ocxo_phase_enter_cfo_abs_ppm"] ||
+            sync["ocxo_phase_exit_cfo_abs_ppm"] ||
+            sync["ocxo_phase_exit_confirm_abs_ppm"]) {
+            LOG_G_WARN_M(Config)
+                << "Removed OCXO keys are ignored; "
+                << "use ocxo_coarse_* / ocxo_fll_* / current ocxo_phase_* keys.";
+        }
+        if (sync["ocxo_pi_kp_fast"] || sync["ocxo_pi_ki_fast"] || sync["ocxo_pi_kp_slow"] ||
+            sync["ocxo_pi_ki_slow"] || sync["ocxo_pi_max_step_fast_ppm"] ||
+            sync["ocxo_pi_max_step_slow_ppm"] || sync["ocxo_pi_max_step_ppm"] ||
+            sync["ocxo_pi_switch_abs_error_ppm"] || sync["ocxo_pi_switch_hold_s"]) {
+            LOG_G_WARN_M(Config)
+                << "Deprecated OCXO PI keys (ocxo_pi_*) are ignored; "
+                << "use ocxo_mode / ocxo_coarse_* / ocxo_fll_* / ocxo_phase_* instead.";
+        }
+        config_detail::load_value(sync, "cfo_ewma_enable", cfg.sync_tracking.cfo_ewma_enable);
+        config_detail::load_value(sync, "cfo_ewma_alpha", cfg.sync_tracking.cfo_ewma_alpha);
+        if (sync["akf_enable"] || sync["akf_bootstrap_frames"] || sync["akf_innovation_window"] ||
+            sync["akf_max_lag"] || sync["akf_adapt_interval"] || sync["akf_gate_sigma"] ||
+            sync["akf_tikhonov_lambda"] || sync["akf_update_smooth"] || sync["akf_q_wf_min"] ||
+            sync["akf_q_wf_max"] || sync["akf_q_rw_min"] || sync["akf_q_rw_max"] ||
+            sync["akf_r_min"] || sync["akf_r_max"]) {
+            LOG_G_WARN_M(Config)
+                << "Deprecated CFO AKF keys (akf_*) are ignored; "
+                << "use cfo_ewma_enable / cfo_ewma_alpha instead.";
+            // One-shot migration convenience: map old master enable if new key absent.
+            if (!sync["cfo_ewma_enable"] && sync["akf_enable"]) {
+                cfg.sync_tracking.cfo_ewma_enable = sync["akf_enable"].as<bool>();
+            }
+        }
+        if (cfg.sync_tracking.cfo_ewma_alpha <= 0.0 ||
+            cfg.sync_tracking.cfo_ewma_alpha > 1.0 ||
+            !std::isfinite(cfg.sync_tracking.cfo_ewma_alpha)) {
+            LOG_G_WARN_M(Config) << "sync_tracking.cfo_ewma_alpha out of range; clamping to (0, 1]";
+            cfg.sync_tracking.cfo_ewma_alpha =
+                std::min(std::max(cfg.sync_tracking.cfo_ewma_alpha, 1e-6), 1.0);
+            if (!(cfg.sync_tracking.cfo_ewma_alpha > 0.0) ||
+                !std::isfinite(cfg.sync_tracking.cfo_ewma_alpha)) {
+                cfg.sync_tracking.cfo_ewma_alpha = 0.02;
+            }
+        }
         config_detail::load_value(sync, "desired_peak_pos", cfg.sync_tracking.desired_peak_pos);
 
         config_detail::load_value(measurement, "measurement_enable", cfg.measurement.measurement_enable);
@@ -4008,6 +4346,8 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(network, "self_scan_port", cfg.network_output.uplink_self_scan_port);
         config_detail::load_value(network, "ertm_debug_ip", cfg.network_output.ertm_debug_ip);
         config_detail::load_value(network, "ertm_debug_port", cfg.network_output.ertm_debug_port);
+        config_detail::load_value(network, "ocxo_debug_ip", cfg.network_output.ocxo_debug_ip);
+        config_detail::load_value(network, "ocxo_debug_port", cfg.network_output.ocxo_debug_port);
 
         load_ue_downlink_arq_config(downlink, cfg.network_output);
         normalize_arq_config(cfg.network_output);
@@ -4015,8 +4355,6 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         normalize_arq_config(cfg.uplink_arq);
 
         config_detail::load_value(runtime, "default_out_ip", cfg.network_output.default_out_ip);
-        config_detail::load_value(runtime, "vofa_debug_ip", cfg.network_output.vofa_debug_ip);
-        config_detail::load_value(runtime, "vofa_debug_port", cfg.network_output.vofa_debug_port);
         config_detail::load_logging_config(config, cfg.logging);
 
         load_simulation_config(config, cfg);
@@ -4052,6 +4390,8 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
                 "to cpu_cores.sensing_cpu_cores.");
         }
 
+        validate_ue_pps_phase_config(cfg);
+
         if (!config_detail::load_data_resource_blocks_from_yaml(
                 cfg, resource_preview, "UE config")) {
             return false;
@@ -4065,12 +4405,17 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR_M(Config) << "Error parsing YAML config: " << e.what();
         return false;
+    } catch (const std::exception& e) {
+        LOG_G_ERROR_M(Config) << "Invalid UE config: " << e.what();
+        return false;
     }
 }
 
 inline void finalize_ue_network_defaults(Config& cfg) {
     normalize_sensing_fft_sizes(cfg, "deBS sensing");
     normalize_sensing_view_bins(cfg, "deBS sensing");
+    cfg.cuda.cuda_precision_profile =
+        normalize_cuda_precision_profile_string(cfg.cuda.cuda_precision_profile);
     if (cfg.cuda.cuda_demod_pipeline_slots == 0) {
         LOG_G_WARN_M(Cuda) << "cuda_demod_pipeline_slots=0 is invalid. Clamping to 1.";
         cfg.cuda.cuda_demod_pipeline_slots = 1;
@@ -4164,7 +4509,12 @@ inline void finalize_ue_network_defaults(Config& cfg) {
                      << " is invalid. Falling back to 12362.";
         cfg.network_output.ertm_debug_port = 12362;
     }
-    if (cfg.network_output.vofa_debug_ip.empty()) cfg.network_output.vofa_debug_ip = cfg.network_output.default_out_ip;
+    if (cfg.network_output.ocxo_debug_ip.empty()) cfg.network_output.ocxo_debug_ip = "0.0.0.0";
+    if (cfg.network_output.ocxo_debug_port <= 0 || cfg.network_output.ocxo_debug_port > 65535) {
+        LOG_G_WARN_M(Ocxo) << "ocxo_debug_port=" << cfg.network_output.ocxo_debug_port
+                     << " is invalid. Falling back to 12347.";
+        cfg.network_output.ocxo_debug_port = 12347;
+    }
     if (cfg.network_output.udp_output_ip.empty()) cfg.network_output.udp_output_ip = cfg.network_output.default_out_ip;
     normalize_udp_egress_pacer_config(cfg.network_output.udp_egress_pacer);
 }
@@ -4236,6 +4586,9 @@ struct RxFrame {
     int64_t usrp_time_ns = -1; // USRP timestamp of the frame start sample
     int64_t host_enqueue_time_ns = 0; // Host timestamp after full-frame RX, before queue push
     uint64_t generation = 0;   // Sync generation used to drop stale frames after a hard resync
+    AirFrameIdentity identity; // Absolute BS air-frame identity (set after Identity SIB decode / free-run)
+    /// Cumulative UL-TX mirror Alignment frozen at RX enqueue (same-frame as samples).
+    int32_t ertm_rx_alignment_shift_samples = 0;
 };
 
 /**
@@ -4366,10 +4719,6 @@ public:
 
     bool enabled() const {
         return _enabled;
-    }
-
-    double current_gain_db() const {
-        return _current_gain_db;
     }
 
     void sync_to_gain(double gain_db) {
@@ -4656,8 +5005,11 @@ struct SensingFrame {
     float SFO;
     float delay_offset;
     int alignment_samples = 0;
+    /// Cumulative UL-TX mirror of RX Alignment at DL frame N (not a live atomic).
+    int32_t ertm_rx_alignment_shift_samples = 0;
     bool force_ertm_remeasure = false;
     uint64_t generation = 0;
+    AirFrameIdentity identity; ///< Absolute air-frame id + UE boundary time for this frame
 };
 
 inline uint64_t host_to_network_u64(uint64_t value) {
@@ -4764,7 +5116,7 @@ enum class SensingViewerWireDataFormat : uint32_t {
 inline constexpr uint32_t kSensingMetadataFlagCfarEnabled = 1u << 0;
 inline constexpr uint32_t kSensingMetadataFlagMicroDopplerEnabled = 1u << 1;
 
-inline constexpr uint32_t kSensingViewerParamsVersion = 7u;
+inline constexpr uint32_t kSensingViewerParamsVersion = 9u;
 inline constexpr uint32_t kSensingViewerFlagCompactMask = 1u << 0;
 inline constexpr uint32_t kSensingViewerFlagCompactLocalDelayDoppler = 1u << 1;
 inline constexpr uint32_t kSensingViewerFlagSkipSensingFft = 1u << 2;
@@ -4795,15 +5147,18 @@ struct SensingViewerParamsPacket {
     uint32_t os_cfar_rank_percent_x100 = 0;
     uint32_t os_cfar_suppress_doppler = 0;
     uint32_t os_cfar_suppress_range = 0;
-    // V6/V7 additions — zero in older packets; viewers treat 0 as "not provided".
-    // V7 stores center_freq / 100 so uint32 covers RF carriers well above mmWave.
+    // Physical radio parameters; all viewers require the exact V9 packet layout.
     uint32_t center_freq_hz_div100 = 0; // center_freq / 100 (units: 100 Hz; uint32 covers up to ~429 GHz)
     uint32_t sample_rate_hz_div100 = 0; // sample_rate / 100 (units: 100 Hz; uint32 covers up to ~429 GHz)
     uint32_t antenna_spacing_um = 0;    // physical ULA element spacing in micrometres (0 = not provided)
+    uint32_t ofdm_fft_size = 0;
+    uint32_t cp_length = 0;
+    uint32_t sensing_symbol_stride = 0;
+    uint32_t sensing_subcarrier_stride = 0; // 0: no uniform frequency grid
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SensingViewerParamsPacket) == 88, "SensingViewerParamsPacket size mismatch");
+static_assert(sizeof(SensingViewerParamsPacket) == 104, "SensingViewerParamsPacket size mismatch");
 
 inline std::vector<uint8_t> serialize_sensing_metadata(
     const SensingMetadata& metadata,
@@ -5048,7 +5403,8 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     uint32_t stream_channel_count = 1,
     uint32_t stream_channel_mask = 0x1u,
     bool aggregated_stream = false,
-    double antenna_spacing_m = 0.0)
+    double antenna_spacing_m = 0.0,
+    size_t sensing_symbol_stride = 0)
 {
     SensingViewerParamsPacket packet{};
     std::memcpy(packet.header, "CTRL", 4);
@@ -5076,7 +5432,7 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     packet.os_cfar_rank_percent_x100 = htonl(rank_percent_x100);
     packet.os_cfar_suppress_doppler = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_doppler)));
     packet.os_cfar_suppress_range = htonl(static_cast<uint32_t>(std::max(0, os_cfar_suppress_range)));
-    // V7: physical radio parameters so the viewer can auto-configure axes and AoA.
+    // Physical radio parameters for axes and AoA.
     if (cfg.downlink.center_freq > 0.0) {
         packet.center_freq_hz_div100 = htonl(static_cast<uint32_t>(
             std::llround(std::clamp(cfg.downlink.center_freq / 100.0, 0.0, 4294967295.0))));
@@ -5089,6 +5445,30 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
         packet.antenna_spacing_um = htonl(static_cast<uint32_t>(
             std::llround(std::clamp(antenna_spacing_m * 1e6, 0.0, 4294967295.0))));
     }
+    packet.ofdm_fft_size = htonl(static_cast<uint32_t>(cfg.ofdm.fft_size));
+    packet.cp_length = htonl(static_cast<uint32_t>(cfg.ofdm.cp_length));
+    size_t symbol_stride = sensing_symbol_stride > 0 ? sensing_symbol_stride : cfg.sensing.symbol_stride;
+    size_t subcarrier_stride = 1;
+    if (sensing_output_mode_is_compact_mask(cfg)) {
+        const auto analysis = analyze_compact_sensing_mask(cfg);
+        symbol_stride = analysis.implicit_symbol_stride;
+        const auto& indices = analysis.common_subcarrier_indices;
+        subcarrier_stride = 0;
+        if (analysis.regular_subsampling_compatible && indices.size() > 1) {
+            const int gap = indices[1] - indices[0];
+            if (gap > 0) {
+                subcarrier_stride = static_cast<size_t>(gap);
+                for (size_t i = 2; i < indices.size(); ++i) {
+                    if (indices[i] - indices[i - 1] != gap) {
+                        subcarrier_stride = 0;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    packet.sensing_symbol_stride = htonl(static_cast<uint32_t>(symbol_stride));
+    packet.sensing_subcarrier_stride = htonl(static_cast<uint32_t>(subcarrier_stride));
     return packet;
 }
 
@@ -5655,76 +6035,141 @@ inline std::vector<zmq_transport::MsgPart> make_ertm_debug_msg_parts(
     };
 }
 
+namespace ocxo_debug_protocol {
+
+inline constexpr std::array<uint8_t, 8> kMagic{{'O', 'C', 'X', 'O', 'D', 'B', 'G', '3'}};
+inline constexpr uint32_t kVersion = 3;
+inline constexpr size_t kChannelCount = 16;
+inline constexpr size_t kHeaderSize = 32;
+inline constexpr size_t kDiagnosticSize =
+    2 * sizeof(double) + 3 * sizeof(int64_t) + 2 * sizeof(double);
+inline constexpr size_t kPacketSize =
+    kHeaderSize + kChannelCount * sizeof(float) + kDiagnosticSize;
+using Channels = std::array<float, kChannelCount>;
+using Packet = std::array<uint8_t, kPacketSize>;
+
+struct Diagnostics {
+    double r_bs_samples = std::numeric_limits<double>::quiet_NaN();
+    double r_ue_samples = std::numeric_limits<double>::quiet_NaN();
+    int64_t bs_last_pps_ticks = -1;
+    int64_t bs_t0_to_pps_ticks = -1;
+    int64_t ue_last_pps_ns = -1;
+    double bs_tick_rate = std::numeric_limits<double>::quiet_NaN();
+    double sample_rate = std::numeric_limits<double>::quiet_NaN();
+};
+
+inline void store_u32_le(uint8_t* dst, uint32_t value) {
+    for (size_t i = 0; i < sizeof(value); ++i) {
+        dst[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+    }
+}
+
+inline void store_u64_le(uint8_t* dst, uint64_t value) {
+    for (size_t i = 0; i < sizeof(value); ++i) {
+        dst[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+    }
+}
+
+inline void store_i64_le(uint8_t* dst, int64_t value) {
+    store_u64_le(dst, static_cast<uint64_t>(value));
+}
+
+inline void store_f32_le(uint8_t* dst, float value) {
+    uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "float must be IEEE-754 binary32");
+    std::memcpy(&bits, &value, sizeof(bits));
+    store_u32_le(dst, bits);
+}
+
+inline void store_f64_le(uint8_t* dst, double value) {
+    uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "double must be IEEE-754 binary64");
+    std::memcpy(&bits, &value, sizeof(bits));
+    store_u64_le(dst, bits);
+}
+
+inline Packet make_packet(
+    const Channels& channels,
+    const Diagnostics& diagnostics,
+    uint64_t sequence,
+    uint64_t timestamp_ns)
+{
+    Packet packet{};
+    std::copy(kMagic.begin(), kMagic.end(), packet.begin());
+    store_u32_le(packet.data() + 8, kVersion);
+    store_u32_le(packet.data() + 12, static_cast<uint32_t>(kChannelCount));
+    store_u64_le(packet.data() + 16, sequence);
+    store_u64_le(packet.data() + 24, timestamp_ns);
+    for (size_t i = 0; i < channels.size(); ++i) {
+        store_f32_le(packet.data() + kHeaderSize + i * sizeof(float), channels[i]);
+    }
+    size_t off = kHeaderSize + kChannelCount * sizeof(float);
+    store_f64_le(packet.data() + off, diagnostics.r_bs_samples);
+    off += sizeof(double);
+    store_f64_le(packet.data() + off, diagnostics.r_ue_samples);
+    off += sizeof(double);
+    store_i64_le(packet.data() + off, diagnostics.bs_last_pps_ticks);
+    off += sizeof(int64_t);
+    store_i64_le(packet.data() + off, diagnostics.bs_t0_to_pps_ticks);
+    off += sizeof(int64_t);
+    store_i64_le(packet.data() + off, diagnostics.ue_last_pps_ns);
+    off += sizeof(int64_t);
+    store_f64_le(packet.data() + off, diagnostics.bs_tick_rate);
+    off += sizeof(double);
+    store_f64_le(packet.data() + off, diagnostics.sample_rate);
+    return packet;
+}
+
+inline Packet make_packet(
+    const Channels& channels,
+    uint64_t sequence,
+    uint64_t timestamp_ns)
+{
+    return make_packet(channels, Diagnostics{}, sequence, timestamp_ns);
+}
+
+} // namespace ocxo_debug_protocol
+
 /**
- * @brief VOFA+ FireWater debug sender.
- *
- * Sends N float channels in little-endian with FireWater tail:
- * [ch0, ch1, ...] + 0x00 0x00 0x80 0x7F
+ * @brief Versioned ZeroMQ publisher for the fixed 16-channel OCXO debug stream.
+ * Channel 7 remains the active Phase-loop error: legacy TO_clock
+ * setpoint error for auto/phase, or UE-minus-BS PPS error for pps_phase.
+ * Protocol v3 keeps those channel indices and appends exact PPS diagnostics.
  */
-class VofaPlusDebugSender {
+class OcxoDebugSender : public ZmqPubSender {
 public:
-    VofaPlusDebugSender(const std::string& ip, uint16_t port, size_t interval_frames = 64)
-        : udp_sender_(ip, port),
+    OcxoDebugSender(const std::string& ip, uint16_t port, size_t interval_frames = 64)
+        : ZmqPubSender(ip, port),
           interval_frames_(std::max<size_t>(interval_frames, 1)) {}
 
-    void send_channels(const float* channels, size_t channel_count) {
-        if (channel_count == 0) {
-            return;
-        }
-        if (channels == nullptr) {
-            const uint64_t dropped = ++send_drop_count_;
-            LOG_RT_WARN_M(Demod) << "VOFA+ debug frame has a null payload; dropping frame"
-                          << ": channels=" << channel_count
-                          << ", dropped=" << dropped;
-            return;
-        }
-        if (channel_count > kMaxChannels) {
-            const uint64_t dropped = ++send_drop_count_;
-            LOG_RT_WARN_M(Demod) << "VOFA+ debug frame has too many channels; dropping frame"
-                          << ": channels=" << channel_count
-                          << ", max_channels=" << kMaxChannels
-                          << ", dropped=" << dropped;
-            return;
-        }
-        if (++frame_counter_ < interval_frames_) {
+    void send_channels(const ocxo_debug_protocol::Channels& channels,
+                       bool force = false) {
+        send_channels(channels, ocxo_debug_protocol::Diagnostics{}, force);
+    }
+
+    void send_channels(
+        const ocxo_debug_protocol::Channels& channels,
+        const ocxo_debug_protocol::Diagnostics& diagnostics,
+        bool force = false) {
+        if (!force && ++frame_counter_ < interval_frames_) {
             return;
         }
         frame_counter_ = 0;
-
-        const size_t payload_bytes = channel_count * sizeof(float);
-        std::memcpy(packet_buffer_.data(), channels, payload_bytes);
-        std::memcpy(packet_buffer_.data() + payload_bytes, kFireWaterTail.data(), kFireWaterTail.size());
-        try {
-            udp_sender_.send(packet_buffer_.data(), payload_bytes + kFireWaterTail.size());
-        } catch (const std::exception& e) {
-            const uint64_t dropped = ++send_drop_count_;
-            if (dropped <= 20 || (dropped % 100) == 0) {
-                LOG_RT_WARN_M(Demod) << "VOFA+ UDP debug send failed; dropping frame"
-                              << ": channels=" << channel_count
-                              << ", dropped=" << dropped
-                              << ", error=" << e.what();
-            }
-        }
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        const uint64_t timestamp_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+        const auto packet =
+            ocxo_debug_protocol::make_packet(
+                channels, diagnostics, sequence_++, timestamp_ns);
+        send_raw(packet.data(), packet.size());
     }
 
-    template <size_t N>
-    void send_channels(const std::array<float, N>& channels) {
-        send_channels(channels.data(), N);
-    }
-
-    void reset_counter() {
-        frame_counter_ = 0;
-    }
+    void reset_counter() { frame_counter_ = 0; }
 
 private:
-    static constexpr size_t kMaxChannels = 16;
-    static constexpr std::array<uint8_t, 4> kFireWaterTail{{0x00, 0x00, 0x80, 0x7f}};
-
-    UdpSender udp_sender_;
     size_t interval_frames_ = 64;
     size_t frame_counter_ = 0;
-    uint64_t send_drop_count_ = 0;
-    std::array<uint8_t, kMaxChannels * sizeof(float) + kFireWaterTail.size()> packet_buffer_{};
+    uint64_t sequence_ = 0;
 };
 
 /**
@@ -6190,10 +6635,6 @@ public:
 
     uint32_t channel_mask() const {
         return _channel_mask;
-    }
-
-    bool has_channel(uint32_t channel_id) const {
-        return _channel_index(channel_id) >= 0;
     }
 
     void push_data(uint32_t channel_id, const AlignedVector& data, uint64_t first_symbol_index) {
@@ -7002,15 +7443,6 @@ public:
         _send_to(peer, &packet, sizeof(packet));
     }
 
-    bool send_sensing_viewer_params_to_last_peer(const SensingViewerParamsPacket& packet) {
-        ControlPeer peer;
-        if (!_get_last_control_peer(peer)) {
-            return false;
-        }
-        send_sensing_viewer_params(peer, packet);
-        return true;
-    }
-
     void send_control_status(
         const ControlPeer& peer,
         const std::string& command,
@@ -7224,27 +7656,39 @@ private:
 };
 
 /**
- * @brief Hardware Synchronization Controller.
- * 
- * Controls an external hardware oscillator (e.g., OCXO) via a serial interface.
- * Allows fine-tuning of the frequency control word (DAC value) to correct for
- * frequency offsets (PPM) based on software estimation.
+ * @brief Hardware OCXO actuator (serial DAC).
+ *
+ * Pure plant interface for an external precision OCXO (e.g. MV197). Loop logic
+ * lives in OCXODiscipliner; this class only maps ppm <-> DAC word, applies a
+ * hard slew limit, and sends SF commands over the serial link.
  */
 class HardwareSyncController {
 public:
+    enum class PpsPhaseAdjustStatus : uint8_t {
+        Idle,
+        Queued,
+        InFlight,
+        Succeeded,
+        Failed
+    };
+
+    enum class PpsPhaseAdjustQueueResult : uint8_t {
+        Queued,
+        Busy
+    };
+
     explicit HardwareSyncController(const std::string& device_path)
-        : serial_fd_(-1), 
+        : device_path_(device_path),
+          serial_fd_(-1),
           worker_thread_(nullptr),
           terminate_flag_(false)
     {
-        // Open serial port in non-blocking mode
         serial_fd_ = open(device_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ == -1) {
             LOG_G_ERROR_M(Config) << "ERROR: Failed to open serial device: " << strerror(errno);
             throw std::runtime_error("Serial device open failed");
         }
-        
-        // Configure serial port
+
         termios options;
         tcgetattr(serial_fd_, &options);
         cfsetispeed(&options, B57600);
@@ -7256,261 +7700,544 @@ public:
         options.c_cflag |= CS8;
         options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
         options.c_oflag &= ~OPOST;
-        options.c_cc[VMIN] = 0;     // Non-blocking read
-        options.c_cc[VTIME] = 0;    // Return immediately
-        
+        options.c_cc[VMIN] = 0;
+        options.c_cc[VTIME] = 0;
+
         if (tcsetattr(serial_fd_, TCSANOW, &options) != 0) {
             LOG_G_ERROR_M(Config) << "ERROR: Failed to set serial attributes: " << strerror(errno);
             close(serial_fd_);
             throw std::runtime_error("Serial configuration failed");
         }
-        
-        // Start worker thread
+
         worker_thread_ = new std::thread(&HardwareSyncController::worker_thread_func, this);
-        hw_freq_word = MID_DAC_VALUE;
-        set_frequency_control_word(hw_freq_word);
+        // Do not send an SF command until configure_plant() — defaults may not
+        // match the board's calibrated zero word.
+        hw_freq_word_ = zero_word_;
+        commanded_ppm_ = 0.0;
+        plant_ready_ = false;
     }
 
     ~HardwareSyncController() {
         terminate_flag_ = true;
-        
-        // Wake up worker thread
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
             condition_.notify_all();
         }
-        
         if (worker_thread_ && worker_thread_->joinable()) {
             worker_thread_->join();
             delete worker_thread_;
         }
-        
+        const int32_t final_word =
+            last_acknowledged_word_.load(std::memory_order_acquire);
+        if (final_word >= 0 && persist_frequency_word(final_word)) {
+            LOG_G_INFO_M(Ocxo)
+                << "Saved final acknowledged OCXO DAC word on shutdown"
+                << " word=" << final_word
+                << " ppm=" << word_to_ppm(final_word)
+                << " state_file=" << state_file_;
+        }
         if (serial_fd_ != -1) close(serial_fd_);
     }
 
-    // Non-blocking frequency setting interface (no return)
-    void set_frequency_control_word(int32_t control_value) {
-        hw_freq_word = control_value;
-        control_value = std::clamp(hw_freq_word, 0, MAX_DAC_VALUE);
-        // Construct command string
-        std::ostringstream oss;
-        oss << "SF" << std::setw(7) << std::setfill('0') << control_value;
-        std::string payload = oss.str();
-        
-        // Calculate checksum
+    /**
+     * @brief Configure calibrated DAC plant model and hard slew limit.
+     */
+    void configure_plant(double ppm_per_lsb,
+                         int32_t zero_word,
+                         double max_abs_ppm,
+                         double max_slew_ppm_per_s,
+                         const std::string& state_file) {
+        ppm_per_lsb_ = std::max(ppm_per_lsb, 1e-12);
+        zero_word_ = std::clamp(zero_word, 0, MAX_DAC_VALUE);
+        max_abs_ppm_ = std::max(max_abs_ppm, 0.0);
+        max_slew_ppm_per_s_ = std::max(max_slew_ppm_per_s, 0.0);
+        state_file_ = state_file;
+        int32_t initial_word = zero_word_;
+        const FrequencyStateLoadResult load_result =
+            load_persisted_frequency_word(initial_word);
+        const bool restored = load_result == FrequencyStateLoadResult::Restored;
+        state_write_enabled_ =
+            load_result == FrequencyStateLoadResult::Missing || restored;
+        if (load_result == FrequencyStateLoadResult::Missing) {
+            LOG_G_WARN_M(Ocxo)
+                << "No retained OCXO DAC state at " << state_file_
+                << "; initializing the calibrated zero word once";
+        } else if (load_result == FrequencyStateLoadResult::Invalid) {
+            LOG_G_WARN_M(Ocxo)
+                << "Invalid OCXO DAC state is preserved at " << state_file_
+                << "; persistence is disabled for this process run";
+        }
+        hw_freq_word_ = initial_word;
+        commanded_ppm_ = word_to_ppm(hw_freq_word_);
+        last_acknowledged_word_.store(
+            restored ? hw_freq_word_ : -1, std::memory_order_release);
+        // Reassert the retained absolute word. Writing the same word is
+        // physically continuous when the external DAC survives a UE restart.
+        set_frequency_control_word(hw_freq_word_);
+        last_apply_time_ = std::chrono::steady_clock::now();
+        has_apply_time_ = true;
+        frequency_control_rebase_pending_ = true;
+        plant_ready_ = true;
+        LOG_G_INFO_M(Ocxo) << "Configured OCXO plant: ppm_per_lsb=" << ppm_per_lsb_
+                     << ", zero_word=" << zero_word_
+                     << ", max_abs_ppm=" << max_abs_ppm_
+                     << ", max_slew_ppm_per_s=" << max_slew_ppm_per_s_
+                     << ", initial_word=" << hw_freq_word_
+                     << ", initial_ppm=" << commanded_ppm_
+                     << ", state=" << frequency_state_name(load_result)
+                     << ", state_file="
+                     << (state_file_.empty() ? "disabled" : state_file_);
+    }
+
+    /**
+     * @brief Set the total wall-clock budget for one AP transaction.
+     *
+     * The budget includes all JAMSYNCING retries. Once it expires, the worker
+     * marks the request Failed and never sends another copy of that AP.
+     */
+    void configure_pps_phase_adjust_timeout(double timeout_s) {
+        pps_phase_command_timeout_s_.store(
+            std::max(timeout_s, 0.1), std::memory_order_release);
+    }
+
+    int32_t current_word() const { return hw_freq_word_; }
+    double current_offset_ppm() const { return commanded_ppm_; }
+
+    PpsPhaseAdjustStatus pps_phase_adjust_status() const {
+        return pps_phase_adjust_status_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Queue the one-shot PPSOUT phase adjustment (AP command).
+     *
+     * Positive nanoseconds follow PPSDO protocol semantics and delay PPSOUT.
+     * The command is never coalesced with SF updates and is accepted only while
+     * the AP transport is Idle. The aligner controls bounded retry/new-epoch
+     * rearming through rearm_pps_phase_adjust().
+     * @return Queued when accepted, or Busy while an earlier AP is pending.
+     */
+    PpsPhaseAdjustQueueResult request_pps_phase_adjust_ns(
+        int64_t adjustment_ns) {
+        constexpr int64_t kMaxAdjustmentNs = 500'000'000LL;
+        adjustment_ns = std::clamp(
+            adjustment_ns, -kMaxAdjustmentNs, kMaxAdjustmentNs);
+        std::ostringstream payload;
+        payload << "AP" << (adjustment_ns >= 0 ? '+' : '-')
+                << std::setw(9) << std::setfill('0') << std::llabs(adjustment_ns);
+        SerialCommand command;
+        command.type = SerialCommandType::PpsPhaseAdjust;
+        command.wire = append_checksum(payload.str());
+        command.deadline = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(
+                    pps_phase_command_timeout_s_.load(
+                        std::memory_order_acquire)));
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (pps_phase_adjust_status_.load(std::memory_order_relaxed) !=
+            PpsPhaseAdjustStatus::Idle) {
+            return PpsPhaseAdjustQueueResult::Busy;
+        }
+        pps_phase_adjust_status_.store(
+            PpsPhaseAdjustStatus::Queued, std::memory_order_release);
+        command_queue_.push_back(std::move(command));
+        condition_.notify_one();
+        return PpsPhaseAdjustQueueResult::Queued;
+    }
+
+    /**
+     * @brief Cancel a queued AP or rearm after the current in-flight AP ends.
+     *
+     * A hard synchronization reset creates a new PPS alignment epoch. An AP
+     * already on the serial wire cannot be cancelled, so its completion is
+     * converted back to Idle instead of being exposed as the new epoch result.
+     */
+    void rearm_pps_phase_adjust() {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        command_queue_.erase(
+            std::remove_if(
+                command_queue_.begin(),
+                command_queue_.end(),
+                [](const SerialCommand& command) {
+                    return command.type == SerialCommandType::PpsPhaseAdjust;
+                }),
+            command_queue_.end());
+        if (pps_phase_adjust_status_.load(std::memory_order_relaxed) ==
+            PpsPhaseAdjustStatus::InFlight) {
+            pps_phase_rearm_pending_ = true;
+        } else {
+            pps_phase_rearm_pending_ = false;
+            pps_phase_adjust_status_.store(
+                PpsPhaseAdjustStatus::Idle, std::memory_order_release);
+        }
+    }
+
+    int32_t ppm_to_word(double ppm) const {
+        const double clamped = std::clamp(ppm, -max_abs_ppm_, max_abs_ppm_);
+        const double word = static_cast<double>(zero_word_) + clamped / ppm_per_lsb_;
+        return std::clamp(
+            static_cast<int32_t>(std::llround(word)),
+            0,
+            MAX_DAC_VALUE);
+    }
+
+    double word_to_ppm(int32_t word) const {
+        return (static_cast<double>(word) - static_cast<double>(zero_word_)) * ppm_per_lsb_;
+    }
+
+    /**
+     * @brief Apply a relative ppm step with the hard actuator slew limit.
+     * @return Actually applied delta_ppm (after slew clamp).
+     */
+    double apply_delta_ppm(double desired_delta_ppm) {
+        return apply_delta_ppm_at(
+            desired_delta_ppm, std::chrono::steady_clock::now());
+    }
+
+    /**
+     * @brief Apply a relative ppm step at an explicit steady-clock time.
+     *
+     * This is equivalent to apply_delta_ppm() and allows deterministic slew
+     * validation without sleeping.
+     * @return Actually applied delta_ppm (after slew clamp).
+     */
+    double apply_delta_ppm_at(
+        double desired_delta_ppm,
+        std::chrono::steady_clock::time_point now) {
+        if (!plant_ready_) {
+            LOG_RT_WARN_HZ_M(Ocxo, 1)
+                << "OCXO apply_delta_ppm ignored: configure_plant() not called";
+            return 0.0;
+        }
+        if (!std::isfinite(desired_delta_ppm)) {
+            return 0.0;
+        }
+        const bool use_rebased_time = frequency_control_rebase_pending_ &&
+            std::abs(desired_delta_ppm) > 1e-15;
+        if (use_rebased_time) {
+            // Search/reacquisition time is not actuator control time. Start the
+            // slew interval at the first real post-rebase correction.
+            last_apply_time_ = now;
+            has_apply_time_ = true;
+        }
+        double dt = 0.0;
+        if (has_apply_time_) {
+            dt = std::chrono::duration<double>(now - last_apply_time_).count();
+        }
+        if (dt < 0.0) {
+            dt = 0.0;
+        }
+        double delta = desired_delta_ppm;
+        if (has_apply_time_ && max_slew_ppm_per_s_ > 0.0) {
+            const double max_step = max_slew_ppm_per_s_ * std::max(dt, 1e-3);
+            delta = std::clamp(delta, -max_step, max_step);
+        }
+        const double target = std::clamp(
+            commanded_ppm_ + delta, -max_abs_ppm_, max_abs_ppm_);
+        const double applied = target - commanded_ppm_;
+        if (std::abs(applied) <= 1e-15) {
+            last_apply_time_ = now;
+            has_apply_time_ = true;
+            return 0.0;
+        }
+        frequency_control_rebase_pending_ = false;
+        commanded_ppm_ = target;
+        hw_freq_word_ = ppm_to_word(commanded_ppm_);
+        set_frequency_control_word(hw_freq_word_);
+        last_apply_time_ = now;
+        has_apply_time_ = true;
+
+        ++apply_log_counter_;
+        if (apply_log_counter_ % OCXO_APPLY_LOG_INTERVAL == 0) {
+            LOG_RT_INFO_M(Ocxo) << "OCXO actuator: desired_delta_ppm=" << desired_delta_ppm
+                          << ", applied_delta_ppm=" << applied
+                          << ", command_ppm=" << commanded_ppm_
+                          << ", word=" << hw_freq_word_;
+        }
+        return applied;
+    }
+
+    /**
+     * @brief Drive absolute offset ppm (relative to calibrated zero word).
+     * @return Applied delta_ppm.
+     */
+    double set_offset_ppm_absolute(double absolute_ppm) {
+        if (!std::isfinite(absolute_ppm)) {
+            return 0.0;
+        }
+        return apply_delta_ppm(absolute_ppm - commanded_ppm_);
+    }
+
+    /**
+     * @brief Rebase slew timing at the next nonzero DAC correction.
+     *
+     * The deferred rebase excludes any following synchronization-search gap
+     * from the first correction's slew budget without changing the DAC word.
+     */
+    void rebase_frequency_control_slew() {
+        if (!plant_ready_) {
+            return;
+        }
+        frequency_control_rebase_pending_ = true;
+    }
+
+private:
+    std::string device_path_;
+    int serial_fd_;
+    std::thread* worker_thread_;
+    std::atomic<bool> terminate_flag_;
+
+    enum class SerialCommandType : uint8_t {
+        Frequency,
+        PpsPhaseAdjust
+    };
+
+    struct SerialCommand {
+        SerialCommandType type = SerialCommandType::Frequency;
+        std::string wire;
+        int32_t frequency_word = -1;
+        size_t retry_count = 0;
+        std::chrono::steady_clock::time_point deadline{};
+    };
+
+    enum class SendCommandResult : uint8_t {
+        Succeeded,
+        Retryable,
+        Failed
+    };
+
+    enum class FrequencyStateLoadResult : uint8_t {
+        Disabled,
+        Missing,
+        Restored,
+        Invalid
+    };
+
+    std::deque<SerialCommand> command_queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable condition_;
+    std::atomic<PpsPhaseAdjustStatus> pps_phase_adjust_status_{
+        PpsPhaseAdjustStatus::Idle};
+    bool pps_phase_rearm_pending_ = false; // Protected by queue_mutex_.
+    std::atomic<double> pps_phase_command_timeout_s_{3.0};
+
+    // 20-bit DAC
+    static constexpr int32_t MAX_DAC_VALUE = (1 << 20) - 1;
+    // Defaults match docs/OCXO_PPM_MAPPING.md linear fit.
+    double ppm_per_lsb_ = 9.708797e-7;
+    int32_t zero_word_ = 493367;
+    double max_abs_ppm_ = 0.45;
+    double max_slew_ppm_per_s_ = 0.001;
+    int32_t hw_freq_word_ = 0;
+    double commanded_ppm_ = 0.0;
+    bool plant_ready_ = false;
+    std::string state_file_;
+    bool state_write_enabled_ = false;
+    std::atomic<int32_t> last_acknowledged_word_{-1};
+    std::chrono::steady_clock::time_point last_apply_time_{};
+    bool has_apply_time_ = false;
+    bool frequency_control_rebase_pending_ = true;
+    static constexpr size_t OCXO_APPLY_LOG_INTERVAL = 64;
+    size_t apply_log_counter_ = 0;
+
+    static std::string append_checksum(const std::string& payload) {
         char checksum = 0;
         for (char c : payload) {
             checksum ^= c;
         }
-        
-        oss.str("");
-        oss << payload << '*' << std::setw(3) << std::setfill('0') 
-             << static_cast<int>(checksum) << '\n';
-        
-        // Add to send queue
+        std::ostringstream command;
+        command << payload << '*' << std::setw(3) << std::setfill('0')
+                << static_cast<int>(static_cast<unsigned char>(checksum)) << '\n';
+        return command.str();
+    }
+
+    static const char* frequency_state_name(FrequencyStateLoadResult result) {
+        switch (result) {
+            case FrequencyStateLoadResult::Disabled: return "disabled";
+            case FrequencyStateLoadResult::Missing: return "zero_initialized";
+            case FrequencyStateLoadResult::Restored: return "restored";
+            case FrequencyStateLoadResult::Invalid: return "invalid_quarantined";
+        }
+        return "unknown";
+    }
+
+    FrequencyStateLoadResult load_persisted_frequency_word(int32_t& word) const {
+        if (state_file_.empty()) {
+            return FrequencyStateLoadResult::Disabled;
+        }
+        errno = 0;
+        if (::access(state_file_.c_str(), F_OK) != 0) {
+            if (errno == ENOENT) {
+                return FrequencyStateLoadResult::Missing;
+            }
+            LOG_G_WARN_M(Ocxo)
+                << "Cannot inspect OCXO DAC state file " << state_file_
+                << ": " << strerror(errno);
+            return FrequencyStateLoadResult::Invalid;
+        }
+        try {
+            const YAML::Node state = YAML::LoadFile(state_file_);
+            if (!state["version"] || state["version"].as<int>() != 1 ||
+                !state["device"] ||
+                state["device"].as<std::string>() != device_path_ ||
+                !state["word"] || !state["zero_word"] ||
+                !state["ppm_per_lsb"]) {
+                throw std::runtime_error("state metadata mismatch");
+            }
+            const int64_t retained_zero_word = state["zero_word"].as<int64_t>();
+            if (retained_zero_word != zero_word_) {
+                throw std::runtime_error("calibrated zero_word mismatch");
+            }
+            const double retained_ppm_per_lsb =
+                state["ppm_per_lsb"].as<double>();
+            const double gain_tolerance = std::max(
+                1e-15, std::abs(ppm_per_lsb_) * 1e-9);
+            if (!std::isfinite(retained_ppm_per_lsb) ||
+                std::abs(retained_ppm_per_lsb - ppm_per_lsb_) >
+                    gain_tolerance) {
+                throw std::runtime_error("calibrated ppm_per_lsb mismatch");
+            }
+            const int64_t candidate = state["word"].as<int64_t>();
+            if (candidate < 0 || candidate > MAX_DAC_VALUE) {
+                throw std::runtime_error("DAC word is outside the 20-bit range");
+            }
+            const int32_t candidate_word = static_cast<int32_t>(candidate);
+            const double candidate_ppm = word_to_ppm(candidate_word);
+            if (!std::isfinite(candidate_ppm) ||
+                std::abs(candidate_ppm) > max_abs_ppm_ + ppm_per_lsb_) {
+                throw std::runtime_error("DAC word exceeds the configured ppm clamp");
+            }
+            word = candidate_word;
+            return FrequencyStateLoadResult::Restored;
+        } catch (const std::exception& ex) {
+            LOG_G_WARN_M(Ocxo)
+                << "Rejecting invalid OCXO DAC state file " << state_file_
+                << ": " << ex.what();
+            return FrequencyStateLoadResult::Invalid;
+        }
+    }
+
+    bool persist_frequency_word(int32_t word) const {
+        if (state_file_.empty() || !state_write_enabled_) {
+            return false;
+        }
+        YAML::Emitter state;
+        state << YAML::BeginMap
+              << YAML::Key << "version" << YAML::Value << 1
+              << YAML::Key << "device" << YAML::Value << device_path_
+              << YAML::Key << "word" << YAML::Value << word
+              << YAML::Key << "zero_word" << YAML::Value << zero_word_
+              << YAML::Key << "ppm_per_lsb" << YAML::Value << ppm_per_lsb_
+              << YAML::EndMap;
+        const std::string payload = std::string(state.c_str()) + '\n';
+        const std::string temporary =
+            state_file_ + ".tmp." + std::to_string(::getpid());
+        const int temp_fd = ::open(
+            temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (temp_fd < 0) {
+            LOG_G_ERROR_M(Ocxo)
+                << "Failed to open OCXO DAC state temp file " << temporary
+                << ": " << strerror(errno);
+            return false;
+        }
+
+        size_t written_total = 0;
+        bool write_ok = true;
+        int operation_errno = 0;
+        while (written_total < payload.size()) {
+            const ssize_t written = ::write(
+                temp_fd,
+                payload.data() + written_total,
+                payload.size() - written_total);
+            if (written > 0) {
+                written_total += static_cast<size_t>(written);
+            } else if (written < 0 && errno == EINTR) {
+                continue;
+            } else {
+                write_ok = false;
+                operation_errno = errno;
+                break;
+            }
+        }
+        if (write_ok && ::fsync(temp_fd) != 0) {
+            write_ok = false;
+            operation_errno = errno;
+        }
+        if (::close(temp_fd) != 0 && write_ok) {
+            write_ok = false;
+            operation_errno = errno;
+        }
+        if (!write_ok) {
+            LOG_G_ERROR_M(Ocxo)
+                << "Failed to durably write OCXO DAC state temp file "
+                << temporary << ": " << strerror(operation_errno);
+            ::unlink(temporary.c_str());
+            return false;
+        }
+
+        std::error_code rename_error;
+        std::filesystem::rename(temporary, state_file_, rename_error);
+        if (rename_error) {
+            LOG_G_ERROR_M(Ocxo)
+                << "Failed to publish OCXO DAC state file " << state_file_
+                << ": " << rename_error.message();
+            ::unlink(temporary.c_str());
+            return false;
+        }
+
+        std::filesystem::path parent =
+            std::filesystem::path(state_file_).parent_path();
+        if (parent.empty()) {
+            parent = ".";
+        }
+        const int directory_fd = ::open(
+            parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (directory_fd < 0 || ::fsync(directory_fd) != 0) {
+            const int directory_errno = errno;
+            if (directory_fd >= 0) {
+                ::close(directory_fd);
+            }
+            LOG_G_ERROR_M(Ocxo)
+                << "Failed to sync OCXO DAC state directory " << parent.string()
+                << ": " << strerror(directory_errno);
+            return false;
+        }
+        if (::close(directory_fd) != 0) {
+            LOG_G_ERROR_M(Ocxo)
+                << "Failed to close OCXO DAC state directory " << parent.string()
+                << ": " << strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+    // Non-blocking DAC write; coalesces only queued SF commands. AP is retained.
+    void set_frequency_control_word(int32_t control_value) {
+        control_value = std::clamp(control_value, 0, MAX_DAC_VALUE);
+        hw_freq_word_ = control_value;
+        std::ostringstream payload;
+        payload << "SF" << std::setw(7) << std::setfill('0') << control_value;
+        SerialCommand command;
+        command.type = SerialCommandType::Frequency;
+        command.wire = append_checksum(payload.str());
+        command.frequency_word = control_value;
+
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        command_queue_.push(oss.str());
+        command_queue_.erase(
+            std::remove_if(
+                command_queue_.begin(),
+                command_queue_.end(),
+                [](const SerialCommand& queued) {
+                    return queued.type == SerialCommandType::Frequency;
+                }),
+            command_queue_.end());
+        command_queue_.push_back(std::move(command));
         condition_.notify_one();
     }
 
-    /**
-    * Get current frequency control word
-    * @return Current 20-bit DAC control word
-    */
-    int32_t get_frequency_control_word() const {
-        return hw_freq_word;
-    }
-
-    /**
-    * Convert ppm value to DAC control word
-    * 
-    * @param ppm Frequency offset in ppm (parts per million), should be within ±0.4 ppm
-    * @return 20-bit DAC control word
-    */
-    int32_t ppm_to_control_word(double ppm) {
-        double ratio = ppm * 1e-6;
-        double fraction = ratio / (2.0 * FREQ_RANGE);  // Normalize to [-0.5, 0.5]
-        double dac_value = MID_DAC_VALUE + fraction * MAX_DAC_VALUE;
-        int32_t value = static_cast<int32_t>(std::round(dac_value));
-        return std::clamp(value, 0, MAX_DAC_VALUE);
-    }
-
-    /**
-    * Convert relative ppm value to DAC control word change
-    * 
-    * @param ppm Frequency offset in ppm
-    * @return 20-bit DAC control word
-    */
-    int32_t ppm_to_control_word_relative(double delta_ppm) {
-        double ratio = delta_ppm * 1e-6;
-        double fraction = ratio / (2.0 * FREQ_RANGE);  // Normalize to [-0.5, 0.5]
-        double dac_value = fraction * MAX_DAC_VALUE;
-        int32_t value = static_cast<int32_t>(std::round(dac_value));
-        return value;
-    }
-
-    /**
-    * Convert DAC control word to ppm value
-    * 
-    * @param control_word 20-bit DAC control word
-    * @return Frequency offset in ppm
-    */
-    double control_word_to_ppm(int32_t control_word) {
-        int32_t clamped_word = std::clamp(control_word, 0, MAX_DAC_VALUE);
-        double fraction = (static_cast<double>(clamped_word) - MID_DAC_VALUE) / MAX_DAC_VALUE;
-        double ratio = fraction * (2.0 * FREQ_RANGE);
-        return ratio * 1e6;
-    }
-
-    void set_frequency_control_ppm(double ppm) {
-        int32_t control_word = ppm_to_control_word(ppm);
-        set_frequency_control_word(control_word);
-    }
-
-    void configure_ocxo_pi(double kp_fast,
-                           double ki_fast,
-                           double kp_slow,
-                           double ki_slow,
-                           double switch_abs_error_ppm,
-                           double switch_hold_s,
-                           double max_step_fast_ppm,
-                           double max_step_slow_ppm) {
-        ocxo_pi_kp_fast_ = std::max(kp_fast, 0.0);
-        ocxo_pi_ki_fast_ = std::max(ki_fast, 0.0);
-        ocxo_pi_kp_slow_ = std::max(kp_slow, 0.0);
-        ocxo_pi_ki_slow_ = std::max(ki_slow, 0.0);
-        ocxo_pi_switch_abs_error_ppm_ = std::max(switch_abs_error_ppm, 0.0);
-        ocxo_pi_switch_hold_s_ = std::max(switch_hold_s, 0.0);
-        ocxo_pi_max_step_fast_ppm_ = std::max(max_step_fast_ppm, 0.0);
-        ocxo_pi_max_step_slow_ppm_ = std::max(max_step_slow_ppm, 0.0);
-        reset_ocxo_pi_state();
-        LOG_G_INFO_M(Ocxo) << "Configured OCXO PI: Kp_fast=" << ocxo_pi_kp_fast_
-                     << ", Ki_fast=" << ocxo_pi_ki_fast_
-                     << ", Kp_slow=" << ocxo_pi_kp_slow_
-                     << ", Ki_slow=" << ocxo_pi_ki_slow_
-                     << ", switch_abs_error_ppm=" << ocxo_pi_switch_abs_error_ppm_
-                     << ", hold=" << ocxo_pi_switch_hold_s_
-                     << " s, max_step_fast_ppm=" << ocxo_pi_max_step_fast_ppm_
-                     << ", max_step_slow_ppm=" << ocxo_pi_max_step_slow_ppm_;
-    }
-
-    double update_ocxo_pi_with_error_ppm(double error_ppm) {
-        const auto now = std::chrono::steady_clock::now();
-        if (!ocxo_pi_initialized_) {
-            ocxo_pi_initialized_ = true;
-            ocxo_pi_prev_error_ppm_ = error_ppm;
-            ocxo_pi_stable_time_s_ = 0.0;
-            ocxo_pi_last_update_time_ = now;
-            const bool fast_stage = ocxo_pi_fast_mode_;
-            const double kp = fast_stage ? ocxo_pi_kp_fast_ : ocxo_pi_kp_slow_;
-            const double ki = fast_stage ? ocxo_pi_ki_fast_ : ocxo_pi_ki_slow_;
-            LOG_RT_INFO_M(Ocxo) << "OCXO PI initialized (stage="
-                          << (fast_stage ? "fast" : "slow")
-                          << ", Kp=" << kp
-                          << ", Ki=" << ki << ")";
-            return 0.0;
-        }
-
-        double dt = std::chrono::duration<double>(now - ocxo_pi_last_update_time_).count();
-        if (dt < 0.0) {
-            dt = 0.0;
-        }
-
-        if (std::abs(error_ppm) < ocxo_pi_switch_abs_error_ppm_) {
-            ocxo_pi_stable_time_s_ += dt;
-        } else {
-            ocxo_pi_stable_time_s_ = 0.0;
-        }
-
-        if (ocxo_pi_fast_mode_ && ocxo_pi_stable_time_s_ >= ocxo_pi_switch_hold_s_) {
-            ocxo_pi_fast_mode_ = false;
-            LOG_RT_INFO_M(Ocxo) << "OCXO PI switched to slow stage (Kp="
-                          << ocxo_pi_kp_slow_ << ", Ki=" << ocxo_pi_ki_slow_ << ")";
-        }
-
-        const bool fast_stage = ocxo_pi_fast_mode_;
-        const double kp = fast_stage ? ocxo_pi_kp_fast_ : ocxo_pi_kp_slow_;
-        const double ki = fast_stage ? ocxo_pi_ki_fast_ : ocxo_pi_ki_slow_;
-        const double max_step_ppm = fast_stage ? ocxo_pi_max_step_fast_ppm_ : ocxo_pi_max_step_slow_ppm_;
-        double delta_ppm =
-            kp * (error_ppm - ocxo_pi_prev_error_ppm_) + ki * dt * error_ppm;
-        delta_ppm = std::clamp(delta_ppm, -max_step_ppm, max_step_ppm);
-
-        ++ocxo_pi_adjust_log_counter_;
-        if (ocxo_pi_adjust_log_counter_ % OCXO_PI_ADJUST_LOG_INTERVAL == 0) {
-            LOG_RT_INFO_M(Ocxo) << "OCXO PI adjust: error_ppm=" << error_ppm
-                          << ", delta_ppm=" << delta_ppm
-                          << ", stage=" << (fast_stage ? "fast" : "slow")
-                          << ", Kp=" << kp
-                          << ", Ki=" << ki
-                          << ", max_step=" << max_step_ppm
-                          << ", stable=" << ocxo_pi_stable_time_s_ << " s";
-        }
-        set_frequency_control_ppm_relative(delta_ppm);
-        ocxo_pi_prev_error_ppm_ = error_ppm;
-        ocxo_pi_last_update_time_ = now;
-        return delta_ppm;
-    }
-
-    void set_frequency_control_ppm_relative(double delta_ppm, double extra_ppm = 0) {
-        int32_t control_word = ppm_to_control_word_relative(delta_ppm);
-        hw_freq_word += control_word;
-        set_frequency_control_word(hw_freq_word + extra_ppm);
-    }
-
-    void reset_ocxo_pi_state() {
-        ocxo_pi_fast_mode_ = true;
-        ocxo_pi_initialized_ = false;
-        ocxo_pi_prev_error_ppm_ = 0.0;
-        ocxo_pi_stable_time_s_ = 0.0;
-        ocxo_pi_adjust_log_counter_ = 0;
-        ocxo_pi_last_update_time_ = std::chrono::steady_clock::time_point{};
-    }
-
-    void reset_frequency_control() {
-        hw_freq_word = MID_DAC_VALUE;
-        set_frequency_control_word(hw_freq_word);
-    }
-
-private:
-    int serial_fd_;
-    std::thread* worker_thread_;
-    std::atomic<bool> terminate_flag_;
-    
-    // Command queue
-    std::queue<std::string> command_queue_;
-    std::mutex queue_mutex_;
-    std::condition_variable condition_;
-    // Frequency adjustment range ±4.0e-7 (proportional), equivalent to ±0.4 ppm
-    static constexpr double FREQ_RANGE = 4.0e-7;
-
-    // DAC is 20-bit, control word range from 0 to (2^20 - 1)
-    static constexpr int32_t MAX_DAC_VALUE = (1 << 20) - 1;  // 1048575
-    static constexpr int32_t MID_DAC_VALUE = MAX_DAC_VALUE / 2;  // 524288
-    int32_t hw_freq_word = 0;
-
-    // OCXO PI state and parameters.
-    bool ocxo_pi_fast_mode_ = true;
-    bool ocxo_pi_initialized_ = false;
-    double ocxo_pi_prev_error_ppm_ = 0.0;
-    double ocxo_pi_stable_time_s_ = 0.0;
-    std::chrono::steady_clock::time_point ocxo_pi_last_update_time_;
-    double ocxo_pi_kp_fast_ = 30.0;
-    double ocxo_pi_ki_fast_ = 1.0;
-    double ocxo_pi_kp_slow_ = 30.0;
-    double ocxo_pi_ki_slow_ = 0.05;
-    double ocxo_pi_switch_abs_error_ppm_ = 0.0;
-    double ocxo_pi_switch_hold_s_ = 60.0;
-    double ocxo_pi_max_step_fast_ppm_ = 0.01;
-    double ocxo_pi_max_step_slow_ppm_ = 0.01;
-    static constexpr size_t OCXO_PI_ADJUST_LOG_INTERVAL = 256;
-    size_t ocxo_pi_adjust_log_counter_ = 0;
-
-    // Worker thread function - handles serial communication
     void worker_thread_func() {
         async_logger::LoggerThreadModeGuard log_mode_guard(async_logger::LoggerThreadMode::NonRealtime);
         while (!terminate_flag_) {
-            std::string command;
+            SerialCommand command;
             
             // Wait for command in queue
             {
@@ -7523,40 +8250,113 @@ private:
                 
                 if (!command_queue_.empty()) {
                     command = std::move(command_queue_.front());
-                    command_queue_.pop();
+                    command_queue_.pop_front();
+                    if (command.type == SerialCommandType::PpsPhaseAdjust) {
+                        pps_phase_adjust_status_.store(
+                            PpsPhaseAdjustStatus::InFlight,
+                            std::memory_order_release);
+                    }
                 }
             }
             
             // Send command and handle response
-            if (!command.empty()) {
-                send_command_and_handle_response(command);
+            if (!command.wire.empty()) {
+                const auto transaction_deadline =
+                    command.type == SerialCommandType::PpsPhaseAdjust
+                        ? command.deadline
+                        : std::chrono::steady_clock::now() +
+                            std::chrono::seconds(1);
+                const SendCommandResult result =
+                    send_command_and_handle_response(
+                        command.wire, transaction_deadline);
+                if (command.type == SerialCommandType::PpsPhaseAdjust) {
+                    constexpr size_t kMaxJamSyncRetries = 8;
+                    const bool retry_has_time =
+                        std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(250) < command.deadline;
+                    const bool retry_command =
+                        result == SendCommandResult::Retryable &&
+                        command.retry_count < kMaxJamSyncRetries &&
+                        retry_has_time;
+                    if (result == SendCommandResult::Retryable &&
+                        !retry_command) {
+                        LOG_G_ERROR_M(Ocxo)
+                            << "PPS AP JAMSYNCING retry budget exhausted; "
+                               "marking transaction failed";
+                    }
+                    if (retry_command) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    }
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    if (pps_phase_rearm_pending_) {
+                        pps_phase_rearm_pending_ = false;
+                        pps_phase_adjust_status_.store(
+                            PpsPhaseAdjustStatus::Idle,
+                            std::memory_order_release);
+                    } else if (retry_command) {
+                        ++command.retry_count;
+                        const size_t retry_attempt = command.retry_count;
+                        pps_phase_adjust_status_.store(
+                            PpsPhaseAdjustStatus::Queued,
+                            std::memory_order_release);
+                        command_queue_.push_front(std::move(command));
+                        condition_.notify_one();
+                        LOG_G_WARN_M(Ocxo)
+                            << "PPS AP returned JAMSYNCING; retrying same command"
+                            << " (attempt=" << retry_attempt << ')';
+                    } else {
+                        pps_phase_adjust_status_.store(
+                            result == SendCommandResult::Succeeded
+                                ? PpsPhaseAdjustStatus::Succeeded
+                                : PpsPhaseAdjustStatus::Failed,
+                            std::memory_order_release);
+                    }
+                } else {
+                    if (result == SendCommandResult::Succeeded &&
+                        command.frequency_word >= 0) {
+                        last_acknowledged_word_.store(
+                            command.frequency_word, std::memory_order_release);
+                        persist_frequency_word(command.frequency_word);
+                    } else if (result == SendCommandResult::Retryable) {
+                        LOG_G_ERROR_M(Config)
+                            << "Unexpected JAMSYNCING response for SF command";
+                    }
+                }
             }
         }
     }
 
     // Send command and handle response (executed in background thread)
-    void send_command_and_handle_response(const std::string& command) {
+    SendCommandResult send_command_and_handle_response(
+        const std::string& command,
+        std::chrono::steady_clock::time_point transaction_deadline) {
+        if (std::chrono::steady_clock::now() >= transaction_deadline) {
+            LOG_G_ERROR_M(Config)
+                << "ERROR: Serial transaction deadline expired before send";
+            return SendCommandResult::Failed;
+        }
         // 1. Send command (with retry)
         ssize_t bytes_written = 0;
-        int retry_count = 0;
         const char* data = command.c_str();
         size_t remaining = command.size();
-        
-        while (remaining > 0 && retry_count < 3) {
+        const auto write_deadline = std::min(
+            transaction_deadline,
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+
+        while (remaining > 0 &&
+               std::chrono::steady_clock::now() < write_deadline) {
             ssize_t result = write(serial_fd_, data + bytes_written, remaining);
             
             if (result > 0) {
                 bytes_written += result;
                 remaining -= result;
             } else if (result == 0) {
-                // Write timeout? Retry later
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                retry_count++;
             } else {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     LOG_G_ERROR_M(Config) << "ERROR: Serial write error: " << strerror(errno)
                                   << " [command: " << command << "]";
-                    return;
+                    return SendCommandResult::Failed;
                 }
                 // Wait for buffer availability
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -7564,22 +8364,23 @@ private:
         }
         
         if (remaining > 0) {
-            LOG_G_ERROR_M(Config) << "ERROR: Failed to send full command after 3 attempts: "
+            LOG_G_ERROR_M(Config) << "ERROR: Failed to send full command before deadline: "
                           << command;
-            return;
+            return SendCommandResult::Failed;
         }
         
         // 2. Wait for response
         char response[32] = {0};
         int total_read = 0;
-        auto start_time = std::chrono::steady_clock::now();
+        const auto response_deadline = std::min(
+            transaction_deadline,
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(500));
         
         while (true) {
-            // Timeout check (500ms)
-            if (std::chrono::steady_clock::now() - start_time > std::chrono::milliseconds(500)) {
+            if (std::chrono::steady_clock::now() >= response_deadline) {
                 LOG_G_ERROR_M(Config) << "ERROR: Response timeout for command: " << command;
                 tcflush(serial_fd_, TCIFLUSH);
-                return;
+                return SendCommandResult::Failed;
             }
             
             // Attempt to read response
@@ -7598,7 +8399,7 @@ private:
             } else {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     LOG_G_ERROR_M(Config) << "ERROR: Serial read error: " << strerror(errno);
-                    return;
+                    return SendCommandResult::Failed;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
@@ -7606,7 +8407,10 @@ private:
         
         // 3. Handle response
         if (strncmp(response, "OK", 2) == 0) {
-            // Success response - silent handling
+            return SendCommandResult::Succeeded;
+        }
+        else if (strncmp(response, "JAMSYNCING", 10) == 0) {
+            return SendCommandResult::Retryable;
         } 
         else if (strncmp(response, "BAD DATA", 8) == 0) {
             LOG_G_ERROR_M(Config) << "ERROR: Device rejected command - BAD DATA: " << command;
@@ -7621,6 +8425,7 @@ private:
             LOG_G_ERROR_M(Config) << "ERROR: Unexpected device response: " << response
                           << " for command: " << command;
         }
+        return SendCommandResult::Failed;
     }
 };
 

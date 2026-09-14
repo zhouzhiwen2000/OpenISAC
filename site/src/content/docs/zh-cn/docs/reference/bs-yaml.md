@@ -63,6 +63,19 @@ description: BS 运行配置参数、取值和作用说明。
 | `clock_time.clock_source` | `string` | `external` | 全局时钟源：`internal`、`external` 或 `gpsdo`。 |
 | `clock_time.time_source` | `string` | `internal` | 全局时间/PPS 源；空字符串表示跟随 `clock_source`。 |
 
+只要 BS 解析后的 `clock_source` 非空，CPU、CUDA 和 HIP BS 就会在启动的
+非实时阶段先观察一次 PPS 跳变，再对 TX USRP 以及所有独立的 sensing/uplink
+RX USRP 同时武装 `set_time_next_pps(0)`。单台物理 USRP 使用
+`time_source: internal` 时也会执行该路径；`time_source` 只选择 PPS 输入，不再决定
+是否执行启动对齐。当解析后的目标包含多台独立 USRP 时，每台都必须使用
+`time_source: external` 或 `gpsdo` 以共享同一 PPS 时间基准，否则会在武装任何设备前
+拒绝启动。只有全部设备都观察到目标
+边沿使 device time 计数器回跳、报告 `time_last_pps=0`，且各设备 `time_now`
+处于一致时间轴后才开始开流；PPS 缺失、backend 不支持或验证失败都会中止启动，
+不再回退到任意软件时刻的 `set_time_now(0)`。对 `gpsdo`，该操作会有意用零点
+替换原有的类 UTC device-time epoch。该步骤消除软件时间原点偏移，但不会消除
+X310 PPS 捕获本身的量化（200 MHz master clock 下为 5 ns）。
+
 ### `ofdm_frame`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
@@ -84,6 +97,7 @@ description: BS 运行配置参数、取值和作用说明。
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
+| `cuda.cuda_precision_profile` | `string` | `fp32` | `fp32` 完全保留现有路径；`mixed_fp16` 对批量 OFDM FFT/IFFT 的存储和计算使用 FP16，感知、信道估计、跟踪、均衡及敏感归约仍使用 FP32。不支持的 FP16 FFT 形状会自动回退 FP32。 |
 | `cuda.cuda_mod_pipeline_slots` | `int` | `3` | CUDA 调制流水线 slot 数，小于 `1` 会钳制。 |
 
 ### `ldpc`
@@ -104,17 +118,12 @@ description: BS 运行配置参数、取值和作用说明。
 | `downlink.tx_clock_source` | `string` | `""` | TX 时钟源覆盖。 |
 | `downlink.tx_time_source` | `string` | `""` | TX 时间源覆盖。 |
 | `downlink.wire_format_tx` | `string` | `sc16` | UHD 发送样本格式，常用 `sc16` 或 `sc8`。 |
+| `downlink.tx_circular_buffer_size` | `int` | `32` | 送入 TX 的已调制帧队列容量。 |
+| `downlink.data_packet_buffer_size` | `int` | `256` | 已编码数据包缓冲区容量。 |
 | `downlink.arq_enabled` | `bool` | `false` | 在 BS 发射端开启下行 ARQ。 |
 | `downlink.arq_window_packets` | `int` | `256` | 下行 ARQ 最多允许的未确认数据包数；有效范围为 `1`–`32767`。 |
 | `downlink.arq_retransmit_timeout_ms` | `int` / ms | `100` | 下行 ARQ 重传超时。 |
 | `downlink.arq_max_retries` | `int` | `5` | 下行最大重传次数；`0` 表示窗口内不限次数。 |
-
-### `downlink_pipeline`
-
-| 参数 | 类型/单位 | 典型值 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `downlink_pipeline.tx_circular_buffer_size` | `int` | `8` | 送入 TX 的已调制帧队列容量。 |
-| `downlink_pipeline.data_packet_buffer_size` | `int` | `256` | 已编码数据包缓冲区容量。 |
 
 ### `uplink`
 
@@ -129,7 +138,7 @@ description: BS 运行配置参数、取值和作用说明。
 | `uplink.bs_dl_ul_timing_diff` | `int` / samples | `50` | BS 上行 RX 窗口相对下行 TX 帧锚点的偏移。 |
 | `uplink.debug_self_channel` | `bool` | `false` | 从上行接收窗口估计本机发送泄漏信道，用于 `DUTI` 调试。 |
 | `uplink.ertm_to_enable` | `bool` | `false` | 开启 eRTM 时偏测量负载和 UE 侧 TO 日志。 |
-| `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS 每隔多少个下行发送帧生成一次 eRTM 报告。 |
+| `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS 每隔多少个下行发送帧生成一次 eRTM 报告；每份报告同时刷新 BS PPS anchor。 |
 | `uplink.rx_gain` | `float` / dB | `0` | BS 上行 RX 增益。 |
 | `uplink.rx_channel` | `int` | `0` | BS 上行 RX 通道索引。 |
 | `uplink.rx_wire_format` | `string` | `sc16` | BS 上行接收的 UHD 样本格式。 |

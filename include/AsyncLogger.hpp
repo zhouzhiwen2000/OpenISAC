@@ -45,6 +45,10 @@ enum class LoggerThreadMode : uint8_t {
  * @brief Hierarchical log modules (compile-time IDs for RT-safe filtering).
  *
  * Paths use dotted notation, e.g. demod.ldpc.detail. Unlisted call sites use Root.
+ *
+ * Enum numeric values are NOT a stable ABI: inserting a module mid-list shifts
+ * later members. Persist / configure only string keys (e.g. "air_frame") via
+ * kModuleTable — never store bare LogModule integers.
  */
 enum class LogModule : uint16_t {
     Root = 0,
@@ -67,6 +71,7 @@ enum class LogModule : uint16_t {
     ModLdpcProfiling,    // mod_ldpc_profiling — LDPC encode timing
     UlRx,
     UlTx,
+    AirFrame,            // air_frame — absolute air-frame timeline / Identity SIB
     Arq,
     ArqDl,
     ArqUl,
@@ -215,21 +220,23 @@ public:
 
 class LogLine {
 public:
-    LogLine(LoggerPath path, LogLevel level, LogModule mod, uint32_t callsite_id, int hz_override = 0)
+    LogLine(LoggerPath path, LogLevel level, LogModule mod, uint32_t callsite_id,
+            int hz_override = 0, bool bypass_filters = false)
         : _path(path),
           _level(level),
           _mod(mod),
           _callsite_id(callsite_id)
     {
         auto& logger = AsyncLogger::instance();
-        if (!logger.should_log(_mod, _level)) {
+        if (!bypass_filters && !logger.should_log(_mod, _level)) {
             _enabled = false;
             logger.note_filtered();
             return;
         }
 
         if (_path == LoggerPath::Realtime) {
-            _enabled = logger.should_emit_realtime(_level, _callsite_id, hz_override, _suppressed_count);
+            _enabled = bypass_filters || logger.should_emit_realtime(
+                _level, _callsite_id, hz_override, _suppressed_count);
             return;
         }
 
@@ -320,6 +327,11 @@ private:
 #define LOG_RT_INFO_M(mod)  LOG_RT_M(mod, ::async_logger::LogLevel::Info)
 #define LOG_RT_WARN_M(mod)  LOG_RT_M(mod, ::async_logger::LogLevel::Warn)
 #define LOG_RT_ERROR_M(mod) LOG_RT_M(mod, ::async_logger::LogLevel::Error)
+// Bypasses module filtering and realtime callsite rate limiting. Keep this for
+// explicitly enabled, low-rate operational status such as calibration output.
+#define LOG_RT_INFO_UNGATED_M(mod) \
+    ::async_logger::LogLine(::async_logger::LoggerPath::Realtime, ::async_logger::LogLevel::Info, \
+                            ::async_logger::LogModule::mod, ASYNC_LOG_CALLSITE_ID, 0, true)
 #define LOG_RT_WARN_HZ_M(mod, hz) \
     ::async_logger::LogLine(::async_logger::LoggerPath::Realtime, ::async_logger::LogLevel::Warn, \
                             ::async_logger::LogModule::mod, ASYNC_LOG_CALLSITE_ID, (hz))

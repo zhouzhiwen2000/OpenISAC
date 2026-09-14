@@ -94,6 +94,7 @@ constexpr LogModuleInfo kModuleTable[] = {
     {LogModule::ModLdpcProfiling, LogModule::ModLdpc, "mod_ldpc_profiling", "LDPC encode timing (perf)"},
     {LogModule::UlRx, LogModule::Root, "ul_rx", "Uplink RX (debug)"},
     {LogModule::UlTx, LogModule::Root, "ul_tx", "Uplink TX (debug)"},
+    {LogModule::AirFrame, LogModule::Root, "air_frame", "Air-frame timeline / Identity SIB"},
     {LogModule::Arq, LogModule::Root, "arq", "ARQ (debug)"},
     {LogModule::ArqDl, LogModule::Arq, "arq.dl", "Downlink ARQ (debug)"},
     {LogModule::ArqUl, LogModule::Arq, "arq.ul", "Uplink ARQ (debug)"},

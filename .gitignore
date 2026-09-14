@@ -6,6 +6,9 @@ _*
 !docs/_astro/
 !docs/_astro/**
 /.claude
+/.codex
+/.hermes
+/RTK.md
 
 measurement/
 .vscode/
@@ -15,4 +18,6 @@ __pycache__/
 site/node_modules/
 site/.astro/
 site/dist/
+**/.openisac_ocxo_dac_state.yaml
+**/.openisac_ocxo_dac_state.yaml.tmp*
 .omx/

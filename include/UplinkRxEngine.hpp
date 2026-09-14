@@ -37,6 +37,7 @@
 #include "Common.hpp"
 #include "OFDMCore.hpp"
 #include "LDPCCodec.hpp"
+#include "TimedStreamRestart.hpp"
 
 class UplinkRxEngine {
 private:
@@ -46,6 +47,8 @@ private:
         AlignedVector samples;
         uint64_t generation = 0;
         uint64_t frame_index = 0;
+        int32_t applied_duti_samples = 0; ///< DUTI actually applied for this RX window
+        AirFrameIdentity identity; ///< Absolute air-frame index (same timeline as BS TX)
     };
 
     struct ReadResult {
@@ -53,11 +56,15 @@ private:
         bool metadata_error = false;
     };
 
+    /// Sidecar carried with LLRs so decode can publish a MATCH-gated eRTM snapshot.
     struct UplinkLlrFrame {
         LDPCCodec::AlignedFloatVector llr;
         uint64_t frame_index = 0;
         uint64_t generation = 0;
         double noise_var = 0.0;
+        int32_t applied_duti_samples = 0;
+        AlignedVector channel_freq;
+        AirFrameIdentity identity;
     };
 
     // int16 (Q16) variant used when _link_cfg.ldpc.fixed_point is set.
@@ -66,6 +73,9 @@ private:
         uint64_t frame_index = 0;
         uint64_t generation = 0;
         double noise_var = 0.0;
+        int32_t applied_duti_samples = 0;
+        AlignedVector channel_freq;
+        AirFrameIdentity identity;
     };
 
     static LDPCCodec::LDPCConfig _ldpc_cfg(const Config& c) {
@@ -136,12 +146,14 @@ public:
             _llr_queue_i16.reset(8, [this]() {
                 UplinkLlrFrameI16 frame;
                 frame.llr.resize(_layout.payload_re_count * 2);
+                frame.channel_freq.resize(_cfg.ofdm.fft_size);
                 return frame;
             });
         } else {
             _llr_queue.reset(8, [this]() {
                 UplinkLlrFrame frame;
                 frame.llr.resize(_layout.payload_re_count * 2);
+                frame.channel_freq.resize(_cfg.ofdm.fft_size);
                 return frame;
             });
         }
@@ -191,16 +203,39 @@ public:
         _arq_payload_intercept = std::move(fn);
     }
 
-    void request_reacquire(const radio::TimeSpec& start_time) {
+    /**
+     * @brief Request a timed RX restart anchored to @p start_time.
+     *
+     * There is intentionally no single-argument @c request_reacquire(start_time)
+     * overload: sampling a live TX cursor for @p stream_base_frame races with
+     * buffered timed frames and permanently biases @c frame_index high.
+     *
+     * @param start_time  New stream anchor (same ticks as the BS TX restart).
+     * @param stream_base_frame  Absolute air-frame index of that anchor (the
+     *        restart seq computed with the anchor ticks, not live next-tx).
+     */
+    uint64_t request_reacquire(
+        const radio::TimeSpec& start_time,
+        uint64_t stream_base_frame)
+    {
+        const uint64_t request_id = _restart_ack.begin_request();
         {
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = start_time;
-            _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
+            _pending_restart_base_frame_index = stream_base_frame;
+            _pending_restart_request_id = request_id;
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_G_WARN_M(UlRx) << "[UL-RX] requested shared restart at "
                      << start_time.get_real_secs()
-                     << " s, aligned to BS TX restart";
+                     << " s, base_frame=" << stream_base_frame
+                     << ", request_id=" << request_id
+                     << ", aligned to BS TX restart";
+        return request_id;
+    }
+
+    TimedStreamRestartStatus reacquire_status(uint64_t request_id) const noexcept {
+        return _restart_ack.status(request_id);
     }
 
     void request_reacquire() {
@@ -208,6 +243,7 @@ public:
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = radio::TimeSpec(0.0);
             _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
+            _pending_restart_request_id = 0;
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_G_WARN_M(UlRx) << "[UL-RX] requested restart without timed anchor";
@@ -216,6 +252,7 @@ public:
     // Provider for the BS TX frame index, used by the duplex-invariant health log
     // to compare the BS TX frame anchor against the uplink-RX frame index.
     void set_bs_frame_provider(std::function<uint64_t()> fn) { _bs_frame_fn = std::move(fn); }
+    void set_bs_epoch_provider(std::function<uint64_t()> fn) { _bs_epoch_fn = std::move(fn); }
 
     void set_debug_sinks(
         DebugVectorCallback channel_sink,
@@ -231,16 +268,46 @@ public:
         _self_delay_debug_sink = std::move(self_delay_sink);
     }
 
-    void set_latest_delay_spectrum_sink(DebugVectorCallback sink) {
-        _latest_delay_spectrum_sink = std::move(sink);
-    }
-
+    /**
+     * @brief Legacy channel-only sink (debug / CUDA compatibility).
+     * Prefer @c set_ertm_ul_measurement_sink for absolute-frame eRTM.
+     */
     void set_latest_channel_estimate_sink(DebugVectorCallback sink) {
         _latest_channel_estimate_sink = std::move(sink);
     }
 
-    void start(const radio::TimeSpec& start_time = radio::TimeSpec(0.0)) {
+    /**
+     * @brief Publish a full UL measurement only after Identity SIB MATCH.
+     *
+     * Callback receives (timeline_epoch32, frame_seq, ul_rx_generation,
+     * applied_duti_samples, channel_freq). Single-writer decode thread.
+     */
+    using ErtmMeasurementCallback = std::function<void(
+        uint32_t timeline_epoch,
+        uint64_t frame_seq,
+        uint64_t ul_rx_generation,
+        int32_t applied_duti_samples,
+        const AlignedVector& channel_freq)>;
+
+    void set_ertm_ul_measurement_sink(ErtmMeasurementCallback sink) {
+        _ertm_ul_measurement_sink = std::move(sink);
+    }
+
+    /**
+     * @brief Start UL-RX ingest/signal/decode threads.
+     *
+     * @param start_time  Timed stream anchor shared with BS TX (or 0 for immediate).
+     * @param stream_base_frame  Absolute air-frame index of @p start_time. Must be
+     *        the reanchored seq (0 at cold start), not a live TX cursor: the TX
+     *        thread may already have advanced past the stream start before this
+     *        thread samples @_bs_frame_fn, which permanently biases frame_index.
+     */
+    void start(
+        const radio::TimeSpec& start_time = radio::TimeSpec(0.0),
+        uint64_t stream_base_frame = 0)
+    {
         if (!_rx_stream) throw std::runtime_error("UplinkRxEngine::start without an RX stream.");
+        _initial_stream_base_frame = stream_base_frame;
         _running.store(true);
         _rx_thread = std::thread(&UplinkRxEngine::_rx_ingest_proc, this, start_time);
         _signal_thread = std::thread(&UplinkRxEngine::_signal_proc, this);
@@ -355,46 +422,31 @@ public:
                    std::chrono::high_resolution_clock::now().time_since_epoch()).count();
     }
 
-    // Read exactly `count` samples from the RX stream into out (blocking).
-    // If `first_idx` is non-null, it receives the RX sample offset of the first
-    // returned sample relative to stream_start_time.
-    ReadResult _read_exact(
+    // Request one complete frame-sized block from UHD. UHD assembles transport
+    // packets internally; a short return remains short and is never stitched to
+    // a later call, which could cross an overflow or frame boundary.
+    ReadResult _recv_once(
         std::complex<float>* out,
         size_t count,
         int64_t* first_idx = nullptr,
         const radio::TimeSpec* stream_start_time = nullptr)
     {
-        size_t got = 0;
         radio::RxMetadata md;
-        bool got_idx = false;
         bool metadata_error = false;
         if (first_idx) {
             *first_idx = std::numeric_limits<int64_t>::min();
         }
-        while (got < count && _running.load(std::memory_order_relaxed)) {
-            const size_t n = _rx_stream->recv(out + got, count - got, md, 1.0, false);
-            if (md.error_code != radio::RxError::None &&
-                md.error_code != radio::RxError::Timeout) {
-                _rx_error_count.fetch_add(1, std::memory_order_relaxed);
-                LOG_RT_WARN_M(UlRx) << "[UL-RX] RX metadata error: " << md.strerror();
-                // Match the sensing RX behavior: never stitch samples across an
-                // overflow/metadata gap into one frame. Drop any partial read and
-                // let the next successful metadata timestamp drive realignment.
-                metadata_error = true;
-                got = 0;
-                got_idx = false;
-                if (first_idx) {
-                    *first_idx = std::numeric_limits<int64_t>::min();
-                }
-                continue;
-            }
-            if (first_idx && !got_idx && n > 0 && md.has_time_spec) {
-                *first_idx = stream_start_time
-                    ? _elapsed_rx_samples_from_time(md.time_spec, *stream_start_time)
-                    : md.time_spec.to_ticks(_rx_sample_rate);
-                got_idx = true;
-            }
-            got += n;
+        const size_t got = _rx_stream->recv(out, count, md, 1.0, false);
+        if (md.error_code != radio::RxError::None &&
+            md.error_code != radio::RxError::Timeout) {
+            _rx_error_count.fetch_add(1, std::memory_order_relaxed);
+            LOG_RT_WARN_M(UlRx) << "[UL-RX] RX metadata error: " << md.strerror();
+            metadata_error = true;
+        }
+        if (first_idx && got > 0 && md.has_time_spec) {
+            *first_idx = stream_start_time
+                ? _elapsed_rx_samples_from_time(md.time_spec, *stream_start_time)
+                : md.time_spec.to_ticks(_rx_sample_rate);
         }
         return {got, metadata_error};
     }
@@ -499,6 +551,7 @@ public:
             std::lock_guard<std::mutex> lock(_restart_mutex);
             _pending_restart_time = start_time;
             _pending_restart_base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
+            _pending_restart_request_id = 0;
         }
         _restart_requested.store(true, std::memory_order_release);
         LOG_RT_WARN_M(UlRx) << "[UL-RX] requested restart after " << reason
@@ -529,7 +582,7 @@ public:
 
         AlignedVector temp_buf(total_read);
         int64_t raw_first_idx = std::numeric_limits<int64_t>::min();
-        const ReadResult read = _read_exact(
+        const ReadResult read = _recv_once(
             temp_buf.data(), total_read, &raw_first_idx, &stream_start_time);
         if (read.samples != total_read || read.metadata_error ||
             !_running.load(std::memory_order_relaxed)) {
@@ -583,11 +636,13 @@ public:
             _rx_stream->issue_stream_cmd(cmd);
         };
         auto issue_stop = [&]() {
-            if (!_rx_stream) return;
+            if (!_rx_stream) return false;
             try {
                 _rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
+                return true;
             } catch (const std::exception& e) {
                 LOG_RT_WARN_M(UlRx) << "[UL-RX] failed to stop RX stream before restart: " << e.what();
+                return false;
             }
         };
 
@@ -595,13 +650,18 @@ public:
         auto discard = [&](int64_t n) {
             if (n <= 0) return;
             skip_buf.resize(static_cast<size_t>(n));
-            _read_exact(skip_buf.data(), static_cast<size_t>(n), nullptr, &start_time);
+            _recv_once(skip_buf.data(), static_cast<size_t>(n), nullptr, &start_time);
         };
 
-        uint64_t base_frame_index = _bs_frame_fn ? _bs_frame_fn() : 0;
+        // Freeze the stream-anchor seq at start() / reacquire — never re-sample
+        // the live TX cursor here (it advances as soon as timed frames are
+        // buffered, long before air time).
+        uint64_t base_frame_index = _initial_stream_base_frame;
         uint64_t fallback_frame_offset = 0;
-        auto start_stream_and_align = [&](const char* reason, uint64_t frame_base) {
+        auto start_stream_and_align = [&]
+            (const char* reason, uint64_t frame_base, uint64_t request_id) {
             issue_start(start_time);
+            _restart_ack.mark_armed(request_id);
             const uint64_t generation =
                 _stream_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
             const int64_t diff = _normalize_frame_offset(
@@ -622,20 +682,35 @@ public:
             }
             radio::TimeSpec restart_time(0.0);
             uint64_t restart_base_frame = 0;
+            uint64_t restart_request_id = 0;
             {
                 std::lock_guard<std::mutex> lock(_restart_mutex);
                 restart_time = _pending_restart_time;
                 restart_base_frame = _pending_restart_base_frame_index;
+                restart_request_id = _pending_restart_request_id;
                 _pending_restart_time = radio::TimeSpec(0.0);
+                _pending_restart_request_id = 0;
             }
-            issue_stop();
+            if (!issue_stop()) {
+                _restart_ack.mark_failed(restart_request_id);
+                return true;
+            }
             start_time = restart_time;
-            applied_diff = start_stream_and_align("restart", restart_base_frame);
+            try {
+                applied_diff = start_stream_and_align(
+                    "restart", restart_base_frame, restart_request_id);
+            } catch (const std::exception& e) {
+                _restart_ack.mark_failed(restart_request_id);
+                LOG_RT_WARN_M(UlRx)
+                    << "[UL-RX] failed to arm timed restart request "
+                    << restart_request_id << ": " << e.what();
+            }
             return true;
         };
 
         // Deterministic frame anchoring — NO uplink-ZC correlation search.
-        int64_t applied_diff = start_stream_and_align("initial start", base_frame_index);
+        int64_t applied_diff = start_stream_and_align(
+            "initial start", base_frame_index, 0);
         int64_t pending_boundary_correction = 0;
 
         while (_running.load(std::memory_order_relaxed)) {
@@ -697,19 +772,20 @@ public:
                     continue;
                 }
             } else {
-                read = _read_exact(
+                read = _recv_once(
                     frame->samples.data(),
                     _period_samples,
                     &first_sample_idx,
                     &start_time);
             }
-            if (read.samples != _period_samples ||
+            if (read.samples != _period_samples || read.metadata_error ||
                 _restart_requested.load(std::memory_order_acquire)) {
                 if (read.samples > 0 && _running.load(std::memory_order_relaxed)) {
                     LOG_RT_WARN_HZ_M(UlRx, 5)
                         << "[UL-RX] dropping incomplete or restart-interrupted RX frame"
                         << ": received_samples=" << read.samples
                         << ", expected_samples=" << _period_samples
+                        << ", metadata_error=" << read.metadata_error
                         << ", restart_requested="
                         << _restart_requested.load(std::memory_order_relaxed);
                 }
@@ -755,6 +831,22 @@ public:
                 }
                 frame->frame_index = base_frame_index + fallback_frame_offset++;
             }
+            frame->identity.clear();
+            frame->identity.frame_seq = frame->frame_index;
+            frame->identity.frame_start_symbol =
+                (_link_cfg.ofdm.num_symbols == 0)
+                    ? 0
+                    : (frame->frame_index *
+                       static_cast<uint64_t>(_link_cfg.ofdm.num_symbols));
+            frame->identity.timeline_epoch = _bs_epoch_fn ? _bs_epoch_fn() : 0;
+            frame->identity.valid = true;
+            // Record the DUTI that governed this window, not the control target
+            // that may change before decode / eRTM inject.
+            frame->applied_duti_samples = static_cast<int32_t>(
+                std::clamp<int64_t>(
+                    applied_diff,
+                    static_cast<int64_t>(std::numeric_limits<int32_t>::min()),
+                    static_cast<int64_t>(std::numeric_limits<int32_t>::max())));
             frame->generation = frame_generation;
             _rx_frame_queue.producer_commit();
         }
@@ -776,7 +868,12 @@ public:
             backoff.reset();
             const uint64_t generation = frame->generation;
             if (generation == _stream_generation.load(std::memory_order_acquire)) {
-                _process_frame(frame->samples, generation, frame->frame_index);
+                _process_frame(
+                    frame->samples,
+                    generation,
+                    frame->frame_index,
+                    frame->applied_duti_samples,
+                    frame->identity);
             } else {
                 LOG_RT_WARN_HZ_M(UlRx, 5)
                     << "[UL-RX] dropping stale signal-processing frame"
@@ -802,7 +899,13 @@ public:
                 }
                 backoff.reset();
                 if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
-                    _decode_llr_stream(frame->llr, _deint_scratch_i16, _payload_llr_scratch_i16);
+                    _decode_llr_stream(
+                        frame->llr, _deint_scratch_i16, _payload_llr_scratch_i16,
+                        frame->frame_index,
+                        frame->generation,
+                        frame->applied_duti_samples,
+                        frame->channel_freq,
+                        frame->identity);
                 } else {
                     LOG_RT_WARN_HZ_M(UlRx, 5)
                         << "[UL-RX] dropping stale fixed-point LLR frame"
@@ -821,7 +924,13 @@ public:
                 }
                 backoff.reset();
                 if (frame->generation == _stream_generation.load(std::memory_order_acquire)) {
-                    _decode_llr_stream(frame->llr, _deint_scratch, _payload_llr_scratch);
+                    _decode_llr_stream(
+                        frame->llr, _deint_scratch, _payload_llr_scratch,
+                        frame->frame_index,
+                        frame->generation,
+                        frame->applied_duti_samples,
+                        frame->channel_freq,
+                        frame->identity);
                 } else {
                     LOG_RT_WARN_HZ_M(UlRx, 5)
                         << "[UL-RX] dropping stale floating-point LLR frame"
@@ -834,7 +943,12 @@ public:
         }
     }
 
-    void _process_frame(const AlignedVector& frame, uint64_t generation, uint64_t frame_index) {
+    void _process_frame(
+        const AlignedVector& frame,
+        uint64_t generation,
+        uint64_t frame_index,
+        int32_t applied_duti_samples,
+        const AirFrameIdentity& identity = {}) {
         const std::complex<float>* win = frame.data() + _window_offset;
         const size_t sym_len = _cfg.ofdm.fft_size + _cfg.ofdm.cp_length;
 
@@ -946,6 +1060,20 @@ public:
             llr_frame->frame_index = frame_index;
             llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
+            llr_frame->applied_duti_samples = applied_duti_samples;
+            if (llr_frame->channel_freq.size() != _h_est.size()) {
+                llr_frame->channel_freq.resize(_h_est.size());
+            }
+            std::copy(_h_est.begin(), _h_est.end(), llr_frame->channel_freq.begin());
+            llr_frame->identity = identity.valid ? identity : AirFrameIdentity{};
+            if (!llr_frame->identity.valid) {
+                llr_frame->identity.frame_seq = frame_index;
+                llr_frame->identity.frame_start_symbol =
+                    (_link_cfg.ofdm.num_symbols == 0)
+                        ? 0
+                        : (frame_index * static_cast<uint64_t>(_link_cfg.ofdm.num_symbols));
+                llr_frame->identity.valid = true;
+            }
             llr_frame->llr.resize(_layout.payload_re_count * 2);
             int16_t* __restrict__ llr = llr_frame->llr.data();
             for (size_t s = 0; s < _data_symbols.size(); ++s) {
@@ -974,6 +1102,20 @@ public:
             llr_frame->frame_index = frame_index;
             llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
+            llr_frame->applied_duti_samples = applied_duti_samples;
+            if (llr_frame->channel_freq.size() != _h_est.size()) {
+                llr_frame->channel_freq.resize(_h_est.size());
+            }
+            std::copy(_h_est.begin(), _h_est.end(), llr_frame->channel_freq.begin());
+            llr_frame->identity = identity.valid ? identity : AirFrameIdentity{};
+            if (!llr_frame->identity.valid) {
+                llr_frame->identity.frame_seq = frame_index;
+                llr_frame->identity.frame_start_symbol =
+                    (_link_cfg.ofdm.num_symbols == 0)
+                        ? 0
+                        : (frame_index * static_cast<uint64_t>(_link_cfg.ofdm.num_symbols));
+                llr_frame->identity.valid = true;
+            }
             llr_frame->llr.resize(_layout.payload_re_count * 2);
             float* __restrict__ llr = llr_frame->llr.data();
             for (size_t s = 0; s < _data_symbols.size(); ++s) {
@@ -988,6 +1130,9 @@ public:
                 }
             }
             _llr_queue.producer_commit();
+        } else if (_ertm_ul_measurement_sink || _latest_channel_estimate_sink) {
+            // No payload REs: still allow MATCH-independent debug publish only.
+            // eRTM measurement requires Identity SIB decode and is skipped here.
         }
 
         _update_self_channel_debug(frame);
@@ -1011,9 +1156,133 @@ public:
     // Parse LdpcPacketFraming packets out of the frame LLR stream and decode.
     // Templated on the LLR sample type so the float and int16 (Q16) paths share
     // one body; decode_frame() is overload-resolved by the payload vector type.
+    /**
+     * @brief Compare UE-modulated UL Identity SIB against BS metadata frame index.
+     * Closed-loop check that the air-frame timeline is consistent end-to-end.
+     * @return true only on exact (epoch, seq) MATCH suitable for eRTM publish.
+     */
+    bool _double_check_ul_identity(
+        const LdpcMiniHeader& ul_id,
+        uint64_t air_frame_index,
+        const AirFrameIdentity& air_identity)
+    {
+        const uint32_t ul_epoch = ul_id.timeline_epoch;
+        const uint32_t ul_seq = ul_id.air_frame_seq;
+        const uint32_t expected_seq = AirFrameClock::ota_frame_seq32(
+            air_identity.valid ? air_identity.frame_seq : air_frame_index);
+        const uint32_t expected_epoch = air_identity.valid
+            ? AirFrameClock::ota_epoch32(air_identity.timeline_epoch)
+            : 0u;
+
+        // Treat (0,0) as explicit unlock marker from UE — not a hard mismatch.
+        if (ul_epoch == 0 && ul_seq == 0) {
+            const uint64_t n =
+                _ul_identity_unlocked.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 20 || (n % 256) == 0) {
+                LOG_RT_WARN_HZ_M(UlRx, 2)
+                    << "[UL-RX] Identity SIB unlock marker (epoch=0,seq=0)"
+                    << ": bs_frame=" << air_frame_index
+                    << ", count=" << n;
+            }
+            return false;
+        }
+
+        // UL-TX hard-gates each queued identity against its timed air slot, so
+        // queue depth and timing advance are not valid reasons for seq skew.
+        const int64_t delta =
+            static_cast<int64_t>(static_cast<int32_t>(ul_seq - expected_seq));
+        const bool epoch_ok =
+            (expected_epoch == 0) || (ul_epoch == expected_epoch);
+        const bool seq_ok = (delta == 0);
+
+        if (epoch_ok && seq_ok) {
+            const uint64_t n =
+                _ul_identity_match.fetch_add(1, std::memory_order_relaxed) + 1;
+            // Closed-loop health: always log early matches, then every 256.
+            if (n <= 16 || (n % 256) == 0) {
+                LOG_G_INFO_M(AirFrame)
+                    << "[AirFrame][UL-RX] Identity SIB MATCH"
+                    << ": n=" << n
+                    << ", ul_epoch=0x" << std::hex << ul_epoch << std::dec
+                    << ", ul_seq=" << ul_seq
+                    << ", bs_seq=" << expected_seq
+                    << ", bs_frame_index=" << air_frame_index
+                    << ", mismatch="
+                    << _ul_identity_mismatch.load(std::memory_order_relaxed)
+                    << ", unlocked="
+                    << _ul_identity_unlocked.load(std::memory_order_relaxed);
+            }
+            return true;
+        }
+
+        const uint64_t n =
+            _ul_identity_mismatch.fetch_add(1, std::memory_order_relaxed) + 1;
+        // Closed-loop identity mismatch is abnormal — WARN (rate-capped for RT).
+        LOG_RT_WARN_HZ_M(AirFrame, 50)
+            << "[AirFrame][UL-RX] Identity SIB DOUBLE-CHECK FAIL"
+            << ": n=" << n
+            << ", ul_epoch=0x" << std::hex << ul_epoch
+            << ", expected_epoch=0x" << expected_epoch << std::dec
+            << ", ul_seq=" << ul_seq
+            << ", expected_seq=" << expected_seq
+            << ", delta=" << delta
+            << ", bs_frame_index=" << air_frame_index
+            << ", match="
+            << _ul_identity_match.load(std::memory_order_relaxed)
+            << ", unlocked="
+            << _ul_identity_unlocked.load(std::memory_order_relaxed);
+        return false;
+    }
+
+    void _publish_ertm_ul_measurement_if_ready(
+        bool identity_match,
+        uint64_t air_frame_index,
+        uint64_t ul_rx_generation,
+        int32_t applied_duti_samples,
+        const AlignedVector& channel_freq,
+        const AirFrameIdentity& air_identity)
+    {
+        if (!identity_match) {
+            return;
+        }
+        if (channel_freq.size() != _cfg.ofdm.fft_size) {
+            return;
+        }
+        const uint32_t epoch32 = air_identity.valid
+            ? AirFrameClock::ota_epoch32(air_identity.timeline_epoch)
+            : 0u;
+        const uint64_t frame_seq =
+            air_identity.valid ? air_identity.frame_seq : air_frame_index;
+        if (epoch32 == 0 || !air_identity.valid) {
+            return;
+        }
+        if (_ertm_ul_measurement_sink) {
+            _ertm_ul_measurement_sink(
+                epoch32,
+                frame_seq,
+                ul_rx_generation,
+                applied_duti_samples,
+                channel_freq);
+        }
+        // Legacy channel-only sink still updates only on MATCH so eRTM consumers
+        // never pin a channel estimate to an unauthenticated window.
+        if (_latest_channel_estimate_sink) {
+            _latest_channel_estimate_sink(
+                AlignedVector(channel_freq.begin(), channel_freq.end()));
+        }
+    }
+
     template <typename LlrVec, typename ScratchVec>
-    void _decode_llr_stream(const LlrVec& frame_llr, ScratchVec& deint_scratch,
-                            LlrVec& payload_scratch) {
+    void _decode_llr_stream(
+        const LlrVec& frame_llr,
+        ScratchVec& deint_scratch,
+        LlrVec& payload_scratch,
+        uint64_t air_frame_index,
+        uint64_t ul_rx_generation,
+        int32_t applied_duti_samples,
+        const AlignedVector& channel_freq,
+        const AirFrameIdentity& air_identity)
+    {
         const size_t bits_per_block = _ldpc.get_N();
         const size_t bytes_per_block = (_ldpc.get_K() + 7) / 8;
         if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
@@ -1021,17 +1290,49 @@ public:
             LOG_G_ERROR_M(UlRx) << "[UL-RX] LDPC dimensions do not match packet framing; dropping LLR frame";
             return;
         }
+        bool identity_checked = false;
         size_t symbol_offset = 0;
         while ((symbol_offset + LdpcPacketFraming::kControlSymbols) * 2 <= frame_llr.size()) {
             const size_t control_off = symbol_offset * 2;
             const bool mk = LdpcPacketFraming::detect_marker_llrs(frame_llr.data() + control_off);
             if (!mk) break;
+
+            // Prefer expanded Identity SIB (marker + 2 BCH words) at frame head.
+            if ((symbol_offset + LdpcPacketFraming::kIdentityControlSymbols) * 2 <=
+                frame_llr.size()) {
+                LdpcMiniHeader identity_hdr{};
+                if (LdpcPacketFraming::decode_identity_control_llrs(
+                        frame_llr.data() + control_off + LdpcPacketFraming::kMarkerBits,
+                        identity_hdr)) {
+                    const bool matched = _double_check_ul_identity(
+                        identity_hdr, air_frame_index, air_identity);
+                    if (!identity_checked) {
+                        identity_checked = true;
+                        _publish_ertm_ul_measurement_if_ready(
+                            matched,
+                            air_frame_index,
+                            ul_rx_generation,
+                            applied_duti_samples,
+                            channel_freq,
+                            air_identity);
+                    }
+                    symbol_offset += LdpcPacketFraming::kIdentityControlSymbols;
+                    continue;
+                }
+            }
+
             LdpcMiniHeader hdr;
             if (!LdpcPacketFraming::decode_mini_header_llrs(
                     frame_llr.data() + control_off + LdpcPacketFraming::kMarkerBits, hdr)) {
                 LOG_RT_WARN_HZ_M(UlRx, 5)
                     << "[UL-RX] mini-header decode failed; dropping remainder of LLR frame"
                     << ": symbol_offset=" << symbol_offset;
+                break;
+            }
+            // Orphan IdentityHi is invalid framing — stop scanning.
+            if (LdpcPacketFraming::is_air_frame_identity_hi_flags(hdr.flags)) {
+                LOG_RT_WARN_HZ_M(UlRx, 5)
+                    << "[UL-RX] orphan IdentityHi mini-header; dropping remainder";
                 break;
             }
             const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(hdr.payload_len);
@@ -1071,9 +1372,17 @@ public:
                     !_arq_payload_intercept(payload_ptr, hdr.payload_len, hdr.seq, hdr.flags)) {
                     try {
                         _udp_out->send(payload_ptr, hdr.payload_len);
+                        if (LOG_MOD_ON(UlRx) && air_identity.valid &&
+                            (_decoded_count.load(std::memory_order_relaxed) % 4096) == 0) {
+                            LOG_G_INFO_M(UlRx) << "[UL-RX] decoded packet air_frame="
+                                         << air_identity.frame_seq
+                                         << " epoch=" << air_identity.timeline_epoch
+                                         << " arq_seq=" << hdr.seq;
+                        }
                     } catch (const std::exception& e) {
                         LOG_G_WARN_M(UlRx) << "[UL-RX] UDP output failed; dropping decoded packet"
                                      << ": seq=" << hdr.seq
+                                     << ", air_frame=" << air_frame_index
                                      << ", payload_bytes=" << hdr.payload_len
                                      << ", error=" << e.what();
                         symbol_offset = next_off;
@@ -1120,8 +1429,8 @@ public:
                 (rx_im * tx_re - rx_re * tx_im) * inv_denom);
         }
 
-        // IFFT to impulse response and normalize by 1/N, matching cuFFT inverse
-        // followed by normalize_ifft_kernel.
+        // IFFT to impulse response and normalize by 1/N, matching the scaling
+        // now folded into the GPU Wiener window kernel.
         fftwf_execute(_ce_ifft_plan);
         const float inv_n = 1.0f / static_cast<float>(fft_size);
         auto* __restrict__ h_time = _ce_out.data();
@@ -1247,17 +1556,15 @@ public:
         if (_channel_debug_sink) {
             _channel_debug_sink(AlignedVector(_h_est.begin(), _h_est.end()));
         }
-        if (_latest_channel_estimate_sink) {
-            _latest_channel_estimate_sink(AlignedVector(_h_est.begin(), _h_est.end()));
-        }
+        // eRTM channel snapshots are MATCH-gated in the decode path so they carry
+        // authenticated absolute frame identity. Debug visualization still uses
+        // every frame via _channel_debug_sink above.
 
         if (_self_channel_debug_sink && !_self_h_est.empty()) {
             _self_channel_debug_sink(AlignedVector(_self_h_est.begin(), _self_h_est.end()));
         }
 
-        const bool need_delay = static_cast<bool>(_delay_debug_sink) ||
-                                static_cast<bool>(_latest_delay_spectrum_sink);
-        if (need_delay) {
+        if (_delay_debug_sink) {
             const size_t half = _cfg.ofdm.fft_size / 2;
             for (size_t i = 0; i < half; ++i) {
                 _ce_in[i] = _h_est[i + half];
@@ -1271,9 +1578,6 @@ public:
             }
             if (_delay_debug_sink) {
                 _delay_debug_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
-            }
-            if (_latest_delay_spectrum_sink) {
-                _latest_delay_spectrum_sink(AlignedVector(_delay_spectrum.begin(), _delay_spectrum.end()));
             }
         }
 
@@ -1361,8 +1665,8 @@ public:
     DebugVectorCallback _constellation_debug_sink;
     DebugVectorCallback _self_channel_debug_sink;
     DebugVectorCallback _self_delay_debug_sink;
-    DebugVectorCallback _latest_delay_spectrum_sink;
     DebugVectorCallback _latest_channel_estimate_sink;
+    ErtmMeasurementCallback _ertm_ul_measurement_sink;
 
     ArqPayloadIntercept _arq_payload_intercept;
 
@@ -1370,12 +1674,20 @@ public:
     std::atomic<int32_t> _dl_ul_timing_diff{0};
     std::mutex _restart_mutex;
     radio::TimeSpec _pending_restart_time{0.0};
+    uint64_t _initial_stream_base_frame{0};
     uint64_t _pending_restart_base_frame_index{0};
+    uint64_t _pending_restart_request_id{0};
     std::atomic<bool> _restart_requested{false};
+    TimedStreamRestartAck _restart_ack;
     std::atomic<uint64_t> _stream_generation{0};
     std::atomic<uint64_t> _rx_error_count{0};
     std::function<uint64_t()> _bs_frame_fn;
+    std::function<uint64_t()> _bs_epoch_fn;
     std::atomic<uint64_t> _decoded_count{0};
+    // UL Identity SIB closed-loop double-check counters (BS metadata vs UE stamp).
+    std::atomic<uint64_t> _ul_identity_match{0};
+    std::atomic<uint64_t> _ul_identity_mismatch{0};
+    std::atomic<uint64_t> _ul_identity_unlocked{0};
     uint64_t _frame_count = 0;
     uint64_t _self_debug_frame_counter = 0;
     uint32_t _constellation_frame_counter = 0;

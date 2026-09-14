@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark UE end-to-end latency across configurations.
 
-Requires root (for isolate_cpus.bash/systemd-run) and connected TX/RX USRPs.
+Requires root (for isolate_cpus.py/systemd-run) and connected TX/RX USRPs.
 
 Usage:
     sudo python3 scripts/bench_ue_latency.py
@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("scripts/bench_ue_latency_ue_template.yaml"),
         help="Base UE YAML template used for reproducible latency runs.",
     )
-    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
+    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.py"))
     parser.add_argument("--sample-rates", default="50e6,100e6,200e6")
     parser.add_argument("--fft-sizes", default="1024")
     parser.add_argument(

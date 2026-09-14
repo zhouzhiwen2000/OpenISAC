@@ -195,28 +195,53 @@ const APP = window.__APP_STATE__;
       'rx_agc_update_frames',
       'hardware_sync',
       'hardware_sync_tty',
-      'ocxo_pi_kp_fast',
-      'ocxo_pi_ki_fast',
-      'ocxo_pi_kp_slow',
-      'ocxo_pi_ki_slow',
-      'ocxo_pi_switch_abs_error_ppm',
-      'ocxo_pi_switch_hold_s',
-      'ocxo_pi_max_step_fast_ppm',
-      'ocxo_pi_max_step_slow_ppm',
-      'akf_enable',
-      'akf_bootstrap_frames',
-      'akf_innovation_window',
-      'akf_max_lag',
-      'akf_adapt_interval',
-      'akf_gate_sigma',
-      'akf_tikhonov_lambda',
-      'akf_update_smooth',
-      'akf_q_wf_min',
-      'akf_q_wf_max',
-      'akf_q_rw_min',
-      'akf_q_rw_max',
-      'akf_r_min',
-      'akf_r_max',
+      'ocxo_mode',
+      'ocxo_dac_ppm_per_lsb',
+      'ocxo_dac_zero_word',
+      'ocxo_max_abs_ppm',
+      'ocxo_actuator_max_slew_ppm_per_s',
+      'ocxo_coarse_enable',
+      'ocxo_coarse_gain',
+      'ocxo_coarse_max_abs_ppm',
+      'ocxo_coarse_obs_window_s',
+      'ocxo_coarse_control_period_s',
+      'ocxo_coarse_max_slew_ppm_per_s',
+      'ocxo_fll_fast_obs_window_s',
+      'ocxo_fll_fast_control_period_s',
+      'ocxo_fll_fast_control_mode',
+      'ocxo_fll_fast_kp',
+      'ocxo_fll_fast_ki',
+      'ocxo_fll_fast_max_slew_ppm_per_s',
+      'ocxo_fll_slow_obs_window_s',
+      'ocxo_fll_slow_control_period_s',
+      'ocxo_fll_slow_kp',
+      'ocxo_fll_slow_ki',
+      'ocxo_fll_slow_deadzone_ppm',
+      'ocxo_fll_slow_max_slew_ppm_per_s',
+      'ocxo_fll_slow_enter_abs_ppm',
+      'ocxo_fll_fast_enter_abs_ppm',
+      'ocxo_fll_switch_hold_s',
+      'ocxo_phase_control_period_s',
+      'ocxo_phase_jump_gate_samples',
+      'ocxo_phase_max_report_age_frames',
+      'ocxo_phase_setpoint_mode',
+      'ocxo_phase_setpoint_fixed_samples',
+      'ocxo_pps_initial_ap_enable',
+      'ocxo_pps_initial_ap_max_abs_ns',
+      'ocxo_pps_initial_ap_settle_s',
+      'ocxo_pps_initial_ap_command_timeout_s',
+      'ocxo_pps_initial_ap_max_retries',
+      'ocxo_pps_initial_ap_deadzone_ns',
+      'ocxo_pps_initial_ap_polarity',
+      'ocxo_phase_kp',
+      'ocxo_phase_ki',
+      'ocxo_phase_max_slew_ppm_per_s',
+      'ocxo_phase_enter_sfo_abs_ppm',
+      'ocxo_phase_enter_hold_s',
+      'ocxo_phase_exit_sfo_abs_ppm',
+      'ocxo_phase_exit_hold_s',
+      'cfo_ewma_enable',
+      'cfo_ewma_alpha',
     ]);
 
     const SIM_HARDWARE_MAPPING_ITEM_KEYS = new Set([
@@ -307,29 +332,6 @@ const APP = window.__APP_STATE__;
       rx_agc_high_threshold_db: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
       rx_agc_max_step_db: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
       rx_agc_update_frames: (model) => fieldBoolValue(model, 'rx_agc_enable', false),
-      hardware_sync_tty: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_kp_fast: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_ki_fast: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_kp_slow: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_ki_slow: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_switch_abs_error_ppm: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_switch_hold_s: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_max_step_fast_ppm: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      ocxo_pi_max_step_slow_ppm: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      akf_enable: (model) => fieldBoolValue(model, 'hardware_sync', false),
-      akf_bootstrap_frames: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_innovation_window: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_max_lag: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_adapt_interval: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_gate_sigma: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_tikhonov_lambda: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_update_smooth: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_q_wf_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_q_wf_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_q_rw_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_q_rw_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_r_min: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
-      akf_r_max: (model) => fieldBoolValue(model, 'hardware_sync', false) && fieldBoolValue(model, 'akf_enable', true),
       bi_sensing_output_enabled: (model) => fieldBoolValue(model, 'sensing.bi_enabled', false),
       bi_sensing_ip: (model) => fieldBoolValue(model, 'sensing.bi_enabled', false),
       bi_sensing_port: (model) => fieldBoolValue(model, 'sensing.bi_enabled', false) && fieldBoolValue(model, 'bi_sensing_output_enabled', true),
@@ -3041,7 +3043,7 @@ const APP = window.__APP_STATE__;
                 'measurement_enable',
                 'rx_agc_enable',
                 'hardware_sync',
-                'akf_enable',
+                'cfo_ewma_enable',
                 'sensing.bi_enabled',
                 'sensing.backend_processing_enabled',
               ].includes(field.key)) {
@@ -3087,7 +3089,7 @@ const APP = window.__APP_STATE__;
                 renderSections();
                 return;
               }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'uplink.enabled', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'sensing.bi_enabled', 'sensing.backend_processing_enabled', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
+              if (['fft_size', 'num_symbols', 'sync_pos', 'uplink.enabled', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'cfo_ewma_enable', 'sensing.bi_enabled', 'sensing.backend_processing_enabled', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
                 field.value = select.value;
                 renderSections();
               }
@@ -3113,7 +3115,7 @@ const APP = window.__APP_STATE__;
                 renderSections();
                 return;
               }
-              if (['fft_size', 'num_symbols', 'sync_pos', 'uplink.enabled', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'akf_enable', 'sensing.bi_enabled', 'sensing.backend_processing_enabled', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
+              if (['fft_size', 'num_symbols', 'sync_pos', 'uplink.enabled', 'enable_sec_sync_symbol', 'enable_cfo_training_sequence', 'measurement_enable', 'rx_agc_enable', 'hardware_sync', 'cfo_ewma_enable', 'sensing.bi_enabled', 'sensing.backend_processing_enabled', 'midframe_pilot_symbols', 'pilot_positions', 'duplex_mode'].includes(field.key)) {
                 field.value = input.value;
                 renderSections();
               }
@@ -3146,6 +3148,9 @@ const APP = window.__APP_STATE__;
       }
       for (const section of model.sections) {
         for (const field of section.fields) {
+          if (field.enabled_if && !enabledIfRuleSatisfied(model, field)) {
+            continue;
+          }
           if (field.type === 'mapping_list') {
             if (field.key === 'data_resource_blocks' || field.key === 'sensing.mask_blocks') {
               mappingLists[field.key] = {

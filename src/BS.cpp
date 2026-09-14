@@ -19,6 +19,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <Common.hpp>
+#include "AirFrameTxGate.hpp"
+#include "TxBurstRecovery.hpp"
 #include "LDPCCodec.hpp"
 #include "UplinkRxEngine.hpp"
 #include "OFDMCore.hpp"
@@ -115,6 +117,8 @@ bool append_csv_row(
 struct QueuedTxFrame {
     AlignedVector samples;
     std::shared_ptr<const SymbolVector> symbols;
+    AirFrameIdentity identity;    // Absolute air-frame slot claimed at modulation
+    uint64_t mod_generation{0};   // Must match AirFrameClock::mod_generation at TX
     int64_t ingest_time_ns{0};    // T1: UDP packet received by _udp_recv_proc
     int64_t encoded_time_ns{0};   // T2: packet pushed into _data_packet_buffer (after LDPC encode)
     int64_t mod_done_time_ns{0};  // T3: frame pushed into _circular_buffer (after IFFT/CP)
@@ -211,6 +215,36 @@ public:
         _prepare_zc_sequence();
         _init_radio();
         _precalc_positions();
+        {
+            double tx_rate = _cfg.rf_sampling.sample_rate;
+            double tick_rate = _cfg.rf_sampling.sample_rate;
+            if (_tx_dev) {
+                const double actual_tx = _tx_dev->get_tx_rate(_cfg.downlink.tx_channel);
+                if (actual_tx > 0.0) {
+                    tx_rate = actual_tx;
+                }
+                const double mcr = _tx_dev->master_clock_rate();
+                if (mcr > 0.0) {
+                    tick_rate = mcr;
+                }
+            }
+            _air_clock.configure(
+                _cfg.samples_per_frame(),
+                _cfg.ofdm.num_symbols,
+                tx_rate,
+                tick_rate);
+            // Distinct boot/session id (not 0→1); OTA carries low 16 bits.
+            const uint64_t epoch = _air_clock.start_new_session_epoch(radio::TimeSpec(0.0));
+            LOG_G_INFO_M(AirFrame) << "[AirFrame] clock configured: boot_id=" << epoch
+                         << " (ota_epoch32=0x" << std::hex
+                         << AirFrameClock::ota_epoch32(epoch) << std::dec << ")"
+                         << ", samples_per_frame=" << _cfg.samples_per_frame()
+                         << ", frame_ticks=" << _air_clock.frame_ticks()
+                         << ", tick_rate=" << tick_rate
+                         << ", sample_rate=" << tx_rate
+                         << ", effective_payload_re="
+                         << _effective_payload_re_count();
+        }
 
         const size_t total_data_samples = _data_resource_layout.non_pilot_re_count;
         _pregen_symbols.resize(total_data_samples);
@@ -231,6 +265,17 @@ public:
         if (!_measurement_enabled && _data_resource_layout.payload_re_count == 0) {
             LOG_G_WARN_M(Config) << "Configured payload resource grid selects 0 RE. Incoming UDP payloads will be dropped.";
         }
+        // Fail-fast: without Identity SIB capacity the UE can never lock absolute
+        // frame numbers. Periodic hot-path warnings are not enough.
+        if (_data_resource_layout.payload_re_count <
+            LdpcPacketFraming::kIdentityControlSymbols) {
+            throw std::runtime_error(
+                "BS payload_re_count (" +
+                std::to_string(_data_resource_layout.payload_re_count) +
+                ") < kIdentityControlSymbols (" +
+                std::to_string(LdpcPacketFraming::kIdentityControlSymbols) +
+                "); increase data resource blocks so the Identity SIB fits");
+        }
 
         _register_commands();
     }
@@ -246,6 +291,12 @@ public:
     void start() {
         _control_handler.start();
         _running.store(true);
+        // Claim cursor at 0 for this session; reanchor after prefill once the
+        // timed start_time is known. Bump generation so any pre-start junk is
+        // unusable (none yet).
+        _air_clock.cancel_and_force_next_seq(0);
+        _bs_pps_anchor_refresh_count.store(0, std::memory_order_relaxed);
+        _bs_pps_anchor_refresh_failures.store(0, std::memory_order_relaxed);
         _next_frame_start_symbol.store(0, std::memory_order_relaxed);
         _next_tx_frame_seq.store(0, std::memory_order_relaxed);
 
@@ -313,11 +364,22 @@ public:
                       << scheduled_start_s << " s after prefill."
                       << std::defaultfloat;
         }
+        // Map claimed air-frame seq 0 to the timed stream anchor without
+        // resetting the claim counter (prefill already claimed 0..K-1).
+        _air_clock.reanchor_keep_seq(_start_time);
+        int64_t initial_bs_t0_to_pps_ticks = 0;
+        int64_t initial_bs_last_pps_ticks = 0;
+        _refresh_bs_pps_anchor(
+            initial_bs_t0_to_pps_ticks, initial_bs_last_pps_ticks, true);
+        _next_tx_frame_seq.store(0, std::memory_order_relaxed);
+        _next_frame_start_symbol.store(0, std::memory_order_relaxed);
+        LOG_G_INFO_M(AirFrame) << "[AirFrame] reanchored t0 to start_time, epoch="
+                     << _air_clock.timeline_epoch()
+                     << ", next_claim_seq=" << _air_clock.next_seq()
+                     << ", prefilled_frames=" << _circular_buffer.size();
 
         _tx_async_exit_requested.store(false, std::memory_order_relaxed);
-        _tx_underflow_restart_requested.store(false, std::memory_order_relaxed);
-        _tx_time_error_restart_requested.store(false, std::memory_order_relaxed);
-        _tx_time_error_count.store(0, std::memory_order_relaxed);
+        _tx_restart_gate.reset();
         _tx_thread = std::thread(&BSEngine::_tx_proc, this);
         if (_tx_stream) {
             _tx_async_thread = std::thread(&BSEngine::_tx_async_event_proc, this);
@@ -348,7 +410,10 @@ public:
                 _uplink_self_channel_sender.start();
                 _uplink_self_pdf_sender.start();
             }
-            _uplink_rx->start(_start_time);
+            // Stream anchor maps to air-frame 0 after reanchor_keep_seq above.
+            // Pass base explicitly — do not sample live _next_tx_frame_seq (TX
+            // may already have buffered future frames and advanced the cursor).
+            _uplink_rx->start(_start_time, /*stream_base_frame=*/0);
         }
     }
 
@@ -358,6 +423,7 @@ public:
             return;
         }
 
+        _tx_async_exit_requested.store(true, std::memory_order_relaxed);
         _control_handler.stop();
 
         if (_uplink_rx) {
@@ -381,7 +447,6 @@ public:
         if (_tx_thread.joinable()) _tx_thread.join();
         if (_udp_recv_thread.joinable()) _udp_recv_thread.join();
         if (_ldpc_encode_thread.joinable()) _ldpc_encode_thread.join();
-        _tx_async_exit_requested.store(true, std::memory_order_relaxed);
         if (_tx_async_thread.joinable()) _tx_async_thread.join();
 
         {
@@ -407,7 +472,6 @@ private:
     radio::IDevicePtr _uplink_rx_dev; // dedicated uplink RX device; null when sharing _tx_dev
     radio::ITxStreamPtr _tx_stream;
     std::unique_ptr<UplinkRxEngine> _uplink_rx;  // non-null when duplex uplink enabled
-    size_t _tx_chunk_samps = 0;
 
     // Random number generator
     std::mt19937 _gen;
@@ -439,9 +503,7 @@ private:
     std::thread _tx_thread;              // TX thread
     std::thread _tx_async_thread;        // TX async event monitor
     std::atomic<bool> _tx_async_exit_requested{false};
-    std::atomic<bool> _tx_underflow_restart_requested{false};
-    std::atomic<bool> _tx_time_error_restart_requested{false};
-    std::atomic<uint64_t> _tx_time_error_count{0};
+    TxAsyncRestartGate _tx_restart_gate;
     
     radio::TimeSpec _start_time{0.0};
 
@@ -526,9 +588,14 @@ private:
         std::make_shared<std::atomic<uint64_t>>(0);
     std::atomic<uint64_t> _next_frame_start_symbol{0};
     std::atomic<uint64_t> _next_tx_frame_seq{0};
+    AirFrameClock _air_clock;
+    std::atomic<uint64_t> _bs_pps_anchor_refresh_count{0};
+    std::atomic<uint64_t> _bs_pps_anchor_refresh_failures{0};
     std::atomic<uint32_t> _ldpc_packet_seq{0};
-    SeqlockedChannelEstimate _ertm_latest_ul_channel;
+    SeqlockedErtmUlMeasurement _ertm_latest_ul_measurement;
     uint64_t _ertm_last_injected_frame = std::numeric_limits<uint64_t>::max();
+    uint32_t _ertm_last_injected_measure_epoch = 0;
+    uint64_t _ertm_last_injected_measure_frame = std::numeric_limits<uint64_t>::max();
     std::atomic<uint32_t> _ertm_payload_seq{0};
 
     // ARQ link-layer retransmission state
@@ -578,16 +645,24 @@ private:
         double enqueue_us{0.0};
     };
 
+    /** Payload RE left for user/ARQ packets after the per-frame Identity SIB. */
+    size_t _effective_payload_re_count() const {
+        return AirFrameClock::effective_payload_re_count(
+            _data_resource_layout.payload_re_count,
+            LdpcPacketFraming::kIdentityControlSymbols);
+    }
+
     int64_t _estimate_arq_queue_delay_ms(size_t queued_packets_ahead,
                                          size_t packet_qpsk_symbols) const {
-        if (_data_resource_layout.payload_re_count == 0 ||
+        const size_t effective_re = _effective_payload_re_count();
+        if (effective_re == 0 ||
             _cfg.rf_sampling.sample_rate <= 0.0) {
             return 0;
         }
         const size_t packet_symbols = std::max<size_t>(
             packet_qpsk_symbols, LdpcPacketFraming::kControlSymbols);
         const size_t packets_per_frame = std::max<size_t>(
-            1, _data_resource_layout.payload_re_count / packet_symbols);
+            1, effective_re / packet_symbols);
         const size_t frames_until_tx = (queued_packets_ahead / packets_per_frame) + 1;
         const double frame_ms =
             _cfg.samples_per_frame() / _cfg.rf_sampling.sample_rate * 1000.0;
@@ -664,10 +739,10 @@ private:
             packets_pulled_total - _arq_profile_last_packets_pulled.exchange(
                 packets_pulled_total, std::memory_order_relaxed);
         const double frame_payload_fill_ratio =
-            (frames_delta > 0 && _data_resource_layout.payload_re_count > 0)
+            (frames_delta > 0 && _effective_payload_re_count() > 0)
                 ? static_cast<double>(payload_re_used_delta) /
                       (static_cast<double>(frames_delta) *
-                       static_cast<double>(_data_resource_layout.payload_re_count))
+                       static_cast<double>(_effective_payload_re_count()))
                 : 0.0;
         const double packets_per_frame =
             frames_delta > 0
@@ -881,11 +956,82 @@ private:
         _uplink_rx->set_debug_sinks(channel_sink, pdf_sink, constellation_sink);
     }
 
-    void _store_ertm_uplink_channel_freq(const AlignedVector& channel_freq) {
+    void _store_ertm_ul_measurement(
+        uint32_t timeline_epoch,
+        uint64_t frame_seq,
+        uint64_t ul_rx_generation,
+        int32_t applied_duti_samples,
+        const AlignedVector& channel_freq)
+    {
         if (!_cfg.uplink.ertm_to_enable || channel_freq.size() != _cfg.ofdm.fft_size) {
             return;
         }
-        _ertm_latest_ul_channel.store(channel_freq);
+        if (timeline_epoch == 0) {
+            return;
+        }
+        _ertm_latest_ul_measurement.store(
+            timeline_epoch,
+            frame_seq,
+            ul_rx_generation,
+            applied_duti_samples,
+            channel_freq);
+        if (LOG_MOD_ON(Ertm)) {
+            static std::atomic<uint64_t> store_count{0};
+            const uint64_t n = store_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 16 || (n % 64) == 0) {
+                LOG_G_INFO_M(Ertm) << "[eRTM] stored UL measurement"
+                             << ": n=" << n
+                             << ", epoch=0x" << std::hex << timeline_epoch << std::dec
+                             << ", M=" << frame_seq
+                             << ", DUTI_M=" << applied_duti_samples
+                             << ", ul_rx_gen=" << ul_rx_generation;
+            }
+        }
+    }
+
+    bool _refresh_bs_pps_anchor(
+        int64_t& t0_to_pps_ticks_out,
+        int64_t& last_pps_ticks_out,
+        bool initial_capture = false)
+    {
+        try {
+            const double tick_rate = _air_clock.tick_rate();
+            const int64_t second_ticks = static_cast<int64_t>(std::llround(tick_rate));
+            if (!(tick_rate > 0.0) || second_ticks <= 0) {
+                throw std::runtime_error("invalid BS tick rate");
+            }
+            const int64_t pps_ticks = _tx_dev->time_last_pps().to_ticks(tick_rate);
+            int64_t t0_to_pps_ticks = _air_clock.t0_ticks() - pps_ticks;
+            t0_to_pps_ticks %= second_ticks;
+            if (t0_to_pps_ticks < 0) {
+                t0_to_pps_ticks += second_ticks;
+            }
+            t0_to_pps_ticks_out = t0_to_pps_ticks;
+            last_pps_ticks_out = pps_ticks;
+            const uint64_t refresh_count =
+                _bs_pps_anchor_refresh_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (initial_capture || refresh_count <= 8 || (refresh_count % 64) == 0) {
+                LOG_G_INFO_M(AirFrame)
+                    << "[PPS anchor] BS frame-0 phase "
+                    << (initial_capture ? "captured" : "refreshed")
+                    << ": refresh=" << refresh_count
+                    << ", last_pps_ticks=" << pps_ticks
+                    << ", t0_to_pps_ticks=" << t0_to_pps_ticks
+                    << ", frame_ticks=" << _air_clock.frame_ticks()
+                    << ", tick_rate=" << tick_rate;
+            }
+            return true;
+        } catch (const std::exception& e) {
+            const uint64_t failures =
+                _bs_pps_anchor_refresh_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (initial_capture || failures <= 8 || (failures % 64) == 0) {
+                LOG_G_WARN_M(AirFrame)
+                    << "[PPS anchor] failed to refresh BS frame/PPS phase"
+                    << ": failures=" << failures
+                    << ", error=" << e.what();
+            }
+            return false;
+        }
     }
 
     bool _try_inject_ertm_payload() {
@@ -900,13 +1046,31 @@ private:
             return false;
         }
 
-        AlignedVector channel_freq;
-        if (!_ertm_latest_ul_channel.load(channel_freq)) {
+        ErtmUlMeasurement measurement;
+        if (!_ertm_latest_ul_measurement.load(measurement)) {
+            return false;
+        }
+        // Do not re-inject the same absolute measurement until a newer MATCH arrives.
+        if (_ertm_last_injected_measure_frame != std::numeric_limits<uint64_t>::max() &&
+            measurement.frame_seq == _ertm_last_injected_measure_frame &&
+            measurement.timeline_epoch == _ertm_last_injected_measure_epoch) {
+            return false;
+        }
+
+        // Refresh immediately before packing each new ERTM5 report. This keeps
+        // the BS PPS phase live without placing a UHD control query in the TX
+        // or modulation real-time path. A failed query is retried after the
+        // configured report interval instead of freezing the startup value.
+        int64_t bs_t0_to_pps_ticks = 0;
+        int64_t bs_last_pps_ticks = 0;
+        if (!_refresh_bs_pps_anchor(bs_t0_to_pps_ticks, bs_last_pps_ticks)) {
+            _ertm_last_injected_frame = current_frame;
             return false;
         }
 
         const uint32_t seq = _ertm_payload_seq.fetch_add(1, std::memory_order_relaxed);
-        const int32_t duti = _bs_dl_ul_timing_diff.load(std::memory_order_relaxed);
+        // Use DUTI applied on measure frame M — never the inject-time control target.
+        const int32_t duti = measurement.applied_duti_samples;
         std::vector<uint8_t> payload;
         std::string pack_error;
         if (!ErtmTimingPayload::pack(
@@ -914,7 +1078,13 @@ private:
                 static_cast<uint32_t>(_cfg.ofdm.fft_size),
                 _cfg.rf_sampling.sample_rate,
                 duti,
-                channel_freq,
+                measurement.timeline_epoch,
+                measurement.frame_seq,
+                bs_last_pps_ticks,
+                bs_t0_to_pps_ticks,
+                _air_clock.frame_ticks(),
+                _air_clock.tick_rate(),
+                measurement.channel_freq,
                 payload,
                 &pack_error)) {
             LOG_G_WARN_M(Ertm) << "[eRTM] failed to pack TO payload; dropping measurement: "
@@ -925,11 +1095,14 @@ private:
 
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
         const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
-        if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
+        const size_t effective_re = _effective_payload_re_count();
+        if (packet_qpsk_symbols > effective_re) {
             LOG_G_WARN_M(Ertm) << "[eRTM] TO payload does not fit in one downlink frame; dropping measurement"
                          << ": payload_bytes=" << payload.size()
                          << ", qpsk_syms=" << packet_qpsk_symbols
-                         << ", frame_capacity=" << _data_resource_layout.payload_re_count;
+                         << ", effective_capacity=" << effective_re
+                         << " (raw_payload_re=" << _data_resource_layout.payload_re_count
+                         << ", identity_sib=" << LdpcPacketFraming::kIdentityControlSymbols << ")";
             _ertm_last_injected_frame = current_frame;
             return false;
         }
@@ -940,9 +1113,15 @@ private:
             LdpcPacketFraming::kFlagErtmTiming);
         if (enqueued) {
             _ertm_last_injected_frame = current_frame;
+            _ertm_last_injected_measure_epoch = measurement.timeline_epoch;
+            _ertm_last_injected_measure_frame = measurement.frame_seq;
             if (LOG_MOD_ON(Ertm) && (seq == 0 || (seq % 64u) == 0u)) {
                 LOG_G_INFO_M(Ertm) << "[eRTM] injected TO payload seq=" << seq
-                             << ", duti_samples=" << duti
+                             << ", epoch=0x" << std::hex << measurement.timeline_epoch << std::dec
+                             << ", M=" << measurement.frame_seq
+                             << ", DUTI_M=" << duti
+                             << ", bs_last_pps_ticks=" << bs_last_pps_ticks
+                             << ", bs_t0_to_pps_ticks=" << bs_t0_to_pps_ticks
                              << ", fft_size=" << _cfg.ofdm.fft_size
                              << ", payload_bytes=" << payload.size();
             }
@@ -1058,7 +1237,8 @@ private:
             stream_channel_count,
             stream_channel_mask,
             aggregated_stream,
-            antenna_spacing_m);
+            antenna_spacing_m,
+            snapshot.sensing_symbol_stride);
         return packet;
     }
 
@@ -1422,25 +1602,35 @@ private:
         tx_stream_args.args["sim_suffix"] = "tx";
         tx_stream_args.channels = {_cfg.downlink.tx_channel};
         _tx_stream = _tx_dev->get_tx_stream(tx_stream_args);
-        _tx_chunk_samps = is_sim ? _cfg.samples_per_frame() : _tx_stream->max_num_samps();
-        if (_tx_chunk_samps == 0) {
-            _tx_chunk_samps = _cfg.samples_per_frame();
-            LOG_G_WARN_M(Config) << "TX streamer reported max_num_samps=0, falling back to frame-sized chunks: "
-                         << _tx_chunk_samps;
-        } else if (!is_sim) {
-            LOG_G_INFO_M(Radio) << "TX streamer chunk size: " << _tx_chunk_samps << " samples";
-        }
+        LOG_G_INFO_M(Radio) << "TX streamer application frame size: "
+                            << _cfg.samples_per_frame()
+                            << " samples per send()";
         if (is_sim) {
             LOG_G_INFO_M(Sensing) << "TX radio backend: SIMULATION (session='" << _cfg.simulation.session
                          << "', no USRP). Sensing channels: " << _sensing_channels.size();
         }
 
-        SensingChannel::initialize_rx_and_sync(
-            _cfg, tune_req, _tx_dev, tx_device_args, _sensing_channels);
-
         if (uplink_enabled(_cfg)) {
             _init_uplink_rx(tx_device_args, tx_clock_source, tx_time_source);
         }
+        std::vector<radio::PpsTimeAlignmentTarget> additional_sync_devices;
+        if (_uplink_rx_dev) {
+            const std::string uplink_rx_time_source =
+                _cfg.uplink.rx_time_source.empty()
+                    ? tx_time_source
+                    : _cfg.uplink.rx_time_source;
+            additional_sync_devices.push_back(
+                {"BS dedicated uplink RX",
+                 _uplink_rx_dev,
+                 uplink_rx_time_source});
+        }
+        SensingChannel::initialize_rx_and_sync(
+            _cfg,
+            tune_req,
+            _tx_dev,
+            tx_device_args,
+            _sensing_channels,
+            additional_sync_devices);
     }
 
     void _init_uplink_rx(const std::string& tx_device_args,
@@ -1506,15 +1696,29 @@ private:
         _uplink_rx->dl_ul_timing_diff().store(_cfg.uplink.bs_dl_ul_timing_diff,
                                               std::memory_order_relaxed);
         _uplink_rx->set_bs_frame_provider([this]() {
-            const uint64_t s = _next_frame_start_symbol.load(std::memory_order_relaxed);
-            return _cfg.ofdm.num_symbols ? (s / _cfg.ofdm.num_symbols) : s;
+            return _next_tx_frame_seq.load(std::memory_order_relaxed);
+        });
+        _uplink_rx->set_bs_epoch_provider([this]() {
+            // Canonical OTA epoch32 — matches AirFrameIdentity.timeline_epoch.
+            return static_cast<uint64_t>(
+                AirFrameClock::ota_epoch32(_air_clock.timeline_epoch()));
         });
         _attach_uplink_debug_sinks();
         if (_cfg.uplink.ertm_to_enable) {
-            _ertm_latest_ul_channel.resize(_cfg.ofdm.fft_size);
-            _uplink_rx->set_latest_channel_estimate_sink([this](AlignedVector&& data) {
-                _store_ertm_uplink_channel_freq(data);
-            });
+            _ertm_latest_ul_measurement.resize(_cfg.ofdm.fft_size);
+            _uplink_rx->set_ertm_ul_measurement_sink(
+                [this](uint32_t timeline_epoch,
+                       uint64_t frame_seq,
+                       uint64_t ul_rx_generation,
+                       int32_t applied_duti_samples,
+                       const AlignedVector& channel_freq) {
+                    _store_ertm_ul_measurement(
+                        timeline_epoch,
+                        frame_seq,
+                        ul_rx_generation,
+                        applied_duti_samples,
+                        channel_freq);
+                });
         }
         if (ul_rx_dev->supports(radio::Capability::HardwareGain)) {
             const radio::GainRange gr = ul_rx_dev->get_rx_gain_range(ul_rx_ch);
@@ -1540,7 +1744,7 @@ private:
                      << "zc_root=" << _uplink_rx->uplink_config().ofdm.zc_root;
     }
 
-    size_t _send_frame_chunked(
+    size_t _send_frame_once(
         const std::complex<float>* data,
         size_t total_samps,
         radio::TxMetadata md)
@@ -1549,34 +1753,29 @@ private:
             return 0;
         }
 
-        // In simulation the hub paces TX via shared-memory backpressure: when a
-        // consumer (e.g. the UE on the comm ring) is not yet attached or is
-        // catching up, send() returns short. That is a clean pause, NOT a radio
-        // underflow — treat it as such and keep retrying so the air-frame sequence
-        // stays locked to the samples actually placed on the air (otherwise the
-        // monostatic sensing RX/TX seq pairing drifts apart).
-        const bool is_sim = radio_is_sim(_cfg);
-
-        const size_t chunk_samps = _tx_chunk_samps ? _tx_chunk_samps : total_samps;
-        size_t total_sent = 0;
-        while (total_sent < total_samps) {
-            const size_t samps_this_call = std::min(chunk_samps, total_samps - total_sent);
-            const size_t sent = _tx_stream->send(data + total_sent, samps_this_call, md, 2.0);
-            total_sent += sent;
-
-            md.start_of_burst = false;
-            md.has_time_spec = false;
-
-            if (sent == 0) {
-                if (is_sim && _running.load(std::memory_order_relaxed) &&
-                    _tx_dev->running()) {
-                    // Hub is alive but paused (backpressure); wait for it to drain.
-                    continue;
-                }
-                break;
-            }
+        // UHD fragments a frame into transport packets internally. Keep the
+        // application boundary at one complete air frame so per-call overhead
+        // cannot starve a full-rate stream. A short UHD return is handled by the
+        // caller as a frame failure; never stitch it with another UHD call.
+        if (!radio_is_sim(_cfg)) {
+            return _tx_stream->send(data, total_samps, md, 2.0);
         }
 
+        // The simulator uses shared-memory backpressure rather than UHD. Keep
+        // its historical retry behavior so a temporarily full ring does not
+        // turn into a simulated radio underflow.
+        size_t total_sent = 0;
+        while (total_sent < total_samps && _running.load(std::memory_order_relaxed)) {
+            const size_t sent =
+                _tx_stream->send(data + total_sent, total_samps - total_sent, md, 2.0);
+            if (sent == 0) {
+                if (_tx_dev->running()) continue;
+                break;
+            }
+            total_sent += sent;
+            md.start_of_burst = false;
+            md.has_time_spec = false;
+        }
         return total_sent;
     }
 
@@ -1613,6 +1812,12 @@ private:
                 }
                 log_line << ")";
             };
+            auto request_restart = [&](TxRestartReason reason) {
+                return async_md.has_time_spec
+                    ? _tx_restart_gate.request_event(
+                          reason, time_spec_to_ns(async_md.time_spec))
+                    : _tx_restart_gate.request(reason);
+            };
 
             switch (async_md.event_code) {
             case radio::AsyncEvent::BurstAck:
@@ -1620,17 +1825,20 @@ private:
                 break;
             case radio::AsyncEvent::Underflow:
             case radio::AsyncEvent::UnderflowInPacket:
-                _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
-                log_event(LOG_G_WARN_M(Mod));
+                if (request_restart(TxRestartReason::Underflow)) {
+                    log_event(LOG_G_WARN_M(Mod));
+                }
                 break;
             case radio::AsyncEvent::SeqError:
             case radio::AsyncEvent::SeqErrorInBurst:
             case radio::AsyncEvent::TimeError:
                 if (async_md.event_code == radio::AsyncEvent::TimeError) {
-                    _tx_time_error_restart_requested.store(true, std::memory_order_relaxed);
-                    _tx_time_error_count.fetch_add(1, std::memory_order_relaxed);
+                    if (request_restart(TxRestartReason::TimeError)) {
+                        log_event(LOG_G_ERROR_M(Mod));
+                    }
+                } else {
+                    log_event(LOG_G_ERROR_M(Mod));
                 }
-                log_event(LOG_G_ERROR_M(Mod));
                 break;
             default:
                 log_event(LOG_G_INFO_M(Mod));
@@ -1826,14 +2034,18 @@ private:
         const size_t padded_len = payload_blocks * bytes_per_ldpc_block;
         const size_t packet_qpsk_symbols =
             LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
-        if (packet_qpsk_symbols > _data_resource_layout.payload_re_count) {
+        // Capacity is after per-frame Identity SIB reservation.
+        const size_t effective_re = _effective_payload_re_count();
+        if (packet_qpsk_symbols > effective_re) {
             static std::atomic<uint64_t> dropped_capacity_count{0};
             const uint64_t dropped = dropped_capacity_count.fetch_add(1, std::memory_order_relaxed) + 1;
             if (dropped <= 20 || (dropped % 100) == 0) {
-                LOG_G_WARN_M(Mod) << "Dropping UDP payload because one unified LDPC packet exceeds payload RE capacity: "
+                LOG_G_WARN_M(Mod) << "Dropping UDP payload because one unified LDPC packet exceeds effective payload RE capacity: "
                              << "payload_bytes=" << payload_len
                              << ", qpsk_syms=" << packet_qpsk_symbols
-                             << ", frame_capacity=" << _data_resource_layout.payload_re_count
+                             << ", effective_capacity=" << effective_re
+                             << " (raw_payload_re=" << _data_resource_layout.payload_re_count
+                             << ", identity_sib=" << LdpcPacketFraming::kIdentityControlSymbols << ")"
                              << ", dropped_packets=" << dropped;
             }
             return true;
@@ -2447,7 +2659,10 @@ private:
         // =================================================
 
         const float scale = 1.0f / std::sqrt(_cfg.ofdm.fft_size)/4; // Output digital signal power is 1/16
+        // Full payload RE includes Identity SIB at the head; user packets only
+        // see the effective remainder (must match encode-side capacity checks).
         const size_t max_data_syms_per_frame = _data_resource_layout.payload_re_count;
+        const size_t effective_user_re = _effective_payload_re_count();
         const size_t measurement_packet_limit_per_frame =
             (_measurement_enabled && _cfg.measurement.measurement_max_packets_per_frame > 0)
                 ? _cfg.measurement.measurement_max_packets_per_frame
@@ -2465,13 +2680,48 @@ private:
             auto current_symbols = _acquire_symbol_frame();
             SymbolVector& current_symbols_ref = *current_symbols;
 
+            // Claim absolute air-frame identity for this modulated frame, then
+            // inject a Tier-1 Identity SIB as the first payload packet so the UE
+            // can lock (epoch, frame_seq) via BCH-protected mini-header.
+            // Tag mod_generation so TX can discard cancelled (pre-restart) work.
+            const AirFrameIdentity air_id = _air_clock.claim_next();
+            const uint64_t claim_gen = air_id.mod_generation;
+
             // Pool of real data symbols available for this frame
             prof_step_start = ProfileClock::now();
             data_pool.clear();
             int64_t frame_ingest_ns = 0;  // T1: UDP recv time of first real packet
             int64_t frame_encoded_ns = 0; // T2: LDPC encode done time of first real packet
             size_t packets_pulled = 0;
-            // Pull packets only when the *whole* packet fits in current frame room.
+
+            // Expanded Identity SIB: marker + 2× BCH words (epoch32 + seq32).
+            // Capacity is enforced at BSEngine construction (fail-fast).
+            {
+                const size_t sib_syms = LdpcPacketFraming::kIdentityControlSymbols;
+                const size_t sib_begin = data_pool.size();
+                data_pool.resize(sib_begin + sib_syms);
+                LdpcPacketFraming::write_identity_control_qpsk(
+                    static_cast<uint32_t>(air_id.timeline_epoch),
+                    AirFrameClock::ota_frame_seq32(air_id.frame_seq),
+                    data_pool.data() + sib_begin);
+                static std::atomic<uint64_t> sib_claim_log_n{0};
+                const uint64_t n =
+                    sib_claim_log_n.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 8 || (n % 512) == 0) {
+                    LOG_RT_INFO_M(AirFrame)
+                        << "[AirFrame][BS-TX] claim+SIB"
+                        << ": n=" << n
+                        << ", epoch=0x" << std::hex << air_id.timeline_epoch
+                        << std::dec
+                        << ", seq=" << air_id.frame_seq
+                        << ", mod_gen=" << claim_gen
+                        << ", ota_seq32="
+                        << AirFrameClock::ota_frame_seq32(air_id.frame_seq);
+                }
+            }
+
+            // Pull packets only when the *whole* packet fits in remaining room
+            // after the Identity SIB (encode already enforces effective capacity).
             while (data_pool.size() < max_data_syms_per_frame) {
                 if (packets_pulled >= measurement_packet_limit_per_frame) {
                     break;
@@ -2485,13 +2735,13 @@ private:
                 if (pkt_size > room) {
                     // Current frame has no room for the next complete packet: stop pulling.
                     // Leave remaining subcarriers blank/pregen in this frame.
-                    if (pkt_size > max_data_syms_per_frame) {
+                    if (pkt_size > effective_user_re) {
                         // Keep packet in queue (strict "do not fetch if it does not fit").
                         // Warn periodically because this can stall queue progress.
                         oversize_head_warn_count++;
                         if (oversize_head_warn_count <= 20 || (oversize_head_warn_count % 100) == 0) {
-                            LOG_RT_WARN_M(ModLdpc) << "[LDPC] Queue head packet exceeds per-frame capacity, not fetched: qpsk_syms="
-                                          << pkt_size << ", max_qpsk_per_frame=" << max_data_syms_per_frame
+                            LOG_RT_WARN_M(ModLdpc) << "[LDPC] Queue head packet exceeds effective per-frame capacity, not fetched: qpsk_syms="
+                                          << pkt_size << ", effective_user_re=" << effective_user_re
                                           << ", warn_count=" << oversize_head_warn_count;
                         }
                     }
@@ -2630,6 +2880,8 @@ private:
                 bool queued = false;
                 queued_frame.samples = std::move(current_frame);
                 queued_frame.symbols = current_symbols;
+                queued_frame.identity = air_id;
+                queued_frame.mod_generation = claim_gen;
                 queued_frame.ingest_time_ns = frame_ingest_ns;
                 queued_frame.encoded_time_ns = frame_encoded_ns;
                 queued_frame.mod_done_time_ns = do_latency_profile
@@ -2717,6 +2969,11 @@ private:
         const double exact_frame_ticks =
             static_cast<double>(_cfg.samples_per_frame()) * tick_rate / tx_sample_rate;
         const long long frame_ticks = std::llround(exact_frame_ticks);
+        const int64_t frame_duration_ns = std::max<int64_t>(
+            1,
+            static_cast<int64_t>(std::llround(
+                static_cast<double>(_cfg.samples_per_frame()) * 1.0e9 / tx_sample_rate)));
+        TxHotPathProfiler tx_profiler(frame_duration_ns);
         const double frame_tick_error = std::abs(exact_frame_ticks - static_cast<double>(frame_ticks));
         if (frame_tick_error > 1e-6) {
             LOG_G_WARN_M(Config) << std::fixed << std::setprecision(6)
@@ -2727,21 +2984,34 @@ private:
                          << std::defaultfloat;
         }
         long long next_frame_ticks = _start_time.to_ticks(tick_rate);
-        uint64_t handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
+        long long last_scheduled_burst_ticks = next_frame_ticks;
         bool next_frame_starts_burst = true;
+        // Held when queue head is for a future air slot (cannot put back on SPSC).
+        QueuedTxFrame held_frame;
+        bool held_frame_valid = false;
+        constexpr double kTxSubmitLeadSec = 0.25;
+        const long long tx_submit_lead_ticks = std::max<long long>(
+            frame_ticks,
+            static_cast<long long>(std::ceil(kTxSubmitLeadSec * tick_rate)));
+        int64_t active_recovery_restart_time_ns = -1;
 
-        if (_tx_dev->supports(radio::Capability::TimedTx) &&
-            _tx_dev->supports(radio::Capability::FreeRunningClock)) {
-            constexpr double kTxSubmitLeadSec = 0.25;
+        auto wait_for_tx_submit_window = [&](long long burst_start_ticks) {
+            if (!_tx_dev->supports(radio::Capability::TimedTx) ||
+                !_tx_dev->supports(radio::Capability::FreeRunningClock)) {
+                return;
+            }
             while (_running.load(std::memory_order_relaxed)) {
-                const radio::TimeSpec next_frame_time =
-                    radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate);
+                const radio::TimeSpec burst_start_time =
+                    radio::TimeSpec::from_ticks(burst_start_ticks, tick_rate);
                 const double wait_s =
-                    (next_frame_time - _tx_dev->time_now()).get_real_secs() - kTxSubmitLeadSec;
+                    (burst_start_time - _tx_dev->time_now()).get_real_secs() -
+                    kTxSubmitLeadSec;
                 if (wait_s <= 0.0) break;
                 std::this_thread::sleep_for(std::chrono::duration<double>(std::min(wait_s, 0.05)));
             }
-        }
+        };
+        wait_for_tx_submit_window(next_frame_ticks);
+        tx_profiler.reset_interval();
 
         auto drop_one_queued_frame = [&]() -> bool {
             QueuedTxFrame dropped_frame;
@@ -2758,6 +3028,11 @@ private:
                 return;
             }
 
+            LOG_RT_WARN_M(Mod) << tx_profiler.report_and_reset(
+                reason,
+                _circular_buffer.size(),
+                _air_clock.seq_from_ticks(next_frame_ticks));
+
             radio::TxMetadata eob_md;
             eob_md.start_of_burst = false;
             eob_md.end_of_burst = true;
@@ -2773,79 +3048,268 @@ private:
             const long long restart_lead_ticks = std::max<long long>(
                 frame_ticks,
                 static_cast<long long>(std::ceil(kRestartLeadSec * tick_rate)));
-            const long long now_ticks = _tx_dev->time_now().to_ticks(tick_rate);
-            const long long target_ticks = now_ticks + restart_lead_ticks;
-            uint64_t frames_to_skip = 0;
-            if (next_frame_ticks < target_ticks) {
-                const long long late_ticks = target_ticks - next_frame_ticks;
-                frames_to_skip = static_cast<uint64_t>((late_ticks + frame_ticks - 1) / frame_ticks);
-            }
-
             size_t dropped_frames = 0;
-            for (uint64_t i = 0; i < frames_to_skip; ++i) {
-                if (drop_one_queued_frame()) {
+            uint64_t total_frames_to_skip = 0;
+            uint64_t restart_frame_seq = 0;
+            uint64_t new_gen = 0;
+            uint64_t arm_attempt = 0;
+            radio::TimeSpec restart_time(0.0);
+            bool receivers_armed = false;
+
+            while (_running.load(std::memory_order_relaxed) && !receivers_armed) {
+                ++arm_attempt;
+                const long long now_ticks = _tx_dev->time_now().to_ticks(tick_rate);
+                const long long target_ticks = serialized_tx_restart_target_ticks(
+                    now_ticks, restart_lead_ticks, last_scheduled_burst_ticks);
+                uint64_t frames_to_skip = 0;
+                if (next_frame_ticks < target_ticks) {
+                    const long long late_ticks = target_ticks - next_frame_ticks;
+                    frames_to_skip = static_cast<uint64_t>(
+                        (late_ticks + frame_ticks - 1) / frame_ticks);
+                }
+                total_frames_to_skip += frames_to_skip;
+                for (uint64_t i = 0; i < frames_to_skip; ++i) {
+                    if (drop_one_queued_frame()) {
+                        ++dropped_frames;
+                    }
+                }
+
+                next_frame_ticks += static_cast<long long>(frames_to_skip) * frame_ticks;
+                last_scheduled_burst_ticks = next_frame_ticks;
+                restart_frame_seq = _air_clock.seq_from_ticks(next_frame_ticks);
+                new_gen = _air_clock.cancel_and_force_next_seq(restart_frame_seq);
+                _next_tx_frame_seq.store(restart_frame_seq, std::memory_order_relaxed);
+                _next_frame_start_symbol.store(
+                    restart_frame_seq * static_cast<uint64_t>(_cfg.ofdm.num_symbols),
+                    std::memory_order_relaxed);
+                next_frame_starts_burst = true;
+                restart_time = radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate);
+                active_recovery_restart_time_ns = time_spec_to_ns(restart_time);
+                _tx_restart_gate.set_recovery_target_time_ns(
+                    active_recovery_restart_time_ns);
+
+                while (true) {
+                    QueuedTxFrame peek;
+                    if (!_circular_buffer.try_pop(peek)) {
+                        break;
+                    }
+                    _frame_pool.release(std::move(peek.samples));
                     ++dropped_frames;
+                }
+                held_frame_valid = false;
+                if (held_frame.samples.size() > 0) {
+                    _frame_pool.release(std::move(held_frame.samples));
+                }
+                held_frame = QueuedTxFrame{};
+
+                const uint64_t uplink_request_id = _uplink_rx
+                    ? _uplink_rx->request_reacquire(restart_time, restart_frame_seq)
+                    : 0;
+                std::vector<uint64_t> sensing_request_ids;
+                sensing_request_ids.reserve(_sensing_channels.size());
+                for (auto& ch : _sensing_channels) {
+                    sensing_request_ids.push_back(
+                        ch->request_reacquire(restart_time, restart_frame_seq));
+                }
+
+                const long long arm_deadline_ticks =
+                    next_frame_ticks - tx_submit_lead_ticks;
+                bool receiver_failed = false;
+                while (_running.load(std::memory_order_relaxed)) {
+                    receivers_armed = true;
+                    receiver_failed = false;
+                    if (_uplink_rx) {
+                        const auto status =
+                            _uplink_rx->reacquire_status(uplink_request_id);
+                        receivers_armed &= status == TimedStreamRestartStatus::Armed;
+                        receiver_failed |= status == TimedStreamRestartStatus::Failed;
+                    }
+                    for (size_t i = 0; i < _sensing_channels.size(); ++i) {
+                        const auto status = _sensing_channels[i]->reacquire_status(
+                            sensing_request_ids[i]);
+                        receivers_armed &= status == TimedStreamRestartStatus::Armed;
+                        receiver_failed |= status == TimedStreamRestartStatus::Failed;
+                    }
+                    if (receivers_armed || receiver_failed ||
+                        _tx_dev->time_now().to_ticks(tick_rate) >= arm_deadline_ticks) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                }
+                if (!receivers_armed && _running.load(std::memory_order_relaxed)) {
+                    LOG_RT_WARN_M(Mod)
+                        << "[TX] receiver restart arm "
+                        << (receiver_failed ? "failed" : "timed out")
+                        << " for target_seq=" << restart_frame_seq
+                        << ", attempt=" << arm_attempt
+                        << "; selecting a new shared anchor";
                 }
             }
 
-            next_frame_ticks += static_cast<long long>(frames_to_skip) * frame_ticks;
-            _next_tx_frame_seq.fetch_add(frames_to_skip, std::memory_order_relaxed);
-            _next_frame_start_symbol.fetch_add(
-                frames_to_skip * static_cast<uint64_t>(_cfg.ofdm.num_symbols),
-                std::memory_order_relaxed);
-            handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
-            next_frame_starts_burst = true;
-
-            const radio::TimeSpec restart_time =
-                radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate);
-            const uint64_t restart_frame_seq =
-                _next_tx_frame_seq.load(std::memory_order_relaxed);
-
-            // The TX frame anchor jumped; RX paths anchored to the shared radio
-            // clock must re-lock to the new framing instead of waiting for their
-            // old frame sequence to naturally catch up to the skipped TX slots.
-            if (_uplink_rx) {
-                _uplink_rx->request_reacquire(restart_time);
+            if (!receivers_armed) {
+                return;
             }
-            for (auto& ch : _sensing_channels) {
-                ch->request_reacquire(restart_time, restart_frame_seq);
-            }
+            // Match startup behavior: give the new modulation generation time to
+            // refill, then submit the timed SOB only inside UHD's lead window.
+            wait_for_tx_submit_window(next_frame_ticks);
+            const size_t recovery_prefilled_frames = _circular_buffer.size();
+            tx_profiler.reset_interval();
 
             LOG_RT_WARN_M(Mod) << std::fixed << std::setprecision(6)
                           << "[TX] " << reason << " restart scheduled at "
                           << restart_time.get_real_secs()
-                          << " s, skipped " << frames_to_skip
-                          << " frame slots and dropped " << dropped_frames
-                          << " queued frames" << std::defaultfloat;
+                          << " s, skipped " << total_frames_to_skip
+                          << " frame slots (target_seq=" << restart_frame_seq
+                          << ", epoch=" << _air_clock.timeline_epoch()
+                          << ", mod_gen=" << new_gen
+                          << ") and dropped " << dropped_frames
+                          << " queued frames, recovery prefilled "
+                          << recovery_prefilled_frames << "/"
+                          << _circular_buffer.capacity()
+                          << ", receiver arm attempt " << arm_attempt
+                          << ", coalesced "
+                          << _tx_restart_gate.consume_coalesced_count()
+                          << " duplicate async events" << std::defaultfloat;
         };
 
         while (_running.load(std::memory_order_relaxed)) {
-            if (_tx_underflow_restart_requested.exchange(false, std::memory_order_relaxed)) {
+            const TxRestartReason restart_reason = _tx_restart_gate.consume();
+            if (restart_reason == TxRestartReason::Underflow) {
                 restart_tx_burst("UNDERFLOW");
-            }
-
-            if (_tx_time_error_restart_requested.exchange(false, std::memory_order_relaxed)) {
-                handled_time_error_count = _tx_time_error_count.load(std::memory_order_relaxed);
+            } else if (restart_reason == TxRestartReason::TimeError) {
                 restart_tx_burst("TIME_ERROR");
             }
 
-            const uint64_t observed_time_error_count =
-                _tx_time_error_count.load(std::memory_order_relaxed);
-            if (observed_time_error_count != handled_time_error_count) {
-                handled_time_error_count = observed_time_error_count;
-            }
+            tx_profiler.observe_queue(_circular_buffer.size());
 
-            QueuedTxFrame frame_to_send;
-            const bool has_frame = _circular_buffer.try_pop(frame_to_send);
-            const uint64_t air_frame_seq = _next_tx_frame_seq.load(std::memory_order_relaxed);
-            const uint64_t frame_start_symbol = _next_frame_start_symbol.load(std::memory_order_relaxed);
+            // Tick schedule is the sole air-frame authority.
+            const uint64_t air_frame_seq = _air_clock.seq_from_ticks(next_frame_ticks);
+            const uint64_t frame_start_symbol =
+                air_frame_seq * static_cast<uint64_t>(_cfg.ofdm.num_symbols);
+            const uint64_t live_gen = _air_clock.mod_generation();
+            const AirFrameIdentity expected_identity =
+                _air_clock.make_identity(air_frame_seq, live_gen);
+            _next_tx_frame_seq.store(air_frame_seq, std::memory_order_relaxed);
+            _next_frame_start_symbol.store(frame_start_symbol, std::memory_order_relaxed);
             md.start_of_burst = next_frame_starts_burst;
             md.end_of_burst = false;
-            md.has_time_spec = true;
-            md.time_spec = radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate);
+            md.has_time_spec = next_frame_starts_burst;
+            if (md.has_time_spec) {
+                md.time_spec = radio::TimeSpec::from_ticks(next_frame_ticks, tick_rate);
+            }
 
-            if (has_frame) {
-                // Measure per-stage latency
+            // Hard gate: only transmit a modulated frame whose claimed seq and
+            // mod_generation match this air slot. Stale → drop; future → hold;
+            // empty/mismatch → blank (keeps time continuous, UE sees gap).
+            QueuedTxFrame frame_to_send;
+            bool send_modulated = false;
+            auto release_frame = [&](QueuedTxFrame& f) {
+                if (!f.samples.empty()) {
+                    _frame_pool.release(std::move(f.samples));
+                }
+                f = QueuedTxFrame{};
+            };
+            auto classify_frame = [&](const QueuedTxFrame& f) {
+                const uint64_t generation = f.mod_generation != 0
+                    ? f.mod_generation
+                    : f.identity.mod_generation;
+                return AirFrameTxGate::classify(
+                    f.identity,
+                    generation,
+                    expected_identity,
+                    live_gen,
+                    true);
+            };
+
+            if (held_frame_valid) {
+                const AirFrameTxGate::Decision held_decision =
+                    classify_frame(held_frame);
+                if (held_decision == AirFrameTxGate::Decision::Match) {
+                    frame_to_send = std::move(held_frame);
+                    held_frame_valid = false;
+                    held_frame = QueuedTxFrame{};
+                    send_modulated = true;
+                } else if (held_decision != AirFrameTxGate::Decision::Future) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 5)
+                        << "[AirFrame] dropping held frame"
+                        << ": decision="
+                        << AirFrameTxGate::decision_name(held_decision)
+                        << ", claimed_seq=" << held_frame.identity.frame_seq
+                        << ", expected=" << air_frame_seq
+                        << ", gen=" << held_frame.mod_generation
+                        << "/" << live_gen;
+                    release_frame(held_frame);
+                    held_frame_valid = false;
+                    tx_profiler.note_gate_drop();
+                } else {
+                    // Keep holding; blank this slot.
+                }
+            }
+
+            while (!send_modulated && !held_frame_valid &&
+                   _running.load(std::memory_order_relaxed)) {
+                QueuedTxFrame popped;
+                if (!_circular_buffer.try_pop(popped)) {
+                    break;
+                }
+                const uint64_t gen = popped.mod_generation != 0
+                    ? popped.mod_generation : popped.identity.mod_generation;
+                const AirFrameTxGate::Decision decision = classify_frame(popped);
+                if (decision == AirFrameTxGate::Decision::CancelledGeneration) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 20)
+                        << "[AirFrame][BS-TX] hard-gate mismatch: cancelled generation"
+                        << ": claimed_seq=" << popped.identity.frame_seq
+                        << ", gen=" << gen << ", live_gen=" << live_gen;
+                    release_frame(popped);
+                    tx_profiler.note_gate_drop();
+                    continue;
+                }
+                if (decision == AirFrameTxGate::Decision::InvalidIdentity ||
+                    decision == AirFrameTxGate::Decision::EpochMismatch) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 20)
+                        << "[AirFrame][BS-TX] hard-gate mismatch: invalid identity"
+                        << ": expected_seq=" << air_frame_seq;
+                    release_frame(popped);
+                    tx_profiler.note_gate_drop();
+                    continue;
+                }
+                if (decision == AirFrameTxGate::Decision::Stale) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 20)
+                        << "[AirFrame][BS-TX] hard-gate mismatch: stale seq"
+                        << ": claimed_seq=" << popped.identity.frame_seq
+                        << ", expected_seq=" << air_frame_seq;
+                    release_frame(popped);
+                    tx_profiler.note_gate_drop();
+                    continue;
+                }
+                if (decision == AirFrameTxGate::Decision::Future) {
+                    held_frame = std::move(popped);
+                    held_frame_valid = true;
+                    break;
+                }
+                // Exact match.
+                frame_to_send = std::move(popped);
+                send_modulated = true;
+                break;
+            }
+
+            if (send_modulated) {
+                {
+                    static std::atomic<uint64_t> gate_match_count{0};
+                    const uint64_t n =
+                        gate_match_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (n <= 16 || (n % 512) == 0) {
+                        LOG_RT_INFO_M(AirFrame)
+                            << "[AirFrame][BS-TX] hard-gate MATCH send"
+                            << ": n=" << n
+                            << ", epoch=0x" << std::hex
+                            << frame_to_send.identity.timeline_epoch << std::dec
+                            << ", claimed_seq=" << frame_to_send.identity.frame_seq
+                            << ", expected_seq=" << air_frame_seq
+                            << ", mod_gen=" << frame_to_send.mod_generation
+                            << ", live_gen=" << live_gen;
+                    }
+                }
                 if (do_latency_profile && frame_to_send.ingest_time_ns != 0) {
                     const int64_t t4_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -2858,40 +3322,89 @@ private:
                     _latency_accumulator.e2e_total_ns.fetch_add(t3 - t1, std::memory_order_relaxed);
                     _latency_accumulator.count.fetch_add(1, std::memory_order_relaxed);
                 }
-                const size_t sent = _send_frame_chunked(
+                const auto send_token = tx_profiler.begin_send();
+                const size_t sent = _send_frame_once(
                     frame_to_send.samples.data(),
                     frame_to_send.samples.size(),
                     md);
+                tx_profiler.complete_send(
+                    send_token,
+                    true,
+                    false,
+                    frame_to_send.samples.size(),
+                    sent,
+                    air_frame_seq);
+                if (md.start_of_burst && active_recovery_restart_time_ns >= 0) {
+                    _tx_restart_gate.finish_recovery(
+                        active_recovery_restart_time_ns);
+                    active_recovery_restart_time_ns = -1;
+                }
                 if (sent < frame_to_send.samples.size()) {
-                    // In sim mode a short send after the hub stops is a clean shutdown,
-                    // not a radio underflow — skip the underflow restart to avoid
-                    // spurious log noise and frame-seq skips during teardown.
                     const bool backend_shutting_down = !_tx_dev->running();
                     if (!backend_shutting_down) {
-                        _tx_underflow_restart_requested.store(true, std::memory_order_relaxed);
+                        _tx_restart_gate.request(TxRestartReason::Underflow);
                         LOG_RT_WARN_M(Mod) << "TX Underflow: "
-                                      << (frame_to_send.samples.size() - sent) << " samples";
+                                      << (frame_to_send.samples.size() - sent) << " samples"
+                                      << ", air_seq=" << air_frame_seq;
                     }
                 } else if (frame_to_send.symbols) {
                     for (auto& ch : _sensing_channels) {
-                        ch->enqueue_tx_symbols(frame_to_send.symbols, frame_start_symbol, air_frame_seq);
+                        ch->enqueue_tx_symbols(
+                            frame_to_send.symbols, frame_start_symbol, air_frame_seq);
                     }
                 }
-                // Return frame to pool for reuse (instead of destroying)
-                _frame_pool.release(std::move(frame_to_send.samples));
+                release_frame(frame_to_send);
             } else {
-                _send_frame_chunked(_blank_frame.data(), _blank_frame.size(), md);
-                LOG_RT_WARN_HZ(5) << "TX blank frame injected";
+                const bool blank_for_future = held_frame_valid;
+                const auto send_token = tx_profiler.begin_send();
+                const size_t sent =
+                    _send_frame_once(_blank_frame.data(), _blank_frame.size(), md);
+                tx_profiler.complete_send(
+                    send_token,
+                    false,
+                    blank_for_future,
+                    _blank_frame.size(),
+                    sent,
+                    air_frame_seq);
+                if (md.start_of_burst && active_recovery_restart_time_ns >= 0) {
+                    _tx_restart_gate.finish_recovery(
+                        active_recovery_restart_time_ns);
+                    active_recovery_restart_time_ns = -1;
+                }
+                if (sent < _blank_frame.size() && _tx_dev->running()) {
+                    LOG_RT_WARN_HZ_M(Mod, 5)
+                        << "[TX profile] blank short send: sent=" << sent
+                        << "/" << _blank_frame.size()
+                        << ", air_seq=" << air_frame_seq;
+                }
+                // If the queue was empty (not merely holding a future frame),
+                // advance the claim cursor so newly modulated frames are labeled
+                // for the live air timeline rather than permanent lag.
+                if (!held_frame_valid) {
+                    _air_clock.advance_next_seq_past(air_frame_seq);
+                }
+                LOG_RT_WARN_HZ_M(AirFrame, 50)
+                    << "[AirFrame][BS-TX] hard-gate BLANK"
+                    << ": expected_seq=" << air_frame_seq
+                    << (held_frame_valid ? " (held future frame)" : " (empty/stale/mismatch)")
+                    << ", live_gen=" << live_gen;
             }
-            _next_tx_frame_seq.fetch_add(1, std::memory_order_relaxed);
-            _next_frame_start_symbol.fetch_add(
-                static_cast<uint64_t>(_cfg.ofdm.num_symbols),
-                std::memory_order_relaxed);
+            if (tx_profiler.periodic_report_due() && LOG_MOD_ON(ModProfiling)) {
+                LOG_RT_INFO_M(ModProfiling) << tx_profiler.report_and_reset(
+                    "periodic", _circular_buffer.size(), air_frame_seq + 1);
+            }
             next_frame_ticks += frame_ticks;
+            const uint64_t next_seq = air_frame_seq + 1;
+            _next_tx_frame_seq.store(next_seq, std::memory_order_relaxed);
+            _next_frame_start_symbol.store(
+                next_seq * static_cast<uint64_t>(_cfg.ofdm.num_symbols),
+                std::memory_order_relaxed);
             next_frame_starts_burst = false;
         }
         
+        md.start_of_burst = false;
         md.end_of_burst = true;
+        md.has_time_spec = false;
         _tx_stream->send(static_cast<const std::complex<float>*>(nullptr), 0, md, 0.1);
     }
 
@@ -2904,7 +3417,6 @@ void signal_handler(int) { stop_signal.store(true); }
 int UHD_SAFE_MAIN(int argc, char *[]) {
     async_logger::AsyncLoggerGuard async_logger_guard;
     std::signal(SIGINT, &signal_handler);
-    radio::set_thread_priority();
 #if defined(__linux__)
     if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
         LOG_G_INFO_M(Config) << "Locked current and future process memory with mlockall().";
@@ -2939,15 +3451,16 @@ int UHD_SAFE_MAIN(int argc, char *[]) {
     LOG_G_INFO_M(Sensing) << "Loaded config from: " << default_config_file;
     normalize_bs_sensing_channels(cfg);
 
-    // Set main thread affinity to the last configured core.
-    bind_current_thread_to_main_core(cfg);
-
     // Load FFTW wisdom
     FFTWManager::import_wisdom();
 
     // Create and start engine
     BSEngine isac_engine(cfg);
     isac_engine.start();
+
+    // Keep construction on the process-wide affinity and SCHED_OTHER policy so
+    // UHD/ZMQ helpers do not inherit the main thread's dedicated CPU.
+    bind_current_thread_to_main_core(cfg);
 
     // Main loop
     while (!stop_signal.load()) {

@@ -14,7 +14,9 @@
 
 #include "Common.hpp"
 #include "OFDMCore.hpp"
+#include "PpsTimeAlignment.hpp"
 #include "RadioBackend.hpp"
+#include "TimedStreamRestart.hpp"
 
 struct SharedSensingRuntime {
     size_t sensing_symbol_stride = 20;
@@ -71,7 +73,8 @@ public:
     void join();
     void start_bistatic();
     void stop_bistatic();
-    void request_reacquire(const radio::TimeSpec& start_time, uint64_t frame_seq);
+    uint64_t request_reacquire(const radio::TimeSpec& start_time, uint64_t frame_seq);
+    TimedStreamRestartStatus reacquire_status(uint64_t request_id) const noexcept;
 
     bool enqueue_tx_symbols(
         const std::shared_ptr<const SymbolVector>& symbols,
@@ -101,7 +104,8 @@ public:
         const radio::TuneRequest& tune_req,
         radio::IDevicePtr tx_device,
         const std::string& tx_device_args,
-        std::vector<std::unique_ptr<SensingChannel>>& channels
+        std::vector<std::unique_ptr<SensingChannel>>& channels,
+        const std::vector<radio::PpsTimeAlignmentTarget>& additional_sync_devices = {}
     );
 
     SensingChannel(const SensingChannel&) = delete;
@@ -174,7 +178,9 @@ private:
         std::mutex restart_mutex;
         radio::TimeSpec pending_restart_time{0.0};
         uint64_t pending_restart_frame_seq = 0;
+        uint64_t pending_restart_request_id = 0;
         std::atomic<bool> restart_requested{false};
+        TimedStreamRestartAck restart_ack;
         std::atomic<uint64_t> pairing_generation{1};
         std::atomic<bool> compute_reset_requested{false};
         std::atomic<RxState> rx_state{RxState::ALIGNMENT};

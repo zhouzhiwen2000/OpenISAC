@@ -541,7 +541,31 @@ def build_simulation_mapping_payload(value: Any, field: dict[str, Any], has_valu
     return build_structured_mapping_payload(value, field, has_value, "simulation_mapping")
 
 
-def build_logging_mapping_payload(value: Any, field: dict[str, Any], has_value: bool) -> dict[str, Any]:
+def logging_module_visible_for_side(module_field: dict[str, Any], side: str) -> bool:
+    """Whether a logging.modules entry should appear for the BS or UE editor tab."""
+    side = str(side or "").strip().lower()
+    if side not in {"bs", "ue"}:
+        return True
+    raw_sides = module_field.get("sides")
+    if raw_sides is None:
+        return True
+    if isinstance(raw_sides, str):
+        sides = {raw_sides.strip().lower()}
+    elif isinstance(raw_sides, (list, tuple, set)):
+        sides = {str(item).strip().lower() for item in raw_sides if str(item).strip()}
+    else:
+        return True
+    if not sides:
+        return True
+    return side in sides
+
+
+def build_logging_mapping_payload(
+    value: Any,
+    field: dict[str, Any],
+    has_value: bool,
+    side: str = "",
+) -> dict[str, Any]:
     """Payload for hierarchical logging filter UI."""
     value_map = copy.deepcopy(value) if isinstance(value, dict) else {}
     if not has_value and isinstance(field.get("default"), dict):
@@ -575,6 +599,8 @@ def build_logging_mapping_payload(value: Any, field: dict[str, Any], has_value: 
     level_options = ["inherit", "off", "error", "warn", "info", "debug"]
     module_fields_payload: list[dict[str, Any]] = []
     for module_field in field.get("module_fields", []):
+        if not logging_module_visible_for_side(module_field, side):
+            continue
         path = str(module_field.get("path", "")).strip()
         if not path:
             continue
@@ -582,6 +608,13 @@ def build_logging_mapping_payload(value: Any, field: dict[str, Any], has_value: 
         level = str(raw_level).strip().lower() if raw_level is not None else "inherit"
         if level not in level_options:
             level = "inherit"
+        raw_sides = module_field.get("sides")
+        if isinstance(raw_sides, (list, tuple)):
+            sides_payload = [str(item) for item in raw_sides]
+        elif raw_sides is None:
+            sides_payload = ["bs", "ue"]
+        else:
+            sides_payload = [str(raw_sides)]
         module_fields_payload.append({
             "path": path,
             "title": module_field.get("title", path),
@@ -589,6 +622,7 @@ def build_logging_mapping_payload(value: Any, field: dict[str, Any], has_value: 
             "depth": int(module_field.get("depth", 0) or 0),
             "level": level,
             "options": list(level_options),
+            "sides": sides_payload,
         })
 
     return {
@@ -603,7 +637,11 @@ def build_logging_mapping_payload(value: Any, field: dict[str, Any], has_value: 
     }
 
 
-def normalize_logging_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[str, Any]:
+def normalize_logging_mapping_payload(
+    raw: Any,
+    field: dict[str, Any],
+    side: str = "",
+) -> dict[str, Any]:
     if isinstance(raw, str):
         parsed = parse_mapping_text(raw)
         if not isinstance(parsed, dict):
@@ -651,6 +689,7 @@ def normalize_logging_mapping_payload(raw: Any, field: dict[str, Any]) -> dict[s
             str(mf.get("path", "")).strip()
             for mf in field.get("module_fields", [])
             if str(mf.get("path", "")).strip()
+            and logging_module_visible_for_side(mf, side)
         }
         for path, level in modules_raw.items():
             path_s = str(path).strip()
@@ -1645,7 +1684,9 @@ def build_form_payload(tab_name: str, data: dict[str, Any], layout: list[dict[st
                 continue
 
             if field["type"] == "logging_mapping":
-                section_payload["fields"].append(build_logging_mapping_payload(value, field, has_value))
+                section_payload["fields"].append(
+                    build_logging_mapping_payload(value, field, has_value, side=tab_name)
+                )
                 continue
 
             if field["type"] == "uplink_mapping":
@@ -1896,7 +1937,9 @@ def normalize_payload_data(tab_name: str, layout: list[dict[str, Any]], payload:
         elif mapping_field.get("type") == "simulation_mapping":
             result[key] = normalize_simulation_mapping_payload(raw_mapping_text, mapping_field)
         elif mapping_field.get("type") == "logging_mapping":
-            result[key] = normalize_logging_mapping_payload(raw_mapping_text, mapping_field)
+            result[key] = normalize_logging_mapping_payload(
+                raw_mapping_text, mapping_field, side=tab_name
+            )
         elif mapping_field.get("type") == "uplink_mapping":
             normalized = normalize_uplink_mapping_payload(
                 raw_mapping_text,

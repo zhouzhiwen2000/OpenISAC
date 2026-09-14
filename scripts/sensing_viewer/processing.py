@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -28,9 +28,6 @@ class ProcessingOptions:
     display_doppler_bins: int = MAX_DOPPLER_BINS
     enable_range_window: bool = True
     enable_doppler_window: bool = True
-
-    def with_display_range(self, value: int) -> "ProcessingOptions":
-        return replace(self, display_range_bins=max(1, int(value)))
 
 
 @dataclass

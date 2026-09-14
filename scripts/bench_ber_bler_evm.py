@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("scripts/bench_ber_bler_evm_ue_template.yaml"),
     )
-    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.bash"))
+    parser.add_argument("--isolate-script", type=Path, default=Path("scripts/isolate_cpus.py"))
     parser.add_argument("--tx-gains", type=str, required=True,
                         help="Comma-separated TX gains in dB, for example 60,55,50,45")
     parser.add_argument("--payload-bytes", type=int, default=1024)
@@ -162,7 +162,7 @@ def main() -> None:
             f"payload_bytes={args.payload_bytes} exceeds single-frame measurement limit {max_payload}"
         )
     if os.geteuid() != 0:
-        raise RuntimeError("bench_ber_bler_evm.py must run as root to use isolate_cpus.bash")
+        raise RuntimeError("bench_ber_bler_evm.py must run as root to use isolate_cpus.py")
 
     mod_cfg["tx_gain"] = float(tx_gains[0])
     mod_summary_path = run_dir / "bs_measurement_summary.csv"

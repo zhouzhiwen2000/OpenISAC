@@ -1,5 +1,6 @@
 #include <uhd/utils/safe_main.hpp>  // UHD_SAFE_MAIN entry macro only
 #include <algorithm>
+#include <array>
 #include <complex>
 #include <vector>
 #include <atomic>
@@ -27,6 +28,8 @@
 #include "LDPCCodec.hpp"
 #include "UplinkTxEngine.hpp"
 #include "OFDMCore.hpp"
+#include "ErtmAbsoluteFrameState.hpp"
+#include "PpsTimeAlignment.hpp"
 #include "SensingChannel.hpp"
 #include "RadioBackend.hpp"
 
@@ -305,6 +308,7 @@ public:
               frame.SFO = 0.0f;
               frame.delay_offset = 0.0f;
               frame.alignment_samples = 0;
+              frame.ertm_rx_alignment_shift_samples = 0;
               frame.force_ertm_remeasure = false;
               if (cfg.uplink.ertm_to_enable) {
                   frame.ertm_downlink_channel_freq.resize(cfg.ofdm.fft_size);
@@ -314,7 +318,7 @@ public:
           _rx_agc(cfg),
           _sync_search_gain_sweep(cfg),
           _reset_hold_frames(reset_hold_frames_from_cfg(cfg)),
-          _akf(make_akf_params(cfg), frame_duration_from_cfg(cfg)) {
+          _cfo_ewma(make_cfo_ewma_params(cfg)) {
         _init_cpu_ldpc_workers();
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(
             _cpu_ldpc_contexts.front()->decoder.get_N(), 21);
@@ -335,22 +339,52 @@ public:
         }
 
         init_radio();
+        _configure_ue_air_timeline();
         init_filter();
         prepare_fftw();
         _init_cpu_demod_workers();
         init_zmq_publishers();
         if (cfg_.sync_tracking.hardware_sync) {
+            const double loop_max_slew_ppm_per_s = std::max({
+                cfg_.sync_tracking.ocxo_coarse_max_slew_ppm_per_s,
+                cfg_.sync_tracking.ocxo_fll_fast_max_slew_ppm_per_s,
+                cfg_.sync_tracking.ocxo_fll_slow_max_slew_ppm_per_s,
+                cfg_.sync_tracking.ocxo_phase_max_slew_ppm_per_s});
+            if (cfg_.sync_tracking.ocxo_actuator_max_slew_ppm_per_s + 1e-15 <
+                loop_max_slew_ppm_per_s) {
+                LOG_G_WARN_M(Ocxo)
+                    << "OCXO actuator slew is below a loop slew; desired steps will be clipped"
+                    << " actuator=" << cfg_.sync_tracking.ocxo_actuator_max_slew_ppm_per_s
+                    << " loop_max=" << loop_max_slew_ppm_per_s;
+            }
             _hw_sync = std::make_unique<HardwareSyncController>(cfg_.sync_tracking.hardware_sync_tty);
-            _hw_sync->configure_ocxo_pi(
-                cfg_.sync_tracking.ocxo_pi_kp_fast,
-                cfg_.sync_tracking.ocxo_pi_ki_fast,
-                cfg_.sync_tracking.ocxo_pi_kp_slow,
-                cfg_.sync_tracking.ocxo_pi_ki_slow,
-                cfg_.sync_tracking.ocxo_pi_switch_abs_error_ppm,
-                cfg_.sync_tracking.ocxo_pi_switch_hold_s,
-                cfg_.sync_tracking.ocxo_pi_max_step_fast_ppm,
-                cfg_.sync_tracking.ocxo_pi_max_step_slow_ppm
-            );
+            _hw_sync->configure_plant(
+                cfg_.sync_tracking.ocxo_dac_ppm_per_lsb,
+                cfg_.sync_tracking.ocxo_dac_zero_word,
+                cfg_.sync_tracking.ocxo_max_abs_ppm,
+                cfg_.sync_tracking.ocxo_actuator_max_slew_ppm_per_s,
+                cfg_.sync_tracking.ocxo_dac_state_file);
+            _hw_sync->configure_pps_phase_adjust_timeout(
+                cfg_.sync_tracking.ocxo_pps_initial_ap_command_timeout_s);
+            _ocxo_discipliner = std::make_unique<OCXODiscipliner>(make_ocxo_params(cfg_));
+            _ocxo_discipliner->reset_tracking_at_command(
+                _hw_sync->current_offset_ppm());
+            _ocxo_pps_initial_aligner = std::make_unique<OCXOPpsInitialAligner>(
+                make_ocxo_pps_initial_aligner_params(cfg_));
+            LOG_G_INFO_M(Ocxo) << "OCXO staged discipliner enabled"
+                         << " (mode=" << cfg_.sync_tracking.ocxo_mode
+                         << ", fast_control="
+                         << cfg_.sync_tracking.ocxo_fll_fast_control_mode
+                         << ", fast_period_s="
+                         << cfg_.sync_tracking.ocxo_fll_fast_control_period_s
+                         << ", phase_entry_ap="
+                         << (cfg_.sync_tracking.ocxo_mode == kOCXOModePpsPhase
+                                 ? (cfg_.sync_tracking.ocxo_pps_initial_ap_enable
+                                        ? "enabled" : "disabled")
+                                 : "inactive")
+                         << ", ap_polarity="
+                         << (cfg_.sync_tracking.ocxo_pps_initial_ap_polarity < 0 ? -1 : 1)
+                         << ")";
         }
         // Initialize sensing processing
         init_sensing();
@@ -372,23 +406,192 @@ public:
         // manage their own FFT plans and clean them up in their destructors
     }
 
+    void _configure_ue_air_timeline() {
+        double rx_rate = cfg_.rf_sampling.sample_rate;
+        if (dev_) {
+            try {
+                const double actual = dev_->get_rx_rate(cfg_.downlink.rx_channel);
+                if (actual > 0.0) {
+                    rx_rate = actual;
+                }
+            } catch (...) {
+            }
+        }
+        _ue_rx_sample_rate = rx_rate;
+        _ue_air_timeline.configure(
+            cfg_.samples_per_frame(),
+            cfg_.ofdm.num_symbols,
+            _ue_rx_sample_rate);
+        LOG_G_INFO_M(AirFrame) << "[AirFrame] UE timeline configured: samples_per_frame="
+                     << cfg_.samples_per_frame()
+                     << ", sample_rate=" << _ue_rx_sample_rate
+                     << (std::abs(_ue_rx_sample_rate - cfg_.rf_sampling.sample_rate) > 1.0
+                             ? " (coerced from config)"
+                             : "");
+    }
+
+    double _rx_rate_hz() const {
+        return (_ue_rx_sample_rate > 0.0) ? _ue_rx_sample_rate : cfg_.rf_sampling.sample_rate;
+    }
+
+    /**
+     * @brief Stamp absolute air-frame identity + UE-USRP frame-start on an RX frame.
+     *
+     * @param raw_first_ns  Metadata time of the first sample of the RX read
+     * @param alignment_sample_adjust  Samples from raw first to committed boundary
+     *        (alignment frame: discard amount; normal: 0)
+     */
+    void _stamp_rx_air_frame(RxFrame& frame, int64_t raw_first_ns, int64_t alignment_sample_adjust) {
+        // Apply any SIB anchors published by the bit thread before deriving seq.
+        _drain_sib_events_on_rx();
+
+        // Always use the same rate as timeline configure (actual UHD rate).
+        const double rate = _rx_rate_hz();
+        const int64_t boundary_ns = UeAirFrameTimeline::boundary_time_ns(
+            raw_first_ns, alignment_sample_adjust, rate);
+        // Store the committed boundary as usrp_time_ns so downstream control
+        // gates and eRTM share the same frame-start reference.
+        if (boundary_ns >= 0) {
+            frame.usrp_time_ns = boundary_ns;
+        }
+        // Derive absolute seq from (SIB seq, SIB boundary) + time delta — never
+        // from an async free-run counter reset by the bit-processing thread.
+        frame.identity = _ue_air_timeline.stamp_rx_boundary(boundary_ns);
+        _ue_air_frame_mid_time_ns.store(
+            frame.identity.ue_frame_mid_time_ns, std::memory_order_relaxed);
+        _ue_air_frame_start_time_ns.store(
+            frame.identity.ue_frame_start_time_ns, std::memory_order_relaxed);
+        if (frame.identity.valid) {
+            // Single-writer snapshot for diagnostics (RX thread only).
+            _air_identity_rx_snapshot = frame.identity;
+            _next_bistatic_frame_start_symbol.store(
+                frame.identity.frame_start_symbol, std::memory_order_relaxed);
+            const uint64_t n =
+                _air_identity_stamp_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            // Heartbeat: first 8 stamps, then every 512 frames.
+            if (n <= 8 || (n % 512) == 0) {
+                LOG_RT_INFO_M(AirFrame)
+                    << "[AirFrame] RX stamp"
+                    << ": n=" << n
+                    << ", epoch=0x" << std::hex << frame.identity.timeline_epoch
+                    << std::dec
+                    << ", seq=" << frame.identity.frame_seq
+                    << ", boundary_ns=" << frame.identity.ue_frame_start_time_ns
+                    << ", mid_ns=" << frame.identity.ue_frame_mid_time_ns
+                    << ", raw_first_ns=" << raw_first_ns
+                    << ", align_adj=" << alignment_sample_adjust
+                    << ", locks=" << _air_identity_lock_count.load(std::memory_order_relaxed)
+                    << ", sfo_resets="
+                    << _air_timeline_reset_count.load(std::memory_order_relaxed);
+            }
+        }
+        if (_uplink_tx) {
+            _uplink_tx->store_air_frame_stamp(frame.identity);
+        }
+    }
+
+    /**
+     * @brief RX-owned: drain Identity-SIB events from bit path and install anchors.
+     * Protocol resets (ARQ/SFO) are requested via flags for the process thread.
+     */
+    void _drain_sib_events_on_rx() {
+        AirFrameSibEvent ev;
+        while (_sib_event_queue.try_pop(ev)) {
+            const uint64_t live_gen =
+                _sync_generation.load(std::memory_order_acquire);
+            if (ev.sync_generation != live_gen) {
+                const uint64_t n =
+                    _air_sib_stale_drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 16 || (n % 64) == 0) {
+                    LOG_RT_WARN_M(AirFrame)
+                        << "[AirFrame] drop stale SIB event"
+                        << ": event_gen=" << ev.sync_generation
+                        << ", live_gen=" << live_gen
+                        << ", epoch=0x" << std::hex << ev.timeline_epoch << std::dec
+                        << ", seq=" << ev.frame_seq
+                        << ", drop_count=" << n;
+                }
+                continue; // stale across hard resync
+            }
+            const bool apply_epoch_changed = _ue_air_timeline.apply_identity_sib_anchor(
+                ev.timeline_epoch,
+                ev.frame_seq,
+                ev.ue_boundary_time_ns,
+                ev.ue_mid_time_ns);
+            // Sticky bit-thread flag survives lost/stale first SIB events: after
+            // last_seen advances, later SIBs have epoch_changed=0, but SFO must
+            // still run once on the first successful post-reboot anchor install.
+            const bool sticky_epoch_sfo =
+                _ota_epoch_sfo_needed.load(std::memory_order_acquire);
+            const bool need_sfo_reset =
+                apply_epoch_changed || ev.epoch_changed || sticky_epoch_sfo;
+            const uint64_t locks =
+                _air_identity_lock_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            // Heartbeat on anchor install (first 16 + every 256).
+            if (locks <= 16 || (locks % 256) == 0 || need_sfo_reset) {
+                LOG_RT_INFO_M(AirFrame)
+                    << "[AirFrame] SIB anchor installed on RX"
+                    << ": locks=" << locks
+                    << ", epoch=0x" << std::hex << ev.timeline_epoch << std::dec
+                    << ", seq=" << ev.frame_seq
+                    << ", boundary_ns=" << ev.ue_boundary_time_ns
+                    << ", mid_ns=" << ev.ue_mid_time_ns
+                    << ", gen=" << ev.sync_generation
+                    << ", apply_epoch_changed=" << apply_epoch_changed
+                    << ", event_epoch_changed=" << ev.epoch_changed
+                    << ", sticky_sfo=" << sticky_epoch_sfo;
+            }
+            // Only RX (after successful anchor install) requests SFO/sync reset.
+            // Tag with *live* generation so process applies under the current
+            // sync epoch even if the SIB event was published slightly earlier.
+            if (need_sfo_reset) {
+                _ota_epoch_sfo_needed.store(false, std::memory_order_release);
+                _pending_sfo_reset_generation.store(
+                    live_gen, std::memory_order_release);
+                // Belt-and-suspenders: if bit-thread clear was lost or this is a
+                // sticky install after a missed event, re-request eRTM wipe.
+                if (apply_epoch_changed || ev.epoch_changed) {
+                    _request_ertm_report_clear("ota_epoch_change_rx_anchor");
+                }
+                LOG_G_WARN_M(AirFrame) << "[AirFrame] BS timeline epoch change on RX"
+                             << ": epoch=" << ev.timeline_epoch
+                             << ", seq=" << ev.frame_seq
+                             << ", live_gen=" << live_gen
+                             << ", event_gen=" << ev.sync_generation
+                             << ", apply_epoch_changed=" << apply_epoch_changed
+                             << ", event_epoch_changed=" << ev.epoch_changed
+                             << ", sticky_sfo=" << sticky_epoch_sfo;
+            }
+        }
+    }
+
     void start() {
-        _control_handler.start();
         _ue_timing_advance.store(cfg_.uplink.ue_timing_advance, std::memory_order_relaxed);
         log_duplex_summary(cfg_, "UE");
 
         radio::TimeSpec stream_start_time(0.0);
         if (_uplink_tx && dev_->supports(radio::Capability::TimedTx)) {
             stream_start_time = _next_timed_stream_start();
+            const double tx_rate = dev_->get_tx_rate(cfg_.uplink.tx_channel);
+            const double rx_rate = _rx_rate_hz();
+            if (std::abs(tx_rate - rx_rate) > 1.0) {
+                throw std::runtime_error(
+                    "UE timed RX/UL-TX requires identical actual sample rates "
+                    "for exact identity mapping: rx_rate=" +
+                    std::to_string(rx_rate) + ", tx_rate=" +
+                    std::to_string(tx_rate) + ", samples_per_period=" +
+                    std::to_string(cfg_.samples_per_frame()));
+            }
             _uplink_tx->set_timed_tx(
                 stream_start_time,
                 dev_->master_clock_rate(),
-                dev_->get_tx_rate(cfg_.uplink.tx_channel));
+                tx_rate);
             LOG_G_INFO_M(Radio) << "[UE] timed RX/UL-TX stream start at "
                          << stream_start_time.get_real_secs()
                          << " s on the shared radio clock";
         }
 
+        _control_handler.start();
         running_.store(true);
         rx_thread_ = std::thread(&UEEngine::rx_proc, this, stream_start_time);
         if (_uplink_tx) {
@@ -468,23 +671,15 @@ private:
         return static_cast<int16_t>(q);
     }
 
-    static AdaptiveCFOAKF::Params make_akf_params(const Config& cfg) {
-        AdaptiveCFOAKF::Params p;
-        p.enable = cfg.sync_tracking.akf_enable;
-        p.bootstrap_frames = cfg.sync_tracking.akf_bootstrap_frames;
-        p.innovation_window = cfg.sync_tracking.akf_innovation_window;
-        p.max_lag = cfg.sync_tracking.akf_max_lag;
-        p.adapt_interval = cfg.sync_tracking.akf_adapt_interval;
-        p.gate_sigma = cfg.sync_tracking.akf_gate_sigma;
-        p.tikhonov_lambda = cfg.sync_tracking.akf_tikhonov_lambda;
-        p.update_smooth = cfg.sync_tracking.akf_update_smooth;
-        p.q_wf_min = cfg.sync_tracking.akf_q_wf_min;
-        p.q_wf_max = cfg.sync_tracking.akf_q_wf_max;
-        p.q_rw_min = cfg.sync_tracking.akf_q_rw_min;
-        p.q_rw_max = cfg.sync_tracking.akf_q_rw_max;
-        p.r_min = cfg.sync_tracking.akf_r_min;
-        p.r_max = cfg.sync_tracking.akf_r_max;
+    static CfoErrorEwma::Params make_cfo_ewma_params(const Config& cfg) {
+        CfoErrorEwma::Params p;
+        p.enable = cfg.sync_tracking.cfo_ewma_enable;
+        p.alpha = cfg.sync_tracking.cfo_ewma_alpha;
         return p;
+    }
+
+    static OCXODiscipliner::Params make_ocxo_params(const Config& cfg) {
+        return make_ocxo_discipliner_params(cfg);
     }
 
     enum class RxState { SYNC_SEARCH, ALIGNMENT, NORMAL };
@@ -584,28 +779,30 @@ private:
     }
 
     void _reset_receive_state_after_stream_restart(uint64_t restart_epoch) {
+        // RX-thread safe portion only. process-owned tracking (latch, SFO,
+        // OCXO age) is reset via _process_tracking_reset_req on the process
+        // thread — writing those fields here is a data race.
         const uint64_t next_generation =
             _sync_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
         _recovery_queue_clear_requested.store(true, std::memory_order_release);
-        _sync_in_progress = false;
-        _sync_in_progress_hold_frames = 0;
-        _delay_adjustment_count = 0;
-        _last_delay_index_err = 0;
-        _reset_count = 0;
         sync_offset_.store(0, std::memory_order_relaxed);
         discard_samples_.store(0, std::memory_order_relaxed);
         _reset_uplink_tx_rx_alignment_shift(restart_epoch);
         _pending_alignment_id.store(0, std::memory_order_relaxed);
+        _alignment_applied_id.store(0, std::memory_order_relaxed);
+        _alignment_applied_samples.store(0, std::memory_order_relaxed);
+        _alignment_applied_time_ns.store(-1, std::memory_order_relaxed);
         _pending_alignment_restart_epoch.store(restart_epoch, std::memory_order_relaxed);
         _set_uplink_waveform_enabled(false);
-        sfo_estimator.reset();
+        _process_tracking_reset_req.fetch_add(1, std::memory_order_acq_rel);
+        _clear_air_frame_identity("stream_restart");
         state_ = RxState::SYNC_SEARCH;
         if (LOG_MOD_ON(Recovery)) {
             LOG_G_WARN_M(Recovery) << "[UE recovery] reset_receive_state generation="
                          << next_generation
                          << ", restart_epoch=" << restart_epoch
                          << ", ertm_measurement_available="
-                         << _ertm_absolute_delay_available.load(std::memory_order_relaxed)
+                         << _ertm_state.snapshot().available
                          << ", ul_tx_rx_shift="
                          << _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed)
                          << ", waveform_enabled="
@@ -753,20 +950,20 @@ private:
     AlignedVector _ertm_corr_a_freq;
     AlignedVector _ertm_corr_b_freq;
     AlignedVector _ertm_corr_out;
+    // Consumer-owned, pre-sized once in prepare_fftw() — no per-frame heap growth.
+    AlignedVector _ertm_bs_uplink_delay;
+    AlignedVector _ertm_local_delay;
+    AlignedVector _ertm_corrected_uplink_delay;
+    AlignedVector _ertm_corrected_downlink_delay;
+    std::vector<float> _ertm_correlation_spectrum;
     fftwf_plan _ertm_corr_fft_a_plan = nullptr;
     fftwf_plan _ertm_corr_fft_b_plan = nullptr;
     fftwf_plan _ertm_corr_ifft_plan = nullptr;
 
     // Per-frame demod scratch lives in CpuDemodWorkerContext (one per demod
     // worker); per-frame outputs live in the CpuDemodResult ring slots.
-    std::atomic<double> _ertm_latest_to_ue_samples{0.0};
-    std::atomic<uint64_t> _ertm_latest_to_ue_seq{0};
-    std::atomic<bool> _ertm_absolute_delay_available{false};
-    // The decode thread only classifies and enqueues BS reports.  The single
-    // sensing consumer retains the newest report and pairs it with the local
-    // downlink estimate carried by the sensing frame currently being handled.
-    SPSCRingBuffer<std::vector<uint8_t>> _ertm_payload_queue{8};
-    std::vector<uint8_t> _ertm_latest_bs_payload;
+    ErtmAbsoluteFrameState _ertm_state;
+    bool _ertm_legacy_payload_warned = false;
 
     // Core computation instances (manage their own FFT plans)
     ChannelEstimator _channel_estimator;
@@ -806,7 +1003,7 @@ private:
     std::unique_ptr<ZmqByteSender> uplink_self_pdf_pub_;
     std::unique_ptr<ZmqByteSender> uplink_self_scan_pub_;
     std::unique_ptr<ZmqByteSender> ertm_debug_pub_;
-    std::unique_ptr<VofaPlusDebugSender> vofa_debug_sender_;
+    std::unique_ptr<OcxoDebugSender> ocxo_debug_sender_;
     // Control handler
     ControlCommandHandler _control_handler;
     // Data sender management
@@ -843,16 +1040,39 @@ private:
     SFOEstimator sfo_estimator{1000};
     bool _sync_in_progress = false; // Flag to indicate if sync is in progress in process_proc
     uint32_t _sync_in_progress_hold_frames = 0; // Frames spent waiting for Alignment feedback
+    // Alignment id process_proc is waiting on while _sync_in_progress is set.
+    // process-thread only; RX stream-restart requests clear via
+    // _process_tracking_reset_req (never written from RX).
+    uint64_t _sync_in_progress_expect_id = 0;
     int _last_delay_index_err = 0; // Last adjusted index
     uint32_t _delay_adjustment_count = 0;
     std::atomic<float> _user_delay_offset = 0.0f;
     std::atomic<int32_t> _ue_timing_advance{0};  // Timing Advance (samples)
     std::atomic<int64_t> _last_tadv_ns{0};       // rate-limit guard for TADV
+    // Target mirrored into UL-TX as soon as Alignment is scheduled.
     std::atomic<int32_t> _uplink_tx_rx_alignment_shift{0};
+    // Alignment actually committed to received DL frame coordinates.
+    std::atomic<int32_t> _committed_uplink_tx_rx_alignment_shift{0};
     std::atomic<uint64_t> _alignment_schedule_count{0};
     std::atomic<uint64_t> _pending_alignment_id{0};
     std::atomic<uint64_t> _pending_alignment_restart_epoch{0};
     std::atomic<uint64_t> _pending_alignment_generation{0};
+    // RX thread publishes the id / samples / time of the last successfully
+    // applied alignment. process_proc uses this to:
+    //  - clear _sync_in_progress when the one-shot Alignment frame is dropped
+    //  - inject Alignment into SFO / force eRTM remeasure on the first
+    //    post-align frame that reaches process (full Alignment semantics).
+    std::atomic<uint64_t> _alignment_applied_id{0};
+    std::atomic<int32_t> _alignment_applied_samples{0};
+    std::atomic<int64_t> _alignment_applied_time_ns{-1};
+    // process-thread only: last applied_id whose SFO/eRTM side effects ran.
+    uint64_t _alignment_applied_consumed_id = 0;
+    // RX requests process-owned tracking reset (latch, SFO, OCXO age).
+    std::atomic<uint64_t> _process_tracking_reset_req{0};
+    uint64_t _process_tracking_reset_applied = 0;
+    // Sensing (or any non-process eRTM consumer) requests OCXO TO reanchor.
+    std::atomic<uint64_t> _ocxo_to_reanchor_req{0};
+    uint64_t _ocxo_to_reanchor_applied = 0;
     // True while the pending alignment came from a fresh SYNC_SEARCH acquisition,
     // so handle_alignment() re-anchors the UL-TX window absolutely to the newly
     // committed RX frame's grid boundary phase (see _schedule_receive_alignment).
@@ -860,6 +1080,7 @@ private:
 
     void _reset_uplink_tx_rx_alignment_shift(uint64_t restart_epoch = 0) {
         _uplink_tx_rx_alignment_shift.store(0, std::memory_order_relaxed);
+        _committed_uplink_tx_rx_alignment_shift.store(0, std::memory_order_release);
         if (_uplink_tx) {
             _uplink_tx->reset_rx_alignment_shift(restart_epoch);
         }
@@ -1069,6 +1290,8 @@ private:
         }
     }
     std::unique_ptr<HardwareSyncController> _hw_sync;
+    std::unique_ptr<OCXODiscipliner> _ocxo_discipliner;
+    std::unique_ptr<OCXOPpsInitialAligner> _ocxo_pps_initial_aligner;
 
     // Data processing related member variables
     struct LlrFrame {
@@ -1077,6 +1300,7 @@ private:
         int64_t rx_enqueue_time_ns = 0;
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
+        AirFrameIdentity identity;
     };
     // int16 (Q16) variant used when cfg_.ldpc.fixed_point is set. The demapper
     // quantizes LLRs directly into this so the whole pipeline runs int16.
@@ -1086,6 +1310,7 @@ private:
         int64_t rx_enqueue_time_ns = 0;
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
+        AirFrameIdentity identity;
     };
     struct LatencyAccumulator {
         std::atomic<int64_t> rx_queue_total_ns{0};
@@ -1301,6 +1526,7 @@ private:
         int64_t rx_enqueue_time_ns = 0;
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
+        AirFrameIdentity identity;
         std::vector<CpuLdpcPacketRef> packets;
         std::vector<uint8_t> payload_bytes; // flat decoded-payload storage
     };
@@ -1313,6 +1539,7 @@ private:
         int64_t rx_enqueue_time_ns = 0;
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
+        AirFrameIdentity identity;
     };
 
     struct CpuLdpcWorkerContext {
@@ -1369,6 +1596,26 @@ private:
     // ARQ: downlink receive window for duplicate suppression + ordered delivery
     ArqRxWindow _dl_arq_rx;
     bool _arq_enabled{false};
+    UeAirFrameTimeline _ue_air_timeline; ///< Absolute seq + UE-USRP times (mutex)
+    AirFrameIdentity _air_identity_rx_snapshot; ///< RX-thread-only diagnostic snapshot
+    SPSCRingBuffer<AirFrameSibEvent> _sib_event_queue{32};
+    /// Non-zero = process should reset SFO/sync if still equal to live generation.
+    std::atomic<uint64_t> _pending_sfo_reset_generation{0};
+    /// Set by bit thread on OTA epoch change; cleared by RX when SFO is requested.
+    /// Survives a lost first SIB event after last_seen already advanced.
+    std::atomic<bool> _ota_epoch_sfo_needed{false};
+    /// Survives RF/sync clear — used to detect BS restart after SYNC_SEARCH.
+    /// Stores canonical OTA epoch32 (same as AirFrameIdentity.timeline_epoch).
+    std::atomic<uint32_t> _last_seen_ota_epoch{0};
+    std::atomic<bool> _has_seen_ota_epoch{false};
+    double _ue_rx_sample_rate = 0.0; ///< Actual UHD RX rate (may differ from YAML)
+    std::atomic<int64_t> _ue_air_frame_start_time_ns{-1}; ///< Last boundary (alignment geometry)
+    std::atomic<int64_t> _ue_air_frame_mid_time_ns{-1};   ///< Last mid-frame (robust stamp)
+    std::atomic<uint64_t> _air_identity_lock_count{0};
+    std::atomic<uint64_t> _air_identity_stamp_count{0};
+    std::atomic<uint64_t> _air_sib_publish_count{0};
+    std::atomic<uint64_t> _air_sib_stale_drop_count{0};
+    std::atomic<uint64_t> _air_timeline_reset_count{0};
     std::atomic<uint64_t> _arq_profile_last_log_ms{0};
     std::atomic<uint64_t> _arq_dl_data_seen{0};
     std::atomic<uint64_t> _arq_dl_data_accepted{0};
@@ -1420,7 +1667,10 @@ private:
         fftwf_execute(_ertm_os_ifft_plan);
 
         const float scale = 1.0f / std::sqrt(static_cast<float>(n));
-        delay_spectrum.resize(os_n);
+        // Prefer capacity-preserving resize when the caller pre-sized the buffer.
+        if (delay_spectrum.size() != os_n) {
+            delay_spectrum.resize(os_n);
+        }
         for (size_t i = 0; i < os_n; ++i) {
             delay_spectrum[i] = _ertm_os_ifft_out[i] * scale;
         }
@@ -1478,7 +1728,11 @@ private:
             return false;
         }
         if (correlation_out) {
-            correlation_out->assign(n, 0.0f);
+            if (correlation_out->size() != n) {
+                correlation_out->assign(n, 0.0f);
+            } else {
+                std::fill(correlation_out->begin(), correlation_out->end(), 0.0f);
+            }
         }
         const bool maximum_likelihood =
             timing_metric == kErtmTimingMetricMaximumLikelihood;
@@ -1707,7 +1961,7 @@ private:
                 << "[eRTM] TO measurement received while eRTM is disabled; dropping report";
             return true;
         }
-        if (!_ertm_payload_queue.try_push(std::move(payload))) {
+        if (!_ertm_state.enqueue(std::move(payload))) {
             static std::atomic<uint64_t> drop_count{0};
             const uint64_t dropped = drop_count.fetch_add(1, std::memory_order_relaxed) + 1;
             if (dropped <= 20 || (dropped % 100) == 0) {
@@ -1756,22 +2010,219 @@ private:
         _uplink_tx->arq_tx_window().process_ack(ack, arq_now_ms());
     }
 
-    // Computes one eRTM measurement against the downlink estimate supplied by
-    // the frame consumer.  The caller therefore controls the exact sensing
-    // frame coordinate system used by TO_UE.
-    void _process_ertm_payload(
-        const std::vector<uint8_t>& payload,
-        const AlignedVector& local_channel_freq)
+    /**
+     * @brief Request eRTM invalidation from any thread (RX/bit/process).
+     *
+     * Immediately marks TO unavailable and bumps a clear generation. Does NOT
+     * touch the SPSC report queue or the consumer-owned report cache — the
+     * actual eRTM consumer applies the wipe via @c _apply_pending_ertm_clear.
+     */
+    void _request_ertm_report_clear(const char* reason) {
+        // Finish invalidating state(M) before publishing the new queue
+        // generation. Any report stamped with the new generation therefore
+        // cannot be followed by this clear wiping its timing history.
+        if (_uplink_tx) {
+            _uplink_tx->clear_ul_tx_timing_history();
+        }
+        const uint64_t gen = _ertm_state.request_clear();
+        if (LOG_MOD_ON(Ertm)) {
+            LOG_G_INFO_M(Ertm) << "[eRTM] clear requested"
+                         << ": reason=" << reason
+                         << ", clear_gen=" << gen
+                         << " (TO invalidated; consumer will filter queue and clear cache)";
+        }
+    }
+
+    /** Consumer-only: wipe cache when a clear request is pending. */
+    bool _apply_pending_ertm_clear() {
+        const ErtmAbsoluteFrameState::ClearResult clear =
+            _ertm_state.apply_pending_clear();
+        if (!clear.applied) {
+            return false;
+        }
+        // Do not touch process-owned OCXO fields here (may run on sensing).
+        _request_ocxo_to_reanchor();
+        if (LOG_MOD_ON(Ertm)) {
+            LOG_G_INFO_M(Ertm) << "[eRTM] consumer applied clear"
+                         << ": clear_gen=" << clear.generation
+                         << ", invalidated_cache=" << clear.invalidated_reports
+                         << " (queued reports filtered by generation)";
+        }
+        return true;
+    }
+
+    /**
+     * @brief Consistent TO publish snapshot from shared eRTM state.
+     *
+     * samples and pub_gen must be observed together; separate relaxed loads can
+     * pair generation G with sample of G+1 and re-ingest the same sample as a
+     * "new" report with a near-zero dTO slope.
+     */
+    using ErtmToPublishSnapshot = ErtmAbsoluteFrameState::PublishSnapshot;
+
+    ErtmToPublishSnapshot _load_ertm_to_publish_snapshot() const {
+        return _ertm_state.snapshot();
+    }
+
+    /** Any thread: ask process to reanchor OCXO Mode B TO state. */
+    void _request_ocxo_to_reanchor() {
+        _ocxo_to_reanchor_req.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    /** process-thread only: apply pending OCXO TO reanchor requests. */
+    void _apply_pending_ocxo_to_reanchor(bool allow_state_changes) {
+        const uint64_t req = _ocxo_to_reanchor_req.load(std::memory_order_acquire);
+        if (req == _ocxo_to_reanchor_applied) {
+            return;
+        }
+        _ocxo_to_pub_known = false;
+        _ocxo_to_last_pub_gen = 0;
+        _ocxo_to_age_frames = 0;
+        if (_ocxo_discipliner) {
+            _ocxo_discipliner->reanchor_to(allow_state_changes);
+        }
+        _ocxo_to_reanchor_applied = req;
+    }
+
+    /**
+     * @brief process-thread only: apply RX-requested tracking reset.
+     *
+     * Stream restart runs on the RX thread and must not write latch / SFO /
+     * OCXO age fields. It only bumps @_process_tracking_reset_req.
+     */
+    void _apply_pending_process_tracking_reset() {
+        const uint64_t req =
+            _process_tracking_reset_req.load(std::memory_order_acquire);
+        if (req == _process_tracking_reset_applied) {
+            return;
+        }
+        _sync_in_progress = false;
+        _sync_in_progress_hold_frames = 0;
+        _sync_in_progress_expect_id = 0;
+        _delay_adjustment_count = 0;
+        _last_delay_index_err = 0;
+        _reset_count = 0;
+        _alignment_applied_consumed_id = 0;
+        sfo_estimator.reset();
+        _ocxo_to_pub_known = false;
+        _ocxo_to_last_pub_gen = 0;
+        _ocxo_to_age_frames = 0;
+        if (_ocxo_discipliner) {
+            _ocxo_discipliner->reanchor_to();
+        }
+        _ocxo_to_reanchor_applied =
+            _ocxo_to_reanchor_req.load(std::memory_order_acquire);
+        _process_tracking_reset_applied = req;
+        if (LOG_MOD_ON(Recovery)) {
+            LOG_G_WARN_M(Recovery)
+                << "[UE recovery] process tracking reset applied req=" << req;
+        }
+    }
+
+    /**
+     * @brief process-thread only: resolve Alignment for SFO / eRTM / latch.
+     *
+     * When the one-shot Alignment frame was queue-dropped, inject applied
+     * samples on the first process frame whose usrp_time is at/after the
+     * applied RX timestamp so SFO and eRTM still see the window jump.
+     */
+    int32_t _effective_alignment_for_frame(
+        int32_t frame_alignment,
+        int64_t frame_usrp_time_ns,
+        bool* from_sidechannel_out = nullptr)
     {
-        ErtmTimingPayloadView bs_payload;
-        std::string unpack_error;
-        if (!ErtmTimingPayload::unpack(
-                payload.data(),
-                payload.size(),
-                static_cast<uint32_t>(cfg_.ofdm.fft_size),
-                bs_payload,
-                &unpack_error)) {
-            LOG_G_WARN_M(Ertm) << "[eRTM] invalid TO payload; dropping report: " << unpack_error;
+        if (from_sidechannel_out) {
+            *from_sidechannel_out = false;
+        }
+        int32_t effective = frame_alignment;
+        const uint64_t applied_id =
+            _alignment_applied_id.load(std::memory_order_acquire);
+        if (applied_id == 0 || applied_id == _alignment_applied_consumed_id) {
+            return effective;
+        }
+        if (frame_alignment != 0) {
+            // Frame already carries the one-shot receipt.
+            _alignment_applied_consumed_id = applied_id;
+            return effective;
+        }
+        const int64_t applied_time_ns =
+            _alignment_applied_time_ns.load(std::memory_order_relaxed);
+        const bool time_ok =
+            (applied_time_ns < 0) ||
+            (frame_usrp_time_ns < 0) ||
+            (frame_usrp_time_ns >= applied_time_ns);
+        if (!time_ok) {
+            // Still processing pre-alignment pipeline frames.
+            return 0;
+        }
+        effective =
+            _alignment_applied_samples.load(std::memory_order_relaxed);
+        _alignment_applied_consumed_id = applied_id;
+        if (from_sidechannel_out) {
+            *from_sidechannel_out = (effective != 0);
+        }
+        return effective;
+    }
+
+    bool _alignment_latch_receipt_ready(int32_t frame_alignment) const {
+        if (frame_alignment != 0) {
+            return true;
+        }
+        if (_sync_in_progress_expect_id == 0) {
+            return false;
+        }
+        const uint64_t applied_id =
+            _alignment_applied_id.load(std::memory_order_acquire);
+        return applied_id == _sync_in_progress_expect_id;
+    }
+
+    using ErtmCachedReport = ErtmAbsoluteFrameState::CachedReport;
+
+    bool _ingest_ertm_raw_payload(
+        std::vector<uint8_t>&& payload,
+        const AirFrameIdentity& dl_identity)
+    {
+        const ErtmAbsoluteFrameState::IngestResult result = _ertm_state.ingest(
+            std::move(payload),
+            dl_identity,
+            static_cast<uint32_t>(cfg_.ofdm.fft_size));
+        switch (result.status) {
+        case ErtmAbsoluteFrameState::IngestStatus::Accepted:
+            return true;
+        case ErtmAbsoluteFrameState::IngestStatus::LegacyPayload:
+            if (!_ertm_legacy_payload_warned) {
+                _ertm_legacy_payload_warned = true;
+                LOG_G_WARN_M(Ertm)
+                    << "[eRTM] rejected legacy ERTM2/3/4 payload; "
+                       "raw BS PPS diagnostics required";
+            }
+            break;
+        case ErtmAbsoluteFrameState::IngestStatus::InvalidPayload:
+            LOG_G_WARN_M(Ertm)
+                << "[eRTM] invalid TO payload; dropping report: " << result.error;
+            break;
+        case ErtmAbsoluteFrameState::IngestStatus::MissingEpoch:
+            LOG_G_WARN_M(Ertm)
+                << "[eRTM] ERTM5 missing timeline epoch; dropping report"
+                << ": seq=" << result.payload_seq;
+            break;
+        case ErtmAbsoluteFrameState::IngestStatus::Empty:
+        case ErtmAbsoluteFrameState::IngestStatus::CacheRejected:
+            break;
+        }
+        return false;
+    }
+
+    void _process_ertm_report(
+        const ErtmTimingPayloadView& bs_payload,
+        const UlTxTimingStateEntry& state_m,
+        const AlignedVector& local_channel_freq,
+        const AirFrameIdentity& dl_identity,
+        int32_t a_n_samples,
+        uint64_t sync_generation)
+    {
+        uint64_t compute_clear_gen = 0;
+        if (!_ertm_state.begin_compute(compute_clear_gen)) {
             return;
         }
         if (local_channel_freq.size() != cfg_.ofdm.fft_size) {
@@ -1779,75 +2230,149 @@ private:
                 << "[eRTM] current downlink frame has an invalid channel estimate size";
             return;
         }
+        if (!dl_identity.valid || dl_identity.timeline_epoch == 0) {
+            LOG_RT_WARN_HZ_M(Ertm, 1)
+                << "[eRTM] current DL air-frame identity is invalid; keeping previous TO";
+            return;
+        }
+        const uint32_t n_epoch =
+            AirFrameClock::ota_epoch32(dl_identity.timeline_epoch);
+        const uint64_t n_frame = dl_identity.frame_seq;
+        if (bs_payload.timeline_epoch != n_epoch) {
+            LOG_G_WARN_M(Ertm) << "[eRTM] epoch mismatch; keeping previous TO"
+                         << ": report_epoch=0x" << std::hex << bs_payload.timeline_epoch
+                         << ", dl_epoch=0x" << n_epoch << std::dec
+                         << ", M=" << bs_payload.ul_measure_frame_seq
+                         << ", N=" << n_frame;
+            return;
+        }
+        if (bs_payload.ul_measure_frame_seq > n_frame) {
+            // Future relative to current N — caller should not select these.
+            return;
+        }
 
-        AlignedVector bs_uplink_delay;
-        AlignedVector local_delay;
-        if (!_compute_ertm_oversampled_delay_spectrum(bs_payload.channel_freq, 0.0, bs_uplink_delay) ||
-            !_compute_ertm_oversampled_delay_spectrum(local_channel_freq, 0.0, local_delay)) {
-            LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute oversampled delay spectra; dropping report";
+        const int32_t a_m = state_m.rx_alignment_shift_samples;
+        const int32_t tadv_m = state_m.tadv_samples;
+        const int32_t a_n = a_n_samples;
+        // Positive UL-TX alignment advances physical TX, which decreases the BS
+        // observed UL delay. Transform H_UL[M] into N's Alignment coordinate.
+        const int32_t alignment_delta = a_n - a_m;
+        const double ul_delay_shift = -static_cast<double>(alignment_delta);
+
+        if (!_compute_ertm_oversampled_delay_spectrum(
+                bs_payload.channel_freq, ul_delay_shift, _ertm_bs_uplink_delay) ||
+            !_compute_ertm_oversampled_delay_spectrum(
+                local_channel_freq, 0.0, _ertm_local_delay)) {
+            LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute oversampled delay spectra; keeping previous TO";
             return;
         }
 
         int64_t signed_shift_bins = 0;
         double metric = 0.0;
-        std::vector<float> correlation_spectrum;
         size_t peak_index = 0;
         double fractional_delta_bins = 0.0;
         const bool publish_debug = cfg_.uplink.ertm_debug_output_enabled;
         if (!_estimate_ertm_delay_shift(
-                bs_uplink_delay,
-                local_delay,
+                _ertm_bs_uplink_delay,
+                _ertm_local_delay,
                 cfg_.uplink.ertm_timing_metric,
                 signed_shift_bins,
                 metric,
-                publish_debug ? &correlation_spectrum : nullptr,
+                publish_debug ? &_ertm_correlation_spectrum : nullptr,
                 &peak_index,
                 &fractional_delta_bins)) {
-            LOG_G_WARN_M(Ertm) << "[eRTM] failed to evaluate timing metric; dropping report"
+            LOG_G_WARN_M(Ertm) << "[eRTM] failed to evaluate timing metric; keeping previous TO"
                          << ": metric=" << cfg_.uplink.ertm_timing_metric;
             return;
         }
 
-        const int32_t tadv_samples = _ue_timing_advance.load(std::memory_order_relaxed);
+        // tau_c uses DUTI_M / TADV_M paired with H_UL[M], not live control values.
         const double rf_delay_samples =
             cfg_.uplink.ertm_dl_rf_delay_samples + cfg_.uplink.ertm_ul_rf_delay_samples;
         const double tau_c_samples =
             rf_delay_samples -
             static_cast<double>(bs_payload.duti_samples) -
-            static_cast<double>(tadv_samples);
+            static_cast<double>(tadv_m);
         const double shift_frac_os_bins =
             static_cast<double>(signed_shift_bins) + fractional_delta_bins;
         const double to_bs_ue_samples =
             shift_frac_os_bins / static_cast<double>(_ertm_delay_oversample_factor);
         const double to_ue_samples = 0.5 * (tau_c_samples - to_bs_ue_samples);
         const double to_bs_samples = 0.5 * (tau_c_samples + to_bs_ue_samples);
+        const int64_t report_age_frames =
+            static_cast<int64_t>(n_frame) -
+            static_cast<int64_t>(bs_payload.ul_measure_frame_seq);
+        ErtmPpsPhaseObservation pps_phase;
+        if (cfg_.sync_tracking.ocxo_mode == kOCXOModePpsPhase) {
+            try {
+                const radio::TimeSpec ue_pps = dev_->time_last_pps();
+                const int64_t ue_pps_ns =
+                    ue_pps.get_full_secs() * 1'000'000'000LL +
+                    static_cast<int64_t>(
+                        std::llround(ue_pps.get_frac_secs() * 1.0e9));
+                pps_phase = compute_ertm_pps_phase(
+                    bs_payload,
+                    n_frame,
+                    dl_identity.ue_frame_start_time_ns,
+                    ue_pps_ns,
+                    cfg_.uplink.ertm_dl_rf_delay_samples,
+                    to_ue_samples);
+            } catch (const std::exception& e) {
+                LOG_RT_WARN_HZ_M(Ertm, 1)
+                    << "[eRTM] failed to read UE PPS timestamp; PPS phase unavailable: "
+                    << e.what();
+            }
+        }
         if (std::isfinite(to_ue_samples)) {
-            const bool had_previous_to_ue =
-                _ertm_absolute_delay_available.load(std::memory_order_acquire);
-            const double previous_to_ue =
-                _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
-            if (had_previous_to_ue) {
-                const double to_ue_diff = to_ue_samples - previous_to_ue;
-                if (std::abs(to_ue_diff) > 0.1) {
-                    if (LOG_MOD_ON(Ertm)) {
-                        LOG_G_INFO_M(Ertm) << "[eRTM] TO_UE diff"
-                                     << " seq=" << bs_payload.seq
-                                     << ", previous_to_ue=" << previous_to_ue
-                                     << " samples, current_to_ue=" << to_ue_samples
-                                     << " samples, to_ue_diff=" << to_ue_diff
-                                     << " samples";
-                    }
+            const ErtmAbsoluteFrameState::PublishResult publish =
+                _ertm_state.publish(
+                    compute_clear_gen,
+                    to_ue_samples,
+                    bs_payload.timeline_epoch,
+                    bs_payload.ul_measure_frame_seq,
+                    dl_identity,
+                    a_n_samples,
+                    sync_generation,
+                    pps_phase.valid,
+                    pps_phase.phase_error_samples,
+                    pps_phase.r_bs_samples,
+                    pps_phase.r_ue_samples,
+                    pps_phase.bs_last_pps_ticks,
+                    pps_phase.bs_t0_to_pps_ticks,
+                    pps_phase.ue_last_pps_ns,
+                    pps_phase.bs_tick_rate,
+                    pps_phase.sample_rate);
+            if (!publish.accepted) {
+                LOG_G_WARN_M(Ertm)
+                    << "[eRTM] discarding TO publish after clear request"
+                    << ": clear_req=" << publish.request_generation
+                    << ", clear_applied=" << publish.applied_generation
+                    << ", seq=" << bs_payload.seq;
+                return;
+            }
+            if (publish.had_previous) {
+                const double to_ue_diff =
+                    to_ue_samples - publish.previous_to_ue_samples;
+                if (std::abs(to_ue_diff) > 0.1 && LOG_MOD_ON(Ertm)) {
+                    LOG_G_INFO_M(Ertm) << "[eRTM] TO_UE diff"
+                                 << " seq=" << bs_payload.seq
+                                 << ", previous_to_ue="
+                                 << publish.previous_to_ue_samples
+                                 << " samples, current_to_ue=" << to_ue_samples
+                                 << " samples, to_ue_diff=" << to_ue_diff
+                                 << " samples";
                 }
             }
-            _ertm_latest_to_ue_samples.store(to_ue_samples, std::memory_order_relaxed);
-            _ertm_latest_to_ue_seq.store(bs_payload.seq, std::memory_order_relaxed);
-            _ertm_absolute_delay_available.store(true, std::memory_order_release);
         }
 
         if (LOG_MOD_ON(Ertm)) {
             std::ostringstream oss;
             oss << std::fixed << std::setprecision(3)
                 << "[eRTM] TO(samples) seq=" << bs_payload.seq
+                << ", epoch=0x" << std::hex << bs_payload.timeline_epoch << std::dec
+                << ", M=" << bs_payload.ul_measure_frame_seq
+                << ", N=" << n_frame
+                << ", age_frames=" << report_age_frames
                 << ", oversample=" << _ertm_delay_oversample_factor
                 << ", timing_metric=" << cfg_.uplink.ertm_timing_metric
                 << ", peak_refinement="
@@ -1860,13 +2385,25 @@ private:
                 << ", peak_index=" << peak_index
                 << ", rf_delay_samples=" << rf_delay_samples
                 << ", metric=" << std::setprecision(6) << metric << std::setprecision(3)
-                << ", DUTI_samples=" << bs_payload.duti_samples
-                << ", TADV_samples=" << tadv_samples
+                << ", DUTI_M=" << bs_payload.duti_samples
+                << ", TADV_M=" << tadv_m
+                << ", A_M=" << a_m
+                << ", A_N=" << a_n
+                << ", ul_delay_shift=" << ul_delay_shift
                 << ", tau_c_samples=" << tau_c_samples
                 << ", TO_BS_UE_samples=" << to_bs_ue_samples
                 << ", TO_UE_samples=" << to_ue_samples
-                << ", TO_BS_samples=" << to_bs_samples
-                << ", rf_delay_samples_cfg=(" << cfg_.uplink.ertm_dl_rf_delay_samples
+                << ", TO_BS_samples=" << to_bs_samples;
+            if (cfg_.sync_tracking.ocxo_mode == kOCXOModePpsPhase) {
+                oss << ", r_B_samples=" << pps_phase.r_bs_samples
+                    << ", r_U_samples=" << pps_phase.r_ue_samples
+                    << ", bs_last_pps_ticks=" << pps_phase.bs_last_pps_ticks
+                    << ", bs_t0_to_pps_ticks=" << pps_phase.bs_t0_to_pps_ticks
+                    << ", ue_last_pps_ns=" << pps_phase.ue_last_pps_ns
+                    << ", PPS_UE_minus_BS_samples=" << pps_phase.phase_error_samples
+                    << ", PPS_phase_valid=" << (pps_phase.valid ? "true" : "false");
+            }
+            oss << ", rf_delay_samples_cfg=(" << cfg_.uplink.ertm_dl_rf_delay_samples
                 << "+" << cfg_.uplink.ertm_ul_rf_delay_samples << ")";
             LOG_G_INFO_M(Ertm) << oss.str();
         }
@@ -1875,26 +2412,28 @@ private:
             // timing offset (SensingChannel applies the inverse phase directly).
             const double correction_to_ue_samples = -to_ue_samples;
             const double correction_to_bs_samples = -to_bs_samples;
-            AlignedVector corrected_uplink_delay;
-            AlignedVector corrected_downlink_delay;
             if (!_compute_ertm_oversampled_delay_spectrum(
-                    bs_payload.channel_freq, correction_to_bs_samples, corrected_uplink_delay) ||
+                    bs_payload.channel_freq,
+                    ul_delay_shift + correction_to_bs_samples,
+                    _ertm_corrected_uplink_delay) ||
                 !_compute_ertm_oversampled_delay_spectrum(
-                    local_channel_freq, correction_to_ue_samples, corrected_downlink_delay)) {
+                    local_channel_freq,
+                    correction_to_ue_samples,
+                    _ertm_corrected_downlink_delay)) {
                 LOG_G_WARN_M(Ertm) << "[eRTM] failed to compute TO-corrected debug spectra; dropping debug frame";
                 return;
             }
             _publish_ertm_debug_frame(
                 bs_payload,
-                bs_uplink_delay,
-                local_delay,
-                correlation_spectrum,
-                corrected_uplink_delay,
-                corrected_downlink_delay,
+                _ertm_bs_uplink_delay,
+                _ertm_local_delay,
+                _ertm_correlation_spectrum,
+                _ertm_corrected_uplink_delay,
+                _ertm_corrected_downlink_delay,
                 peak_index,
                 signed_shift_bins,
                 metric,
-                tadv_samples,
+                tadv_m,
                 rf_delay_samples,
                 tau_c_samples,
                 to_bs_ue_samples,
@@ -1903,59 +2442,161 @@ private:
         }
     }
 
+    /**
+     * @brief Drop published TO without wiping report cache (consumer-only).
+     *
+     * Used when Alignment force-remeasure cannot form a usable absolute pair:
+     * keeping the previous TO would apply an A_N-stale absolute delay. Sensing
+     * falls back to los_tracking until a fresh pair succeeds.
+     */
+    void _invalidate_ertm_to_available(const char* reason) {
+        // May run on sensing thread — only touch shared eRTM atomics here.
+        // OCXO reanchor is requested for the process thread.
+        _ertm_state.invalidate_to();
+        _request_ocxo_to_reanchor();
+        LOG_RT_WARN_HZ_M(Ertm, 2)
+            << "[eRTM] TO marked unavailable"
+            << ": reason=" << reason
+            << " (sensing falls back until a fresh absolute pair succeeds)";
+    }
+
     void _update_ertm_measurement_for_downlink_frame(
         const AlignedVector& local_channel_freq,
         bool force_remeasure,
-        int alignment_samples)
+        int alignment_samples,
+        const AirFrameIdentity& dl_identity,
+        int32_t a_n_samples,
+        uint64_t sync_generation)
     {
         if (!cfg_.uplink.ertm_to_enable) {
             return;
         }
 
-        // This fixes the local DL/sensing-frame pairing.  The BS report is
-        // still an asynchronously sampled UL measurement; pairing those two
-        // radio snapshots by epoch is a separate protocol concern.
+        // Sole consumer of the SPSC queue and report cache.
+        _apply_pending_ertm_clear();
+
         bool received_new_report = false;
         size_t queued_reports = 0;
-        std::vector<uint8_t> payload;
-        while (_ertm_payload_queue.try_pop(payload)) {
-            _ertm_latest_bs_payload = std::move(payload);
-            received_new_report = true;
+        size_t stale_generation_reports = 0;
+        ErtmAbsoluteFrameState::QueuedPayload queued;
+        while (_ertm_state.try_pop(queued)) {
+            // A clear may race the drain. Apply it before classifying this item;
+            // reports stamped after the clear survive, older ones are discarded.
+            if (_apply_pending_ertm_clear()) {
+                received_new_report = false;
+            }
+            if (queued.clear_generation !=
+                _ertm_state.applied_clear_generation()) {
+                ++stale_generation_reports;
+                ++queued_reports;
+                continue;
+            }
+            if (_ingest_ertm_raw_payload(std::move(queued.raw), dl_identity)) {
+                received_new_report = true;
+            }
             ++queued_reports;
         }
-        if (queued_reports > 1) {
-            LOG_G_WARN_M(Ertm) << "[eRTM] superseding queued BS UL reports with the latest report"
-                         << ": dropped=" << (queued_reports - 1);
+        // If clear landed after the final pop/ingest, wipe the stale cache before
+        // report selection. A post-clear item remains queued for the next frame.
+        if (_apply_pending_ertm_clear()) {
+            received_new_report = false;
         }
-        if (_ertm_latest_bs_payload.empty()) {
-            if (force_remeasure) {
+        if (queued_reports > 1 && LOG_MOD_ON(Ertm)) {
+            LOG_G_INFO_M(Ertm) << "[eRTM] drained queued BS UL reports"
+                         << ": count=" << queued_reports
+                         << ", stale_generation=" << stale_generation_reports
+                         << ", cache_size=" << _ertm_state.cache_size();
+        }
+
+        if (!dl_identity.valid || dl_identity.timeline_epoch == 0) {
+            if (force_remeasure || received_new_report) {
                 LOG_RT_WARN_HZ_M(Ertm, 1)
-                    << "[eRTM] Alignment requires a TO remeasurement, but no BS UL report is cached yet";
+                    << "[eRTM] DL identity invalid; not publishing TO"
+                    << ": force_remeasure=" << force_remeasure
+                    << ", received_new_report=" << received_new_report;
+            }
+            // Alignment remeasure cannot form a new absolute pair without N's
+            // identity; do not keep applying a TO from the previous coordinate.
+            if (force_remeasure) {
+                _invalidate_ertm_to_available("force_remeasure_invalid_dl_identity");
             }
             return;
         }
-        if (!received_new_report && !force_remeasure) {
+
+        const ErtmAbsoluteFrameState::StateMSelection selection =
+            _ertm_state.select_with_state_m(
+                dl_identity,
+                [this](uint32_t epoch, uint64_t frame, UlTxTimingStateEntry& state) {
+                    return _uplink_tx &&
+                        _uplink_tx->query_ul_tx_timing_state(epoch, frame, state);
+                },
+                [&dl_identity](const ErtmTimingPayloadView& report) {
+                    LOG_G_WARN_M(Ertm)
+                        << "[eRTM] UL-TX timing history miss; invalidating report and trying older M"
+                        << ": epoch=0x" << std::hex << report.timeline_epoch
+                        << std::dec
+                        << ", M=" << report.ul_measure_frame_seq
+                        << ", N=" << dl_identity.frame_seq;
+                });
+        ErtmCachedReport* selected = selection.report;
+        const UlTxTimingStateEntry& state_m = selection.state_m;
+        const size_t future_count = selection.future_count;
+        const size_t history_miss_count = selection.history_miss_count;
+        if (selected == nullptr) {
+            if (force_remeasure) {
+                LOG_RT_WARN_HZ_M(Ertm, 1)
+                    << "[eRTM] Alignment requires a TO remeasurement, but no usable BS UL report is cached"
+                    << " (future_pending=" << future_count
+                    << ", history_miss=" << history_miss_count << ")";
+                // Previous TO is A_N-stale after Alignment; fall back until a
+                // fresh absolute pair is available.
+                _invalidate_ertm_to_available("force_remeasure_no_usable_pair");
+            }
+            return;
+        }
+        // Auto-activate a previously-future report once N >= M, even without a
+        // new queue push or Alignment force remeasure.
+        const bool unused_ready_report = _ertm_state.is_unused(*selected);
+        if (!received_new_report && !force_remeasure && !unused_ready_report) {
             return;
         }
 
         if (force_remeasure && LOG_MOD_ON(Ertm)) {
             LOG_G_INFO_M(Ertm) << "[eRTM] forced TO remeasurement after Alignment"
                          << " alignment=" << alignment_samples << " samples"
+                         << ", A_N=" << a_n_samples
                          << ", deferred_after_sensing_drop="
-                         << (alignment_samples == 0 ? "true" : "false");
+                         << (alignment_samples == 0 ? "true" : "false")
+                         << ", M=" << selected->view.ul_measure_frame_seq
+                         << ", N=" << dl_identity.frame_seq
+                         << ", future_pending=" << future_count;
+        } else if (unused_ready_report && !received_new_report && LOG_MOD_ON(Ertm)) {
+            LOG_G_INFO_M(Ertm) << "[eRTM] activating previously-future UL report"
+                         << ": M=" << selected->view.ul_measure_frame_seq
+                         << ", N=" << dl_identity.frame_seq
+                         << ", future_pending=" << future_count;
         }
-        _process_ertm_payload(_ertm_latest_bs_payload, local_channel_freq);
+        _process_ertm_report(
+            selected->view,
+            state_m,
+            local_channel_freq,
+            dl_identity,
+            a_n_samples,
+            sync_generation);
     }
 
     float _select_sensing_delay_offset(float tracking_delay_offset) {
         float base_delay_offset = tracking_delay_offset;
         if (cfg_.sensing.delay_correction_mode == kSensingDelayCorrectionModeErtmAbsolute) {
-            if (_ertm_absolute_delay_available.load(std::memory_order_acquire)) {
-                const double to_ue_samples =
-                    _ertm_latest_to_ue_samples.load(std::memory_order_relaxed);
+            const ErtmToPublishSnapshot snap = _load_ertm_to_publish_snapshot();
+            const bool use_ertm =
+                snap.available &&
+                snap.clear_gen == snap.request_gen &&
+                std::isfinite(snap.to_ue_samples);
+            if (use_ertm) {
                 // SensingChannel::delay_offset is a frequency-domain inverse
                 // phase correction, so positive TO_UE removes positive UE delay.
-                base_delay_offset = static_cast<float>(to_ue_samples);
+                base_delay_offset = static_cast<float>(snap.to_ue_samples);
             } else {
                 LOG_RT_WARN_HZ_M(Ertm, 1) << "[eRTM] sensing.sensing_delay_correction_mode=ertm_absolute "
                     << "but no valid TO_UE estimate is available yet; using los_tracking delay";
@@ -2055,8 +2696,13 @@ private:
     uint32_t _reset_hold_frames = 1;
     double _rx_gain_min_db = 0.0;
     double _rx_gain_max_db = 0.0;
-    AdaptiveCFOAKF _akf;
-    size_t _ocxo_update_counter = 0;
+    CfoErrorEwma _cfo_ewma;
+    NormalCfoQualityGate _ocxo_cfo_quality_gate;
+    size_t _ocxo_log_counter = 0;
+    // eRTM TO age tracking for OCXO Mode B (frames since last publication gen).
+    bool _ocxo_to_pub_known = false;
+    uint64_t _ocxo_to_last_pub_gen = 0;
+    uint64_t _ocxo_to_age_frames = 0;
     DemodControlTimeGates _control_time_gates;
     std::string _measurement_summary_path;
     std::atomic<uint32_t> _measurement_active_epoch_id{0};
@@ -2577,9 +3223,7 @@ private:
         dcfg.backend = cfg_.radio.radio_backend;
         dcfg.device_args = cfg_.usrp_device.device_args;
         dcfg.clock_source = cfg_.clock_time.clock_source;
-        // The UE only ever set the clock source (never the time source); leave it
-        // empty so the UHD backend does not apply one.
-        dcfg.time_source = "";
+        dcfg.time_source = resolve_ue_time_source(cfg_);
         dcfg.sim_session = cfg_.simulation.session;
         dcfg.sim_tick_rate = cfg_.rf_sampling.sample_rate;
         dcfg.sim_center_freq = cfg_.downlink.center_freq;
@@ -2639,6 +3283,23 @@ private:
 
         if (uplink_enabled(cfg_)) {
             _init_uplink_tx();
+        }
+        const std::string time_source = resolve_ue_time_source(cfg_);
+        if (!is_sim && radio::clock_source_enables_pps_alignment(
+                cfg_.clock_time.clock_source)) {
+            LOG_G_INFO_M(Radio)
+                << "Waiting for PPS with clock_source='"
+                << cfg_.clock_time.clock_source
+                << "', time_source='" << time_source
+                << "', then aligning UE USRP timekeeper...";
+            const auto alignment = radio::align_device_times_to_next_pps(
+                {{"UE", dev_, time_source}});
+            const auto& snapshot = alignment.devices.front();
+            LOG_G_INFO_M(Radio)
+                << "Aligned UE USRP timekeeper to PPS edge"
+                << ": time_last_pps_ticks=" << snapshot.last_pps_ticks
+                << ", time_now_ticks=" << snapshot.now_ticks
+                << ", tick_rate=" << snapshot.tick_rate;
         }
     }
 
@@ -2918,7 +3579,8 @@ private:
                     snapshot.cfar_os_suppress_doppler,
                     snapshot.cfar_os_suppress_range,
                     true,
-                    1u, 0x1u, false, 0.0);
+                    1u, 0x1u, false, 0.0,
+                    snapshot.sensing_symbol_stride);
             _control_handler.send_sensing_viewer_params(peer, packet);
         });
     }
@@ -3079,6 +3741,14 @@ private:
             _ertm_corr_a_freq.resize(_ertm_oversampled_fft_size);
             _ertm_corr_b_freq.resize(_ertm_oversampled_fft_size);
             _ertm_corr_out.resize(_ertm_oversampled_fft_size);
+            // Per-compute delay/correlation outputs — sized once, reused forever.
+            _ertm_bs_uplink_delay.resize(_ertm_oversampled_fft_size);
+            _ertm_local_delay.resize(_ertm_oversampled_fft_size);
+            _ertm_corrected_uplink_delay.resize(_ertm_oversampled_fft_size);
+            _ertm_corrected_downlink_delay.resize(_ertm_oversampled_fft_size);
+            _ertm_correlation_spectrum.assign(_ertm_oversampled_fft_size, 0.0f);
+            // Pre-size shared report-cache channel buffers for unpack reuse.
+            _ertm_state.prepare_channel_buffers(cfg_.ofdm.fft_size);
             _ertm_corr_fft_a_plan = fftwf_plan_dft_1d(
                 static_cast<int>(_ertm_oversampled_fft_size),
                 reinterpret_cast<fftwf_complex*>(_ertm_corr_a.data()),
@@ -3140,7 +3810,17 @@ private:
                              << cfg_.network_output.ertm_debug_port;
             }
         }
-        vofa_debug_sender_ = std::make_unique<VofaPlusDebugSender>(cfg_.network_output.vofa_debug_ip, cfg_.network_output.vofa_debug_port, 64);
+        if (cfg_.sync_tracking.hardware_sync) {
+            ocxo_debug_sender_ = std::make_unique<OcxoDebugSender>(
+                cfg_.network_output.ocxo_debug_ip,
+                static_cast<uint16_t>(cfg_.network_output.ocxo_debug_port),
+                64);
+            LOG_G_INFO_M(Ocxo)
+                << "OCXO ZeroMQ debug stream: bind="
+                << cfg_.network_output.ocxo_debug_ip << ':'
+                << cfg_.network_output.ocxo_debug_port
+                << ", protocol=OCXODBG3, channels=16, pps_diagnostics=exact";
+        }
     }
 
     size_t _clear_frame_queue(const char* reason, bool warn = true) {
@@ -3196,8 +3876,9 @@ private:
             _rx_stream_start_time_ns.load(std::memory_order_acquire);
         const int64_t frame_samples =
             static_cast<int64_t>(cfg_.samples_per_frame());
+        const double rate = _rx_rate_hz();
         if (timestamp_ns < 0 || start_ns < 0 || frame_samples <= 0 ||
-            !(cfg_.rf_sampling.sample_rate > 0.0)) {
+            !(rate > 0.0)) {
             LOG_RT_WARN_M(Recovery) << "[UE recovery] rx_timestamp_boundary context=" << context
                           << ", valid=0"
                           << ", timestamp_ns=" << timestamp_ns
@@ -3207,9 +3888,10 @@ private:
             return;
         }
 
+        // Same actual RX rate used by timeline configure / stamp boundary.
         const double raw_offset =
             static_cast<double>(timestamp_ns - start_ns) *
-            cfg_.rf_sampling.sample_rate * 1.0e-9;
+            rate * 1.0e-9;
         const int64_t raw_offset_samples =
             static_cast<int64_t>(std::llround(raw_offset));
         const int64_t adjusted_offset_samples = raw_offset_samples + sample_adjust;
@@ -3260,9 +3942,11 @@ private:
         _sync_generation.fetch_add(1, std::memory_order_acq_rel);
         _sync_in_progress = false;
         _sync_in_progress_hold_frames = 0;
+        _sync_in_progress_expect_id = 0;
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
         _set_uplink_waveform_enabled(false);
+        _clear_air_frame_identity("sync_search");
         _llr_snr_linear_filtered = 1.0;
         _llr_snr_filter_initialized = false;
         const bool log_agc = LOG_MOD_ON(Agc);
@@ -3461,21 +4145,14 @@ private:
             _sync_generation.load(std::memory_order_acquire);
 
         int64_t first_time_ns = -1;
-        size_t received = 0;
-        while (received < cfg_.sync_samples() && running_.load()) {
-            const size_t got = rx_stream_->recv(
-                &target_buffer[received],
-                cfg_.sync_samples() - received,
-                md
-            );
-            bool restart_read = false;
-            if (_handle_rx_metadata_error(md, "sync search", &restart_read) && restart_read) {
-                break;
-            }
-            if (received == 0 && got > 0) {
-                first_time_ns = metadata_time_to_ns(md);
-            }
-            received += got;
+        size_t received = rx_stream_->recv(
+            target_buffer.data(), cfg_.sync_samples(), md);
+        bool restart_read = false;
+        if (_handle_rx_metadata_error(md, "sync search", &restart_read) && restart_read) {
+            received = 0;
+        }
+        if (received > 0) {
+            first_time_ns = metadata_time_to_ns(md);
         }
 
         if (sync_batch == nullptr) {
@@ -3533,18 +4210,14 @@ private:
             : 0;
         const size_t total_read = frame_samples + positive_shift - negative_shift;
         AlignedVector temp_buf(total_read);
-        size_t received = 0;
         int64_t frame_time_ns = -1;
-        while (received < total_read && running_.load()) {
-            const size_t got = rx_stream_->recv(&temp_buf[received], total_read - received, md);
-            bool restart_read = false;
-            if (_handle_rx_metadata_error(md, "alignment", &restart_read) && restart_read) {
-                break;
-            }
-            if (received == 0 && got > 0) {
-                frame_time_ns = metadata_time_to_ns(md);
-            }
-            received += got;
+        size_t received = rx_stream_->recv(temp_buf.data(), total_read, md);
+        bool restart_read = false;
+        if (_handle_rx_metadata_error(md, "alignment", &restart_read) && restart_read) {
+            received = 0;
+        }
+        if (received > 0) {
+            frame_time_ns = metadata_time_to_ns(md);
         }
         if (received < total_read) {
             if (received > 0 && running_.load(std::memory_order_relaxed)) {
@@ -3565,9 +4238,12 @@ private:
         // Acquire pre-allocated RX frame from pool
         RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = alignment_samples;
-        frame.usrp_time_ns = frame_time_ns;
         frame.host_enqueue_time_ns = do_latency_profile ? host_now_ns() : 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
+        frame.ertm_rx_alignment_shift_samples = 0;
+        // Alignment moves the committed frame start by alignment_samples relative
+        // to the raw first-sample metadata time (same convention as boundary logs).
+        _stamp_rx_air_frame(frame, frame_time_ns, static_cast<int64_t>(alignment_samples));
         if (positive_shift > 0) {
             LOG_RT_INFO_M(Recovery)
                 << "UE alignment is dropping " << positive_shift
@@ -3592,11 +4268,13 @@ private:
             const int64_t start_ns =
                 _rx_stream_start_time_ns.load(std::memory_order_acquire);
             const int64_t fs = static_cast<int64_t>(frame_samples);
-            if (start_ns >= 0 && fs > 0 && cfg_.rf_sampling.sample_rate > 0.0) {
+            const double rate = _rx_rate_hz();
+            if (start_ns >= 0 && fs > 0 && rate > 0.0) {
+                // Use actual (possibly coerced) RX rate — must match timeline.
                 const int64_t raw_offset_samples =
                     static_cast<int64_t>(std::llround(
                         static_cast<double>(frame_time_ns - start_ns) *
-                        cfg_.rf_sampling.sample_rate * 1.0e-9));
+                        rate * 1.0e-9));
                 const int64_t boundary_offset_samples =
                     raw_offset_samples + static_cast<int64_t>(alignment_samples);
                 const int64_t grid_phase_samples =
@@ -3605,6 +4283,12 @@ private:
                     grid_phase_samples, alignment_id, alignment_restart_epoch);
             }
         }
+        // The alignment read above has now committed the new RX coordinate.
+        const int32_t committed_alignment =
+            _uplink_tx_rx_alignment_shift.load(std::memory_order_relaxed);
+        _committed_uplink_tx_rx_alignment_shift.store(
+            committed_alignment, std::memory_order_release);
+        frame.ertm_rx_alignment_shift_samples = committed_alignment;
         if (positive_shift > 0) {
             std::copy(temp_buf.begin() + positive_shift,
                     temp_buf.begin() + positive_shift + frame_samples,
@@ -3621,15 +4305,23 @@ private:
                     frame.frame_data.begin());
         }
 
+        // Publish applied receipt before queue push so process_proc can clear
+        // the latch and inject SFO/eRTM Alignment even if this frame is dropped.
+        _alignment_applied_samples.store(alignment_samples, std::memory_order_relaxed);
+        _alignment_applied_time_ns.store(frame_time_ns, std::memory_order_relaxed);
+        _alignment_applied_id.store(alignment_id, std::memory_order_release);
+
         if (!frame_queue_.try_push(std::move(frame))) {
-            // Alignment frames carry Alignment!=0 used to clear _sync_in_progress.
-            // Dropping them can leave the tracking latch stuck until a hard reset.
+            // Sample IQ for this boundary may be lost, but the latch side-channel
+            // above already recorded the applied alignment_id.
             if (running_.load(std::memory_order_relaxed)) {
                 LOG_RT_WARN_HZ_M(Sync, 5)
                     << "[delay_track] alignment_frame_drop queue_full alignment="
                     << alignment_samples
                     << " alignment_id=" << alignment_id
-                    << " (sync_in_progress latch may stick until reset)";
+                    << " depth=" << frame_queue_.size()
+                    << "/" << frame_queue_.capacity()
+                    << " (latch clears via applied side-channel; IQ frame lost)";
             }
             _rx_frame_pool.release(std::move(frame));
         }
@@ -3677,27 +4369,29 @@ private:
         RxFrame frame = _rx_frame_pool.acquire();
         frame.Alignment = 0;
         frame.usrp_time_ns = -1;
+        frame.identity.clear();
         frame.host_enqueue_time_ns = 0;
         frame.generation = _sync_generation.load(std::memory_order_acquire);
-        size_t received = 0;
-
-        while (received < cfg_.samples_per_frame() && running_.load()) {
-            const size_t got = rx_stream_->recv(
-                &frame.frame_data[received],
-                cfg_.samples_per_frame() - received,
-                md
-            );
-            bool restart_read = false;
-            if (_handle_rx_metadata_error(md, "normal", &restart_read) && restart_read) {
-                break;
-            }
-            if (received == 0 && got > 0) {
-                frame.usrp_time_ns = metadata_time_to_ns(md);
-            }
-            received += got;
+        frame.ertm_rx_alignment_shift_samples = 0;
+        int64_t raw_first_ns = -1;
+        size_t received = rx_stream_->recv(
+            frame.frame_data.data(), cfg_.samples_per_frame(), md);
+        bool restart_read = false;
+        if (_handle_rx_metadata_error(md, "normal", &restart_read) && restart_read) {
+            received = 0;
+        }
+        if (received > 0) {
+            raw_first_ns = metadata_time_to_ns(md);
         }
 
         if (received == cfg_.samples_per_frame()) {
+            // NORMAL: stream is already on the committed grid; raw first sample
+            // is the air-frame boundary (alignment_sample_adjust = 0).
+            _stamp_rx_air_frame(frame, raw_first_ns, 0);
+            // Freeze cumulative UL-TX Alignment with this RX frame so process/
+            // sensing never pair h_est of frame N with a later schedule update.
+            frame.ertm_rx_alignment_shift_samples =
+                _committed_uplink_tx_rx_alignment_shift.load(std::memory_order_acquire);
             uint32_t remaining =
                 _rx_boundary_log_remaining.load(std::memory_order_acquire);
             while (remaining > 0 &&
@@ -4111,6 +4805,8 @@ private:
         };
 
         auto collect_ready_slots = [&](bool blocking) {
+            // SFO/sync-tracking ownership lives here — apply BS timeline resets.
+            _apply_bs_air_timeline_reset_on_process_thread();
             bool collected = false;
             while (!_cpu_demod_slots.empty()) {
                 auto& slot = *_cpu_demod_slots[collect_slot_idx];
@@ -4160,6 +4856,7 @@ private:
 
         while (running_.load()) {
             collect_ready_slots(false);
+            _apply_pending_process_tracking_reset();
             if (_recovery_queue_clear_requested.exchange(false, std::memory_order_acq_rel)) {
                 _clear_recovery_queues_from_process_thread();
             }
@@ -4915,33 +5612,39 @@ private:
             cfg_.downlink.center_freq,
             current_rx_tune_.actual_rf_freq,
             current_rx_tune_.actual_dsp_freq);
+        const double normal_cfo_alias_period_hz =
+            cfg_.rf_sampling.sample_rate /
+            static_cast<double>(cfg_.ofdm.fft_size + cfg_.ofdm.cp_length);
+        const auto normal_cfo = dealias_normal_cfo_hz(
+            static_cast<double>(result.detected_freq_offset),
+            normal_cfo_alias_period_hz,
+            tune_system_cfo_hz);
+        cfo_observation_valid = cfo_observation_valid && normal_cfo.valid;
+        const bool ocxo_cfo_quality_valid = _ocxo_cfo_quality_gate.update(
+            normal_cfo,
+            normal_cfo_alias_period_hz,
+            cfo_observation_valid);
+        const double detected_cfo_hz = normal_cfo.valid
+            ? normal_cfo.dealiased_hz
+            : static_cast<double>(result.detected_freq_offset);
         const double clock_error_hz =
-            static_cast<double>(result.detected_freq_offset) - tune_system_cfo_hz;
+            detected_cfo_hz - tune_system_cfo_hz;
+        // Mode A residual for OCXO: plant-oriented (∂e/∂u = -1 with local UE
+        // OCXO). Do not invert here — Mode A closed-loop polarity is correct.
+        // Mode B TO_clock slope polarity is handled inside OCXODiscipliner.
         const double raw_error_ppm =
             (std::abs(cfg_.downlink.center_freq) > 0.0)
                 ? (clock_error_hz / cfg_.downlink.center_freq * 1e6)
                 : 0.0;
-        bool vofa_debug_valid = false;
-        float vofa_raw_error_ppm = 0.0f;
-        float vofa_filtered_error_ppm = 0.0f;
-        if (cfg_.sync_tracking.hardware_sync && cfo_observation_valid) {
-            const auto akf_result = _akf.update(raw_error_ppm);
-            const double control_error_ppm = cfg_.sync_tracking.akf_enable
-                ? akf_result.filtered_error_ppm
+        double control_error_ppm = raw_error_ppm;
+        if (cfg_.sync_tracking.hardware_sync && ocxo_cfo_quality_valid) {
+            const auto ewma_result = _cfo_ewma.update(raw_error_ppm);
+            control_error_ppm = cfg_.sync_tracking.cfo_ewma_enable
+                ? ewma_result.filtered_error_ppm
                 : raw_error_ppm;
-            vofa_debug_valid = true;
-            vofa_raw_error_ppm = static_cast<float>(raw_error_ppm);
-            vofa_filtered_error_ppm = static_cast<float>(akf_result.filtered_error_ppm);
-            ++_ocxo_update_counter;
-            if (_ocxo_update_counter >= 434) {
-                _ocxo_update_counter = 0;
-                const double applied_delta_ppm =
-                    _hw_sync->update_ocxo_pi_with_error_ppm(control_error_ppm);
-                _akf.notify_control_action(applied_delta_ppm);
-            }
         }
         if (cfo_observation_valid) {
-            _freq_offset_sum += result.detected_freq_offset;
+            _freq_offset_sum += detected_cfo_hz;
             _freq_offset_count++;
             if (_freq_offset_count >= 434) {
                 _avg_freq_offset = _freq_offset_sum / _freq_offset_count;
@@ -4959,14 +5662,6 @@ private:
         }
         if (issued_freq_adjust) {
             _control_time_gates.mark_freq_adjust_now(radio_time_now());
-        }
-        if (vofa_debug_valid && vofa_debug_sender_) {
-            const std::array<float, 3> channels{
-                vofa_raw_error_ppm,
-                vofa_filtered_error_ppm,
-                static_cast<float>(_avg_freq_offset)
-            };
-            vofa_debug_sender_->send_channels(channels);
         }
         prof_step_end = ProfileClock::now();
         result.profile.cfo_sfo_est_total += std::chrono::duration<double, std::micro>(
@@ -4993,11 +5688,292 @@ private:
             prof_step_end - prof_step_start).count();
 
         prof_step_start = ProfileClock::now();
-        sfo_estimator.update(
-            result.adjusted_delay_index + result.fractional_delay,
-            frame.Alignment);
+        _apply_pending_process_tracking_reset();
+        bool alignment_from_sidechannel = false;
+        const int32_t effective_alignment = _effective_alignment_for_frame(
+            frame.Alignment,
+            frame.usrp_time_ns,
+            &alignment_from_sidechannel);
+        if (alignment_from_sidechannel && LOG_MOD_ON(Sync)) {
+            LOG_RT_INFO_M(Sync)
+                << "[delay_track] alignment_sidechannel_inject"
+                << " samples=" << effective_alignment
+                << " applied_id=" << _alignment_applied_consumed_id
+                << " frame_time_ns=" << frame.usrp_time_ns
+                << " (queue-dropped Alignment frame; full SFO/eRTM semantics)";
+        }
+        const float peak_ratio =
+            (result.delay_average_mag > 0.0f)
+                ? (result.delay_max_mag / result.delay_average_mag)
+                : 0.0f;
+        const bool bad_peak =
+            (result.delay_average_mag > 0.0f) && (peak_ratio < 20.0f);
+        const bool delay_peak_valid =
+            (result.delay_average_mag > 0.0f) && !bad_peak;
+        if (delay_peak_valid) {
+            sfo_estimator.update(
+                result.adjusted_delay_index + result.fractional_delay,
+                static_cast<float>(effective_alignment));
+        } else {
+            sfo_estimator.apply_alignment_without_observation(
+                static_cast<float>(effective_alignment));
+        }
         const auto sfo_per_frame = sfo_estimator.get_sfo_per_frame();
         const float delay_offset = sfo_estimator.get_sensing_delay_offset();
+
+        // OFDM delay-track SFO stays diagnostic here; Mode B control uses the
+        // Alignment-continuous eRTM TO_clock slope inside OCXODiscipliner.
+        if (cfg_.sync_tracking.hardware_sync && _hw_sync && _ocxo_discipliner &&
+            _ocxo_pps_initial_aligner) {
+            _apply_pending_ocxo_to_reanchor(allow_freq_adjust);
+            OCXODiscipliner::Observation ocxo_obs;
+            ocxo_obs.allow_control = allow_freq_adjust;
+            ocxo_obs.cfo_valid = ocxo_cfo_quality_valid;
+            ocxo_obs.cfo_ppm = control_error_ppm;
+            const double spf = static_cast<double>(cfg_.samples_per_frame());
+            const double ofdm_sfo_ppm = (spf > 0.0)
+                ? (static_cast<double>(sfo_per_frame) / spf * 1.0e6)
+                : 0.0;
+            ErtmToPublishSnapshot to_snap;
+            bool to_ok = false;
+            if (cfg_.uplink.ertm_to_enable) {
+                // Atomic same-frame TO/Alignment/identity snapshot.
+                to_snap = _load_ertm_to_publish_snapshot();
+                to_ok =
+                    to_snap.available &&
+                    to_snap.clear_gen == to_snap.request_gen &&
+                    std::isfinite(to_snap.to_ue_samples);
+                if (to_ok) {
+                    if (!_ocxo_to_pub_known ||
+                        to_snap.pub_gen != _ocxo_to_last_pub_gen) {
+                        _ocxo_to_pub_known = true;
+                        _ocxo_to_last_pub_gen = to_snap.pub_gen;
+                        _ocxo_to_age_frames = 0;
+                        ocxo_obs.to_is_new = true;
+                    } else {
+                        ++_ocxo_to_age_frames;
+                        ocxo_obs.to_is_new = false;
+                    }
+                    ocxo_obs.to_valid = true;
+                    ocxo_obs.to_ue_samples = to_snap.to_ue_samples;
+                    ocxo_obs.to_alignment_samples =
+                        to_snap.rx_alignment_shift_samples;
+                    ocxo_obs.to_timeline_epoch =
+                        to_snap.dl_identity.timeline_epoch;
+                    ocxo_obs.to_frame_seq = to_snap.dl_identity.frame_seq;
+                    ocxo_obs.to_sync_generation = to_snap.sync_generation;
+                    ocxo_obs.to_report_age_frames = _ocxo_to_age_frames;
+                    ocxo_obs.pps_phase_valid =
+                        to_snap.pps_phase_available &&
+                        std::isfinite(to_snap.pps_phase_error_samples);
+                    ocxo_obs.pps_phase_error_samples =
+                        to_snap.pps_phase_error_samples;
+                } else {
+                    _ocxo_to_pub_known = false;
+                    _ocxo_to_age_frames = 0;
+                }
+            } else {
+                _ocxo_to_pub_known = false;
+                _ocxo_to_age_frames = 0;
+            }
+
+            const auto reacquisition =
+                _ocxo_discipliner->prepare_reacquisition_resume(
+                    ocxo_obs,
+                    OCXODiscipliner::kReacquisitionModeHoldS);
+            if (reacquisition.action ==
+                OCXODiscipliner::ReacquisitionAction::Waiting) {
+                ocxo_obs.allow_control = false;
+            } else if (reacquisition.action ==
+                       OCXODiscipliner::ReacquisitionAction::Reset) {
+                _hw_sync->rebase_frequency_control_slew();
+                if (cfg_.sync_tracking.ocxo_mode == kOCXOModePpsPhase) {
+                    _hw_sync->rearm_pps_phase_adjust();
+                    _ocxo_pps_initial_aligner->reset();
+                }
+                LOG_G_WARN_M(Ocxo)
+                    << "OCXO reacquisition exceeded mode-preserve window; tracking reset"
+                    << " previous_stage="
+                    << OCXODiscipliner::stage_name(reacquisition.previous_stage)
+                    << " elapsed_s=" << reacquisition.elapsed_s
+                    << " preserve_s="
+                    << OCXODiscipliner::kReacquisitionModeHoldS
+                    << " retained_ppm=" << _hw_sync->current_offset_ppm();
+            } else if (reacquisition.elapsed_s > 0.0) {
+                LOG_G_INFO_M(Ocxo)
+                    << "OCXO reacquisition resumed with retained tracking mode"
+                    << " stage="
+                    << OCXODiscipliner::stage_name(reacquisition.previous_stage)
+                    << " elapsed_s=" << reacquisition.elapsed_s
+                    << " preserve_s="
+                    << OCXODiscipliner::kReacquisitionModeHoldS;
+            }
+
+            const bool pps_phase_mode =
+                cfg_.sync_tracking.ocxo_mode == kOCXOModePpsPhase;
+            OCXOPpsInitialAligner::UpdateResult align_out;
+            align_out.state = _ocxo_pps_initial_aligner->state();
+            align_out.phase_control_ready = true;
+            bool align_state_changed = false;
+            if (pps_phase_mode) {
+                const auto map_ap_status = [](
+                    HardwareSyncController::PpsPhaseAdjustStatus status) {
+                    using HwStatus = HardwareSyncController::PpsPhaseAdjustStatus;
+                    using AlignStatus = OCXOPpsInitialAligner::CommandStatus;
+                    switch (status) {
+                        case HwStatus::Idle: return AlignStatus::Idle;
+                        case HwStatus::Queued: return AlignStatus::Queued;
+                        case HwStatus::InFlight: return AlignStatus::InFlight;
+                        case HwStatus::Succeeded: return AlignStatus::Succeeded;
+                        case HwStatus::Failed: return AlignStatus::Failed;
+                    }
+                    return AlignStatus::Failed;
+                };
+                OCXOPpsInitialAligner::Observation align_obs;
+                align_obs.phase_stage =
+                    _ocxo_discipliner->stage() == OCXODiscipliner::Stage::Phase;
+                align_obs.phase_valid = ocxo_obs.pps_phase_valid;
+                align_obs.phase_error_samples = ocxo_obs.pps_phase_error_samples;
+                align_obs.sample_rate = cfg_.rf_sampling.sample_rate;
+                align_obs.publication_generation = to_ok ? to_snap.pub_gen : 0;
+                align_obs.command_status = map_ap_status(
+                    _hw_sync->pps_phase_adjust_status());
+                align_out = _ocxo_pps_initial_aligner->update(align_obs);
+                align_state_changed = align_out.state_changed;
+                if (align_out.request_hardware_rearm) {
+                    _hw_sync->rearm_pps_phase_adjust();
+                    if (align_out.phase_entry_rearm) {
+                        LOG_G_INFO_M(Ocxo)
+                            << "OCXO PPS AP rearmed for FllSlow-to-Phase entry";
+                    } else {
+                        LOG_G_WARN_M(Ocxo)
+                            << "OCXO PPS AP settling timed out; waiting for "
+                               "a fresh PPS publication before bounded retry"
+                            << ": retry=" << align_out.retry_count;
+                    }
+                }
+                if (align_out.request_adjust) {
+                    using HwQueueResult =
+                        HardwareSyncController::PpsPhaseAdjustQueueResult;
+                    const HwQueueResult queue_result =
+                        _hw_sync->request_pps_phase_adjust_ns(
+                        align_out.adjustment_ns);
+                    const auto align_queue_result =
+                        queue_result == HwQueueResult::Queued
+                            ? OCXOPpsInitialAligner::QueueResult::Queued
+                            : OCXOPpsInitialAligner::QueueResult::Busy;
+                    align_state_changed |=
+                        _ocxo_pps_initial_aligner->notify_command_queue_result(
+                            align_queue_result);
+                    align_out.state = _ocxo_pps_initial_aligner->state();
+                    align_out.phase_control_ready =
+                        _ocxo_pps_initial_aligner->phase_control_ready();
+                    LOG_G_INFO_M(Ocxo)
+                        << "OCXO phase-entry PPS AP request"
+                        << ": pps_error_samples=" << ocxo_obs.pps_phase_error_samples
+                        << ", adjustment_ns=" << align_out.adjustment_ns
+                        << ", queue_result="
+                        << (queue_result == HwQueueResult::Queued ? "queued" : "busy")
+                        << ", retry=" << align_out.retry_count
+                        << " (AP changes PPSOUT only; USRP/TO anchors unchanged)";
+                }
+                ocxo_obs.phase_control_ready = align_out.phase_control_ready;
+            }
+            if (align_state_changed) {
+                if (align_out.state == OCXOPpsInitialAligner::State::Failed) {
+                    LOG_G_WARN_M(Ocxo)
+                        << "OCXO phase-entry PPS AP failed; Phase SF tracking is released"
+                        << ": pps_error_samples=" << ocxo_obs.pps_phase_error_samples
+                        << ", retry=" << align_out.retry_count
+                        << ". A large residual may remain and the slew-limited "
+                           "Phase PI may not remove it quickly.";
+                } else {
+                    LOG_G_INFO_M(Ocxo) << "OCXO phase-entry PPS AP state="
+                                 << OCXOPpsInitialAligner::state_name(align_out.state);
+                }
+            }
+            const auto ocxo_out = _ocxo_discipliner->update(ocxo_obs);
+            double applied_delta_ppm = 0.0;
+            if (ocxo_out.request_control) {
+                applied_delta_ppm =
+                    _hw_sync->apply_delta_ppm(ocxo_out.desired_delta_ppm);
+                _ocxo_discipliner->commit_applied_delta(applied_delta_ppm);
+                _cfo_ewma.notify_control_action(applied_delta_ppm);
+            }
+            const auto ocxo_debug = _ocxo_discipliner->debug_state();
+            if (ocxo_debug_sender_) {
+                const double alignment_event_samples = ocxo_obs.to_is_new
+                    ? ocxo_debug.alignment_feedforward_samples
+                    : 0.0;
+                const ocxo_debug_protocol::Channels channels{
+                    static_cast<float>(normal_cfo.modulo_hz),
+                    static_cast<float>(detected_cfo_hz),
+                    static_cast<float>(raw_error_ppm),
+                    static_cast<float>(control_error_ppm),
+                    static_cast<float>(ofdm_sfo_ppm),
+                    static_cast<float>(ocxo_debug.to_raw),
+                    static_cast<float>(ocxo_debug.to_clock),
+                    static_cast<float>(ocxo_debug.to_err),
+                    static_cast<float>(ocxo_debug.to_slope_ppm),
+                    static_cast<float>(ocxo_obs.to_alignment_samples),
+                    static_cast<float>(alignment_event_samples),
+                    static_cast<float>(ocxo_out.desired_delta_ppm),
+                    static_cast<float>(applied_delta_ppm),
+                    static_cast<float>(ocxo_debug.command_ppm),
+                    static_cast<float>(ocxo_debug.coarse_outstanding_ppm),
+                    static_cast<float>(OCXODiscipliner::stage_code(ocxo_debug.stage))
+                };
+                ocxo_debug_protocol::Diagnostics diagnostics;
+                if (to_ok && to_snap.pps_phase_available) {
+                    diagnostics.r_bs_samples = to_snap.r_bs_samples;
+                    diagnostics.r_ue_samples = to_snap.r_ue_samples;
+                    diagnostics.bs_last_pps_ticks = to_snap.bs_last_pps_ticks;
+                    diagnostics.bs_t0_to_pps_ticks = to_snap.bs_t0_to_pps_ticks;
+                    diagnostics.ue_last_pps_ns = to_snap.ue_last_pps_ns;
+                    diagnostics.bs_tick_rate = to_snap.bs_tick_rate;
+                    diagnostics.sample_rate = to_snap.sample_rate;
+                }
+                const bool force_debug_event =
+                    ocxo_out.request_control ||
+                    ocxo_out.transition_reason !=
+                        OCXODiscipliner::TransitionReason::None ||
+                    ocxo_out.to_jump_rejected ||
+                    align_state_changed ||
+                    std::abs(alignment_event_samples) > 1e-15;
+                ocxo_debug_sender_->send_channels(
+                    channels, diagnostics, force_debug_event);
+            }
+            ++_ocxo_log_counter;
+            if (ocxo_out.transition_reason != OCXODiscipliner::TransitionReason::None ||
+                ocxo_out.to_jump_rejected ||
+                align_state_changed ||
+                _ocxo_log_counter % 256 == 0) {
+                LOG_RT_INFO_M(Ocxo)
+                    << "OCXO loop: mode=" << OCXODiscipliner::active_mode_name(ocxo_debug.mode)
+                    << " stage=" << OCXODiscipliner::stage_name(ocxo_debug.stage)
+                    << " reason=" << OCXODiscipliner::transition_reason_name(ocxo_out.transition_reason)
+                    << " cfo_mod_hz=" << normal_cfo.modulo_hz
+                    << " cfo_hz=" << detected_cfo_hz
+                    << " cfo_ppm=" << control_error_ppm
+                    << " ofdm_sfo_ppm=" << ofdm_sfo_ppm
+                    << " freq_source="
+                    << OCXODiscipliner::frequency_source_name(ocxo_debug.frequency_source)
+                    << " freq_error_ppm=" << ocxo_debug.frequency_error_ppm
+                    << " cmd_ppm=" << ocxo_debug.command_ppm
+                    << " desired_ppm=" << ocxo_out.desired_delta_ppm
+                    << " applied_ppm=" << applied_delta_ppm
+                    << " coarse_left_ppm=" << ocxo_debug.coarse_outstanding_ppm
+                    << " to_raw=" << ocxo_debug.to_raw
+                    << " to_clock=" << ocxo_debug.to_clock
+                    << " phase_error=" << ocxo_debug.to_err
+                    << " phase_entry_ap_state="
+                    << (pps_phase_mode
+                            ? OCXOPpsInitialAligner::state_name(align_out.state)
+                            : "inactive")
+                    << " to_slope_ppm=" << ocxo_debug.to_slope_ppm
+                    << " align_ff=" << ocxo_debug.alignment_feedforward_samples;
+            }
+        }
         const size_t sync_symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         const size_t sync_symbol_offset = cfg_.ofdm.sync_pos * sync_symbol_len;
         const std::complex<float>* sync_symbol_td = nullptr;
@@ -5030,12 +6006,6 @@ private:
         const int delay_adjust_step = cfg_.sync_tracking.delay_adjust_step;
         const int delay_reset_err_thresh = delay_adjust_step + 5;
         const int cp_length = static_cast<int>(cfg_.ofdm.cp_length);
-        const float peak_ratio =
-            (result.delay_average_mag > 0.0f)
-                ? (result.delay_max_mag / result.delay_average_mag)
-                : 0.0f;
-        const bool bad_peak =
-            (result.delay_average_mag > 0.0f) && (peak_ratio < 20.0f);
         const bool large_delay_err = abs_delay_err > delay_reset_err_thresh;
         const bool sync_enabled =
             cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync;
@@ -5125,15 +6095,33 @@ private:
                     << " avg_mag=" << result.delay_average_mag;
                 adjust_rx_freq(0.0, true);
                 sfo_estimator.reset();
-                _akf.reset();
-                _ocxo_update_counter = 0;
-                if (vofa_debug_sender_) {
-                    vofa_debug_sender_->reset_counter();
+                _cfo_ewma.reset();
+                _ocxo_cfo_quality_gate.reset();
+                _ocxo_log_counter = 0;
+                _ocxo_to_pub_known = false;
+                _ocxo_to_last_pub_gen = 0;
+                _ocxo_to_age_frames = 0;
+                if (ocxo_debug_sender_) {
+                    ocxo_debug_sender_->reset_counter();
                 }
                 if (cfg_.sync_tracking.hardware_sync) {
-                    _hw_sync->reset_frequency_control();
-                    _hw_sync->reset_ocxo_pi_state();
-                    LOG_RT_INFO_M(Ocxo) << "OCXO PI state reset to fast stage after sync reset.";
+                    if (_hw_sync) {
+                        if (_ocxo_discipliner) {
+                            _ocxo_discipliner->begin_reacquisition_hold();
+                        }
+                        _hw_sync->rebase_frequency_control_slew();
+                    }
+                    LOG_RT_INFO_M(Ocxo)
+                        << "OCXO reacquisition hold started after sync reset"
+                        << " stage="
+                        << (_ocxo_discipliner
+                                ? OCXODiscipliner::stage_name(
+                                      _ocxo_discipliner->stage())
+                                : "inactive")
+                        << " preserve_s="
+                        << OCXODiscipliner::kReacquisitionModeHoldS
+                        << " ppm=" << (_hw_sync ? _hw_sync->current_offset_ppm() : 0.0)
+                        << " word=" << (_hw_sync ? _hw_sync->current_word() : 0);
                 }
                 _enter_sync_search_state();
                 _mute_uplink_tx_gain_for_sync_search();
@@ -5144,20 +6132,32 @@ private:
         } else {
             _reset_count = 0;
         }
-        // Alignment feedback: only the RX alignment frame carries Alignment!=0.
-        // Always clear the latch on that committed frame. allow_alignment gates
-        // *issuing* new corrections from measurement frames (stale pipeline
-        // protection); it must not reject the one-shot feedback of a schedule we
-        // already applied. mark_alignment_now(radio_time_now()) can land after
-        // the alignment frame's usrp_time_ns, which previously left the latch
-        // stuck until hard reset while delay slowly drifted.
-        if (_sync_in_progress && frame.Alignment != 0) {
+        // Latch clear: frame receipt and/or applied side-channel. SFO/eRTM
+        // already used effective_alignment above for full semantics.
+        if (_sync_in_progress &&
+            _alignment_latch_receipt_ready(frame.Alignment)) {
+            const uint64_t applied_id =
+                _alignment_applied_id.load(std::memory_order_acquire);
+            const int32_t applied_samples =
+                _alignment_applied_samples.load(std::memory_order_relaxed);
+            const bool receipt_frame = (frame.Alignment != 0);
+            const bool receipt_sidechannel =
+                (_sync_in_progress_expect_id != 0) &&
+                (applied_id == _sync_in_progress_expect_id);
             _sync_in_progress = false;
             _sync_in_progress_hold_frames = 0;
+            _sync_in_progress_expect_id = 0;
             if (log_sync) {
                 LOG_RT_INFO_M(Sync)
                     << "[delay_track] alignment_feedback_clear"
                     << " frame_align=" << frame.Alignment
+                    << " effective_align=" << effective_alignment
+                    << " applied_id=" << applied_id
+                    << " applied_samples=" << applied_samples
+                    << " via="
+                    << (receipt_frame
+                            ? (receipt_sidechannel ? "frame+sidechannel" : "frame")
+                            : "sidechannel")
                     << " delay_err=" << delay_index_err
                     << " adj_idx=" << result.adjusted_delay_index
                     << " peak_ratio=" << peak_ratio
@@ -5171,14 +6171,19 @@ private:
             if (_sync_in_progress_hold_frames == 8u ||
                 _sync_in_progress_hold_frames == 32u ||
                 (_sync_in_progress_hold_frames % 64u) == 0u) {
+                const uint64_t applied_id =
+                    _alignment_applied_id.load(std::memory_order_acquire);
                 LOG_RT_WARN_M(Sync)
                     << "[delay_track] sync_in_progress_held"
                     << " hold_frames=" << _sync_in_progress_hold_frames
                     << " delay_err=" << delay_index_err
                     << " frame_align=" << frame.Alignment
+                    << " effective_align=" << effective_alignment
+                    << " expect_id=" << _sync_in_progress_expect_id
+                    << " applied_id=" << applied_id
                     << " allow_align=" << (allow_alignment ? 1 : 0)
                     << " peak_ratio=" << peak_ratio
-                    << " (no Alignment!=0 feedback yet; small align blocked)";
+                    << " (no alignment receipt yet; small align blocked)";
             }
         } else {
             _sync_in_progress_hold_frames = 0;
@@ -5191,7 +6196,7 @@ private:
                 << " peak_ratio=" << peak_ratio
                 << " (tracking alignment disabled; only hard reset can recover)";
         }
-        if (err_in_align_window && sync_enabled) {
+        if (delay_peak_valid && err_in_align_window && sync_enabled) {
             if (!_sync_in_progress && allow_alignment) {
                 const uint32_t confirm_before = _delay_adjustment_count;
                 if (_delay_adjustment_count++ >= 1) {
@@ -5199,11 +6204,14 @@ private:
                     _schedule_receive_alignment(static_cast<int32_t>(delay_index_err));
                     _sync_in_progress = true;
                     _sync_in_progress_hold_frames = 0;
+                    _sync_in_progress_expect_id =
+                        _pending_alignment_id.load(std::memory_order_relaxed);
                     issued_alignment = true;
                     if (log_sync) {
                         LOG_RT_INFO_M(Sync)
                             << "[delay_track] schedule_alignment"
                             << " samples=" << delay_index_err
+                            << " alignment_id=" << _sync_in_progress_expect_id
                             << " adj_idx=" << result.adjusted_delay_index
                             << " desired=" << cfg_.sync_tracking.desired_peak_pos
                             << " predictive=" << predictive_delay_samples
@@ -5245,7 +6253,17 @@ private:
                 }
             }
         } else {
-            if (log_sync &&
+            if (log_sync && err_in_align_window && sync_enabled && !delay_peak_valid) {
+                LOG_RT_INFO_HZ_M(Sync, 5)
+                    << "[delay_track] align_blocked"
+                    << " delay_err=" << delay_index_err
+                    << " reasons=invalid_peak,"
+                    << " frame_align=" << frame.Alignment
+                    << " peak_ratio=" << peak_ratio
+                    << " max_mag=" << result.delay_max_mag
+                    << " avg_mag=" << result.delay_average_mag
+                    << " adj_idx=" << result.adjusted_delay_index;
+            } else if (log_sync &&
                 abs_delay_err > 0 &&
                 abs_delay_err < delay_adjust_step &&
                 sync_enabled) {
@@ -5282,7 +6300,7 @@ private:
                 << " frame_align=" << frame.Alignment
                 << " sfo_per_frame=" << sfo_per_frame;
         }
-        _last_delay_index_err = delay_index_err;
+        _last_delay_index_err = delay_peak_valid ? delay_index_err : 0;
         if (issued_alignment) {
             _control_time_gates.mark_alignment_now(radio_time_now());
         }
@@ -5297,11 +6315,18 @@ private:
         // Without the bistatic sensing pipeline, keep eRTM/debug functionality
         // by consuming reports here.  With sensing enabled, that thread is the
         // sole consumer of both the report queue and the eRTM FFT plans.
+        // A_N comes from the RxFrame freeze at RX enqueue, not the live atomic
+        // (which process may already have updated via schedule_receive_alignment).
+        const int32_t a_n_samples = frame.ertm_rx_alignment_shift_samples;
+        const bool force_ertm_from_align = (effective_alignment != 0);
         if (!_bistatic_sensing_channel) {
             _update_ertm_measurement_for_downlink_frame(
                 result.h_est,
-                frame.Alignment != 0,
-                frame.Alignment);
+                force_ertm_from_align,
+                effective_alignment,
+                frame.identity,
+                a_n_samples,
+                frame.generation);
         }
         if (result.has_sensing) {
             result.sense_frame.CFO = result.alpha;
@@ -5312,9 +6337,11 @@ private:
                 result.sense_frame.SFO = result.beta;
             }
             result.sense_frame.delay_offset = delay_offset;
-            result.sense_frame.alignment_samples = frame.Alignment;
+            result.sense_frame.alignment_samples = effective_alignment;
+            result.sense_frame.identity = frame.identity;
+            result.sense_frame.ertm_rx_alignment_shift_samples = a_n_samples;
             result.sense_frame.force_ertm_remeasure =
-                frame.Alignment != 0 ||
+                force_ertm_from_align ||
                 _ertm_remeasure_deferred_after_sensing_drop;
             if (cfg_.uplink.ertm_to_enable) {
                 if (result.sense_frame.ertm_downlink_channel_freq.size() !=
@@ -5376,6 +6403,7 @@ private:
                     frame.host_enqueue_time_ns,
                     result.frame_dequeue_time_ns,
                     demod_done_time_ns,
+                    frame.identity,
                 }, [this]() {
                     return !_bit_processing_running.load(std::memory_order_acquire);
                 })) {
@@ -5388,6 +6416,7 @@ private:
                     frame.host_enqueue_time_ns,
                     result.frame_dequeue_time_ns,
                     demod_done_time_ns,
+                    frame.identity,
                 }, [this]() {
                     return !_bit_processing_running.load(std::memory_order_acquire);
                 })) {
@@ -5626,13 +6655,25 @@ private:
                 _update_ertm_measurement_for_downlink_frame(
                     frame.ertm_downlink_channel_freq,
                     frame.force_ertm_remeasure,
-                    frame.alignment_samples);
+                    frame.alignment_samples,
+                    frame.identity,
+                    frame.ertm_rx_alignment_shift_samples,
+                    frame.generation);
                 frame.delay_offset = _select_sensing_delay_offset(frame.delay_offset);
                 const uint64_t frame_symbol_count = static_cast<uint64_t>(frame.rx_symbols.size());
-                const uint64_t frame_start_symbol = _next_bistatic_frame_start_symbol.fetch_add(
-                    frame_symbol_count,
-                    std::memory_order_relaxed
-                );
+                // Prefer absolute air-frame identity when locked; otherwise fall
+                // back to the local monotonic symbol counter.
+                uint64_t frame_start_symbol = 0;
+                if (frame.identity.valid) {
+                    frame_start_symbol = frame.identity.frame_start_symbol;
+                    _next_bistatic_frame_start_symbol.store(
+                        frame_start_symbol + frame_symbol_count,
+                        std::memory_order_relaxed);
+                } else {
+                    frame_start_symbol = _next_bistatic_frame_start_symbol.fetch_add(
+                        frame_symbol_count,
+                        std::memory_order_relaxed);
+                }
                 _bistatic_sensing_channel->process_bistatic_frame(frame, frame_start_symbol);
             }
             _sensing_frame_pool.release(std::move(frame));
@@ -5680,11 +6721,34 @@ private:
                 break;
             }
 
+            // Expanded Identity SIB: marker + 2 BCH words (may exceed one
+            // standard control header). Prefer identity decode when enough LLRs.
+            if ((symbol_offset + LdpcPacketFraming::kIdentityControlSymbols) * 2 <=
+                llr.size()) {
+                LdpcMiniHeader identity_hdr{};
+                if (LdpcPacketFraming::decode_identity_control_llrs(
+                        llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
+                        identity_hdr)) {
+                    CpuLdpcPacketRef ref;
+                    ref.mini_header = identity_hdr;
+                    ref.payload_offset = 0;
+                    ref.payload_len = 0;
+                    result.packets.push_back(ref);
+                    symbol_offset += LdpcPacketFraming::kIdentityControlSymbols;
+                    continue;
+                }
+            }
+
             LdpcMiniHeader mini_header;
             if (!LdpcPacketFraming::decode_mini_header_llrs(
                     llr.data() + control_llr_offset + LdpcPacketFraming::kMarkerBits,
                     mini_header)) {
                 LOG_G_WARN_M(Demod) << "[Demod] Mini-header CRC/version check failed; dropping remainder of frame.";
+                break;
+            }
+            // Standalone IdentityHi without Identity word0 is invalid.
+            if (LdpcPacketFraming::is_air_frame_identity_hi_flags(mini_header.flags)) {
+                LOG_G_WARN_M(Demod) << "[Demod] orphan IdentityHi mini-header; dropping remainder.";
                 break;
             }
 
@@ -5703,6 +6767,7 @@ private:
             }
 
             if (payload_blocks == 0) {
+                // Non-identity control-only packets (if any).
                 symbol_offset = next_symbol_offset;
                 continue;
             }
@@ -5741,6 +6806,139 @@ private:
     // Serial half: stateful packet handling in frame order on the
     // bit-processing collector thread (eRTM classification, measurement
     // comparison, ARQ window, UDP output, latency accounting).
+    /**
+     * @brief Bit-thread only: publish SIB anchor for RX to install.
+     * @param result_generation  Must be the LLR/result generation (not wall-clock current).
+     * @param epoch_changed  True when last_seen OTA epoch differs (survives RF clear).
+     *        RX needs this flag: after SYNC_SEARCH the local anchor is cleared, so
+     *        apply_identity_sib_anchor() cannot detect a BS restart by itself.
+     * @return true if the event was accepted into the queue under a live generation.
+     */
+    bool _publish_identity_sib_event(
+        uint64_t result_generation,
+        uint32_t ota_epoch32,
+        uint32_t ota_frame_seq32,
+        int64_t ue_boundary_time_ns = -1,
+        int64_t ue_mid_time_ns = -1,
+        bool epoch_changed = false)
+    {
+        const uint64_t live_gen = _sync_generation.load(std::memory_order_acquire);
+        if (result_generation != live_gen) {
+            return false;
+        }
+        AirFrameSibEvent ev;
+        ev.sync_generation = result_generation;
+        ev.timeline_epoch = static_cast<uint64_t>(ota_epoch32);
+        ev.frame_seq = static_cast<uint64_t>(ota_frame_seq32);
+        ev.ue_boundary_time_ns = ue_boundary_time_ns;
+        ev.ue_mid_time_ns = ue_mid_time_ns;
+        // Carry bit-thread OTA epoch-change detection across RF/sync clear.
+        // Must not hard-code false: that drops SFO reset after BS-only restart.
+        ev.epoch_changed = epoch_changed;
+        if (!_sib_event_queue.try_push(ev)) {
+            LOG_RT_WARN_HZ_M(AirFrame, 2)
+                << "[AirFrame] SIB event queue full; dropping identity update"
+                << " epoch32=0x" << std::hex << ota_epoch32 << std::dec
+                << " seq32=" << ota_frame_seq32
+                << " epoch_changed=" << epoch_changed;
+            return false;
+        }
+        return true;
+    }
+
+    void _clear_air_frame_identity(const char* reason) {
+        const AirFrameIdentity snap = _ue_air_timeline.snapshot();
+        if (snap.valid || LOG_MOD_ON(AirFrame)) {
+            LOG_RT_WARN_M(AirFrame) << "[AirFrame] identity cleared"
+                          << ": reason=" << reason
+                          << ", had_valid=" << snap.valid
+                          << ", epoch=" << snap.timeline_epoch
+                          << ", seq=" << snap.frame_seq
+                          << ", ue_frame_start_ns=" << snap.ue_frame_start_time_ns
+                          << ", ue_frame_mid_ns=" << snap.ue_frame_mid_time_ns
+                          << ", last_seen_ota_epoch=0x" << std::hex
+                          << _last_seen_ota_epoch.load(std::memory_order_relaxed)
+                          << std::dec
+                          << ", has_seen_ota_epoch="
+                          << _has_seen_ota_epoch.load(std::memory_order_relaxed);
+        }
+        // RF/sync anchor clear only — last_seen_ota_epoch survives for BS restart
+        // detection after a period of sync loss.
+        _ue_air_timeline.clear();
+        _air_identity_rx_snapshot.clear();
+        if (_uplink_tx) {
+            // Invalidate queued and producer-held UL identities immediately;
+            // no subsequent RX frame is guaranteed to publish an invalid stamp
+            // while the receiver is in SYNC_SEARCH.
+            _uplink_tx->store_air_frame_stamp(AirFrameIdentity{});
+        }
+        // Stale ERTM5 reports and TO/PPS phase belong to the previous timeline.
+        // Do not SPSC-pop from this thread — request consumer-side wipe.
+        _request_ertm_report_clear(reason);
+        AirFrameSibEvent drop;
+        while (_sib_event_queue.try_pop(drop)) {
+        }
+        _pending_sfo_reset_generation.store(0, std::memory_order_release);
+        _ue_air_frame_start_time_ns.store(-1, std::memory_order_relaxed);
+        _ue_air_frame_mid_time_ns.store(-1, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Bit-thread: rebuild ARQ windows after BS epoch change.
+     * @return true if still generation-live after the reset (caller may commit last_seen).
+     */
+    bool _reset_arq_on_timeline_change(uint64_t result_generation) {
+        if (result_generation !=
+            _sync_generation.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (_arq_enabled) {
+            _dl_arq_rx.configure(cfg_.network_output);
+            _dl_arq_rx.set_direction(0);
+        }
+        if (_uplink_tx && _uplink_tx->arq_enabled()) {
+            _uplink_tx->arq_tx_window().reset(cfg_.uplink_arq, /*direction=*/1);
+        }
+        return result_generation ==
+               _sync_generation.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Demod/process-thread owner: rebuild SFO/sync tracking after BS epoch change.
+     */
+    void _apply_bs_air_timeline_reset_on_process_thread() {
+        // Only apply if pending generation still matches live sync generation.
+        uint64_t pending_gen =
+            _pending_sfo_reset_generation.load(std::memory_order_acquire);
+        if (pending_gen == 0) {
+            return;
+        }
+        const uint64_t live =
+            _sync_generation.load(std::memory_order_acquire);
+        if (pending_gen != live) {
+            // Stale request from a previous generation — drop it.
+            _pending_sfo_reset_generation.compare_exchange_strong(
+                pending_gen, 0, std::memory_order_acq_rel);
+            return;
+        }
+        if (!_pending_sfo_reset_generation.compare_exchange_strong(
+                pending_gen, 0, std::memory_order_acq_rel)) {
+            return; // another consumer took it
+        }
+        LOG_G_WARN_M(AirFrame) << "[AirFrame] applying BS timeline SFO/sync reset"
+                     << " on process thread gen=" << live;
+        sfo_estimator.reset();
+        _sync_in_progress = false;
+        _sync_in_progress_hold_frames = 0;
+        _sync_in_progress_expect_id = 0;
+        _delay_adjustment_count = 0;
+        _last_delay_index_err = 0;
+        _llr_snr_linear_filtered = 1.0;
+        _llr_snr_filter_initialized = false;
+        _next_bistatic_frame_start_symbol.store(0, std::memory_order_relaxed);
+        _air_timeline_reset_count.fetch_add(1, std::memory_order_relaxed);
+    }
+
     void _process_decoded_packets(const CpuLdpcResult& result,
                                   bool do_latency_profile,
                                   std::vector<uint8_t>& expected_measurement_payload) {
@@ -5748,9 +6946,93 @@ private:
         const int64_t process_dequeue_time_ns = result.process_dequeue_time_ns;
         const int64_t demod_done_time_ns = result.demod_done_time_ns;
         bool latency_recorded = false;
+
+        // Publish Identity SIB; commit last_seen only after generation-safe
+        // protocol actions so a resync cannot mark an epoch "seen" without reset.
         for (const CpuLdpcPacketRef& pkt : result.packets) {
-            const uint8_t* payload = result.payload_bytes.data() + pkt.payload_offset;
+            if (LdpcPacketFraming::is_air_frame_identity(pkt.mini_header)) {
+                if (result.generation !=
+                    _sync_generation.load(std::memory_order_acquire)) {
+                    break;
+                }
+                const uint32_t ota_epoch = pkt.mini_header.timeline_epoch;
+                const uint32_t ota_seq = pkt.mini_header.air_frame_seq;
+                // Survives sync-clear: detect BS restart after SYNC_SEARCH.
+                const bool had_seen =
+                    _has_seen_ota_epoch.load(std::memory_order_acquire);
+                const uint32_t prev_ota =
+                    _last_seen_ota_epoch.load(std::memory_order_relaxed);
+                const bool epoch_changed = had_seen && (prev_ota != ota_epoch);
+
+                const bool published = _publish_identity_sib_event(
+                    result.generation,
+                    ota_epoch,
+                    ota_seq,
+                    result.identity.ue_frame_start_time_ns,
+                    result.identity.ue_frame_mid_time_ns,
+                    epoch_changed);
+                if (!published) {
+                    break; // stale or queue full — do not advance last_seen
+                }
+                const uint64_t pub_n =
+                    _air_sib_publish_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                // Decode-path heartbeat (default Info): first 16 + every 512.
+                if (pub_n <= 16 || (pub_n % 512) == 0 || epoch_changed) {
+                    LOG_G_INFO_M(AirFrame)
+                        << "[AirFrame] Identity SIB decoded (bit)"
+                        << ": n=" << pub_n
+                        << ", ota_epoch=0x" << std::hex << ota_epoch
+                        << ", prev_seen=0x" << prev_ota << std::dec
+                        << ", ota_seq=" << ota_seq
+                        << ", epoch_changed=" << epoch_changed
+                        << ", gen=" << result.generation
+                        << ", rx_boundary_ns=" << result.identity.ue_frame_start_time_ns
+                        << ", rx_mid_ns=" << result.identity.ue_frame_mid_time_ns;
+                }
+
+                if (epoch_changed) {
+                    // Invalidate eRTM first (atomic TO + clear request) so sensing
+                    // cannot keep using the previous epoch while ARQ/SFO catch up.
+                    _request_ertm_report_clear("ota_epoch_change");
+                    // Bit thread only resets ARQ. SFO is requested by RX after
+                    // the next successful anchor install (sticky flag below).
+                    if (!_reset_arq_on_timeline_change(result.generation)) {
+                        LOG_G_WARN_M(AirFrame)
+                            << "[AirFrame] epoch-change ARQ reset aborted (generation)"
+                            << ": prev=0x" << std::hex << prev_ota
+                            << ", new=0x" << ota_epoch << std::dec
+                            << " (eRTM already cleared)";
+                        break;
+                    }
+                    // Sticky: even if this SIB event is lost/stale before RX
+                    // drains it, the next successful install still requests SFO.
+                    _ota_epoch_sfo_needed.store(true, std::memory_order_release);
+                    LOG_G_WARN_M(AirFrame)
+                        << "[AirFrame] OTA epoch change ARQ reset (bit thread)"
+                        << ": prev=0x" << std::hex << prev_ota
+                        << ", new=0x" << ota_epoch << std::dec
+                        << ", seq=" << ota_seq
+                        << ", sfo_sticky=1"
+                        << ", ertm_clear_requested=1";
+                }
+
+                // Commit last_seen only after publish (+ optional reset) succeeded
+                // under a live generation.
+                if (result.generation ==
+                    _sync_generation.load(std::memory_order_acquire)) {
+                    _last_seen_ota_epoch.store(ota_epoch, std::memory_order_release);
+                    _has_seen_ota_epoch.store(true, std::memory_order_release);
+                }
+                break;
+            }
+        }
+
+        for (const CpuLdpcPacketRef& pkt : result.packets) {
             const LdpcMiniHeader& mini_header = pkt.mini_header;
+            if (LdpcPacketFraming::is_air_frame_identity(mini_header)) {
+                continue; // already consumed; never forward to app/ARQ
+            }
+            const uint8_t* payload = result.payload_bytes.data() + pkt.payload_offset;
             std::vector<uint8_t> udp_data(payload, payload + pkt.payload_len);
 
             {
@@ -6048,6 +7330,7 @@ private:
             result->rx_enqueue_time_ns = task.rx_enqueue_time_ns;
             result->process_dequeue_time_ns = task.process_dequeue_time_ns;
             result->demod_done_time_ns = task.demod_done_time_ns;
+            result->identity = task.identity;
             result->packets.clear();
             result->payload_bytes.clear();
             if (task.generation != _sync_generation.load(std::memory_order_acquire)) {
@@ -6223,6 +7506,7 @@ private:
                 task.rx_enqueue_time_ns = frame_llr.rx_enqueue_time_ns;
                 task.process_dequeue_time_ns = frame_llr.process_dequeue_time_ns;
                 task.demod_done_time_ns = frame_llr.demod_done_time_ns;
+                task.identity = frame_llr.identity;
                 dispatch_ldpc_task(std::move(task));
             } else {
                 LlrFrame frame_llr;
@@ -6250,6 +7534,7 @@ private:
                 task.rx_enqueue_time_ns = frame_llr.rx_enqueue_time_ns;
                 task.process_dequeue_time_ns = frame_llr.process_dequeue_time_ns;
                 task.demod_done_time_ns = frame_llr.demod_done_time_ns;
+                task.identity = frame_llr.identity;
                 dispatch_ldpc_task(std::move(task));
             }
         }
@@ -6310,15 +7595,16 @@ int UHD_SAFE_MAIN(int argc, char*[]) {
     finalize_ue_network_defaults(cfg);
     log_ue_sync_mode(cfg);
     log_ue_agc_mode(cfg);
-    radio::set_thread_priority(1, true);
-    // Use last available core for main thread
-    bind_current_thread_to_main_core(cfg);
-    
+
     // Load FFTW wisdom
     FFTWManager::import_wisdom();
 
     UEEngine receiver(cfg);
     receiver.start();
+
+    // Keep construction on the process-wide affinity and SCHED_OTHER policy so
+    // UHD/ZMQ helpers do not inherit the main thread's dedicated CPU.
+    bind_current_thread_to_main_core(cfg);
     
     while (!stop_signal.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

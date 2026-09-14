@@ -63,6 +63,22 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `clock_time.clock_source` | `string` | `external` | Global clock source: `internal`, `external`, or `gpsdo`. |
 | `clock_time.time_source` | `string` | `internal` | Global time/PPS source; empty follows `clock_source`. |
 
+Whenever the resolved BS `clock_source` is non-empty, CPU, CUDA, and HIP startup
+waits for one observed PPS transition, then arms the TX USRP and every distinct
+sensing/uplink RX USRP with `set_time_next_pps(0)`. This includes
+`time_source: internal` on a single physical USRP; `time_source` selects the PPS
+input but does not disable startup alignment. When the resolved target set
+contains multiple distinct USRPs, every target must use `time_source: external`
+or `gpsdo` so they share a common PPS epoch; otherwise startup rejects the
+configuration before arming any device. Streaming starts only after
+every device time counter is observed to reset at the target edge, reports
+`time_last_pps=0`, and has a `time_now` value consistent with the other devices.
+A missing PPS, unsupported backend, or failed verification aborts startup
+instead of falling back to an arbitrary `set_time_now(0)` epoch. For `gpsdo`,
+this intentionally replaces any UTC-like device-time epoch with zero. The step
+removes the software-time-origin offset; it does not remove the X310 PPS capture
+quantization (5 ns at a 200 MHz master clock).
+
 ### `ofdm_frame`
 
 | Path | Type/Unit | Typical Value | Description |
@@ -84,6 +100,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
+| `cuda.cuda_precision_profile` | `string` | `fp32` | `fp32` preserves the existing path. `mixed_fp16` uses FP16 for bulk OFDM FFT/IFFT storage and arithmetic while retaining FP32 for sensing, channel estimation, tracking, equalization, and sensitive reductions. Unsupported FP16 FFT shapes fall back to FP32. |
 | `cuda.cuda_mod_pipeline_slots` | `int` | `3` | CUDA modulation pipeline slots; values below `1` are clamped. |
 
 ### `ldpc`
@@ -104,17 +121,12 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `downlink.tx_clock_source` | `string` | `""` | TX clock source override. |
 | `downlink.tx_time_source` | `string` | `""` | TX time source override. |
 | `downlink.wire_format_tx` | `string` | `sc16` | TX wire format, typically `sc16` or `sc8`. |
+| `downlink.tx_circular_buffer_size` | `int` | `32` | Capacity of the modulated-frame queue feeding TX. |
+| `downlink.data_packet_buffer_size` | `int` | `256` | Capacity of the encoded-packet buffer. |
 | `downlink.arq_enabled` | `bool` | `false` | Enable downlink ARQ on the BS transmitter. |
 | `downlink.arq_window_packets` | `int` | `256` | Downlink ARQ outstanding packet window; valid range `1`–`32767`. |
 | `downlink.arq_retransmit_timeout_ms` | `int` / ms | `100` | Downlink ARQ retransmission timeout. |
 | `downlink.arq_max_retries` | `int` | `5` | Max downlink retransmission retries; `0` means unlimited within the window. |
-
-### `downlink_pipeline`
-
-| Path | Type/Unit | Typical Value | Description |
-| :--- | :--- | :--- | :--- |
-| `downlink_pipeline.tx_circular_buffer_size` | `int` | `8` | Capacity of the modulated-frame queue feeding TX. |
-| `downlink_pipeline.data_packet_buffer_size` | `int` | `256` | Capacity of the encoded-packet buffer. |
 
 ### `uplink`
 
@@ -129,7 +141,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `uplink.bs_dl_ul_timing_diff` | `int` / samples | `50` | BS-side uplink RX window offset relative to the downlink TX frame anchor. |
 | `uplink.debug_self_channel` | `bool` | `false` | Estimate local TX leakage/self channel from uplink RX windows for `DUTI` debugging. |
 | `uplink.ertm_to_enable` | `bool` | `false` | Enable eRTM timing-offset payloads and UE-side TO logs. |
-| `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames. |
+| `uplink.ertm_report_interval_frames` | `int` / frames | `32` | BS eRTM payload/report cadence in downlink TX frames; each report also refreshes the BS PPS anchor. |
 | `uplink.rx_gain` | `float` / dB | `0` | BS uplink RX gain. |
 | `uplink.rx_channel` | `int` | `0` | BS uplink RX channel index. |
 | `uplink.rx_wire_format` | `string` | `sc16` | BS uplink RX wire format. |

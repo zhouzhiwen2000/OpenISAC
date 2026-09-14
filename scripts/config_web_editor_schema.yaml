@@ -166,7 +166,7 @@ common:
   fields:
   - type: logging_mapping
     key: logging
-    comment: Hierarchical text-log filter. Set default_level globally, then override modules (inherit from parent). Error always prints when force_error is true.
+    comment: Hierarchical text-log filter. Set default_level globally, then override modules (inherit from parent). Error always prints when force_error is true. Module list is filtered per BS/UE tab — open air_frame to info for timeline/SIB heartbeats.
     optional: true
     default:
       default_level: warn
@@ -195,187 +195,238 @@ common:
       comment: Always emit Error (use Error only for unrecoverable failures)
       default: true
       optional: true
+    # sides: which config tab shows this module. Omit or [bs, ue] = both.
     module_fields:
+    - path: air_frame
+      title: Air-frame timeline
+      comment: Absolute air-frame seq / Identity SIB / UL closed-loop (set info to debug)
+      depth: 0
+      sides: [bs, ue]
     - path: config
       title: Config / YAML
       comment: YAML parse and clamp (debug)
       depth: 0
+      sides: [bs, ue]
     - path: radio
       title: Radio
       comment: Radio backend (debug)
       depth: 0
+      sides: [bs, ue]
     - path: radio.uhd
       title: UHD / USRP
       comment: Real USRP path (debug)
       depth: 1
+      sides: [bs, ue]
     - path: radio.sim
       title: Sim backend
       comment: Simulation HAL (debug)
       depth: 1
+      sides: [bs, ue]
     - path: sync
       title: Sync / CFO / align
       comment: Synchronization diagnostics (debug)
       depth: 0
+      sides: [ue]
     - path: demod
       title: Demodulator
       comment: CPU demod diagnostics (debug)
       depth: 0
+      sides: [ue]
     - path: demod.ldpc
       title: LDPC decode
       comment: CPU LDPC decode (debug)
       depth: 1
+      sides: [ue]
     - path: demod.ldpc.detail
       title: LDPC decode detail
       comment: Verbose LDPC decode internals (debug)
       depth: 2
+      sides: [ue]
     - path: demod.llr
       title: LLR / demap
       comment: LLR and demapping (debug)
       depth: 1
+      sides: [ue]
     - path: demod.snr
       title: SNR diagnostics
       comment: SNR / quality reports (debug)
       depth: 1
+      sides: [ue]
     - path: demod_profiling
       title: Demod load / latency
       comment: PERFORMANCE — frame load & latency timers (off until set)
       depth: 1
+      sides: [ue]
     - path: demod_eq_profiling
       title: Equalizer breakdown
       comment: PERFORMANCE — EQ stage breakdown timers (off until set)
       depth: 1
+      sides: [ue]
     - path: mod
       title: Modulator
       comment: CPU modulation diagnostics (debug)
       depth: 0
+      sides: [bs]
     - path: mod.ldpc
       title: LDPC encode
       comment: CPU LDPC encode (debug)
       depth: 1
+      sides: [bs]
     - path: mod.ldpc.detail
       title: LDPC encode detail
       comment: Verbose LDPC encode internals (debug)
       depth: 2
+      sides: [bs]
     - path: mod_profiling
       title: Mod load / latency
       comment: PERFORMANCE — modulation load & latency (off until set)
       depth: 1
+      sides: [bs]
     - path: mod_ldpc_profiling
       title: LDPC encode timing
       comment: PERFORMANCE — LDPC encode timers (off until set)
       depth: 2
+      sides: [bs]
     - path: ul_rx
       title: Uplink RX
       comment: BS uplink receiver (debug)
       depth: 0
+      sides: [bs]
     - path: ul_tx
       title: Uplink TX
       comment: UE uplink transmitter (debug)
       depth: 0
+      sides: [ue]
     - path: arq
       title: ARQ
       comment: ARQ diagnostics (debug)
       depth: 0
+      sides: [bs, ue]
     - path: arq.dl
       title: Downlink ARQ
       comment: Downlink ARQ (debug)
       depth: 1
+      sides: [bs, ue]
     - path: arq.ul
       title: Uplink ARQ
       comment: Uplink ARQ (debug)
       depth: 1
+      sides: [bs, ue]
     - path: ertm
       title: eRTM
       comment: eRTM timing diagnostics (debug)
       depth: 0
+      sides: [bs, ue]
     - path: sensing
       title: Sensing
       comment: Sensing diagnostics (debug)
       depth: 0
+      sides: [bs, ue]
     - path: sensing.aggregate
       title: Sensing aggregate
       comment: Aggregate sensing path (debug)
       depth: 1
+      sides: [bs, ue]
     - path: sensing_profiling
       title: Sensing timers
       comment: PERFORMANCE — sensing processing timers (off until set)
       depth: 1
+      sides: [bs, ue]
     - path: recovery
       title: Recovery / restart
       comment: Stream restart diagnostics (debug)
       depth: 0
+      sides: [bs, ue]
     - path: agc
       title: AGC
       comment: AGC diagnostics (debug)
       depth: 0
+      sides: [bs, ue]
     - path: ocxo
       title: OCXO / clock
       comment: OCXO and clock loops (debug)
       depth: 0
+      sides: [ue]
     - path: channelsim
       title: Channel simulator
       comment: ChannelSimulator hub
       depth: 0
+      sides: [bs, ue]
     - path: udp_egress_profiling
       title: UDP pacer stats
       comment: PERFORMANCE — UDP egress pacer throughput (off until set)
       depth: 0
+      sides: [bs, ue]
     - path: cuda
       title: CUDA
       comment: CUDA backend diagnostics (debug)
       depth: 0
+      sides: [bs, ue]
     - path: cuda.demod
       title: CUDA demod
       comment: CUDA demod diagnostics (debug)
       depth: 1
+      sides: [ue]
     - path: cuda.demod.ldpc
       title: CUDA LDPC decode
       comment: CUDA RX LDPC (debug)
       depth: 2
+      sides: [ue]
     - path: cuda.demod_profiling
       title: CUDA demod load
       comment: PERFORMANCE — CUDA demod timers (off until set)
       depth: 2
+      sides: [ue]
     - path: cuda.demod_eq_profiling
       title: CUDA EQ breakdown
       comment: PERFORMANCE — CUDA EQ breakdown (off until set)
       depth: 2
+      sides: [ue]
     - path: cuda.mod
       title: CUDA mod
       comment: CUDA modulation (debug)
       depth: 1
+      sides: [bs]
     - path: cuda.mod.ldpc
       title: CUDA LDPC encode
       comment: CUDA TX LDPC (debug)
       depth: 2
+      sides: [bs]
     - path: cuda.mod_profiling
       title: CUDA mod load
       comment: PERFORMANCE — CUDA mod timers (off until set)
       depth: 2
+      sides: [bs]
     - path: cuda.mod_ldpc_profiling
       title: CUDA LDPC encode timing
       comment: PERFORMANCE — CUDA LDPC encode timers (off until set)
       depth: 3
+      sides: [bs]
     - path: cuda.sensing
       title: CUDA sensing
       comment: CUDA sensing diagnostics (debug)
       depth: 1
+      sides: [bs, ue]
     - path: cuda.sensing_profiling
       title: CUDA sensing timers
       comment: PERFORMANCE — CUDA sensing timers (off until set)
       depth: 2
+      sides: [bs, ue]
     - path: cuda.ldpc
       title: CUDA LDPC shared
       comment: Shared CUDA LDPC misc (debug)
       depth: 1
+      sides: [bs, ue]
     - path: cuda.cfo
       title: CUDA CFO
       comment: CUDA CFO diagnostics (debug)
       depth: 1
+      sides: [ue]
     - path: cuda.recovery
       title: CUDA recovery
       comment: CUDA recovery (debug)
       depth: 1
+      sides: [bs, ue]
 
 - title: Measurement mode
   yaml_key: measurement
@@ -606,6 +657,15 @@ bs:
   order: 25
   fields:
   - type: scalar
+    key: cuda_precision_profile
+    kind: string
+    comment: CUDA precision profile; fp32 preserves the current path, mixed_fp16 uses FP16 bulk FFT and LDPC messages with FP32 estimation and tracking
+    default: fp32
+    optional: true
+    options:
+    - fp32
+    - mixed_fp16
+  - type: scalar
     key: cuda_mod_pipeline_slots
     kind: int
     comment: Number of CUDA modulation pipeline slots
@@ -830,7 +890,7 @@ bs:
   - type: scalar
     key: clock_source
     kind: string
-    comment: Global clock source; internal/external/gpsdo
+    comment: Global clock source; any non-empty value enables startup PPS alignment
     default: external
     optional: true
     options:
@@ -840,7 +900,7 @@ bs:
   - type: scalar
     key: time_source
     kind: string
-    comment: Global time source; empty follows clock_source
+    comment: Global time/PPS input; empty follows clock_source and does not control startup PPS alignment
     default: internal
     optional: true
     options:
@@ -926,6 +986,9 @@ bs:
     comment: Enable downlink ARQ on the BS transmitter
     default: false
     optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
   - type: scalar
     key: arq_window_packets
     data_key: downlink.arq_window_packets
@@ -934,8 +997,11 @@ bs:
     default: 256
     optional: true
     enabled_if:
-      key: downlink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: downlink.arq_enabled
+        value: true
   - type: scalar
     key: arq_retransmit_timeout_ms
     data_key: downlink.arq_retransmit_timeout_ms
@@ -944,8 +1010,11 @@ bs:
     default: 100
     optional: true
     enabled_if:
-      key: downlink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: downlink.arq_enabled
+        value: true
   - type: scalar
     key: arq_max_retries
     data_key: downlink.arq_max_retries
@@ -954,8 +1023,11 @@ bs:
     default: 5
     optional: true
     enabled_if:
-      key: downlink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: downlink.arq_enabled
+        value: true
 - title: Uplink
   yaml_key: uplink
   order: 40
@@ -1103,6 +1175,9 @@ bs:
     comment: Enable uplink hardware RX AGC driven by delay-spectrum peak
     default: false
     optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
   - type: scalar
     key: rx_agc_low_threshold_db
     kind: float
@@ -1187,6 +1262,9 @@ bs:
     comment: Enable uplink ARQ on the BS receiver
     default: false
     optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
   - type: scalar
     key: arq_ordered_delivery
     data_key: uplink.arq_ordered_delivery
@@ -1195,8 +1273,11 @@ bs:
     default: false
     optional: true
     enabled_if:
-      key: uplink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.arq_enabled
+        value: true
   - type: scalar
     key: arq_window_packets
     data_key: uplink.arq_window_packets
@@ -1205,8 +1286,11 @@ bs:
     default: 256
     optional: true
     enabled_if:
-      key: uplink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.arq_enabled
+        value: true
   - type: scalar
     key: arq_feedback_interval_ms
     data_key: uplink.arq_feedback_interval_ms
@@ -1215,8 +1299,11 @@ bs:
     default: 10
     optional: true
     enabled_if:
-      key: uplink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.arq_enabled
+        value: true
 - title: Network
   yaml_key: network_output
   order: 90
@@ -1510,6 +1597,15 @@ ue:
   order: 25
   fields:
   - type: scalar
+    key: cuda_precision_profile
+    kind: string
+    comment: CUDA precision profile; fp32 preserves the current path, mixed_fp16 uses FP16 bulk FFT and LDPC messages with FP32 estimation and tracking
+    default: fp32
+    optional: true
+    options:
+    - fp32
+    - mixed_fp16
+  - type: scalar
     key: cuda_demod_pipeline_slots
     kind: int
     comment: Number of CUDA demodulation pipeline slots
@@ -1706,8 +1802,18 @@ ue:
   - type: scalar
     key: clock_source
     kind: string
-    comment: Clock source; internal/external/gpsdo
+    comment: Clock source; any non-empty value enables startup PPS alignment
     default: external
+    optional: true
+    options:
+    - internal
+    - external
+    - gpsdo
+  - type: scalar
+    key: time_source
+    kind: string
+    comment: Time/PPS input; does not control startup PPS alignment; empty resolves to internal, and pps_phase requires external
+    default: internal
     optional: true
     options:
     - internal
@@ -1776,6 +1882,9 @@ ue:
     comment: Enable downlink ARQ on the UE receiver
     default: false
     optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
   - type: scalar
     key: arq_ordered_delivery
     data_key: downlink.arq_ordered_delivery
@@ -1784,8 +1893,11 @@ ue:
     default: false
     optional: true
     enabled_if:
-      key: downlink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: downlink.arq_enabled
+        value: true
   - type: scalar
     key: arq_window_packets
     data_key: downlink.arq_window_packets
@@ -1794,8 +1906,11 @@ ue:
     default: 256
     optional: true
     enabled_if:
-      key: downlink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: downlink.arq_enabled
+        value: true
   - type: scalar
     key: arq_feedback_interval_ms
     data_key: downlink.arq_feedback_interval_ms
@@ -1804,8 +1919,11 @@ ue:
     default: 10
     optional: true
     enabled_if:
-      key: downlink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: downlink.arq_enabled
+        value: true
 - title: Uplink
   yaml_key: uplink
   order: 40
@@ -1916,6 +2034,9 @@ ue:
     comment: Enable uplink ARQ on the UE transmitter
     default: false
     optional: true
+    enabled_if:
+      key: uplink.enabled
+      value: true
   - type: scalar
     key: arq_window_packets
     data_key: uplink.arq_window_packets
@@ -1924,8 +2045,11 @@ ue:
     default: 256
     optional: true
     enabled_if:
-      key: uplink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.arq_enabled
+        value: true
   - type: scalar
     key: arq_retransmit_timeout_ms
     data_key: uplink.arq_retransmit_timeout_ms
@@ -1934,8 +2058,11 @@ ue:
     default: 100
     optional: true
     enabled_if:
-      key: uplink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.arq_enabled
+        value: true
   - type: scalar
     key: arq_max_retries
     data_key: uplink.arq_max_retries
@@ -1944,8 +2071,11 @@ ue:
     default: 5
     optional: true
     enabled_if:
-      key: uplink.arq_enabled
-      value: true
+      all:
+      - key: uplink.enabled
+        value: true
+      - key: uplink.arq_enabled
+        value: true
   - type: scalar
     key: ue_timing_advance
     kind: int
@@ -2089,138 +2219,501 @@ ue:
     comment: Serial device used by hardware sync controller
     default: /dev/ttyUSB0
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_kp_fast
-    kind: float
-    comment: Fast-stage OCXO PI proportional gain (Kp)
-    default: 30.0
+    key: ocxo_mode
+    kind: string
+    comment: OCXO discipline mode (auto|freq|phase|pps_phase)
+    default: auto
     optional: true
+    options:
+    - auto
+    - freq
+    - phase
+    - pps_phase
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_ki_fast
+    key: ocxo_dac_ppm_per_lsb
     kind: float
-    comment: Fast-stage OCXO PI integral gain (Ki)
-    default: 1.0
+    comment: Calibrated DAC ppm per LSB for the OCXO plant
+    default: 9.708797e-7
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_kp_slow
-    kind: float
-    comment: Slow-stage OCXO PI proportional gain (Kp)
-    default: 30.0
+    key: ocxo_dac_zero_word
+    kind: int
+    comment: DAC word corresponding to 0 ppm
+    default: 493367
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_ki_slow
-    kind: float
-    comment: Slow-stage OCXO PI integral gain (Ki)
-    default: 0.05
+    key: ocxo_dac_state_file
+    kind: string
+    comment: State file for the last acknowledged DAC word; empty disables restart persistence
+    default: .openisac_ocxo_dac_state.yaml
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_switch_abs_error_ppm
+    key: ocxo_max_abs_ppm
     kind: float
-    comment: Switch to slow stage when absolute error_ppm is below this threshold
-    default: 0.0002
+    comment: Absolute OCXO command clamp (ppm)
+    default: 0.45
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_switch_hold_s
+    key: ocxo_actuator_max_slew_ppm_per_s
     kind: float
-    comment: Required continuous hold time below threshold before switching (s)
-    default: 60.0
-    optional: true
-  - type: scalar
-    key: ocxo_pi_max_step_fast_ppm
-    kind: float
-    comment: Fast-stage max OCXO adjustment per update (ppm)
+    comment: Hard OCXO actuator slew limit (ppm/s)
     default: 0.01
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: ocxo_pi_max_step_slow_ppm
-    kind: float
-    comment: Slow-stage max OCXO adjustment per update (ppm)
-    default: 0.01
-    optional: true
-  - type: scalar
-    key: akf_enable
+    key: ocxo_coarse_enable
     kind: bool
-    comment: Enable adaptive Kalman filter for hardware error_ppm
+    comment: Arm startup one-target frequency correction after reset
     default: true
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: akf_bootstrap_frames
-    kind: int
-    comment: Cold-start frame count before AKF enters normal update
-    default: 64
-    optional: true
-  - type: scalar
-    key: akf_innovation_window
-    kind: int
-    comment: Innovation history window used in ACF/LS adaptation
-    default: 64
-    optional: true
-  - type: scalar
-    key: akf_max_lag
-    kind: int
-    comment: Maximum innovation autocorrelation lag
-    default: 4
-    optional: true
-  - type: scalar
-    key: akf_adapt_interval
-    kind: int
-    comment: Frames between adaptive Q/R least-squares updates
-    default: 64
-    optional: true
-  - type: scalar
-    key: akf_gate_sigma
+    key: ocxo_coarse_gain
     kind: float
-    comment: Innovation gating threshold in sigma units
-    default: 3.0
+    comment: Coarse target gain on selected frequency error
+    default: 1.0
     optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_coarse_enable
+        value: true
   - type: scalar
-    key: akf_tikhonov_lambda
+    key: ocxo_coarse_max_abs_ppm
     kind: float
-    comment: Tikhonov regularization coefficient for LS
-    default: 0.001
-    optional: true
-  - type: scalar
-    key: akf_update_smooth
-    kind: float
-    comment: Exponential smoothing for Q/R update
+    comment: Maximum coarse target offset (ppm)
     default: 0.2
     optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_coarse_enable
+        value: true
   - type: scalar
-    key: akf_q_wf_min
+    key: ocxo_coarse_obs_window_s
     kind: float
-    comment: Lower bound of white-frequency-noise coefficient
-    default: 1.0e-10
+    comment: Observation window; Mode A averages CFO, Mode B regresses TO_clock/frame_seq (s)
+    default: 1.0
     optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_coarse_enable
+        value: true
   - type: scalar
-    key: akf_q_wf_max
+    key: ocxo_coarse_control_period_s
     kind: float
-    comment: Upper bound of white-frequency-noise coefficient
-    default: 1.0e2
+    comment: Coarse target update period (s)
+    default: 0.5
     optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_coarse_enable
+        value: true
   - type: scalar
-    key: akf_q_rw_min
+    key: ocxo_coarse_max_slew_ppm_per_s
     kind: float
-    comment: Lower bound of random-walk-frequency-noise coefficient
-    default: 1.0e-12
+    comment: Coarse target tracking slew (ppm/s)
+    default: 0.01
     optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_coarse_enable
+        value: true
   - type: scalar
-    key: akf_q_rw_max
+    key: ocxo_fll_fast_obs_window_s
     kind: float
-    comment: Upper bound of random-walk-frequency-noise coefficient
-    default: 1.0e1
+    comment: Fast window; Mode A averages CFO, Mode B regresses TO_clock/frame_seq (s)
+    default: 1.0
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: akf_r_min
+    key: ocxo_fll_fast_control_period_s
     kind: float
-    comment: Lower bound of observation noise variance R
-    default: 1.0e-08
+    comment: Fast FLL update period (s)
+    default: 0.5
     optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
   - type: scalar
-    key: akf_r_max
-    kind: float
-    comment: Upper bound of observation noise variance R
-    default: 1.0e3
+    key: ocxo_fll_fast_control_mode
+    kind: string
+    comment: Fast FLL control law; half_step requests half the current error per update
+    default: pi
     optional: true
+    options:
+    - pi
+    - half_step
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_fast_kp
+    kind: float
+    comment: Fast FLL proportional gain
+    default: 0.5
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_fll_fast_control_mode
+        value: pi
+  - type: scalar
+    key: ocxo_fll_fast_ki
+    kind: float
+    comment: Fast FLL integral gain
+    default: 0.03
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_fll_fast_control_mode
+        value: pi
+  - type: scalar
+    key: ocxo_fll_fast_max_slew_ppm_per_s
+    kind: float
+    comment: Fast FLL slew limit (ppm/s)
+    default: 0.005
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_obs_window_s
+    kind: float
+    comment: Slow window; Mode A averages CFO, Mode B regresses TO_clock/frame_seq (s)
+    default: 10.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_control_period_s
+    kind: float
+    comment: Slow FLL update period (s)
+    default: 2.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_kp
+    kind: float
+    comment: Slow FLL proportional gain
+    default: 0.1
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_ki
+    kind: float
+    comment: Slow FLL integral gain
+    default: 0.007
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_deadzone_ppm
+    kind: float
+    comment: Slow FLL residual deadzone (ppm)
+    default: 5.0e-5
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_max_slew_ppm_per_s
+    kind: float
+    comment: Slow FLL slew limit (ppm/s)
+    default: 0.005
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_slow_enter_abs_ppm
+    kind: float
+    comment: Fast-to-slow residual threshold (ppm)
+    default: 0.0005
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_fast_enter_abs_ppm
+    kind: float
+    comment: Slow-to-fast residual threshold (ppm)
+    default: 0.01
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_fll_switch_hold_s
+    kind: float
+    comment: Fast-to-slow stable dwell (s)
+    default: 30.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_control_period_s
+    kind: float
+    comment: Phase control period (s)
+    default: 5.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_jump_gate_samples
+    kind: float
+    comment: Unknown TO_clock jump reject gate (samples)
+    default: 0.5
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_max_report_age_frames
+    kind: int
+    comment: Maximum eRTM TO age accepted for phase lock
+    default: 256
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_setpoint_mode
+    kind: string
+    comment: Legacy auto/phase TO_clock setpoint mode
+    default: freeze_on_lock
+    optional: true
+    options:
+    - freeze_on_lock
+    - zero
+    - fixed
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_setpoint_fixed_samples
+    kind: float
+    comment: Fixed TO_clock target for legacy auto/phase mode (samples)
+    default: 0.0
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_phase_setpoint_mode
+        value: fixed
+  - type: scalar
+    key: ocxo_pps_initial_ap_enable
+    kind: bool
+    comment: Apply one PPSOUT phase correction on every FllSlow-to-Phase entry
+    default: true
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_mode
+        value: pps_phase
+  - type: scalar
+    key: ocxo_pps_initial_ap_max_abs_ns
+    kind: float
+    comment: Maximum absolute one-shot PPSOUT AP adjustment (ns)
+    default: 500000000.0
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_pps_initial_ap_enable
+        value: true
+  - type: scalar
+    key: ocxo_pps_initial_ap_settle_s
+    kind: float
+    comment: AP settling delay before accepting a fresh PPS phase report (s)
+    default: 2.0
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_pps_initial_ap_enable
+        value: true
+  - type: scalar
+    key: ocxo_pps_initial_ap_command_timeout_s
+    kind: float
+    comment: Maximum wait for AP command completion before releasing Phase SF (s)
+    default: 3.0
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_pps_initial_ap_enable
+        value: true
+  - type: scalar
+    key: ocxo_pps_initial_ap_max_retries
+    kind: int
+    comment: Bounded retries (0..3) after AP success without a fresh post-AP PPS publication
+    default: 1
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_pps_initial_ap_enable
+        value: true
+  - type: scalar
+    key: ocxo_pps_initial_ap_deadzone_ns
+    kind: float
+    comment: Skip AP and settling when PPS phase error is within this range (ns)
+    default: 10.0
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_pps_initial_ap_enable
+        value: true
+  - type: scalar
+    key: ocxo_pps_initial_ap_polarity
+    kind: int
+    comment: Bench-confirmed AP command sign for positive UE-minus-BS PPS error (-1 or +1)
+    default: 1
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: ocxo_pps_initial_ap_enable
+        value: true
+  - type: scalar
+    key: ocxo_phase_kp
+    kind: float
+    comment: Active phase-error velocity-form PI proportional gain (ppm per sample)
+    default: 2.0e-4
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_ki
+    kind: float
+    comment: Active phase-error velocity-form PI integral gain (ppm per sample-second)
+    default: 1.0e-6
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_max_slew_ppm_per_s
+    kind: float
+    comment: Phase loop slew limit (ppm/s)
+    default: 5.0e-5
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_enter_sfo_abs_ppm
+    kind: float
+    comment: Slow-window TO_clock regression SFO threshold to enter Phase (ppm)
+    default: 2.0e-4
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_enter_hold_s
+    kind: float
+    comment: Stable slow-window TO_clock regression dwell before Phase (s)
+    default: 30.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_exit_sfo_abs_ppm
+    kind: float
+    comment: Slow-window TO_clock regression SFO threshold to exit Phase (ppm)
+    default: 0.01
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_phase_exit_hold_s
+    kind: float
+    comment: Confirmed Phase exit dwell (s; runtime minimum 10)
+    default: 10.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: cfo_ewma_enable
+    kind: bool
+    comment: Enable Mode A EWMA pre-filter on residual CFO ppm
+    default: true
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: cfo_ewma_alpha
+    kind: float
+    comment: EWMA weight on new residual_ppm samples (0..1; higher = faster)
+    default: 0.02
+    optional: true
+    enabled_if:
+      all:
+      - key: hardware_sync
+        value: true
+      - key: cfo_ewma_enable
+        value: true
   - type: scalar
     key: desired_peak_pos
     kind: int
@@ -2365,6 +2858,24 @@ ue:
     default: 10001
     optional: true
   - type: scalar
+    key: ocxo_debug_ip
+    kind: string
+    comment: OCXO debug ZMQ bind IP
+    default: 0.0.0.0
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
+    key: ocxo_debug_port
+    kind: int
+    comment: OCXO debug ZMQ output port
+    default: 12347
+    optional: true
+    enabled_if:
+      key: hardware_sync
+      value: true
+  - type: scalar
     key: ertm_debug_ip
     kind: string
     comment: eRTM debug ZMQ listen IP
@@ -2482,18 +2993,6 @@ ue:
   - type: scalar
     key: default_out_ip
     kind: string
-    comment: Default destination IP for UDP payload and VOFA+ debug outputs
+    comment: Default destination IP for UDP payload outputs
     default: 127.0.0.1
-    optional: true
-  - type: scalar
-    key: vofa_debug_ip
-    kind: string
-    comment: VOFA+ debug output IP
-    default: ''
-    optional: true
-  - type: scalar
-    key: vofa_debug_port
-    kind: int
-    comment: VOFA+ debug output port
-    default: 12347
     optional: true

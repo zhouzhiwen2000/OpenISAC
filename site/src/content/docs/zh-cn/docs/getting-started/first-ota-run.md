@@ -9,7 +9,7 @@ description: 端到端空口 OpenISAC 测试的最小启动流程。
 - 先选一份最接近你硬件的 YAML 模板。仓库自带 X310/B210 示例，但项目并不限于这两种 USRP。
 - 运行时 YAML 需要放在 `build/` 目录，因为两个二进制程序都会从当前工作目录读取 `BS.yaml` 或 `UE.yaml`。
 - 如果前端跑在另一台机器上，请在 Python 前端中用 `--host <后端IP>` 或 Backend IP 输入框指向后端。`default_out_ip` 只用于目的输出 IP，不用于 UDP/ZMQ 监听地址。
-- 如果你关心实时稳定性，请先执行 `scripts/set_performance.bash`，然后用 `sudo ../scripts/isolate_cpus.py` 做 CPU 隔离（会询问 BS/UE/BS+UE，或传 `--role`），再用 `sudo ../scripts/isolate_cpus.py run ...` 启动程序。
+- 如果你关心实时稳定性，请先执行 `scripts/set_performance.bash`，然后用 `sudo ../scripts/isolate_cpus.py` 做 CPU 隔离（会询问 BS/UE/BS+UE；内核隔离核足够时还可配置网卡 IRQ 隔离和 RX/TX 分流），再用 `sudo ../scripts/isolate_cpus.py run ...` 启动程序。
 
 ## 典型使用示例
 

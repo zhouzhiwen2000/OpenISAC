@@ -11,6 +11,8 @@ chmod +x scripts/set_performance.bash
 ./scripts/set_performance.bash
 ```
 
+This script configures socket buffers, NIC ring sizes and MTU, CPU frequency policy, and real-time throttling. NIC combined queues, RSS/XPS steering, and IRQ affinity are intentionally handled by the second-stage menu in `scripts/isolate_cpus.py`, so the two scripts do not overwrite each other.
+
 > **Note:** `secure_boot` needs to be turned off in your BIOS settings to enable `RT_RUNTIME_SHARE` functionality.
 
 When UHD spawns a new thread, it may try to boost the thread's scheduling priority. If setting the new priority fails, the UHD software prints a warning to the console, as shown below.

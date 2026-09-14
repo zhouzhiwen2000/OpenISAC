@@ -46,11 +46,8 @@ FLAG_SENSING_METADATA_SIDECAR = 1 << 7
 WIRE_DATA_FORMAT_COMPLEX_FLOAT32 = 0
 WIRE_DATA_FORMAT_COMPLEX_FLOAT16 = 1
 
-PARAMS_PACKET_STRUCT_V1 = struct.Struct("!4s4s11I")
-PARAMS_PACKET_STRUCT_V3 = struct.Struct("!4s4s13I")
-PARAMS_PACKET_STRUCT_V4 = struct.Struct("!4s4s14I")
-PARAMS_PACKET_STRUCT_V5 = struct.Struct("!4s4s17I")   # same layout as old "current"
-PARAMS_PACKET_STRUCT    = struct.Struct("!4s4s20I")   # V7: +center_freq_hz_div100, sample_rate_hz_div100, antenna_spacing_um
+PARAMS_VERSION = 9
+PARAMS_PACKET_STRUCT = struct.Struct("!4s4s24I")
 COMPACT_HEADER_STRUCT = struct.Struct("!IIIQ")
 AGGREGATE_HEADER_STRUCT = struct.Struct("!IIIIQ")
 REQUEST_PACKET_STRUCT = struct.Struct("!4s4si")
@@ -87,10 +84,15 @@ class ViewerRuntimeParams:
     backend_os_rank_percent: float = 75.0
     backend_os_suppress_doppler: int = 2
     backend_os_suppress_range: int = 2
-    # V6 additions — 0.0 / None means the backend did not supply the value.
+    # Radio and sampling geometry advertised by the backend.
     center_freq_hz: float = 0.0          # 0.0 = not provided
     sample_rate_hz: float = 0.0          # 0.0 = not provided
     antenna_spacing_m: float = 0.0       # 0.0 = not provided (only sent in sim mode)
+    ofdm_fft_size: int = 0
+    cp_length: int = 0
+    sensing_symbol_stride: int = 0
+    sensing_subcarrier_stride: int = 0
+
 
     def is_compact_mask(self) -> bool:
         return bool(self.flags & FLAG_COMPACT_MASK)
@@ -98,14 +100,8 @@ class ViewerRuntimeParams:
     def is_compact_raw(self) -> bool:
         return self.frame_format == FRAME_FORMAT_COMPACT_RAW
 
-    def is_dense_channel_buffer(self) -> bool:
-        return self.frame_format == FRAME_FORMAT_DENSE_CHANNEL_BUFFER
-
     def is_dense_range_doppler(self) -> bool:
         return self.frame_format == FRAME_FORMAT_DENSE_RANGE_DOPPLER
-
-    def is_sparse_compact(self) -> bool:
-        return self.frame_format == FRAME_FORMAT_COMPACT_SPARSE
 
     def raw_fft_locally_supported(self) -> bool:
         return self.frame_format in (
@@ -243,29 +239,20 @@ def make_tcp_endpoint(ip: str, port: int) -> str:
     return f"tcp://{host}:{int(port)}"
 
 
-def make_data_sub(endpoint: str, rcvhwm: int = 4, conflate: bool = False):
+def make_data_sub(endpoint: str, rcvhwm: int = 4):
     """SUB socket for a sensing data stream with a bounded receive queue.
 
-    ``conflate=True`` used to set ZMQ_CONFLATE. That option is unsafe with
-    multipart publishers (libzmq can abort with fq.cpp ``!_more``), so we only
-    apply a small RCVHWM and let callers keep the latest complete message in
-    user space. The backend XPUB uses XPUB_NODROP, so HWM overflow is reported
-    and warned at the sender instead of being silent.
+    The backend XPUB uses XPUB_NODROP, so HWM overflow is reported and warned
+    at the sender instead of being silent.
     """
     z = _require_zmq()
     ctx = z.Context.instance()
     sock = ctx.socket(z.SUB)
     sock.setsockopt(z.LINGER, 0)
-    # Prefer a tiny HWM over ZMQ_CONFLATE so multi-part frames stay atomic.
-    sock.setsockopt(z.RCVHWM, 2 if conflate else int(rcvhwm))
+    sock.setsockopt(z.RCVHWM, int(rcvhwm))
     sock.connect(endpoint)
     sock.setsockopt(z.SUBSCRIBE, b"")
     return sock
-
-
-def make_debug_sub_conflate(endpoint: str):
-    """SUB socket for a single-part debug plot stream (latest frame only)."""
-    return make_data_sub(endpoint, conflate=True)
 
 
 def make_control_dealer(endpoint: str, identity: bytes | str | None = None):
@@ -313,10 +300,6 @@ def build_control_command(command: bytes, value: int = 0) -> bytes:
     return REQUEST_PACKET_STRUCT.pack(CMD_HEADER, command, int(value))
 
 
-def build_system_response_calibration_command(value: int = 0) -> bytes:
-    return build_control_command(CALIBRATE_SYSTEM_RESPONSE_COMMAND, value)
-
-
 def build_channel_sim_snr_command(snr_db: float | None) -> bytes:
     value = CHANNEL_SIM_SNR_DISABLED if snr_db is None else int(round(float(snr_db) * 100.0))
     return build_control_command(CHANNEL_SIM_SNR_COMMAND, value)
@@ -327,78 +310,33 @@ def build_channel_sim_snr_request() -> bytes:
 
 
 def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
-    if len(data) < PARAMS_PACKET_STRUCT_V1.size:
+    """Decode the exact current protocol; legacy and future layouts are rejected."""
+    if len(data) != PARAMS_PACKET_STRUCT.size:
+        LOGGER.warning("Sensing PARM requires V%d (%d bytes); received %d bytes. Update backend and viewer together.",
+                       PARAMS_VERSION, PARAMS_PACKET_STRUCT.size, len(data))
         return None
-    # Defaults for fields not present in older packet versions.
-    os_cfar_rank_percent_x100 = 7500
-    os_cfar_suppress_doppler = 2
-    os_cfar_suppress_range = 2
-    wire_data_format = WIRE_DATA_FORMAT_COMPLEX_FLOAT32
-    stream_channel_count = 1
-    stream_channel_mask = 1
-    center_freq_raw = 0
-    sample_rate_hz_div100 = 0
-    antenna_spacing_um = 0
-
-    if len(data) >= PARAMS_PACKET_STRUCT.size:
-        # V6/V7: includes center_freq, sample_rate, antenna_spacing.
-        # V6 encoded center_freq * 10 and overflowed above ~429 MHz; V7 uses
-        # center_freq / 100 to cover RF carriers with 100 Hz resolution.
-        (
-            header, command, version, flags, frame_format,
-            wire_rows, wire_cols, active_rows, active_cols,
-            frame_symbol_period, range_fft_size, doppler_fft_size,
-            compact_mask_hash, wire_data_format, stream_channel_count,
-            stream_channel_mask, os_cfar_rank_percent_x100,
-            os_cfar_suppress_doppler, os_cfar_suppress_range,
-            center_freq_raw, sample_rate_hz_div100, antenna_spacing_um,
-        ) = PARAMS_PACKET_STRUCT.unpack_from(data)
-    elif len(data) >= PARAMS_PACKET_STRUCT_V5.size:
-        # V5 (17 uint32 fields, no radio params)
-        (
-            header, command, version, flags, frame_format,
-            wire_rows, wire_cols, active_rows, active_cols,
-            frame_symbol_period, range_fft_size, doppler_fft_size,
-            compact_mask_hash, wire_data_format, stream_channel_count,
-            stream_channel_mask, os_cfar_rank_percent_x100,
-            os_cfar_suppress_doppler, os_cfar_suppress_range,
-        ) = PARAMS_PACKET_STRUCT_V5.unpack_from(data)
-    elif len(data) >= PARAMS_PACKET_STRUCT_V4.size:
-        (
-            header, command, version, flags, frame_format,
-            wire_rows, wire_cols, active_rows, active_cols,
-            frame_symbol_period, range_fft_size, doppler_fft_size,
-            compact_mask_hash, wire_data_format, stream_channel_count,
-            stream_channel_mask,
-        ) = PARAMS_PACKET_STRUCT_V4.unpack_from(data)
-    elif len(data) >= PARAMS_PACKET_STRUCT_V3.size:
-        (
-            header, command, version, flags, frame_format,
-            wire_rows, wire_cols, active_rows, active_cols,
-            frame_symbol_period, range_fft_size, doppler_fft_size,
-            compact_mask_hash, stream_channel_count, stream_channel_mask,
-        ) = PARAMS_PACKET_STRUCT_V3.unpack_from(data)
-    else:
-        (
-            header, command, version, flags, frame_format,
-            wire_rows, wire_cols, active_rows, active_cols,
-            frame_symbol_period, range_fft_size, doppler_fft_size,
-            compact_mask_hash,
-        ) = PARAMS_PACKET_STRUCT_V1.unpack_from(data)
-
+    (
+        header, command, version, flags, frame_format,
+        wire_rows, wire_cols, active_rows, active_cols,
+        frame_symbol_period, range_fft_size, doppler_fft_size,
+        compact_mask_hash, wire_data_format, stream_channel_count,
+        stream_channel_mask, os_cfar_rank_percent_x100,
+        os_cfar_suppress_doppler, os_cfar_suppress_range,
+        center_freq_raw, sample_rate_hz_div100, antenna_spacing_um,
+        ofdm_fft_size, cp_length, sensing_symbol_stride, sensing_subcarrier_stride,
+    ) = PARAMS_PACKET_STRUCT.unpack(data)
     if header != CTRL_HEADER or command != PARAMS_COMMAND:
         return None
-
-    if int(center_freq_raw) > 0:
-        center_freq_hz = (
-            float(int(center_freq_raw)) * 100.0
-            if int(version) >= 7
-            else float(int(center_freq_raw)) / 10.0
-        )
-    else:
-        center_freq_hz = 0.0
-    sample_rate_hz = float(int(sample_rate_hz_div100)) * 100.0 if int(sample_rate_hz_div100) > 0 else 0.0
-    antenna_spacing_m = float(int(antenna_spacing_um)) * 1e-6 if int(antenna_spacing_um) > 0 else 0.0
+    if version != PARAMS_VERSION:
+        LOGGER.warning("Sensing PARM version %d is unsupported; require V%d. Update backend and viewer together.",
+                       version, PARAMS_VERSION)
+        return None
+    if sample_rate_hz_div100 == 0 or ofdm_fft_size == 0:
+        LOGGER.warning("Sensing PARM has invalid physical sampling parameters")
+        return None
+    center_freq_hz = float(center_freq_raw) * 100.0
+    sample_rate_hz = float(sample_rate_hz_div100) * 100.0
+    antenna_spacing_m = float(antenna_spacing_um) * 1e-6
 
     return ViewerRuntimeParams(
         version=int(version),
@@ -421,6 +359,10 @@ def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
         center_freq_hz=center_freq_hz,
         sample_rate_hz=sample_rate_hz,
         antenna_spacing_m=antenna_spacing_m,
+        ofdm_fft_size=int(ofdm_fft_size),
+        cp_length=int(cp_length),
+        sensing_symbol_stride=int(sensing_symbol_stride),
+        sensing_subcarrier_stride=int(sensing_subcarrier_stride),
     )
 
 

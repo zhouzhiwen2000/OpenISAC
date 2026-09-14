@@ -38,7 +38,7 @@ Then open `http://<your-host>:8765` in a browser.
 - Use `-1`, `[]`, or an omitted optional field to leave that module unbound.
 - The runtime panel shows **Isolated / Bound / Process / System** CPU lists. Default isolation covers only the most sensitive threads (USRP TX/RX, main; BS sensing RX) — not OFDM mod/demod.
 - **BS+UE (isolate both sides)** unions sensitive cores from both YAML files when checked; unchecked isolates only the current tab.
-- **Save + Start** / **Apply Isolation** call `scripts/isolate_cpus.py`; process `AllowedCPUs` spans all logical CPUs when isolation is on.
+- **Save + Start** / **Apply Isolation** call `scripts/isolate_cpus.py`; this non-interactive path leaves NIC IRQ policy off unless the CLI is run separately with `--nic-irq isolate|split`. Process `AllowedCPUs` spans application CPUs and excludes dedicated NIC IRQ CPUs when such a policy is active in saved state.
 - **Override isolated CPU list** allows a manual isolate set for this launch/apply.
 - **Reset Isolation** restores system slices to all CPUs.
 - Because the console can launch arbitrary commands entered in the web UI, bind it only to trusted networks or keep the default `127.0.0.1`.

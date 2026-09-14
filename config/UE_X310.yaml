@@ -13,6 +13,7 @@ rf_sampling:
 usrp_device:
   device_args: "addr=192.168.40.2, master_clock_rate=200e6, num_recv_frames=2048, num_send_frames=2048"  # USRP args
   clock_source: external  # Clock source; internal/external/gpsdo
+  time_source: internal  # Time/PPS source; set external together with clock_source for ocxo_mode=pps_phase
 
 # ===== OFDM Frame =====
 ofdm_frame:
@@ -32,6 +33,7 @@ ofdm_frame:
 
 # ===== CUDA =====
 cuda:
+  cuda_precision_profile: fp32  # CUDA precision profile: fp32/mixed_fp16
   cuda_demod_pipeline_slots: 3  # Number of CUDA demodulation pipeline slots
   cuda_ldpc_decoder_backend: gpu  # CUDA demod LDPC decoder backend
   cuda_ldpc_worker_buffers: 3  # Number of CUDA LDPC async worker batch buffers
@@ -81,28 +83,54 @@ sync_tracking:
   predictive_delay: true  # Enable CFO-based predictive delay compensation during alignment/tracking
   hardware_sync: false  # Enable hardware sync mode
   hardware_sync_tty: /dev/ttyUSB0  # Serial device used by hardware sync controller
-  ocxo_pi_kp_fast: 30.0  # Fast-stage OCXO PI proportional gain (Kp)
-  ocxo_pi_ki_fast: 1.0  # Fast-stage OCXO PI integral gain (Ki)
-  ocxo_pi_kp_slow: 30.0  # Slow-stage OCXO PI proportional gain (Kp)
-  ocxo_pi_ki_slow: 0.05  # Slow-stage OCXO PI integral gain (Ki)
-  ocxo_pi_switch_abs_error_ppm: 0.0002  # Switch to slow stage when absolute error_ppm is below this threshold
-  ocxo_pi_switch_hold_s: 60.0  # Required continuous hold time below threshold before switching (s)
-  ocxo_pi_max_step_fast_ppm: 0.01  # Fast-stage max OCXO adjustment per update (ppm)
-  ocxo_pi_max_step_slow_ppm: 0.01  # Slow-stage max OCXO adjustment per update (ppm)
-  akf_enable: true  # Enable adaptive Kalman filter for hardware error_ppm
-  akf_bootstrap_frames: 64  # Cold-start frame count before AKF enters normal update
-  akf_innovation_window: 64  # Innovation history window used in ACF/LS adaptation
-  akf_max_lag: 4  # Maximum innovation autocorrelation lag
-  akf_adapt_interval: 64  # Frames between adaptive Q/R least-squares updates
-  akf_gate_sigma: 3.0  # Innovation gating threshold in sigma units
-  akf_tikhonov_lambda: 0.001  # Tikhonov regularization coefficient for LS
-  akf_update_smooth: 0.2  # Exponential smoothing for Q/R update
-  akf_q_wf_min: 1e-10  # Lower bound of white-frequency-noise coefficient
-  akf_q_wf_max: 1.0e2  # Upper bound of white-frequency-noise coefficient
-  akf_q_rw_min: 1e-12  # Lower bound of random-walk-frequency-noise coefficient
-  akf_q_rw_max: 1.0e1  # Upper bound of random-walk-frequency-noise coefficient
-  akf_r_min: 1e-08  # Lower bound of observation noise variance R
-  akf_r_max: 1.0e3  # Upper bound of observation noise variance R
+  ocxo_mode: auto  # OCXO discipline mode: auto | freq | phase | pps_phase
+  ocxo_dac_ppm_per_lsb: 9.708797e-7  # Calibrated DAC ppm per LSB (MV197 map)
+  ocxo_dac_zero_word: 493367  # DAC word corresponding to 0 ppm
+  ocxo_dac_state_file: .openisac_ocxo_dac_state.yaml  # Persist the last acknowledged DAC word across UE restarts
+  ocxo_max_abs_ppm: 0.45  # Absolute OCXO command clamp (ppm)
+  ocxo_actuator_max_slew_ppm_per_s: 0.01  # Hard actuator slew limit (ppm/s)
+  ocxo_coarse_enable: true  # Arm startup one-target correction after reset
+  ocxo_coarse_gain: 1.0  # Coarse target gain on selected frequency error
+  ocxo_coarse_max_abs_ppm: 0.2  # Max coarse target offset (ppm)
+  ocxo_coarse_obs_window_s: 1.0  # Observation window: Mode A CFO average; Mode B TO regression (s)
+  ocxo_coarse_control_period_s: 0.5  # Coarse update period (s)
+  ocxo_coarse_max_slew_ppm_per_s: 0.01  # Coarse target tracking slew (ppm/s)
+  ocxo_fll_fast_obs_window_s: 1.0  # Fast window: Mode A CFO average; Mode B TO regression (s)
+  ocxo_fll_fast_control_period_s: 0.5  # Fast FLL update period (s)
+  ocxo_fll_fast_control_mode: pi  # pi | half_step (half the error per update)
+  ocxo_fll_fast_kp: 0.5  # Fast FLL proportional gain
+  ocxo_fll_fast_ki: 0.03  # Fast FLL integral gain
+  ocxo_fll_fast_max_slew_ppm_per_s: 0.005  # Fast FLL slew (ppm/s)
+  ocxo_fll_slow_obs_window_s: 10.0  # Slow window: Mode A CFO average; Mode B TO regression (s)
+  ocxo_fll_slow_control_period_s: 2.0  # Slow FLL update period (s)
+  ocxo_fll_slow_kp: 0.1  # Slow FLL proportional gain
+  ocxo_fll_slow_ki: 0.007  # Slow FLL integral gain
+  ocxo_fll_slow_deadzone_ppm: 5.0e-5  # Slow FLL residual deadzone (ppm)
+  ocxo_fll_slow_max_slew_ppm_per_s: 0.005  # Slow FLL slew limit (ppm/s)
+  ocxo_fll_slow_enter_abs_ppm: 0.0005  # Fast-to-slow residual threshold (ppm)
+  ocxo_fll_fast_enter_abs_ppm: 0.01  # Slow-to-fast threshold (ppm)
+  ocxo_fll_switch_hold_s: 30.0  # Fast-to-slow dwell (s)
+  ocxo_phase_control_period_s: 5.0  # Phase control period (s)
+  ocxo_phase_jump_gate_samples: 0.5  # Unknown TO_clock jump reject gate (samples)
+  ocxo_phase_max_report_age_frames: 256  # Max eRTM TO age accepted for phase lock
+  ocxo_phase_setpoint_mode: freeze_on_lock  # Legacy auto/phase target: freeze_on_lock | zero | fixed
+  ocxo_phase_setpoint_fixed_samples: 0.0  # Legacy fixed TO_clock target when mode=fixed
+  ocxo_pps_initial_ap_enable: true  # One PPSOUT coarse phase placement on every Phase entry
+  ocxo_pps_initial_ap_max_abs_ns: 500000000.0  # AP clamp; PPSDO hardware range is +/-0.5 s
+  ocxo_pps_initial_ap_settle_s: 2.0  # Wait for adjusted PPS plus a fresh eRTM phase observation
+  ocxo_pps_initial_ap_command_timeout_s: 3.0  # Max wait for AP completion before releasing Phase SF
+  ocxo_pps_initial_ap_max_retries: 1  # Bounded retries after AP success but no fresh post-AP PPS publication
+  ocxo_pps_initial_ap_deadzone_ns: 10.0  # Skip AP/settle when PPS error is already within this range
+  ocxo_pps_initial_ap_polarity: 1  # Bench-confirmed AP command sign for positive (P_U-P_B)
+  ocxo_phase_kp: 2.0e-4  # Velocity-form Phase PI proportional gain (ppm per sample)
+  ocxo_phase_ki: 1.0e-6  # Velocity-form Phase PI integral gain ((ppm/s) per sample)
+  ocxo_phase_max_slew_ppm_per_s: 5.0e-5  # Phase loop slew (ppm/s)
+  ocxo_phase_enter_sfo_abs_ppm: 2.0e-4  # Slow-window TO regression threshold to enter Phase (ppm)
+  ocxo_phase_enter_hold_s: 30.0  # Stable slow-window TO regression dwell before Phase (s)
+  ocxo_phase_exit_sfo_abs_ppm: 0.01  # Slow-window TO regression threshold to exit Phase (ppm)
+  ocxo_phase_exit_hold_s: 10.0  # Confirmed Phase exit dwell (s; minimum 10)
+  cfo_ewma_enable: true  # Enable Mode A EWMA pre-filter on residual CFO ppm
+  cfo_ewma_alpha: 0.02  # EWMA weight on new residual_ppm samples (0..1; higher = faster)
   desired_peak_pos: 20  # Target delay-peak index for alignment
 
 # ===== Sensing =====
@@ -127,6 +155,8 @@ network_output:
   bi_sensing_ip: 0.0.0.0  # Bistatic sensing/control ZMQ bind IP
   bi_sensing_port: 8889  # Bistatic sensing ZMQ output port
   control_port: 10001  # ZMQ port for runtime control commands
+  ocxo_debug_ip: 0.0.0.0  # OCXO debug ZMQ bind IP
+  ocxo_debug_port: 12347  # OCXO debug ZMQ output port
   self_channel_ip: 0.0.0.0  # UE self-channel ZMQ listen IP
   self_channel_port: 12350  # UE self-channel output port
   self_pdf_ip: 0.0.0.0  # UE self delay-spectrum ZMQ listen IP
@@ -157,9 +187,7 @@ logging:
   default_level: warn  # off|error|warn|info|debug — global default; Error always prints when force_error=true
   timestamps: false  # Prefix each line with local HH:MM:SS.uuuuuu
   force_error: true  # Always emit Error (unrecoverable failures only)
-  modules: {}  # Optional overrides, e.g. demod.ldpc: debug, cuda.demod: warn, ul_rx: warn
+  modules: {}  # Optional overrides, e.g. air_frame: info, demod.ldpc: debug, ul_tx: warn
 
 runtime:
-  default_out_ip: 127.0.0.1  # Default destination IP for UDP payload and VOFA+ debug outputs
-  vofa_debug_ip: ""  # VOFA+ debug output IP
-  vofa_debug_port: 12347  # VOFA+ debug output port
+  default_out_ip: 127.0.0.1  # Default destination IP for UDP payload outputs

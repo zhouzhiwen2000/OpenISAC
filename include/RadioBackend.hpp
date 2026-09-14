@@ -14,6 +14,7 @@
 // differs between backends.
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "RadioTypes.hpp"
@@ -35,6 +36,13 @@ public:
     // end-of-burst marker).
     virtual size_t send(const sample_t* buff, size_t nsamps,
                         const TxMetadata& metadata, double timeout) = 0;
+
+    // Native SC16 hot path. Backends that support an "sc16" CPU stream format
+    // override this; the default keeps existing FC32-only backends explicit.
+    virtual size_t send(const sc16_t* /*buff*/, size_t /*nsamps*/,
+                        const TxMetadata& /*metadata*/, double /*timeout*/) {
+        throw std::logic_error("TX backend does not support native SC16 samples");
+    }
 
     // Multi-channel overload; defaults to the single-channel path (channel 0).
     virtual size_t send(const sample_t* const* buffs, size_t nsamps,

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Self-contained ARQ helper logic test.
-Exercises: duplicate suppression, ACK bitmap, retransmit timeout selection,
-ordered/unordered delivery - all via a C++ test binary that links against
-the shared ARQ helpers in OFDMCore.hpp.
+Self-contained protocol helper logic test.
+Exercises ARQ window/framing behavior and ERTM5 payload serialization via a
+C++ test binary that links against the shared helpers in OFDMCore.hpp.
 
 Build & run:
     g++ -std=c++17 -I../include -o test_arq_helpers test_arq_helpers.cpp -lfftw3f
@@ -23,7 +22,9 @@ TEST_SOURCE = r"""
 #include <chrono>
 #include <cassert>
 #include <functional>
+#include <utility>
 #include "OFDMCore.hpp"
+#include "ErtmAbsoluteFrameState.hpp"
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -87,7 +88,12 @@ void test_mini_header_flags() {
     CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlags), "data flags known");
     CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlagArqFeedback), "feedback flags known");
     CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlagErtmTiming), "ertm flags known");
-    CHECK(!LdpcPacketFraming::flags_are_known(0x08), "unknown flag rejected");
+    // Identity SIB uses 0x04 (word0) and 0x08 (word1 / IdentityHi); both are known.
+    CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlagAirFrameIdentity),
+          "identity word0 flags known");
+    CHECK(LdpcPacketFraming::flags_are_known(LdpcPacketFraming::kFlagAirFrameIdentityHi),
+          "identity word1 flags known");
+    CHECK(!LdpcPacketFraming::flags_are_known(0x10), "unknown flag rejected");
 
     const uint64_t packed_header = LdpcPacketFraming::pack_header(feedback_hdr);
     LdpcMiniHeader decoded;
@@ -99,8 +105,33 @@ void test_mini_header_flags() {
     CHECK(LdpcPacketFraming::unpack_header(packed_ertm_header, decoded), "decode ertm header");
     CHECK(decoded.flags == LdpcPacketFraming::kFlagErtmTiming, "ertm flag roundtrip");
 
+    // Expanded Identity SIB: epoch32 + frame_seq32 via dual BCH words.
+    {
+        std::vector<int> identity_qpsk(LdpcPacketFraming::kIdentityControlSymbols);
+        const uint32_t epoch32 = 0xA1B2C3D4u;
+        const uint32_t seq32 = 0x11223344u;
+        LdpcPacketFraming::write_identity_control_qpsk(
+            epoch32, seq32, identity_qpsk.data());
+        // Convert QPSK ints to soft LLRs for decode path (high confidence).
+        std::vector<float> identity_llrs(identity_qpsk.size() * 2);
+        for (size_t i = 0; i < identity_qpsk.size(); ++i) {
+            const int q = identity_qpsk[i] & 3;
+            identity_llrs[i * 2] = ((q >> 1) & 1) ? -8.0f : 8.0f;
+            identity_llrs[i * 2 + 1] = (q & 1) ? -8.0f : 8.0f;
+        }
+        LdpcMiniHeader identity_hdr{};
+        CHECK(LdpcPacketFraming::decode_identity_control_llrs(
+                  identity_llrs.data() + LdpcPacketFraming::kMarkerBits,
+                  identity_hdr),
+              "decode identity control");
+        CHECK(LdpcPacketFraming::is_air_frame_identity(identity_hdr),
+              "identity word0 flag set");
+        CHECK(identity_hdr.timeline_epoch == epoch32, "identity epoch roundtrip");
+        CHECK(identity_hdr.air_frame_seq == seq32, "identity seq roundtrip");
+    }
+
     LdpcMiniHeader bad_hdr = data_hdr;
-    bad_hdr.flags = 0x08;
+    bad_hdr.flags = 0x10;  // outside kKnownFlagsMask
     bool threw = false;
     try {
         LdpcPacketFraming::pack_header(bad_hdr);
@@ -118,6 +149,202 @@ void test_mini_header_flags() {
           "unflagged ARQ1 user payload remains data by header");
 
     printf("  test_mini_header_flags: OK\n");
+}
+
+// ---- Test ERTM5 absolute-frame + raw PPS-anchor payload pack/unpack ----
+void test_ertm5_payload() {
+    AlignedVector channel_freq = {
+        {1.0f, -0.5f},
+        {-2.25f, 3.5f},
+        {0.0f, 4.0f},
+        {-1.0f, -1.0f},
+    };
+    constexpr uint32_t kSeq = 0x89ABCDEFu;
+    constexpr uint32_t kEpoch = 0xA1B2C3D4u;
+    constexpr uint64_t kFrameSeq = 0x12345678ABCDEF01ULL;
+
+    std::vector<uint8_t> packed;
+    std::string error;
+    CHECK(ErtmTimingPayload::pack(
+              kSeq,
+              static_cast<uint32_t>(channel_freq.size()),
+              15.36e6,
+              -37,
+              kEpoch,
+              kFrameSeq,
+              987654321,
+              123456,
+              200000,
+              200.0e6,
+              channel_freq,
+              packed,
+              &error),
+          "ERTM5 pack");
+    CHECK(ErtmTimingPayload::looks_like(packed.data(), packed.size()),
+          "ERTM5 magic");
+
+    ErtmTimingPayloadView decoded;
+    error.clear();
+    CHECK(ErtmTimingPayload::unpack(
+              packed.data(),
+              packed.size(),
+              static_cast<uint32_t>(channel_freq.size()),
+              decoded,
+              &error),
+          "ERTM5 unpack");
+    CHECK(decoded.seq == kSeq, "ERTM5 seq roundtrip");
+    CHECK(decoded.timeline_epoch == kEpoch, "ERTM5 epoch roundtrip");
+    CHECK(decoded.ul_measure_frame_seq == kFrameSeq,
+          "ERTM5 64-bit frame roundtrip");
+    CHECK(decoded.duti_samples == -37, "ERTM5 DUTI roundtrip");
+    CHECK(decoded.sample_rate == 15.36e6, "ERTM5 sample rate roundtrip");
+    CHECK(decoded.bs_pps_anchor_valid, "ERTM5 PPS anchor valid");
+    CHECK(decoded.bs_last_pps_ticks == 987654321,
+          "ERTM5 raw BS PPS ticks roundtrip");
+    CHECK(decoded.bs_t0_to_pps_ticks == 123456, "ERTM5 PPS t0 roundtrip");
+    CHECK(decoded.bs_frame_ticks == 200000, "ERTM5 frame ticks roundtrip");
+    CHECK(decoded.bs_tick_rate == 200.0e6, "ERTM5 tick rate roundtrip");
+    CHECK(decoded.channel_freq == channel_freq, "ERTM5 channel roundtrip");
+
+    error.clear();
+    CHECK(!ErtmTimingPayload::unpack(
+              packed.data(), packed.size(), 8, decoded, &error),
+          "ERTM5 rejects wrong FFT size");
+    CHECK(error.find("fft_size mismatch") != std::string::npos,
+          "ERTM5 wrong FFT error");
+
+    const std::vector<uint8_t> legacy = {'E', 'R', 'T', 'M', '2'};
+    error.clear();
+    CHECK(!ErtmTimingPayload::unpack(
+              legacy.data(), legacy.size(), 4, decoded, &error),
+          "ERTM5 rejects legacy ERTM2");
+    CHECK(error.find("legacy ERTM2/3/4") != std::string::npos,
+          "ERTM2 rejection error");
+
+    const std::vector<uint8_t> legacy_v3 = {'E', 'R', 'T', 'M', '3'};
+    error.clear();
+    CHECK(!ErtmTimingPayload::unpack(
+              legacy_v3.data(), legacy_v3.size(), 4, decoded, &error),
+          "ERTM5 rejects legacy ERTM3 without a PPS anchor");
+    CHECK(error.find("legacy ERTM2/3/4") != std::string::npos,
+          "ERTM3 rejection error");
+
+    const std::vector<uint8_t> legacy_v4 = {'E', 'R', 'T', 'M', '4'};
+    error.clear();
+    CHECK(!ErtmTimingPayload::unpack(
+              legacy_v4.data(), legacy_v4.size(), 4, decoded, &error),
+          "ERTM5 rejects legacy ERTM4 without raw BS PPS ticks");
+    CHECK(error.find("legacy ERTM2/3/4") != std::string::npos,
+          "ERTM4 rejection error");
+
+    // Convert the valid ERTM5 packet into the complete former ERTM4 wire
+    // layout by changing the magic and removing only bs_last_pps_ticks.
+    std::vector<uint8_t> complete_legacy_v4 = packed;
+    complete_legacy_v4[4] = '4';
+    constexpr size_t kRawBsPpsOffset = 5 + 4 + 8 + 4 + 4 + 4 + 8 + 4;
+    complete_legacy_v4.erase(
+        complete_legacy_v4.begin() + kRawBsPpsOffset,
+        complete_legacy_v4.begin() + kRawBsPpsOffset + sizeof(int64_t));
+    CHECK(complete_legacy_v4.size() == packed.size() - sizeof(int64_t),
+          "complete ERTM4 payload has the former wire size");
+    AirFrameIdentity dl_identity;
+    dl_identity.timeline_epoch = kEpoch;
+    dl_identity.frame_seq = kFrameSeq;
+    dl_identity.valid = true;
+    ErtmAbsoluteFrameState frame_state;
+    frame_state.prepare_channel_buffers(channel_freq.size());
+    const auto legacy_ingest = frame_state.ingest(
+        std::move(complete_legacy_v4),
+        dl_identity,
+        static_cast<uint32_t>(channel_freq.size()));
+    CHECK(legacy_ingest.status ==
+              ErtmAbsoluteFrameState::IngestStatus::LegacyPayload &&
+              frame_state.cache_size() == 0,
+          "complete ERTM4 ingest is classified as legacy without caching");
+
+    printf("  test_ertm5_payload: OK\n");
+}
+
+void test_ertm_pps_phase_formula() {
+    ErtmTimingPayloadView report;
+    report.sample_rate = 1.0e6;
+    report.bs_pps_anchor_valid = true;
+    report.bs_last_pps_ticks = 9'750'000;
+    report.bs_t0_to_pps_ticks = 2'000'000; // r_B(0) = 0.2 s
+    report.bs_frame_ticks = 100'000;        // frame = 0.01 s
+    report.bs_tick_rate = 10.0e6;
+
+    // N=5 gives r_B=0.25 s; UE boundary is 0.30 s after its PPS.
+    const auto phase = compute_ertm_pps_phase(
+        report,
+        5,
+        10'300'000'000LL,
+        10'000'000'000LL,
+        100.0,
+        50.0);
+    CHECK(phase.valid, "PPS phase formula accepts complete same-frame inputs");
+    CHECK(std::abs(phase.r_bs_samples - 250'000.0) < 1e-9,
+          "PPS phase formula reconstructs BS PPS-to-frame distance");
+    CHECK(std::abs(phase.r_ue_samples - 300'000.0) < 1e-9,
+          "PPS phase formula reconstructs UE PPS-to-frame distance");
+    CHECK(std::abs(phase.phase_error_samples - (-49'950.0)) < 1e-9,
+          "P_U-P_B follows tau_DL-TO_UE+r_B-r_U");
+    CHECK(phase.bs_last_pps_ticks == report.bs_last_pps_ticks &&
+              phase.bs_t0_to_pps_ticks == report.bs_t0_to_pps_ticks &&
+              phase.ue_last_pps_ns == 10'000'000'000LL &&
+              phase.bs_tick_rate == report.bs_tick_rate &&
+              phase.sample_rate == report.sample_rate,
+          "PPS phase diagnostics pass exact BS/UE anchors and rates through");
+
+    CHECK(std::abs(wrap_pps_phase_samples(800'000.0, 1.0e6) - (-200'000.0)) < 1e-9,
+          "PPS phase error wraps into the centered one-second interval");
+    CHECK(std::abs(wrap_pps_phase_samples(500'000.0, 1.0e6) - (-500'000.0)) < 1e-9,
+          "positive half-second maps to the negative interval endpoint");
+    CHECK(std::abs(wrap_pps_phase_samples(-500'000.0, 1.0e6) - (-500'000.0)) < 1e-9,
+          "negative half-second stays at the interval endpoint");
+    CHECK(std::abs(wrap_pps_phase_samples(1'000'000.0, 1.0e6)) < 1e-9,
+          "a whole second wraps to zero");
+
+    const auto shifted_epoch = compute_ertm_pps_phase(
+        report,
+        5,
+        110'300'000'000LL,
+        110'000'000'000LL,
+        100.0,
+        50.0);
+    CHECK(shifted_epoch.valid &&
+              std::abs(shifted_epoch.phase_error_samples - phase.phase_error_samples) < 1e-9,
+          "whole-second UE timestamp epoch changes do not alter PPS phase");
+
+    const auto huge_frame = compute_ertm_pps_phase(
+        report,
+        std::numeric_limits<uint64_t>::max() - 5u,
+        10'300'000'000LL,
+        10'000'000'000LL,
+        0.0,
+        0.0);
+    CHECK(huge_frame.valid &&
+              std::abs(huge_frame.r_bs_samples - 300'000.0) < 1e-9,
+          "BS PPS distance stays exact beyond the double integer range");
+
+    report.bs_pps_anchor_valid = false;
+    CHECK(!compute_ertm_pps_phase(
+               report, 5, 10'300'000'000LL, 10'000'000'000LL, 100.0, 50.0).valid,
+          "missing BS PPS anchor invalidates the complete phase observation");
+    printf("  test_ertm_pps_phase_formula: OK\n");
+}
+
+// ---- Test UL-TX timing state boundary semantics ----
+void test_ul_tx_timing_effective_frame() {
+    constexpr uint64_t kFrame = 1000;
+    CHECK(ul_tx_timing_effective_from_frame(kFrame, false, true) == kFrame,
+          "new burst timing state applies to current frame");
+    CHECK(ul_tx_timing_effective_from_frame(kFrame, true, true) == kFrame + 1,
+          "continuous aggregate shift applies to next frame");
+    CHECK(ul_tx_timing_effective_from_frame(kFrame, true, false) == kFrame,
+          "canceling TADV and Alignment deltas apply to current frame");
+
+    printf("  test_ul_tx_timing_effective_frame: OK\n");
 }
 
 // ---- Test ArqTxWindow ----
@@ -507,6 +734,9 @@ int main() {
     test_seq_helpers();
     test_feedback_pack_unpack();
     test_mini_header_flags();
+    test_ertm5_payload();
+    test_ertm_pps_phase_formula();
+    test_ul_tx_timing_effective_frame();
     test_tx_window();
     test_tx_window_encoded();
     test_rx_window_unordered();

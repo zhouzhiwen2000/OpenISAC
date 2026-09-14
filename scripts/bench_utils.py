@@ -6,7 +6,6 @@ import os
 import signal
 import subprocess
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 
@@ -141,60 +140,6 @@ def apply_fft_sample_rate_sweep(
         cfg["pilot_positions"] = pilot_positions
 
 
-def launch_openisac_pair(
-    build_dir: Path,
-    run_dir: Path,
-    mod_cfg: dict,
-    demod_cfg: dict,
-    demod_bin: str = "UE",
-    mod_bin: str = "BS",
-    startup_gap_s: float = 1.0,
-) -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    save_yaml(run_dir / "BS.yaml", mod_cfg)
-    save_yaml(run_dir / "UE.yaml", demod_cfg)
-
-    demod_proc = subprocess.Popen(
-        [str(build_dir / demod_bin)],
-        cwd=run_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,
-    )
-    time.sleep(startup_gap_s)
-    mod_proc = subprocess.Popen(
-        [str(build_dir / mod_bin)],
-        cwd=run_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,
-    )
-    return mod_proc, demod_proc
-
-
-def launch_openisac_process(
-    build_dir: Path,
-    run_dir: Path,
-    binary_name: str,
-    *,
-    mod_cfg: dict | None = None,
-    demod_cfg: dict | None = None,
-) -> subprocess.Popen[bytes]:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    if mod_cfg is not None:
-        save_yaml(run_dir / "BS.yaml", mod_cfg)
-    if demod_cfg is not None:
-        save_yaml(run_dir / "UE.yaml", demod_cfg)
-
-    return subprocess.Popen(
-        [str(build_dir / binary_name)],
-        cwd=run_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,
-    )
-
-
 def terminate_process_tree(proc: subprocess.Popen[bytes], timeout_s: float = 10.0) -> bytes:
     if proc.poll() is None:
         os.killpg(os.getpgid(proc.pid), signal.SIGINT)
@@ -318,38 +263,6 @@ def read_thread_snapshot(pids: list[int]) -> dict[tuple[int, int], dict[str, obj
                 "allowed_cpus": read_task_allowed_cpus(pid, tid),
             }
     return snapshot
-
-
-def sample_cpu_usage(
-    pids: list[int],
-    duration_s: float,
-    interval_s: float,
-) -> list[dict[str, float]]:
-    cpu_count = os.cpu_count() or 1
-    samples: list[dict[str, float]] = []
-    prev_total, prev_idle = read_total_cpu_ticks()
-    prev_proc = sum(read_process_ticks(pid) or 0 for pid in pids)
-    deadline = time.time() + duration_s
-
-    while time.time() < deadline:
-        time.sleep(interval_s)
-        curr_total, curr_idle = read_total_cpu_ticks()
-        curr_proc = sum(read_process_ticks(pid) or 0 for pid in pids)
-        delta_total = curr_total - prev_total
-        delta_idle = curr_idle - prev_idle
-        delta_proc = curr_proc - prev_proc
-        prev_total, prev_idle, prev_proc = curr_total, curr_idle, curr_proc
-        if delta_total <= 0:
-            continue
-        proc_cpu_pct = 100.0 * cpu_count * delta_proc / delta_total
-        host_cpu_pct = 100.0 * (1.0 - delta_idle / delta_total)
-        samples.append(
-            {
-                "proc_cpu_pct": proc_cpu_pct,
-                "host_cpu_pct": host_cpu_pct,
-            }
-        )
-    return samples
 
 
 def sample_cpu_usage_with_threads(

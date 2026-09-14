@@ -38,11 +38,19 @@
 #include <fftw3.h>
 #include "RadioBackend.hpp"
 
+#include "AirFrameTxGate.hpp"
 #include "Common.hpp"
 #include "OFDMCore.hpp"
 #include "LDPCCodec.hpp"
 
 class UplinkTxEngine {
+private:
+    struct QueuedUlPeriod {
+        AlignedVector samples;
+        AirFrameIdentity identity;
+        uint64_t generation = 0;
+    };
+
 public:
     explicit UplinkTxEngine(const Config& link_cfg)
         : _link_cfg(link_cfg),
@@ -52,6 +60,7 @@ public:
           _fft_in(_cfg.ofdm.fft_size),
           _fft_out(_cfg.ofdm.fft_size),
           _period_samples(link_cfg.samples_per_frame()),
+          _air_frame_gate(_period_samples, link_cfg.ofdm.num_symbols),
           _window_offset(_duplex.ul_sample_offset(link_cfg)),
           _window_samples(_duplex.ul_sample_count(link_cfg)) {
         if (_cfg.ofdm.num_symbols < 2) {
@@ -59,6 +68,14 @@ public:
         }
         if (_window_samples != _cfg.samples_per_frame()) {
             throw std::runtime_error("UplinkTxEngine: uplink window samples != uplink frame samples.");
+        }
+        if (_layout.payload_re_count < LdpcPacketFraming::kIdentityControlSymbols) {
+            throw std::runtime_error(
+                "UplinkTxEngine: payload_re_count (" +
+                std::to_string(_layout.payload_re_count) +
+                ") < kIdentityControlSymbols (" +
+                std::to_string(LdpcPacketFraming::kIdentityControlSymbols) +
+                "); increase uplink data resources so the Identity SIB fits");
         }
         _zc_seq = generate_zc_freq(_cfg.ofdm.fft_size, _cfg.ofdm.zc_root);
         _bit_interleaver = std::make_unique<BitBlockInterleaver>(_ldpc.get_N(), 21);
@@ -80,11 +97,11 @@ public:
         // jitter so the TX thread can keep the USRP continuously fed (mirrors
         // BS _circular_buffer prefill philosophy).
         _period_queue.reset(kPeriodQueueDepth, [this]() {
-            AlignedVector frame;
-            frame.resize(_period_samples);
-            return frame;
+            QueuedUlPeriod period;
+            period.samples.resize(_period_samples);
+            return period;
         });
-        _timing_pad_buffer.assign(_period_samples, std::complex<float>(0.0f, 0.0f));
+        _tx_frame_buffer.assign(_period_samples * 2, std::complex<float>(0.0f, 0.0f));
         _blank_period_frame.assign(_period_samples, std::complex<float>(0.0f, 0.0f));
     }
 
@@ -110,6 +127,7 @@ public:
         _tick_rate = tick_rate;
         _tx_sample_rate = tx_sample_rate > 0.0 ? tx_sample_rate : _link_cfg.rf_sampling.sample_rate;
         _use_timed_tx = (tick_rate > 0.0);
+        _air_frame_gate.configure_timing(_use_timed_tx, _tick_rate, _tx_sample_rate);
         _scheduled_restart_epoch.store(0, std::memory_order_relaxed);
         _restart_requested.store(false, std::memory_order_release);
     }
@@ -164,6 +182,108 @@ public:
 
     void reset_rx_alignment_shift(uint64_t restart_epoch = 0) {
         store_rx_alignment_shift(0, 0, restart_epoch);
+    }
+
+    /**
+     * @brief Query UL-TX timing state effective at absolute air frame @p frame_seq.
+     *
+     * Returns the newest entry in the same OTA epoch with
+     * @c effective_from_frame <= frame_seq. Fails when history does not cover
+     * the requested frame (including ring overwrite of still-referenced states).
+     */
+    bool query_ul_tx_timing_state(
+        uint32_t timeline_epoch,
+        uint64_t frame_seq,
+        UlTxTimingStateEntry& out) const
+    {
+        if (timeline_epoch == 0) {
+            return false;
+        }
+        // Plain POD history entries are not atomic. Hold the same mutex used by
+        // publish/clear so concurrent readers never race ordinary stores (a
+        // version/seqlock around non-atomic fields is still a C++ data race).
+        std::lock_guard<std::mutex> lock(_timing_history_mutex);
+        if (_timing_history_count == 0) {
+            return false;
+        }
+        const size_t available = std::min(_timing_history_count, kUlTxTimingHistoryCapacity);
+        for (size_t i = 0; i < available; ++i) {
+            const size_t idx =
+                (_timing_history_count - 1u - i) % kUlTxTimingHistoryCapacity;
+            const UlTxTimingStateEntry& entry = _timing_history[idx];
+            if (entry.timeline_epoch != timeline_epoch) {
+                continue;
+            }
+            if (entry.effective_from_frame <= frame_seq) {
+                out = entry;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Drop all published UL-TX timing history (epoch switch / stream restart). */
+    void clear_ul_tx_timing_history() {
+        std::lock_guard<std::mutex> lock(_timing_history_mutex);
+        // Count is the publication boundary; old POD slots are unreachable once
+        // it becomes zero and are overwritten by later publishes.
+        _timing_history_count = 0;
+        _timing_history_has_last = false;
+        _timing_history_last = UlTxTimingStateEntry{};
+        _timing_history_fast_valid.store(false, std::memory_order_release);
+    }
+
+    /**
+     * @brief Publish the latest DL air-frame stamp (absolute seq + UE-USRP
+     * frame-start time) so UL-TX / duplex processing can correlate with the
+     * concurrent downlink frame.
+     */
+    void store_air_frame_stamp(const AirFrameIdentity& id) {
+        const AirFrameTxGate::StampUpdate update =
+            _air_frame_gate.store_stamp(id);
+        if (update.generation_bumped) {
+            LOG_RT_WARN_M(AirFrame)
+                << "[AirFrame][UL-TX] period_generation bump on stamp"
+                << ": gen=" << update.generation
+                << ", valid=" << update.valid
+                << ", epoch_changed=" << update.epoch_changed
+                << ", validity_changed=" << update.validity_changed
+                << ", epoch=0x" << std::hex
+                << (update.valid ? id.timeline_epoch : 0) << std::dec
+                << ", stamp_seq=" << (update.valid ? id.frame_seq : 0)
+                << ", next_claim_seq=" << update.next_claim_seq;
+        } else if (update.valid) {
+            const uint64_t n =
+                _stamp_update_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 8 || (n % 512) == 0) {
+                LOG_RT_INFO_M(AirFrame)
+                    << "[AirFrame][UL-TX] stamp update (no gen bump)"
+                    << ": n=" << n
+                    << ", epoch=0x" << std::hex << id.timeline_epoch << std::dec
+                    << ", stamp_seq=" << id.frame_seq
+                    << ", next_claim_seq=" << update.next_claim_seq
+                    << ", period_gen=" << update.generation;
+            }
+        }
+        // Same-epoch lag never invalidates the whole queue. TX drops stale
+        // periods and advances the claim cursor after a blank slot.
+    }
+
+    bool air_frame_valid() const {
+        return _air_frame_gate.stamp().valid;
+    }
+    uint64_t air_frame_seq() const {
+        return _air_frame_gate.stamp().frame_seq;
+    }
+    uint64_t air_frame_epoch() const {
+        return _air_frame_gate.stamp().timeline_epoch;
+    }
+    int64_t ue_air_frame_start_time_ns() const {
+        return _air_frame_gate.stamp().ue_frame_start_time_ns;
+    }
+    /** Preferred robust UE-USRP stamp (mid-frame). */
+    int64_t ue_air_frame_mid_time_ns() const {
+        return _air_frame_gate.stamp().ue_frame_mid_time_ns;
     }
 
     bool set_waveform_enabled(bool enabled) {
@@ -308,8 +428,59 @@ private:
                                    QPSKModulator::QPSK_TABLE_FLAT[idx + 1]);
     }
 
+    size_t _effective_user_payload_re() const {
+        return AirFrameClock::effective_payload_re_count(
+            _layout.payload_re_count,
+            LdpcPacketFraming::kIdentityControlSymbols);
+    }
+
+    /**
+     * @brief Snapshot DL air-frame stamp and write Tier-1 Identity SIB at the
+     * head of the UL payload (frozen into this period's samples).
+     * @return QPSK symbols written (0 if capacity insufficient).
+     */
+    size_t _inject_identity_sib(
+        AlignedIntVector& data_pool,
+        const AirFrameIdentity& identity)
+    {
+        const size_t sib = LdpcPacketFraming::kIdentityControlSymbols;
+        const size_t begin = data_pool.size();
+        data_pool.resize(begin + sib);
+        // Always embed a structured SIB so BS can double-check closed loop.
+        // When unlock/invalid, epoch=0 and seq=0 is an explicit "no lock" marker.
+        const uint32_t ota_epoch = identity.valid
+            ? AirFrameClock::ota_epoch32(identity.timeline_epoch)
+            : 0u;
+        const uint32_t ota_seq = identity.valid
+            ? AirFrameClock::ota_frame_seq32(identity.frame_seq)
+            : 0u;
+        LdpcPacketFraming::write_identity_control_qpsk(
+            ota_epoch, ota_seq, data_pool.data() + begin);
+        if (identity.valid) {
+            _identity_sib_injected.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            _identity_sib_unlocked.fetch_add(1, std::memory_order_relaxed);
+        }
+        return sib;
+    }
+
     void _append_idle_symbols(AlignedIntVector& data_pool) {
-        if (_layout.payload_re_count < LdpcPacketFraming::kControlSymbols) {
+        // Fill remaining RE after Identity SIB (already at head when present).
+        const size_t room = (_layout.payload_re_count > data_pool.size())
+            ? (_layout.payload_re_count - data_pool.size())
+            : 0;
+        if (room < LdpcPacketFraming::kControlSymbols) {
+            // Not enough room for a control packet; pad random QPSK if configured.
+            if (_link_cfg.uplink.idle_waveform == kUplinkIdleWaveformRandomQpsk) {
+                const uint32_t idle_seq =
+                    _idle_seq.fetch_add(1, std::memory_order_relaxed);
+                while (data_pool.size() < _layout.payload_re_count) {
+                    const uint32_t rnd = splitmix32(
+                        0x554C4944u ^ idle_seq ^
+                        static_cast<uint32_t>(data_pool.size()));
+                    data_pool.push_back(static_cast<int>(rnd & 0x3u));
+                }
+            }
             return;
         }
         const uint32_t idle_seq = _idle_seq.fetch_add(1, std::memory_order_relaxed);
@@ -320,8 +491,9 @@ private:
             0,
             static_cast<uint16_t>(idle_seq & 0xFFFFu),
         };
-        data_pool.resize(LdpcPacketFraming::kControlSymbols);
-        LdpcPacketFraming::write_control_qpsk(hdr, data_pool.data());
+        const size_t begin = data_pool.size();
+        data_pool.resize(begin + LdpcPacketFraming::kControlSymbols);
+        LdpcPacketFraming::write_control_qpsk(hdr, data_pool.data() + begin);
 
         if (_link_cfg.uplink.idle_waveform != kUplinkIdleWaveformRandomQpsk) {
             return;
@@ -545,9 +717,14 @@ private:
         }
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(len);
         const size_t packet_qpsk = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
-        if (packet_qpsk > _layout.payload_re_count) {
+        // Capacity after per-period Identity SIB reservation (mirrors BS DL).
+        const size_t effective_re = _effective_user_payload_re();
+        if (packet_qpsk > effective_re) {
             LOG_RT_WARN_HZ_M(UlTx, 2) << "[UL-TX] dropping payload: " << packet_qpsk
-                              << " qpsk syms > capacity " << _layout.payload_re_count;
+                              << " qpsk syms > effective capacity " << effective_re
+                              << " (raw=" << _layout.payload_re_count
+                              << ", identity_sib="
+                              << LdpcPacketFraming::kIdentityControlSymbols << ")";
             return false;
         }
 
@@ -608,7 +785,25 @@ private:
     }
 
     // ---- Build one uplink frame's IQ into period_buffer at the UL window ----
-    void _build_period_buffer(AlignedVector& period_buffer) {
+    void _build_period_buffer(QueuedUlPeriod& period) {
+        const AirFrameTxGate::Claim claim = _air_frame_gate.claim_period();
+        period.identity = claim.identity;
+        period.generation = claim.generation;
+        {
+            const uint64_t n =
+                _period_claim_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 8 || (n % 512) == 0) {
+                LOG_RT_INFO_M(AirFrame)
+                    << "[AirFrame][UL-TX] claim period"
+                    << ": n=" << n
+                    << ", valid=" << period.identity.valid
+                    << ", epoch=0x" << std::hex << period.identity.timeline_epoch
+                    << std::dec
+                    << ", seq=" << period.identity.frame_seq
+                    << ", period_gen=" << period.generation;
+            }
+        }
+        AlignedVector& period_buffer = period.samples;
         // The period buffers come from the pool zero-initialized and the only
         // region ever written is the UL window [_window_offset, +_window_samples),
         // which the symbol loop below overwrites in full every frame (the ctor
@@ -618,19 +813,27 @@ private:
         // fill over the (large) full period is needed. If a future layout leaves
         // gaps inside the UL window, re-add a window-scoped zeroing here.
 
-        // Pull payload packets up to one frame's payload capacity.
         AlignedIntVector& data_pool = _data_pool;
         data_pool.clear();
         data_pool.reserve(_layout.payload_re_count);
-        while (data_pool.size() < _layout.payload_re_count) {
+
+        // Freeze the claimed target air slot into this period's samples. The TX
+        // hard gate verifies the same identity and generation before sending.
+        const size_t sib_syms = _inject_identity_sib(data_pool, period.identity);
+        const size_t max_re = _layout.payload_re_count;
+        const size_t effective_user_re = (max_re > sib_syms) ? (max_re - sib_syms) : 0;
+
+        // Pull payload packets into the remaining capacity after Identity SIB.
+        while (data_pool.size() < max_re) {
             AlignedIntVector* slot = _packet_buffer.consumer_slot();
             if (slot == nullptr) break;
-            const size_t room = _layout.payload_re_count - data_pool.size();
+            const size_t room = max_re - data_pool.size();
             if (slot->size() > room) {
-                if (slot->size() > _layout.payload_re_count) {
-                    LOG_RT_WARN_M(UlTx) << "[UL-TX] encoded packet exceeds frame capacity; "
+                if (slot->size() > effective_user_re) {
+                    LOG_RT_WARN_M(UlTx) << "[UL-TX] encoded packet exceeds effective frame capacity; "
                                   << "dropping queue head: qpsk_syms=" << slot->size()
-                                  << ", capacity=" << _layout.payload_re_count;
+                                  << ", effective_user_re=" << effective_user_re
+                                  << ", raw=" << max_re;
                     _packet_buffer.consumer_pop();  // oversized: drop to avoid stall
                 }
                 break;
@@ -638,7 +841,8 @@ private:
             data_pool.insert(data_pool.end(), slot->begin(), slot->end());
             _packet_buffer.consumer_pop();
         }
-        if (data_pool.empty()) {
+        // Only SIB (or empty): pad with idle control / random QPSK.
+        if (data_pool.size() <= sib_syms) {
             _append_idle_symbols(data_pool);
         }
 
@@ -684,7 +888,7 @@ private:
      */
     size_t _prefill_period_queue() {
         size_t filled = 0;
-        while (AlignedVector* slot = _period_queue.producer_slot()) {
+        while (QueuedUlPeriod* slot = _period_queue.producer_slot()) {
             _build_period_buffer(*slot);
             _period_queue.producer_commit();
             ++filled;
@@ -705,7 +909,7 @@ private:
         // Hard-RT is _tx_proc sample send only.
         SPSCBackoff backoff;
         while (_running.load(std::memory_order_relaxed)) {
-            AlignedVector* frame = _period_queue.producer_slot();
+            QueuedUlPeriod* frame = _period_queue.producer_slot();
             if (frame == nullptr) {
                 backoff.pause();
                 continue;
@@ -764,8 +968,15 @@ private:
                 }
                 applied_shift_samples = 0;
                 first = true;
-                // Drop stale periods; TX will inject blank periods until mod refills.
-                // Only the mod thread may produce into the queue (SPSC contract).
+                // Restart invalidates prior absolute-frame timing history.
+                clear_ul_tx_timing_history();
+                // Generation cancellation also invalidates a producer-held slot
+                // that has not reached producer_commit() yet. Queue clear alone
+                // cannot cancel that in-flight modulation work.
+                const AirFrameIdentity restart_identity =
+                    _air_frame_gate.cancel_and_reanchor(
+                        next_ticks,
+                        _rx_alignment_shift.load(std::memory_order_acquire));
                 const size_t dropped_periods = _period_queue.size();
                 _period_queue.clear();
                 if (dropped_periods > 0) {
@@ -778,7 +989,11 @@ private:
                 if (LOG_MOD_ON(UlTx)) {
                     LOG_RT_WARN_M(UlTx) << "[UL-TX] timed TX restart scheduled at "
                                   << radio::TimeSpec::from_ticks(next_ticks, _tick_rate).get_real_secs()
-                                  << " s";
+                                  << " s, target_epoch=" << restart_identity.timeline_epoch
+                                  << ", target_seq=" << restart_identity.frame_seq
+                                  << ", identity_valid=" << restart_identity.valid
+                                  << ", period_generation="
+                                  << _air_frame_gate.generation();
                 }
                 if (LOG_MOD_ON(Recovery)) {
                     LOG_RT_WARN_M(Recovery) << "[UL-TX recovery] restart_seen restart_epoch="
@@ -796,14 +1011,160 @@ private:
                 }
             }
 
-            AlignedVector* frame = _period_queue.consumer_slot();
-            const bool has_frame = (frame != nullptr);
-            // Like BS blank-frame path: if the queue is empty, still submit one
-            // full period (zeros) so the USRP never starves. Modulation may be
-            // catching up after restart or under load.
-            const AlignedVector& period_src = has_frame ? *frame : _blank_period_frame;
-            if (!has_frame) {
-                LOG_RT_WARN_HZ_M(UlTx, 5) << "[UL-TX] blank period injected (period queue empty)";
+            uint64_t gate_generation = _air_frame_gate.generation();
+            AirFrameIdentity expected_identity = _use_timed_tx
+                ? _air_frame_gate.identity_for_grid_ticks(
+                      next_ticks,
+                      _rx_alignment_shift.load(std::memory_order_acquire))
+                : AirFrameIdentity{};
+            QueuedUlPeriod* selected_period = nullptr;
+            bool held_future_period = false;
+
+            // Hard gate the modulated identity against this nominal TX grid
+            // slot. Timing advance shifts the physical samples, but does not
+            // change which absolute air-frame period owns the UL window.
+            while (_running.load(std::memory_order_relaxed)) {
+                QueuedUlPeriod* candidate = _period_queue.consumer_slot();
+                if (candidate == nullptr) {
+                    break;
+                }
+
+                const uint64_t live_generation = _air_frame_gate.generation();
+                if (live_generation != gate_generation) {
+                    gate_generation = live_generation;
+                    expected_identity = _use_timed_tx
+                        ? _air_frame_gate.identity_for_grid_ticks(
+                              next_ticks,
+                              _rx_alignment_shift.load(std::memory_order_acquire))
+                        : AirFrameIdentity{};
+                    continue;
+                }
+                const AirFrameTxGate::Decision decision =
+                    AirFrameTxGate::classify(
+                        candidate->identity,
+                        candidate->generation,
+                        expected_identity,
+                        gate_generation,
+                        _use_timed_tx);
+                if (decision == AirFrameTxGate::Decision::CancelledGeneration) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 20)
+                        << "[AirFrame][UL-TX] hard-gate mismatch: cancelled generation"
+                        << ": queued_generation=" << candidate->generation
+                        << ", live_generation=" << gate_generation
+                        << ", queued_epoch=0x" << std::hex
+                        << candidate->identity.timeline_epoch << std::dec
+                        << ", queued_seq=" << candidate->identity.frame_seq;
+                    _period_queue.consumer_pop();
+                    continue;
+                }
+
+                if (decision == AirFrameTxGate::Decision::InvalidIdentity ||
+                    decision == AirFrameTxGate::Decision::EpochMismatch ||
+                    decision == AirFrameTxGate::Decision::Stale) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 20)
+                        << "[AirFrame][UL-TX] hard-gate mismatch: stale/epoch"
+                        << ": queued_epoch=0x" << std::hex
+                        << candidate->identity.timeline_epoch
+                        << ", expected_epoch=0x" << expected_identity.timeline_epoch
+                        << std::dec
+                        << ", queued_seq=" << candidate->identity.frame_seq
+                        << ", expected_seq=" << expected_identity.frame_seq
+                        << ", generation=" << gate_generation;
+                    _period_queue.consumer_pop();
+                    continue;
+                }
+                if (decision == AirFrameTxGate::Decision::Future) {
+                    held_future_period = true;
+                    break;
+                }
+
+                selected_period = candidate;
+                break;
+            }
+
+            if (held_future_period) {
+                const uint64_t n =
+                    _gate_hold_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 16 || (n % 256) == 0) {
+                    QueuedUlPeriod* head = _period_queue.consumer_slot();
+                    LOG_RT_INFO_M(AirFrame)
+                        << "[AirFrame][UL-TX] hard-gate HOLD future"
+                        << ": n=" << n
+                        << ", expected_epoch=0x" << std::hex
+                        << expected_identity.timeline_epoch << std::dec
+                        << ", expected_seq=" << expected_identity.frame_seq
+                        << ", queued_seq="
+                        << (head ? head->identity.frame_seq : 0)
+                        << ", generation=" << gate_generation;
+                }
+            }
+
+            // Final send commit is serialized with stamp/generation updates.
+            // Keep a rejected queue head in place; the next slot iteration will
+            // either discard it as stale or match it against the refreshed grid.
+            if (selected_period != nullptr) {
+                const AirFrameTxGate::GateSnapshot commit =
+                    _air_frame_gate.validate_for_send(
+                        selected_period->identity,
+                        selected_period->generation,
+                        next_ticks,
+                        _rx_alignment_shift.load(std::memory_order_acquire),
+                        _use_timed_tx);
+                gate_generation = commit.generation;
+                expected_identity = commit.expected;
+                if (commit.decision != AirFrameTxGate::Decision::Match) {
+                    LOG_RT_WARN_HZ_M(AirFrame, 20)
+                        << "[AirFrame][UL-TX] hard-gate mismatch: final-commit reject"
+                        << ": decision="
+                        << AirFrameTxGate::decision_name(commit.decision)
+                        << ", queued_seq=" << selected_period->identity.frame_seq
+                        << ", expected_seq=" << commit.expected.frame_seq
+                        << ", queued_gen=" << selected_period->generation
+                        << ", live_gen=" << commit.generation;
+                    selected_period = nullptr;
+                }
+            }
+            const bool has_frame = (selected_period != nullptr);
+            const AlignedVector& period_src = has_frame
+                ? selected_period->samples
+                : _blank_period_frame;
+            if (has_frame) {
+                const uint64_t n =
+                    _gate_match_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 16 || (n % 512) == 0) {
+                    LOG_RT_INFO_M(AirFrame)
+                        << "[AirFrame][UL-TX] hard-gate MATCH send"
+                        << ": n=" << n
+                        << ", epoch=0x" << std::hex
+                        << selected_period->identity.timeline_epoch << std::dec
+                        << ", seq=" << selected_period->identity.frame_seq
+                        << ", period_gen=" << selected_period->generation
+                        << ", expected_seq=" << expected_identity.frame_seq
+                        << ", matches=" << n
+                        << ", holds="
+                        << _gate_hold_count.load(std::memory_order_relaxed)
+                        << ", blanks="
+                        << _gate_blank_count.load(std::memory_order_relaxed)
+                        << ", sib_injected="
+                        << _identity_sib_injected.load(std::memory_order_relaxed);
+                }
+            } else {
+                const uint64_t n =
+                    _gate_blank_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                // Abnormal under steady lock — WARN every event (rate-capped for RT).
+                LOG_RT_WARN_HZ_M(AirFrame, 50)
+                    << "[AirFrame][UL-TX] hard-gate BLANK"
+                    << ": n=" << n
+                    << (held_future_period ? " (holding future)" : " (empty/stale/mismatch)")
+                    << ", expected_valid=" << expected_identity.valid
+                    << ", expected_epoch=0x" << std::hex
+                    << expected_identity.timeline_epoch << std::dec
+                    << ", expected_seq=" << expected_identity.frame_seq
+                    << ", generation=" << gate_generation
+                    << ", matches="
+                    << _gate_match_count.load(std::memory_order_relaxed)
+                    << ", holds="
+                    << _gate_hold_count.load(std::memory_order_relaxed);
             }
 
             const int32_t timing_advance_samples =
@@ -819,19 +1180,42 @@ private:
                 static_cast<int64_t>(rx_alignment_shift_samples);
             const int64_t applied_shift_before = applied_shift_samples;
             const uint64_t period_seq = ++tx_period_seq;
+
+            // Absolute-frame UL-TX timing history for eRTM stale-UL compensation.
+            // Timed path: hard-gate expected identity. Sim/non-timed path: the
+            // selected period's stamped identity (no TX grid tick mapping).
+            const AirFrameIdentity& timing_identity =
+                (_use_timed_tx || !has_frame)
+                    ? expected_identity
+                    : selected_period->identity;
+            if (timing_identity.valid && timing_identity.timeline_epoch != 0) {
+                _maybe_publish_ul_tx_timing_state(
+                    static_cast<uint32_t>(
+                        AirFrameClock::ota_epoch32(timing_identity.timeline_epoch)),
+                    timing_identity.frame_seq,
+                    gate_generation,
+                    timing_advance_samples,
+                    rx_alignment_shift_samples,
+                    /*continuous_stream=*/!first,
+                    /*boundary_shift_pending=*/
+                        !first && target_shift_samples != applied_shift_before);
+            }
+
             if (_use_timed_tx) {
                 if (first) {
                     // A new burst can use timed metadata for the initial alignment.
-                    // Later in the same continuous burst, metadata follows the
-                    // target and the sample count change moves the real boundary.
+                    // Later periods omit timed metadata; sample-count changes
+                    // move the real boundary within the continuous stream.
                     applied_shift_samples = target_shift_samples;
                 }
-                md.has_time_spec = true;
+                md.has_time_spec = first;
                 md.start_of_burst = first;
                 md.end_of_burst = false;
-                md.time_spec = radio::TimeSpec::from_ticks(
-                    next_ticks - _samples_to_ticks(target_shift_samples),
-                    _tick_rate);
+                if (md.has_time_spec) {
+                    md.time_spec = radio::TimeSpec::from_ticks(
+                        next_ticks - _samples_to_ticks(target_shift_samples),
+                        _tick_rate);
+                }
                 next_ticks += period_ticks;
             } else {
                 md.has_time_spec = false;
@@ -856,6 +1240,14 @@ private:
                                   << ", restart_epoch=" << active_restart_epoch
                                   << ", first=" << first
                                   << ", blank=" << !has_frame
+                                  << ", expected_identity_valid=" << expected_identity.valid
+                                  << ", expected_epoch=" << expected_identity.timeline_epoch
+                                  << ", expected_seq=" << expected_identity.frame_seq
+                                  << ", queued_epoch="
+                                  << (has_frame ? selected_period->identity.timeline_epoch : 0)
+                                  << ", queued_seq="
+                                  << (has_frame ? selected_period->identity.frame_seq : 0)
+                                  << ", period_generation=" << gate_generation
                                   << ", md_time="
                                   << (md.has_time_spec ? md.time_spec.get_real_secs() : -1.0)
                                   << ", target_shift=" << target_shift_samples
@@ -894,6 +1286,12 @@ private:
             }
             if (has_frame) {
                 _period_queue.consumer_pop();
+            } else if (_use_timed_tx && expected_identity.valid &&
+                       _air_frame_gate.generation() == gate_generation) {
+                // Queue starvation must not leave the producer claim cursor
+                // permanently behind the air timeline.
+                _air_frame_gate.advance_claim_past(
+                    expected_identity, gate_generation);
             }
         }
         radio::TxMetadata eob_md;
@@ -914,6 +1312,95 @@ private:
                static_cast<int64_t>(_rx_alignment_shift.load(std::memory_order_relaxed));
     }
 
+    void _maybe_publish_ul_tx_timing_state(
+        uint32_t timeline_epoch,
+        uint64_t current_frame_seq,
+        uint64_t period_generation,
+        int32_t tadv_samples,
+        int32_t rx_alignment_shift_samples,
+        bool continuous_stream,
+        bool boundary_shift_pending)
+    {
+        if (timeline_epoch == 0) {
+            return;
+        }
+        // Stable periods are the common case. Avoid putting std::mutex on every
+        // highest-priority TX iteration; the locked path rechecks before publish.
+        if (_timing_history_fast_valid.load(std::memory_order_acquire) &&
+            _timing_history_fast_epoch.load(std::memory_order_relaxed) == timeline_epoch &&
+            _timing_history_fast_tadv.load(std::memory_order_relaxed) == tadv_samples &&
+            _timing_history_fast_alignment.load(std::memory_order_relaxed) ==
+                rx_alignment_shift_samples) {
+            return;
+        }
+        bool should_log_publish = false;
+        size_t log_n = 0;
+        uint64_t log_effective_from = 0;
+        bool log_continuous_shift_change = false;
+        {
+            std::lock_guard<std::mutex> lock(_timing_history_mutex);
+            const bool component_changed =
+                !_timing_history_has_last ||
+                _timing_history_last.timeline_epoch != timeline_epoch ||
+                _timing_history_last.tadv_samples != tadv_samples ||
+                _timing_history_last.rx_alignment_shift_samples !=
+                    rx_alignment_shift_samples;
+            if (!component_changed) {
+                _timing_history_fast_epoch.store(
+                    timeline_epoch, std::memory_order_relaxed);
+                _timing_history_fast_tadv.store(tadv_samples, std::memory_order_relaxed);
+                _timing_history_fast_alignment.store(
+                    rx_alignment_shift_samples, std::memory_order_relaxed);
+                _timing_history_fast_valid.store(true, std::memory_order_release);
+                return;
+            }
+            // First timed burst applies to the current frame. In a continuous burst,
+            // aggregate shift changes move the next boundary; component changes whose
+            // TADV/Alignment deltas cancel apply to the current frame.
+            const bool continuous_shift_change =
+                continuous_stream && boundary_shift_pending;
+            const uint64_t effective_from_frame =
+                ul_tx_timing_effective_from_frame(
+                    current_frame_seq, continuous_stream, boundary_shift_pending);
+
+            const size_t idx = _timing_history_count % kUlTxTimingHistoryCapacity;
+            UlTxTimingStateEntry& slot = _timing_history[idx];
+            slot.timeline_epoch = timeline_epoch;
+            slot.effective_from_frame = effective_from_frame;
+            slot.period_generation = period_generation;
+            slot.tadv_samples = tadv_samples;
+            slot.rx_alignment_shift_samples = rx_alignment_shift_samples;
+            ++_timing_history_count;
+            _timing_history_last = slot;
+            _timing_history_has_last = true;
+            _timing_history_fast_epoch.store(timeline_epoch, std::memory_order_relaxed);
+            _timing_history_fast_tadv.store(tadv_samples, std::memory_order_relaxed);
+            _timing_history_fast_alignment.store(
+                rx_alignment_shift_samples, std::memory_order_relaxed);
+            _timing_history_fast_valid.store(true, std::memory_order_release);
+
+            // Snapshot log fields under the lock; emit after unlock so the
+            // highest-priority TX path never holds this mutex across logging.
+            log_n = _timing_history_count;
+            log_effective_from = effective_from_frame;
+            log_continuous_shift_change = continuous_shift_change;
+            should_log_publish =
+                LOG_MOD_ON(Ertm) && (log_n <= 16 || (log_n % 64) == 0);
+        }
+        if (should_log_publish) {
+            LOG_G_INFO_M(Ertm)
+                << "[eRTM] UL-TX timing state publish"
+                << ": n=" << log_n
+                << ", epoch=0x" << std::hex << timeline_epoch << std::dec
+                << ", effective_from_frame=" << log_effective_from
+                << ", tadv=" << tadv_samples
+                << ", rx_alignment=" << rx_alignment_shift_samples
+                << ", period_gen=" << period_generation
+                << ", continuous_shift_change=" << log_continuous_shift_change
+                << ", boundary_shift_pending=" << boundary_shift_pending;
+        }
+    }
+
     long long _samples_to_ticks(int64_t samples) const {
         if (!_use_timed_tx || _tick_rate <= 0.0 || _tx_sample_rate <= 0.0) {
             return samples;
@@ -922,32 +1409,32 @@ private:
             static_cast<double>(samples) * _tick_rate / _tx_sample_rate));
     }
 
-    size_t _send_samples(
+    size_t _send_samples_once(
         const std::complex<float>* data,
         size_t sample_count,
         const radio::TxMetadata& first_md)
     {
+        if (sample_count == 0) {
+            return 0;
+        }
+        // UHD handles transport-packet fragmentation internally. Do not retry a
+        // short return here: a second application call would no longer be the
+        // same one-frame transaction.
+        if (_use_timed_tx) {
+            return _tx_stream->send(data, sample_count, first_md, 0.1);
+        }
+
+        // Untimed mode is the shared-memory simulator. Preserve backpressure
+        // retries there; this does not create additional UHD calls.
         size_t sent_total = 0;
         radio::TxMetadata md = first_md;
-        // Hard-RT TX path: never yield/sleep on short send. UHD may block inside
-        // send() up to the timeout while waiting for device buffer space; when it
-        // returns 0 we stay on-core and retry with a CPU relax only.
         SPSCBusySpin spin;
         while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
             const size_t sent = _tx_stream->send(
-                data + sent_total,
-                sample_count - sent_total,
-                md,
-                0.1);
+                data + sent_total, sample_count - sent_total, md, 0.1);
             if (sent == 0) {
                 spin.pause();
-                // Safety valve: if the device never accepts samples, surface a
-                // short-send rather than spinning forever (caller increments
-                // tx_error_count / recovery). Bound is large enough that normal
-                // buffer-full waits still retry many times.
-                if (spin.spins() >= 10'000'000u) {
-                    break;
-                }
+                if (spin.spins() >= 10'000'000u) break;
                 continue;
             }
             spin.reset();
@@ -956,41 +1443,6 @@ private:
             md.start_of_burst = false;
         }
         return sent_total;
-    }
-
-    size_t _send_zeros(size_t sample_count, const radio::TxMetadata& first_md) {
-        size_t sent_total = 0;
-        radio::TxMetadata md = first_md;
-        while (sent_total < sample_count && _running.load(std::memory_order_relaxed)) {
-            const size_t chunk = std::min(_timing_pad_buffer.size(), sample_count - sent_total);
-            const size_t sent = _send_samples(_timing_pad_buffer.data(), chunk, md);
-            sent_total += sent;
-            md.has_time_spec = false;
-            md.start_of_burst = false;
-            if (sent < chunk) {
-                break;
-            }
-        }
-        return sent_total;
-    }
-
-    size_t _send_period_samples(
-        const AlignedVector& frame,
-        size_t sample_offset,
-        size_t sample_count,
-        const radio::TxMetadata& first_md)
-    {
-        if (sample_offset >= frame.size() || sample_count == 0) {
-            return 0;
-        }
-        const size_t frame_end = sample_count >= (frame.size() - sample_offset)
-            ? frame.size()
-            : (sample_offset + sample_count);
-        const size_t bounded_count = frame_end - sample_offset;
-        if (_waveform_enabled.load(std::memory_order_acquire)) {
-            return _send_samples(frame.data() + sample_offset, bounded_count, first_md);
-        }
-        return _send_zeros(bounded_count, first_md);
     }
 
     SendResult _send_period_with_stream_shift(
@@ -1003,8 +1455,13 @@ private:
         result.expected_samples = _period_samples;
         result.complete = true;
 
-        int64_t delta = target_shift_samples - applied_shift_samples;
-        radio::TxMetadata frame_md = first_md;
+        const int64_t delta = target_shift_samples - applied_shift_samples;
+        const bool waveform_enabled =
+            _waveform_enabled.load(std::memory_order_acquire);
+        const std::complex<float>* send_data = waveform_enabled
+            ? frame.data()
+            : _blank_period_frame.data();
+        size_t send_samples = frame.size();
 
         if (delta < 0) {
             const size_t insert_samples = static_cast<size_t>(-delta);
@@ -1015,22 +1472,22 @@ private:
                                   << target_shift_samples << ", applied_shift="
                                   << target_shift_samples << ")";
             }
-            const size_t sent = _send_period_samples(frame, 0, frame.size(), frame_md);
-            result.sent_samples += sent;
-            if (sent < frame.size()) {
+            if (frame.size() + insert_samples > _tx_frame_buffer.size()) {
                 result.complete = false;
                 return result;
             }
-            frame_md.has_time_spec = false;
-            frame_md.start_of_burst = false;
-            const size_t inserted = _send_zeros(insert_samples, frame_md);
-            result.sent_samples += inserted;
-            if (inserted < insert_samples) {
-                result.complete = false;
-                return result;
+            if (waveform_enabled) {
+                std::copy(frame.begin(), frame.end(), _tx_frame_buffer.begin());
+            } else {
+                std::fill_n(
+                    _tx_frame_buffer.begin(), frame.size(), std::complex<float>(0.0f, 0.0f));
             }
-            applied_shift_samples = target_shift_samples;
-            return result;
+            std::fill_n(
+                _tx_frame_buffer.begin() + static_cast<std::ptrdiff_t>(frame.size()),
+                insert_samples,
+                std::complex<float>(0.0f, 0.0f));
+            send_data = _tx_frame_buffer.data();
+            send_samples = frame.size() + insert_samples;
         } else if (delta > 0) {
             const size_t skip_samples = std::min<size_t>(
                 static_cast<size_t>(delta),
@@ -1047,22 +1504,14 @@ private:
                 applied_shift_samples += static_cast<int64_t>(skip_samples);
                 return result;
             }
-            const size_t sent = _send_period_samples(
-                frame,
-                0,
-                frame.size() - skip_samples,
-                frame_md);
-            result.sent_samples += sent;
-            result.complete = (sent == frame.size() - skip_samples);
-            if (result.complete) {
-                applied_shift_samples += static_cast<int64_t>(skip_samples);
-            }
-            return result;
+            send_samples = frame.size() - skip_samples;
         }
 
-        const size_t sent = _send_period_samples(frame, 0, frame.size(), frame_md);
-        result.sent_samples += sent;
-        result.complete = (sent == frame.size());
+        result.sent_samples = _send_samples_once(send_data, send_samples, first_md);
+        result.complete = (result.sent_samples == send_samples);
+        if (result.complete && delta != 0) {
+            applied_shift_samples = target_shift_samples;
+        }
         return result;
     }
 
@@ -1085,11 +1534,12 @@ private:
     static constexpr size_t kPeriodQueueDepth = 8;
 
     const size_t _period_samples;
+    AirFrameTxGate _air_frame_gate;
     const size_t _window_offset;
     const size_t _window_samples;
-    SPSCRingBuffer<AlignedVector> _period_queue;
+    SPSCRingBuffer<QueuedUlPeriod> _period_queue;
     std::complex<float> _eob_sample{0.0f, 0.0f};
-    AlignedVector _timing_pad_buffer;
+    AlignedVector _tx_frame_buffer;  // frame plus up to one frame of timing padding
     AlignedVector _blank_period_frame;  // zeros; injected when period queue is empty
 
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
@@ -1130,6 +1580,30 @@ private:
     std::atomic<int32_t> _rx_alignment_shift{0};
     std::atomic<uint64_t> _rx_alignment_update_id{0};
     std::atomic<uint64_t> _rx_alignment_restart_epoch{0};
+
+    // Absolute-frame indexed UL-TX timing change history (eRTM compensation).
+    // Capacity covers engineering-scale TADV/Alignment change counts; if an
+    // old entry is overwritten while still referenced by a cached ERTM5, the
+    // UE must skip that report rather than guess current state.
+    // POD history access is serialized by _timing_history_mutex. The TX-only
+    // atomic mirror skips the lock while the published components are unchanged.
+    static constexpr size_t kUlTxTimingHistoryCapacity = 64;
+    UlTxTimingStateEntry _timing_history[kUlTxTimingHistoryCapacity]{};
+    size_t _timing_history_count = 0;
+    mutable std::mutex _timing_history_mutex;
+    bool _timing_history_has_last = false;
+    UlTxTimingStateEntry _timing_history_last{};
+    std::atomic<bool> _timing_history_fast_valid{false};
+    std::atomic<uint32_t> _timing_history_fast_epoch{0};
+    std::atomic<int32_t> _timing_history_fast_tadv{0};
+    std::atomic<int32_t> _timing_history_fast_alignment{0};
+    std::atomic<uint64_t> _identity_sib_injected{0};  ///< Periods with valid DL stamp
+    std::atomic<uint64_t> _identity_sib_unlocked{0};  ///< Periods with zero/invalid stamp
+    std::atomic<uint64_t> _stamp_update_count{0};
+    std::atomic<uint64_t> _period_claim_count{0};
+    std::atomic<uint64_t> _gate_match_count{0};
+    std::atomic<uint64_t> _gate_hold_count{0};
+    std::atomic<uint64_t> _gate_blank_count{0};
     std::atomic<uint64_t> _scheduled_restart_epoch{0};
     std::atomic<uint64_t> _submitted_restart_epoch{0};
     std::atomic<bool> _waveform_enabled{false};

@@ -7,7 +7,7 @@ description: 在 macOS 上安装依赖、构建 CPU 版本并运行 Python 感�
 
 使用前请注意：
 
-- `isolate_cpus.bash` 等实时调优脚本仅支持 Linux。
+- `isolate_cpus.py` 等实时调优脚本仅支持 Linux。
 - UHD 只保留一套安装来源，不要在同一个 shell 环境中混用 Homebrew 和 MacPorts 版本。
 - 涉及 UHD、USRP、实时调度、USB 传输或网络吞吐的功能，最终应在实际运行 UHD 的 Linux 主机上验证。
 

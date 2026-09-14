@@ -11,6 +11,8 @@ chmod +x scripts/set_performance.bash
 ./scripts/set_performance.bash
 ```
 
+该脚本负责 socket buffer、网卡 ring 和 MTU、CPU 频率策略及实时 throttling。网卡 combined 队列、RSS/XPS 分流和 IRQ affinity 统一由 `scripts/isolate_cpus.py` 的第二级菜单处理，避免两套脚本互相覆盖。
+
 > **注意:** 如果您需要启用 `RT_RUNTIME_SHARE` 功能，则需要在 BIOS 设置中关闭 `secure_boot`。
 
 当 UHD 生成新线程时，它可能会尝试提高线程的调度优先级。如果设置新优先级失败，UHD 软件将向控制台打印警告，如下所示：

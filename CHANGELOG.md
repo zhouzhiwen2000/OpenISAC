@@ -2,11 +2,266 @@
 
 本文件记录 OpenISAC 的重要更新。
 
-当前从以下提交开始整理：
+当前从以下公开版本开始整理：
 
-- Commit: `fe0ee68b67d6621ed22c3eaa71d1de0a7490ce3c`
+- Public baseline: [fe0ee68b67d6621ed22c3eaa71d1de0a7490ce3c](https://github.com/zhouzhiwen2000/OpenISAC/commit/fe0ee68b67d6621ed22c3eaa71d1de0a7490ce3c)
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
+
+## 2026-09-15 - 感知物理坐标与 backend viewer 修复
+
+### Summary
+
+修复 backend sensing viewer 缺失的目标区域范围回调，恢复窗口正常初始化。fast/backend viewer 统一使用 Doppler Hz、单站距离 m、双站相对时延 ns 和微多普勒时间 s；坐标换算使用原始 OFDM FFT、CP、实际 sensing stride 与处理 FFT 长度，并保持裁剪、补零和显示降采样下的标定一致。物理坐标相对于当前同步／系统时延对齐参考。
+
+感知参数协议统一为 V9（104 字节），CPU、CUDA、ROCm 发送端同步更新，viewer 拒绝旧版／未知参数包；非均匀子载波集合不伪造物理距离。Doppler 坐标与回调修复参考 philippaPA/OpenISAC 的 `cca9d5e` 和 `9b630f3`，扩展为共用坐标逻辑与单站／双站物理单位。
+
+## 2026-08-05 - 系统时延校准日志绕过日志 gate
+
+### Summary
+
+当感知通道设置 `enable_system_delay_estimation: true` 时，CPU、CUDA 和 ROCm 的 `SYSDLY` 校准消息现在绕过模块日志过滤和实时调用点限流，确保校准建议值持续可见。
+
+## 2026-07-29 - 稳定 UHD 定时发送并保留网卡多队列
+
+### Summary
+
+CPU、CUDA 与 ROCm 的 BS 下行及 UE 上行 UHD 路径改为每个连续 burst 只在首个 `send()` 上设置 `has_time_spec`；正常连续帧依靠样本数推进时间，underflow/restart 后的新 burst 再提交一次绝对时间戳，避免一次启动抖动被后续逐帧时间戳放大为持续 `TIME_ERROR`。`isolate_cpus.py` 的单核 IRQ 隔离模式不再把高速网卡压缩为一个 combined 队列，而是默认保留当前队列数；只有显式传入 `--nic-combined N` 或选择双队列 RX/TX 分流时才修改队列数。旧 `isolate_cpus.bash` 包装器已删除，benchmark 与文档统一直接调用 `isolate_cpus.py`。
+
+## 2026-07-29 - UHD 收发统一为整帧调用
+
+### Summary
+
+CPU、CUDA 与 ROCm 的 BS/UE 下行、上行及感知路径统一以完整业务帧调用一次 UHD `send()`/`recv()`，不再按 streamer 最大 packet samples 分块或在应用层拼接短返回；UHD 继续在内部完成传输包分片。短收发直接丢弃当前帧并进入现有恢复，定时补零先写入预分配缓冲区后单次发送；共享内存仿真后端保留背压重试。
+
+## 2026-07-29 - 将网卡 IRQ 隔离与收发分流并入 CPU 隔离流程
+
+### Summary
+
+`isolate_cpus.py` 在发现任意内核 `isolcpus` 逻辑核时新增第二级菜单，可选择跳过网卡调优或进行 IRQ 隔离；只有至少两个可用的隔离物理核心时才显示双 combined 队列 RX/TX 分流，将 RX 固定到 queue 0、将 BS/UE YAML 中的 USRP TX 线程固定到 queue 1。IRQ 隔离默认保留当前 combined 队列数，仅在显式传入 `--nic-combined N` 或选择双队列分流时修改；IRQ 核优先选择不同物理核心，并将实际 IRQ CPU 及其 SMT 同胞同时从系统 slice 与后端进程 `AllowedCPUs` 中排除。`set_performance.bash` 不再修改 combined 队列、RSS/XPS、IRQ affinity 或 `irqbalance`，仅保留通用主机、ring 和 MTU 调优，避免两套脚本互相覆盖。
+
+## 2026-07-28 - 增加 Fast FLL 半步控制模式
+
+### Summary
+
+OCXO Fast FLL 新增 `ocxo_fll_fast_control_mode: pi | half_step`。默认 `pi` 保持原 velocity-form PI；`half_step` 不使用 PI 历史，每个 Fast 更新周期直接请求当前 frequency error 的一半，仍受 Fast loop slew、全局 actuator slew 和 DAC command 范围限制。现有默认更新周期保持 0.5 秒，CPU、CUDA 与 HIP UE 共用同一控制状态机和配置解析。
+
+## 2026-07-28 - 短时重新同步保持 OCXO 控制阶段
+
+### Summary
+
+CPU、CUDA 与 HIP UE 在运行中因 delay tracking reset 重新搜索同步时，不再立即把 OCXO discipliner 重置到 Fast。控制器会冻结 reset 前的 Coarse/FllFast/FllSlow/Phase 阶段、控制历史和 DAC command；30 秒内重新获得同步后沿用原阶段，Phase 会等待新 timeline 的有效 TO/PPS anchor 后再解冻。只有重捕获间隔超过 30 秒才执行原有 tracking reset，并重新武装 PPS Phase 对齐流程。`ToStale`、TO discontinuity/jump、frequency-source change、FLL unstable 与 Phase SFO exit 等运行时自动降级条件必须连续维持至少 10 秒才会退回 Fast；短时毛刺只暂停当帧控制，条件恢复后会清零降级计时。
+
+## 2026-07-28 - 修正实时调度继承导致的退出阻塞
+
+### Summary
+
+CPU、CUDA 与 HIP 的 BS/UE 主线程保持普通调度，并在启动引擎后才绑定 `main_cpu_core`，避免 UHD、CUDA 和 ZMQ 辅助线程继承主线程的实时策略与专用 CPU；RX、TX、调制、解调和 LDPC 等数据面线程继续在各自入口显式提升实时优先级并绑定配置核心。BS 停止流程会在任何阻塞操作和线程 join 前先通知异步 TX 线程退出，避免 Ctrl+C 清理阶段被高优先级辅助线程饿死而无法结束。
+
+## 2026-07-27 - 阻止无效 delay 峰触发 UE 错误对齐
+
+### Summary
+
+CPU、CUDA 与 HIP UE 的 delay tracking 现在只有在 delay-spectrum 峰均值有效且 `peak_ratio >= 20` 时才向 SFO estimator 提交观测或调度 RX sample alignment；BS underflow、短暂失锁或噪声帧会清空 alignment 二帧确认并继续既有 reset-hold 判定，不再把 CP 搜索窗内的随机峰放大成错误窗口移动。已实际提交的 alignment 即使其回执帧峰值无效，仍通过独立坐标更新保持 SFO/eRTM delay 连续。Quinn fractional-delay 输出同时限制到文档约定的 `[-0.5, 0.5]`，避免低质量峰产生越界小数观测。
+
+## 2026-07-25 - 收紧多设备 PPS 与 UE timed-rate 前置校验
+
+### Summary
+
+CPU、CUDA 与 HIP 的多设备 PPS 对齐现在要求所有独立 USRP 使用共享的 `external` 或 `gpsdo` 时间源，并在武装设备前拒绝 internal/空时间源；单设备 internal 对齐仍保持支持。`clock_source` 仅接受空值、`internal`、`external` 或 `gpsdo`，拼写错误会给出明确配置错误。B210 TX + X310 sensing 模板统一改用 external PPS。CPU/CUDA/HIP UE 的 timed RX/UL-TX 若设备实际采样率相差超过 1 Hz，现在会在启动任何工作线程前 hard-fail，避免上下行帧身份网格使用不同 rate authority。配置编辑器说明、双语文档、HIP 日志文案及 PPS 回归测试同步更新。
+
+## 2026-07-24 - 由 clock_source 统一触发启动 PPS 对齐
+
+### Summary
+
+CPU、CUDA 与 HIP 的 BS/UE 启动对齐规则统一为：真实 UHD 后端只要解析后的 `clock_source` 非空，就在开流前观察 PPS、执行 `set_time_next_pps(0)` 并验证 device time 复位；`time_source: internal` 也进入该路径，`time_source` 仅选择 PPS 输入。BS 多设备路径不再拒绝 internal time source，但仍保留跨设备时间一致性验证。`BS_B210Tx_X310Rx.yaml` 的全局 `time_source` 改为 `internal`，与 sensing RX 通道保持一致。
+
+## 2026-07-24 - 增加 CUDA 激进混合精度配置
+
+### Summary
+
+CUDA BS/UE 新增单一 `cuda.cuda_precision_profile` 配置；默认 `fp32` 完全保留现有数值路径，`mixed_fp16` 对上下行批量 OFDM FFT/IFFT 和 UE GPU LDPC 消息使用 FP16，同时继续以 FP32执行信道估计、Wiener、CFO/SFO、均衡、噪声与 LLR、MTI 和 sensing 处理。运行时若 cuFFT 不支持当前 FP16 变换形状会自动回退 FP32；CUDA LDPC 仅分配所选解码精度的消息工作区，编码器和控制解析器不再分配未使用的解码工作区。
+
+## 2026-07-20 - 在开流前将 USRP 设备时间对齐外部 PPS
+
+### Summary
+
+当解析后的 `time_source` 为 `external` 或 `gpsdo` 时，CPU/CUDA BS 与 UE 在非实时初始化阶段先观察一次 PPS 跳变，再把所有相关 USRP 同时武装为下一 PPS 边沿 `set_time_next_pps(0)`；BS 的空 `clock_time.time_source` 跟随 `clock_source`，TX、独立 sensing RX 与独立 uplink RX 均进入相同严格路径，UE 则在 RX/UL-TX 开流前完成且不依赖 OCXO mode。启动会轮询到各设备 time counter 确实在目标边沿回跳，再验证 `time_last_pps=0` 与跨设备 `time_now` 一致性；PPS 缺失、backend 不支持或验证失败直接报错，不再退回任意软件时刻的 `set_time_now(0)`。`gpsdo` 路径会有意将原有类 UTC device-time epoch 置零。该步骤统一设备时间零点，但不改变 X310 在 200 MHz master clock 下约 5 ns 的 PPS 边沿捕获量化分辨率。
+
+## 2026-07-20 - 增加 PPS anchor 跳变精确诊断
+
+### Summary
+
+eRTM wire format 升级为 `ERTM5`，在原有 frame/PPS anchor 之外携带 BS 原始 `time_last_pps()` ticks；UE 将该值与本机原始 PPS ns、`r_B/r_U`、tick rate 和 sample rate 一起原子发布。OCXO debug 升级为 `OCXODBG3`：原 16 路 float 通道的索引和含义保持不变，新增 typed diagnostic trailer，CSV 追加精确 `float64/int64` 字段，避免绝对 PPS timestamp 经过 `float32` 丢失低位；自动文件名按 `ocxo_debug_YYYYMMDD_01.csv`、`_02`、`_03` 顺序递增。CPU/CUDA 路径和协议回归测试保持一致，viewer 仍可读取旧 `OCXODBG2` 数据包。
+
+## 2026-07-20 - 每次重新进入 Phase 时执行一次 PPS 调相
+
+### Summary
+
+`pps_phase` 的 PPSDO AP gate 改为在每次 `FllSlow -> Phase` 转换时重新武装，并按最新有效 PPS residual 计算一次调相；同一次 Phase 停留期间保持 one-shot，普通更新和 Freeze 不会重复发送。AP pending/settling 期间继续暂停 Phase SF，旧 AP 尚在 Queued/InFlight 时等待硬件回到 Idle。CPU/CUDA 路径、配置注释、双语文档和确定性重入测试保持一致；保留 `ocxo_pps_initial_ap_*` 键名以兼容现有 YAML。
+
+## 2026-07-20 - 保持 OCXO DAC 值跨重新同步与 UE 重启连续
+
+### Summary
+
+UE/CUDAUE 普通重新同步不再把 OCXO 控制器和 DAC 强制归零，而是清理观测、误差历史和阶段状态并保留当前有效 command；执行器把 slew 时间基准延迟到重新入锁后的第一条实际非零修正，避免长 search 间隔放大首步。串口 worker 在 `SF` 收到 `OK` 后通过 temp fsync、原子 rename 和目录 fsync checkpoint raw DAC word；正常退出时先结束 worker，再保存最后一条已确认的稳态 word，不会把未确认的 queued command 当作有效值。后续 UE/CUDAUE 进程启动仅在串口设备与 DAC 标定元数据一致时恢复并重发同一 word，同时用对应 ppm 初始化控制器；损坏、不匹配或越界状态会被保留供排查，且本次运行禁止覆盖。新增 `ocxo_dac_state_file` 配置，默认写入当前工作目录的 `.openisac_ocxo_dac_state.yaml`，文件 I/O 不进入实时处理线程。
+
+## 2026-07-20 - 更新 OCXO Slow FLL 与 PPS AP 默认参数
+
+### Summary
+
+根据本轮 PPSOUT 台架数据更新 UE OCXO 默认调参：Slow FLL 使用 `kp=0.1`、`ki=0.007`、`0.005 ppm/s` 变化率上限和 `0.0005 ppm` Fast-to-Slow 阈值；初始 PPSOUT AP 保持默认开启，并把已确认的命令极性设为 `+1`。C++ 内建默认值、UE 硬件预设、台架模板、配置编辑器与双语文档保持一致。
+
+## 2026-07-20 - 按 eRTM 报告实时刷新 BS PPS anchor
+
+### Summary
+
+CPU BS/CUDABS 不再让 ERTM4 在整个 timeline epoch 内复用启动时捕获的 PPS anchor；每份达到发送条件的新 eRTM 报告在打包前重新读取 `time_last_pps()`，并把本次快照直接写入 payload。刷新位于 LDPC/eRTM 内部负载线程，不进入 TX/调制实时路径；读取失败时跳过本次报告并按配置的报告帧间隔重试。
+
+## 2026-07-20 - 修正 Mode B TO_clock 控制极性（UE 本振）
+
+### Summary
+
+台架确认：OCXO 在 UE 本振时 Mode A（CFO residual）为负反馈、极性正确；Mode B（`TO_clock` 斜率 FLL / legacy TO Phase）为正反馈。对 Mode B 控制误差取反：FLL 使用 `-to_slope`，legacy Phase 使用 `setpoint - to_clock`；原始 `to_slope_ppm` 仍作诊断；`pps_phase` 误差与 Mode A residual 不变。
+
+### Changes
+
+- `OCXODiscipliner`：`mode_b_frequency_error_ppm()` / `mode_b_to_phase_error_samples()`；Coarse/FLL 与 Phase 诊断 `frequency_error_ppm` 使用 `-to_slope`，legacy Phase/debug `to_err` 使用 `setpoint-to_clock`。
+- 更新 `test_ocxo_control.py` 中 Mode B、legacy Phase 与 PPS Phase 的正增益 plant 模型，并增加 Mode B FLL / legacy Phase 闭环收敛回归。
+
+## 2026-07-17 - 新增显式 OCXO PPS Phase 锁定模式
+
+### Summary
+
+保留 `auto`/`phase` 原有的 `TO_clock-setpoint` Phase 锁定，并新增显式 `pps_phase` 模式。BS 在初始化后发布 frame-0/PPS 纪元锚点；UE 用 eRTM `TO_UE`、下行 RF 延迟、同帧边界时间戳和 PPS 时间戳计算 `wrap_1s(P_U-P_B)`，以 0 为固定目标。PPSDO `AP` 每个同步纪元只做一次 PPSOUT 粗调，随后 PLL 继续通过 SF 连续跟踪；AP 不改变 USRP 时间轴、air-frame anchor 或 TO 状态。
+
+### Changes
+
+- eRTM wire format 升级为 `ERTM4`，增加 BS frame-0 相对 PPS 的 tick 距离、帧 tick 周期和 tick rate；拒绝缺少 PPS 锚点的 ERTM2/3，避免协议语义静默混用。
+- CPU/CUDA UE 仅在 `pps_phase` 下按 `wrap_1s(tau_DL_RF - TO_UE + r_B - r_U)` 读取和发布 PPS 相位误差；`auto`/`phase` 继续使用 `ocxo_phase_setpoint_mode` 与 `ocxo_phase_setpoint_fixed_samples`，且不读取 `time_last_pps()`。
+- UE 空 `time_source` 明确解析为 `internal`；`pps_phase` 强制 `hardware_sync=true`、`ertm_to_enable=true`，并要求 `clock_source` 与 `time_source` 都显式为 `external`，否则配置加载失败。
+- 一次性 AP 增加 enable、限幅、稳定时间、完成超时、近零 deadzone 和可台架切换的 polarity；串口队列只合并 SF，绝不丢弃 AP，`JAMSYNCING` 会重试同一请求。
+- 修复 AP 入队失败、串口无响应和 Settling 缺少 post-AP publication 会永久阻塞 Phase SF，以及 hard sync reset 后 AP 未正确重新武装的问题。AP worker 使用包含全部 `JAMSYNCING` 重试的总墙钟截止时间，截止后不再发送该 AP；Settling 超时采用有界重试，等待新观测后按残差重算 AP；旧 AP 仍 Queued/InFlight 时新同步纪元等待 Idle，不把 Busy 当作终端失败。
+- `pps_phase` 关闭初始 AP 时在配置加载阶段告警一次；AP 运行失败时 CPU/CUDA 日志会报告当前 PPS residual，并明确提示限斜率 Phase PI 可能无法快速消除大残差。
+- BS PPS 距离改为整数 tick 模运算，避免大绝对帧号在 `double` 平台丢失精度。OCXO 调试协议升级为 `OCXODBG2`，通道 7 表示当前模式的有效 Phase error。
+
+## 2026-07-16 - OCXO Coarse/FLL/Phase 分层控制与 ZeroMQ 诊断
+
+### Summary
+
+原位替换 OCXO 控制器为 `Coarse -> FllFast -> FllSlow -> Phase` 状态机：Mode A 的 Coarse/FLL 使用解模糊 residual CFO；Mode B 从 Alignment 连续化后的 eRTM `TO_clock` 斜率估计钟 SFO，避免 CFO 多普勒和 OFDM delay-track SFO 的运动分量驱动 OCXO；Phase 仅使用 `TO_clock`。控制器 command、EWMA plant 补偿和粗调剩余量只按硬件实际执行的 delta 推进；CPU/CUDA 统一发布带序号和源时间戳的 16 通道 `OCXODBG1` ZeroMQ 数据包。
+
+### Changes
+
+- normal CFO 按相邻符号相位周期选择最接近当前 tune-system CFO 的分支；Mode A OCXO 输入还需连续 3 帧通过 alias 周期 1/4 的变化门限，避免 cold-start 单点直接驱动粗调。
+- eRTM TO 原子快照增加 `A_N`、DL identity 和 sync generation；`TO_clock` 用 `delta_TO_UE - delta_A` 消除已知 Alignment 边沿，同时保留真实 SFO 斜率。
+- Mode B 的 Coarse/FLL 与 Phase 进退判据均使用 `TO_clock` 对绝对 frame sequence 的滚动线性回归估计钟 SFO；短窗用于 Coarse/FllFast，slow 窗用于 FllSlow/Phase，避免单报告差分抖动和不等报告间隔偏置。
+- Phase 改用继承 FLL command 的增量 PI（velocity form），不再把绝对 PI 输出重复当作 DAC delta 累加；新增闭环收敛测试覆盖该低频振荡回归。
+- 根据 100 MHz 硬件记录继续将默认 `ocxo_phase_kp` 调整为 `2.0e-4`，并把 Phase 进入 slope 收紧到 `2.0e-4 ppm`、Slow FLL deadzone 降到 `5.0e-5 ppm`；保持 `ki=1.0e-6`、hold 与 slew 不变，减少反向超调和带残余斜率入锁造成的首个 TO 峰值。
+- Freeze 作为纯 overlay 暂停控制计时并延后 TO jump/stale 转移；Coarse 异常退出清理目标并支持 overshoot abort；FLL 保留真实窗口样本，Phase 只在 TO 斜率有效且稳定后进入。
+- 新增 Coarse/FLL/Phase YAML、web editor schema、中英文参数文档、ZeroMQ 通道表和支持通道选择/滚动曲线/CSV 记录的 `plot_ocxo_debug.py`；控制、阶段、TO jump 和 Alignment 事件会绕过周期降采样立即发布；删除 Capture/Hold、`ocxo_freq_*` 以及旧 VOFA/FireWater UDP 支持。
+- 修复 OCXO viewer 将某个信号分组全部隐藏后再启用时图窗高度塌缩的问题；所有可见分组始终按相同 stretch 均分绘图区。
+
+## 2026-07-16 - 统一绝对帧发送门控与 eRTM 状态
+
+### Summary
+
+CPU/CUDA 共用 `AirFrameTxGate` 与 `ErtmAbsoluteFrameState`，统一帧 claim、generation、stale/future/blank 判定、eRTM 报告缓存、clear generation、`state(M)` 选择和 TO 发布；修复 CUDA 感知帧 identity 漂移及 BS 空帧 claim cursor 并发覆盖。补齐 OCXO 配置 schema 依赖，并修正 CFO EWMA 控制阶跃方向与 Mode B 绝对限幅 anti-windup。
+
+## 2026-07-15 - OCXO 控制律符号与旧 PI 对齐
+
+### Summary
+
+观测 `detected_freq_offset - tune_system_cfo` 与旧版一致（真实系统残差，便于长期把 DSP 补偿卸掉）；dual-mode 相对旧 `update_ocxo_pi_with_error_ppm` 多了一个负号，Mode A/B 命令方向反了。已改回与旧 PI 相同极性（正 residual → 正 OCXO step）。
+
+## 2026-07-15 - Alignment latch / TO 发布审查修复
+
+### Summary
+
+修复 queue-full 后 Alignment 语义不完整、TO 用 payload seq 当版本、sensing/process OCXO 数据竞争、`to_is_new` 被 control gate 吞掉、以及 RX 写 process latch 状态等问题。
+
+### Changes
+
+- **Alignment 侧信道完整语义**：RX 发布 `applied_id/samples/time`；process 在首帧 post-align 注入 SFO 与 eRTM force-remeasure，并清 latch（不依赖队列投递）。
+- **TO 发布代**：独立单调 `_ertm_latest_to_ue_pub_gen`，不再用 ERTM3 payload `seq` 判定 Mode B 新报告；`samples`/`pub_gen`/`available` 在 `_ertm_to_publish_mutex` 下一致快照读写。
+- **OCXO reanchor**：sensing 仅请求；process 统一 `reanchor_to` / age 清零。
+- **`to_is_new`**：`OCXODiscipliner::update` 在 `allow_control=false` 时仍 ingest TO unwrap/slope。
+- **线程边界**：RX stream-restart 只 bump `_process_tracking_reset_req`；latch/SFO/OCXO age 由 process 应用。
+
+## 2026-07-15 - OCXO 驯服审查修复
+
+### Summary
+
+修复 dual-mode OCXO 的六项审查问题：TO 陈旧/斜率、Mode A 观测窗、DAC 首次写入、SFO 有效位、发布 docs、计划归档。
+
+### Changes
+
+- **Mode B**：按 eRTM TO *publication generation* 累计 `to_report_age_frames` 并置 `to_is_new`（后修为独立 pub_gen，不再用 payload `seq`）；超龄回退频率环；TO 斜率仅在新报告上用真实报告间隔计算。
+- **Mode A**：观测窗必须满 `ocxo_freq_obs_window_s` 才出批，不再被 `obs_count < 2` 短路。
+- **执行器**：构造不再发默认 SF；`configure_plant()` 用标定 zero word 首次写入；未配置 plant 时忽略 apply。
+- **SFO**：`SFOEstimator::has_estimate()`，首窗回归前不参与融合。
+- 重新发布 `docs/`；计划移入 `plans/old/`。
+
+## 2026-07-15 - CFO 预滤波：Adaptive AKF → EWMA
+
+### Summary
+
+将 `AdaptiveCFOAKF` 替换为轻量 `CfoErrorEwma`，仅作 OCXO 观测预滤波；删除自适应 Q/R 与相关 YAML。
+
+### Changes
+
+- **`CfoErrorEwma`**：`filtered ← (1-α)·filtered + α·raw`，并对 OCXO 执行步进做 plant 补偿。
+- **配置**：`cfo_ewma_enable` / `cfo_ewma_alpha`（默认 `0.02`）；旧 `akf_*` 键告警忽略，`akf_enable` 可映射到 `cfo_ewma_enable`。
+
+## 2026-07-15 - OCXO 双模式驯服（MV197）
+
+### Summary
+
+移除过快的 legacy OCXO PI 路径，改为匹配精密 OCXO（MV197）慢漂移特性的双模式驯服：无 eRTM 时用 CFO+SFO 做频率对齐；eRTM TO 可用时用解卷绕 `TO_UE` 做时间/相位锁定。执行器使用标定 DAC 映射与硬斜率限制。
+
+### Changes
+
+- **`OCXODiscipliner`**（`OFDMCore.hpp`）：Mode A 频率环 / Mode B 相位环，Capture/Hold/Freeze 状态机；无 legacy 兼容。
+- **`HardwareSyncController`**：纯执行器（标定 `ppm_per_lsb` / `zero_word`、硬 slew、串口命令合并）。
+- **UE / CUDAUE**：SFO 更新后融合观测并驱动 OCXO；eRTM clear/invalidate 时 re-anchor TO。
+- **YAML / web editor / docs**：`ocxo_pi_*` 删除；新增 `ocxo_mode`、`ocxo_dac_*`、`ocxo_freq_*`、`ocxo_phase_*`。旧 `ocxo_pi_*` 键仅告警忽略。
+
+## 2026-07-15 - eRTM 旧 UL 报文绝对空口帧补偿
+
+### Summary
+
+eRTM 不再把“处理时刻”的 DUTI/TADV 与异步旧 UL 信道粗配对。BS 在 **UL Identity MATCH** 后发布绑定测量帧 `M` 与实际 DUTI 的 ERTM3；UE 用 `state_at(M)` 查历史 TADV/Alignment，把旧 UL 谱变换到当前 DL 帧 `N` 的 Alignment 坐标，并用 `DUTI_M/TADV_M` 计算 `tau_c`。无法精确配对时保留上一份有效 TO。
+
+### Changes
+
+- **协议 ERTM3**：在 ERTM2 基础上增加 `timeline_epoch` 与 `ul_measure_frame_seq`；明确拒绝无绝对帧身份的 ERTM2。
+- **BS**：UL-RX 将 `applied_duti`、channel、identity 作为同帧 sidecar；仅 Identity MATCH 后通过 `SeqlockedErtmUlMeasurement` 发布；注入时不再读取当前 `_bs_dl_ul_timing_diff`。
+- **UE UL-TX**：按绝对帧发布 `UlTxTimingStateEntry` 变更历史（总 shift 改变时下一帧生效；TADV/Alignment 反向相消时当前帧生效）；query/publish/clear 均受同一 mutex 保护，稳定状态使用原子快照 fast path，clear 只做 O(1) 元数据失效，避免非原子 POD 数据竞争和逐帧/长时间锁竞争。
+- **UE eRTM**：`RxFrame` 在 RX enqueue 时固化已提交的 `A_N`；decode 入队时记录 clear generation，sole consumer 只丢弃 clear 前报告并保留 clear 后报告；history miss 会作废该 slot 并递降尝试更旧 `M`；TO publish 与 clear 线性化，禁止旧计算重新置 `available=true`；cache 优先淘汰外 epoch、最旧冗余 usable 和最远 future；Alignment 平移旧 UL 谱。
+- **CUDA**：与 CPU 对齐绝对帧 eRTM 语义——`CUDAUplinkRxEngine` MATCH 门控测量快照、`CUDAUplinkTxEngine` `state_at(M)` 历史、CUDAUE 冻结 `A_N` / generation clear / force_remeasure 失败作废 TO；延迟谱与相关仍走 CUDA kernels。
+
+## 2026-07-14 - BS-USRP 绝对空口帧序号与 Tier-1 Identity SIB
+
+### Summary
+
+建立以 BS USRP 时间为权威的绝对空口帧序号；每帧注入 **BCH 保护的 Identity SIB**；UE 用 **(BS seq, UE boundary) 时间锚点**推导帧号，并用 **帧中点时间**做稳健相关。TX 硬门控保证波形内 SIB 与空口时隙一致。UL 闭环：UE 将帧序号调制进上行，BS 侧 double-check。
+
+### Changes
+
+- **BS TX 硬门控**：仅当 `claimed_seq == seq_from_ticks(tx_time)` 且 `mod_generation` 匹配才发射；过期丢弃、未来 hold、空槽 blank；underflow 时 `cancel_and_force_next_seq` + 排空队列。
+- **原子 claim**：`(mod_generation, seq)` 在 mutex 下快照，避免 cancel 与 claim 交错产生“新 gen + 旧 seq”假 future hold。
+- **Boot epoch**：高熵 64-bit boot id（仅 BS 内部时钟）；**canonical OTA epoch32** 写入 `AirFrameIdentity.timeline_epoch` 与 SIB（word0 lo16 + word1 hi16，仍 192 QPSK）。
+- **UE 时间锚点**：先 `extend_mod_seq` 再判断异常倒退，避免 32-bit 回绕误触发 timeline reset。
+- **resync 安全**：SIB 事件带 `result.generation`；**仅在 publish 与（若需要）ARQ reset 成功后才提交 `last_seen_ota_epoch`**，避免“见过新 epoch 却未 reset”。
+- **`last_seen_ota_epoch`（epoch32）** 跨 SYNC_SEARCH 保留。
+- **SFO reset 分代**：仅 RX 在成功安装 SIB anchor 后写入 `_pending_sfo_reset_generation`；process 线程仅当它等于当前 `_sync_generation` 时执行；bit 线程只做 ARQ reset。
+- **UE 实际采样率**：timeline / boundary / alignment grid phase 统一使用 `get_rx_rate()` 缓存值，避免 UHD coercion 后混用 YAML 速率。
+- **BS/UL 容量 fail-fast**：`payload_re_count < kIdentityControlSymbols` 在初始化阶段直接退出。
+- **UL 闭环硬门控**：UL period 携带目标 `(epoch, seq, period_generation)`；UL-TX 按 timed grid 与 UE 时间锚推导当前目标，只发送身份和代际完全匹配的 period，过期丢弃、未来 hold、空槽 blank。同步清除和 timed restart 会递增代际，使队列内及 producer 手中的在途旧 period 一并失效；同 epoch 的 claim 落后不 gen++；BS UL-RX 对 `(epoch, seq)` 做精确 double-check。
+- **诊断日志**：独立模块 `air_frame`（YAML `logging.modules.air_frame: info`）输出 `[AirFrame]` 心跳；Web Editor Logging 按 BS/UE 过滤无关模块。
+- **ARQ reset**：`ArqTxWindow::reset(config, dir)` 持锁；`configure`/`set_direction` 亦加锁。
+- **传播**：`RxFrame`/`SensingFrame`/LLR/UL-RX 带 identity；双站感知用 `frame_start_symbol`。
+- `ue_frame_mid_time_ns = boundary + T/2` 作为首选稳健时间戳。
 
 ## 2026-07-13 - ARQ 协议窗口上限与安全默认值分离
 
@@ -98,7 +353,7 @@ eRTM debug 的上行/下行 TO 校正谱复用 Sensing 的 pending alignment 补
 
 ### Summary
 
-`scripts/isolate_cpus.py` 重写 CPU 隔离：默认先询问本机是 **BS / UE / BS+UE**，再从对应 YAML 提取关键线程核（USRP 收发、OFDM 调制/解调、main；BS 含 sensing RX ingest）。系统 slice 避开这些核；`run` 的进程 `AllowedCPUs` 为全部逻辑核，非关键线程可使用系统核。`isolate_cpus.bash` 保留为薄封装。Web 配置台启动路径同步该策略。
+`scripts/isolate_cpus.py` 重写 CPU 隔离：默认先询问本机是 **BS / UE / BS+UE**，再从对应 YAML 提取关键线程核（USRP 收发、OFDM 调制/解调、main；BS 含 sensing RX ingest）。系统 slice 避开这些核；`run` 的进程 `AllowedCPUs` 为全部逻辑核，非关键线程可使用系统核。Web 配置台启动路径同步该策略。
 
 ## 2026-07-10 - Replace profiling_modules with hierarchical logging
 
@@ -639,7 +894,7 @@ UE self-scan 诊断改为只发布峰值附近 correlation 切片 + 固定 metad
   影响：ZeroMQ PUB socket 不会再尝试绑定远端目标地址；远端 viewer 应连接后端机器的实际网卡 IP。
 
 - 更新 Demodulator 示例配置、benchmark 模板、README、网页文档和 Web 配置编辑器 schema。
-  影响：模板和配置 UI 都明确区分 ZeroMQ 监听地址与 UDP/VOFA 目标地址。
+  影响：模板和配置 UI 都明确区分 ZeroMQ 监听地址与 UDP 目标地址。
 
 - 为 `plot_channel.py`、`plot_pdf.py` 和 `plot_const.py` 增加 Host 输入框与 Connect 按钮。
   影响：这些简单 debug viewer 可以在窗口内切换连接的后端地址，不需要手动修改脚本常量。

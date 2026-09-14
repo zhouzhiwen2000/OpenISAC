@@ -35,7 +35,7 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 - 使用 `-1`、`[]` 或省略可选字段表示该模块不做显式绑核。
 - 运行面板展示 **Isolated / Bound / Process / System** CPU 列表。默认 isolate 只覆盖最敏感线程（USRP 收发、main；BS sensing RX），不含 OFDM 调制/解调。
 - 勾选 **BS+UE (isolate both sides)** 时合并两侧 YAML 的敏感核；不勾选则只 isolate 当前 tab。
-- **Save + Start** / **Apply Isolation** 调用 `scripts/isolate_cpus.py`；开启隔离时进程 `AllowedCPUs` 为全部逻辑核。
+- **Save + Start** / **Apply Isolation** 调用 `scripts/isolate_cpus.py`；该非交互路径不会主动修改网卡 IRQ，需另行通过 CLI 的 `--nic-irq isolate|split` 启用。保存状态启用网卡策略后，进程 `AllowedCPUs` 会排除专用 IRQ 核。
 - **Override isolated CPU list** 可手动指定本次 isolate 列表。
 - **Reset Isolation** 将系统 slice 恢复为可用全部 CPU。
 - **安全提示**：该控制台可以执行网页中填写的启动命令。请保持默认监听地址 `127.0.0.1`，或仅绑定到可信网络。

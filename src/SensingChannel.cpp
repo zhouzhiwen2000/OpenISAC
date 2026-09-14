@@ -1122,7 +1122,11 @@ void SensingChannel::stop_bistatic() {
     _compute.sensing_sender.stop();
 }
 
-void SensingChannel::request_reacquire(const radio::TimeSpec& start_time, uint64_t frame_seq) {
+uint64_t SensingChannel::request_reacquire(
+    const radio::TimeSpec& start_time,
+    uint64_t frame_seq)
+{
+    const uint64_t request_id = _rx_io.restart_ack.begin_request();
     const uint64_t generation =
         _rx_io.pairing_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
     _rx_io.compute_reset_requested.store(true, std::memory_order_release);
@@ -1130,12 +1134,21 @@ void SensingChannel::request_reacquire(const radio::TimeSpec& start_time, uint64
         std::lock_guard<std::mutex> lock(_rx_io.restart_mutex);
         _rx_io.pending_restart_time = start_time;
         _rx_io.pending_restart_frame_seq = frame_seq;
+        _rx_io.pending_restart_request_id = request_id;
     }
     _rx_io.restart_requested.store(true, std::memory_order_release);
     LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] requested RX restart at " << start_time.get_real_secs()
                   << " s, frame_seq_base=" << frame_seq
-                  << ", generation=" << generation;
+                  << ", generation=" << generation
+                  << ", request_id=" << request_id;
+    return request_id;
+}
+
+TimedStreamRestartStatus SensingChannel::reacquire_status(
+    uint64_t request_id) const noexcept
+{
+    return _rx_io.restart_ack.status(request_id);
 }
 
 bool SensingChannel::enqueue_tx_symbols(
@@ -1705,7 +1718,8 @@ void SensingChannel::initialize_rx_and_sync(
     const radio::TuneRequest& tune_req,
     radio::IDevicePtr tx_device,
     const std::string& tx_device_args,
-    std::vector<std::unique_ptr<SensingChannel>>& channels
+    std::vector<std::unique_ptr<SensingChannel>>& channels,
+    const std::vector<radio::PpsTimeAlignmentTarget>& additional_sync_devices
 ) {
     // Simulation backend: each sensing channel consumes its own hub ring
     // ("rx.sens<id>"); there is no tuning, gain, or PPS time-sync to apply.
@@ -1801,25 +1815,45 @@ void SensingChannel::initialize_rx_and_sync(
 
     // PPS time sync across the distinct devices in use (including the shared TX
     // device). Gated on the backend reporting PpsTimeSync support.
+    const std::string tx_clock_source = cfg.downlink.tx_clock_source.empty()
+        ? cfg.clock_time.clock_source
+        : cfg.downlink.tx_clock_source;
+    const std::string tx_time_source = cfg.downlink.tx_time_source.empty()
+        ? (cfg.clock_time.time_source.empty()
+              ? tx_clock_source
+              : cfg.clock_time.time_source)
+        : cfg.downlink.tx_time_source;
     struct SyncEntry {
         std::string args;
         radio::IDevicePtr device;
+        std::string time_source;
     };
     struct SyncSnapshot {
         double now_s = 0.0;
         double last_pps_s = 0.0;
     };
     std::vector<SyncEntry> sync_devices;
-    auto add_sync_device = [&](const std::string& args, const radio::IDevicePtr& dev) {
+    auto add_sync_device = [&](const std::string& args,
+                               const radio::IDevicePtr& dev,
+                               const std::string& time_source) {
         if (!dev) return;
         for (const auto& e : sync_devices) {
             if (e.device.get() == dev.get()) return;
         }
-        sync_devices.push_back(SyncEntry{args, dev});
+        sync_devices.push_back(SyncEntry{args, dev, time_source});
     };
-    add_sync_device(tx_device_args, tx_device);
+    add_sync_device(tx_device_args, tx_device, tx_time_source);
     for (auto& ch : channels) {
-        add_sync_device(resolve_rx_device_args(ch->_rx_io.channel_cfg), ch->_rx_io.rx_device);
+        const auto& channel_cfg = ch->_rx_io.channel_cfg;
+        const std::string rx_clock_source =
+            resolve_rx_clock_source(channel_cfg);
+        add_sync_device(
+            resolve_rx_device_args(channel_cfg),
+            ch->_rx_io.rx_device,
+            resolve_rx_time_source(channel_cfg, rx_clock_source));
+    }
+    for (const auto& target : additional_sync_devices) {
+        add_sync_device(target.label, target.device, target.time_source);
     }
 
     auto collect_sync_snapshot = [&]() {
@@ -1839,17 +1873,55 @@ void SensingChannel::initialize_rx_and_sync(
         LOG_G_INFO_M(Sensing) << title;
         for (size_t i = 0; i < sync_devices.size(); ++i) {
             const auto& entry = sync_devices[i];
+            const double now_s = snapshots[i].now_s;
             const double pps_s = snapshots[i].last_pps_s;
             LOG_G_INFO_M(Radio) << std::fixed << std::setprecision(9)
                       << "  [USRP " << i << "] args='" << entry.args
-                      << "', time_last_pps=" << pps_s << " s"
+                      << "', time_now=" << now_s << " s"
+                      << ", time_last_pps=" << pps_s << " s"
                       << std::defaultfloat;
         }
     };
 
-    const bool pps_capable = tx_device && tx_device->supports(radio::Capability::PpsTimeSync);
+    const bool align_time_to_pps =
+        radio::clock_source_enables_pps_alignment(tx_clock_source);
+    const bool pps_capable =
+        tx_device && tx_device->supports(radio::Capability::PpsTimeSync);
     auto latest_sync_snapshot = collect_sync_snapshot();
-    if (pps_capable && sync_devices.size() > 1) {
+    if (align_time_to_pps && !pps_capable) {
+        throw std::runtime_error(
+            "BS clock_source='" + tx_clock_source +
+            "', time_source='" + tx_time_source +
+            "' requires PPS time synchronization, but the TX radio backend "
+            "does not support it.");
+    }
+    if (align_time_to_pps && !sync_devices.empty()) {
+        LOG_G_INFO_M(Radio)
+            << "Waiting for PPS with clock_source='" << tx_clock_source
+            << "', time_source='" << tx_time_source
+            << "', then aligning "
+            << sync_devices.size() << " BS-side USRP timekeeper(s)...";
+        std::vector<radio::PpsTimeAlignmentTarget> targets;
+        targets.reserve(sync_devices.size());
+        for (const auto& entry : sync_devices) {
+            targets.push_back({entry.args, entry.device, entry.time_source});
+        }
+        const auto alignment = radio::align_device_times_to_next_pps(targets);
+        LOG_G_INFO_M(Radio)
+            << "Aligned " << alignment.devices.size()
+            << " BS-side USRP timekeeper(s) to the same PPS edge.";
+        for (const auto& snapshot : alignment.devices) {
+            LOG_G_INFO_M(Radio)
+                << "  [PPS aligned] device='" << snapshot.label
+                << "', time_last_pps_ticks=" << snapshot.last_pps_ticks
+                << ", time_now_ticks=" << snapshot.now_ticks
+                << ", tick_rate=" << snapshot.tick_rate;
+        }
+        latest_sync_snapshot = collect_sync_snapshot();
+        print_last_pps_status(
+            "Post-alignment BS-side USRP PPS status:",
+            latest_sync_snapshot);
+    } else if (pps_capable && sync_devices.size() > 1) {
         try {
             for (const auto& entry : sync_devices) {
                 entry.device->set_time_next_pps(radio::TimeSpec(0.0));
@@ -1913,9 +1985,11 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
     auto issue_stop = [&]() {
         try {
             _rx_io.rx_stream->issue_stream_cmd(radio::StreamCmd(radio::StreamMode::StopContinuous));
+            return true;
         } catch (const std::exception& e) {
             LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                           << "] failed to stop RX stream before restart: " << e.what();
+            return false;
         }
     };
     auto apply_pending_restart = [&]() {
@@ -1924,19 +1998,34 @@ void SensingChannel::_rx_loop(const radio::TimeSpec& start_time) {
         }
         radio::TimeSpec restart_time(0.0);
         uint64_t restart_frame_seq = 0;
+        uint64_t restart_request_id = 0;
         {
             std::lock_guard<std::mutex> lock(_rx_io.restart_mutex);
             restart_time = _rx_io.pending_restart_time;
             restart_frame_seq = _rx_io.pending_restart_frame_seq;
+            restart_request_id = _rx_io.pending_restart_request_id;
             _rx_io.pending_restart_time = radio::TimeSpec(0.0);
+            _rx_io.pending_restart_request_id = 0;
         }
-        issue_stop();
+        if (!issue_stop()) {
+            _rx_io.restart_ack.mark_failed(restart_request_id);
+            return true;
+        }
+        try {
+            issue_start(restart_time);
+        } catch (const std::exception& e) {
+            _rx_io.restart_ack.mark_failed(restart_request_id);
+            LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                          << "] failed to arm timed restart request "
+                          << restart_request_id << ": " << e.what();
+            return true;
+        }
         _rx_io.rx_frame_seq_base = restart_frame_seq;
         _rx_io.next_rx_frame_seq = restart_frame_seq;
         _rx_io.rx_state.store(RxState::ALIGNMENT, std::memory_order_release);
         const uint64_t generation =
             _rx_io.pairing_generation.load(std::memory_order_acquire);
-        issue_start(restart_time);
+        _rx_io.restart_ack.mark_armed(restart_request_id);
         LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                       << "] RX stream generation " << generation
                       << " restarted at " << restart_time.get_real_secs()
@@ -1992,36 +2081,29 @@ void SensingChannel::_handle_alignment() {
     const size_t total_read = static_cast<size_t>(total_read_signed);
     AlignedVector temp_buf(total_read);
     radio::RxMetadata md;
-    size_t received = 0;
     bool have_first_time = false;
     radio::TimeSpec first_time_spec(0.0);
 
-    while (received < total_read && _running_ref.load(std::memory_order_relaxed)) {
-        size_t num_rx = _rx_io.rx_stream->recv(
-            temp_buf.data() + received,
-            total_read - received,
-            md,
-            1.0,
-            false
-        );
-
-        if (md.error_code != radio::RxError::None) {
-            if (md.error_code != radio::RxError::Timeout) {
-                LOG_RT_WARN_M(Sensing) << "RX alignment error: " << md.strerror();
-                received = 0;
-                have_first_time = false;
-            }
-            continue;
+    const size_t received = _rx_io.rx_stream->recv(
+        temp_buf.data(), total_read, md, 1.0, false);
+    if (md.error_code != radio::RxError::None) {
+        if (md.error_code != radio::RxError::Timeout) {
+            LOG_RT_WARN_M(Sensing) << "RX alignment error: " << md.strerror();
         }
-
-        if (!have_first_time && num_rx > 0 && md.has_time_spec) {
-            first_time_spec = md.time_spec;
-            have_first_time = true;
-        }
-        received += num_rx;
-        if (_rx_io.restart_requested.load(std::memory_order_acquire)) {
-            return;
-        }
+        return;
+    }
+    if (received > 0 && md.has_time_spec) {
+        first_time_spec = md.time_spec;
+        have_first_time = true;
+    }
+    if (received != total_read) {
+        LOG_RT_WARN_HZ_M(Sensing, 5)
+            << "RX alignment frame short read: received=" << received
+            << ", expected=" << total_read;
+        return;
+    }
+    if (_rx_io.restart_requested.load(std::memory_order_acquire)) {
+        return;
     }
 
     if (!_running_ref.load(std::memory_order_relaxed) ||
@@ -2079,37 +2161,32 @@ void SensingChannel::_handle_alignment() {
 void SensingChannel::_handle_normal_rx() {
     AlignedVector rx_frame = _rx_io.rx_frame_pool.acquire();
     radio::RxMetadata md;
-    size_t received = 0;
     bool have_first_time = false;
     radio::TimeSpec first_time_spec(0.0);
 
-    while (received < _cfg.samples_per_frame() && _running_ref.load(std::memory_order_relaxed)) {
-        size_t num_rx = _rx_io.rx_stream->recv(
-            rx_frame.data() + received,
-            _cfg.samples_per_frame() - received,
-            md,
-            2.0,
-            false
-        );
-
-        if (md.error_code != radio::RxError::None) {
-            if (md.error_code != radio::RxError::Timeout) {
-                LOG_RT_WARN_M(Sensing) << "RX error: " << md.strerror();
-                received = 0;
-                have_first_time = false;
-            }
-            continue;
+    const size_t received = _rx_io.rx_stream->recv(
+        rx_frame.data(), _cfg.samples_per_frame(), md, 2.0, false);
+    if (md.error_code != radio::RxError::None) {
+        if (md.error_code != radio::RxError::Timeout) {
+            LOG_RT_WARN_M(Sensing) << "RX error: " << md.strerror();
         }
-
-        if (!have_first_time && num_rx > 0 && md.has_time_spec) {
-            first_time_spec = md.time_spec;
-            have_first_time = true;
-        }
-        received += num_rx;
-        if (_rx_io.restart_requested.load(std::memory_order_acquire)) {
-            _rx_io.rx_frame_pool.release(std::move(rx_frame));
-            return;
-        }
+        _rx_io.rx_frame_pool.release(std::move(rx_frame));
+        return;
+    }
+    if (received > 0 && md.has_time_spec) {
+        first_time_spec = md.time_spec;
+        have_first_time = true;
+    }
+    if (received != _cfg.samples_per_frame()) {
+        LOG_RT_WARN_HZ_M(Sensing, 5)
+            << "RX frame short read: received=" << received
+            << ", expected=" << _cfg.samples_per_frame();
+        _rx_io.rx_frame_pool.release(std::move(rx_frame));
+        return;
+    }
+    if (_rx_io.restart_requested.load(std::memory_order_acquire)) {
+        _rx_io.rx_frame_pool.release(std::move(rx_frame));
+        return;
     }
 
     if (!_running_ref.load(std::memory_order_relaxed) ||
@@ -2326,7 +2403,7 @@ void SensingChannel::_estimate_system_delay(const AlignedVector& rx_frame_data, 
 
     _compute.next_delay_estimation_frame_seq = frame_seq + kSystemDelayEstimationFrameInterval;
 
-    LOG_RT_INFO_M(Sensing) << "[SYSDLY CH " << _rx_io.logical_id
+    LOG_RT_INFO_UNGATED_M(Sensing) << "[SYSDLY CH " << _rx_io.logical_id
                   << "] frame_seq=" << frame_seq
                   << ", delay=" << delay_samples << " samp (" << delay_us << " us)"
                   << ", peak=" << max_pos
