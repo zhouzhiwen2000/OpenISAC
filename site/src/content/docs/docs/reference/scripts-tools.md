@@ -90,3 +90,8 @@ f_{slow}=\frac{F_s}{(N+N_{CP})S_t},\quad \Delta f_D=\frac{f_{slow}}{N_D},\quad \
 $$
 
 Monostatic range uses $R=c\tau/2$; bistatic delay uses $10^9\tau$ ns and is **relative to the current synchronization/alignment reference**. It is not an absolute transmitter-to-target or receiver-to-target distance. Monostatic zero range likewise depends on the system-delay alignment calibration. Changing the processing FFT length changes the displayed bin spacing, not the waveform's physical resolution.
+
+
+## Calibration tools
+
+Run `calibrate_hsys.py capture` to request and verify a saved response, or `calibrate_hsys.py inspect` for an offline file check. `calibrate_system_delay.py` summarizes recent per-channel alignment estimates from backend logs. See [Calibration Workflows](/docs/tools-workflows/calibration-workflows/) for setup, commands and validation limits.

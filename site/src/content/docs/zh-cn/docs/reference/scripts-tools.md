@@ -89,3 +89,8 @@ f_{slow}=\frac{F_s}{(N+N_{CP})S_t},\quad \Delta f_D=\frac{f_{slow}}{N_D},\quad \
 $$
 
 单站按 $R=c\tau/2$ 换算距离；双站按 $10^9\tau$ 显示 ns，**零点相对于当前同步／对齐参考**，不能当作发射机或接收机到目标的绝对距离。单站零距离也依赖系统时延对齐标定。改变 FFT 长度会改变坐标的 bin 间隔，不会改变波形本身的物理分辨率。
+
+
+## 校准工具
+
+`calibrate_hsys.py capture` 请求校准并验证新保存的响应，`calibrate_hsys.py inspect` 离线检查文件。`calibrate_system_delay.py` 按通道分析后端日志中最近的 alignment 建议。准备步骤、命令和验证范围见[校准流程](/zh-cn/docs/tools-workflows/calibration-workflows/)。

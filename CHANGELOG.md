@@ -8,6 +8,14 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-09-15 - 命令行 Hsys 校准与系统时延日志分析
+
+### Summary
+
+新增 `calibrate_hsys.py`：显式选择单站／双站逻辑感知通道，使用 V9 握手和实际工作目录 YAML 检查运行参数，备份旧校准文件，并等待新文件完成角色、通道、FFT、射频参数、符号数和有限值校验；支持离线文件质量摘要。不自动改变或恢复增益，超时／中断不误报完成。
+
+新增 `calibrate_system_delay.py`，按通道分析最近的系统时延日志，通过相关峰质量、样本数与建议值极差筛选稳定结果；重启或 alignment 变化后重置统计，不自动修改 YAML。补充中英文使用流程和离线回归测试。Hsys 命令行流程借鉴 Henry Teall <henry.teall@paconsulting.com> 的 [9b630f3](https://github.com/philippaPA/OpenISAC/commit/9b630f3744a2261b234d22f95bfe6e07b727d4d8)，不引入 DC 基线方案。
+
 ## 2026-09-15 - 感知物理坐标与 backend viewer 修复
 
 ### Summary
