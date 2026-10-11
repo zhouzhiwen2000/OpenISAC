@@ -8,6 +8,12 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-11 - OpenISAC 论文正式发表
+
+### Summary
+
+更新中英文 README 与网站首页的论文状态和引用：OpenISAC 已正式发表于 *IEEE Internet of Things Journal*，vol. 13, no. 17, pp. 41254–41269, Sept. 1, 2026，doi: [10.1109/JIOT.2026.3710751](https://doi.org/10.1109/JIOT.2026.3710751)。采用正式期刊题名，并增加 IEEE Xplore 入口。
+
 ## 2026-09-15 - 命令行 Hsys 校准与系统时延日志分析
 
 ### Summary

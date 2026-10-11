@@ -79,11 +79,11 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 
 ## Citation
 
-If you find this repository useful, please cite our paper:
+Our paper is published in **IEEE Internet of Things Journal**. If you find this repository useful, please cite it:
 
-> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC with Over-the-Air Synchronization," *arXiv preprint* arXiv:2601.03535, Jan. 2026.
+> Z. Zhou, C. Zhang, X. Xu, and Y. Zeng, "OpenISAC: An Open-Source Real-Time Experimentation Platform for OFDM-ISAC," *IEEE Internet of Things Journal*, vol. 13, no. 17, pp. 41254–41269, Sept. 1, 2026, doi: 10.1109/JIOT.2026.3710751.
 >
-> [[arXiv](https://arxiv.org/pdf/2601.03535)]
+> [[IEEE Xplore](https://doi.org/10.1109/JIOT.2026.3710751)] [[arXiv](https://arxiv.org/pdf/2601.03535)]
 
 ## Authors
 
