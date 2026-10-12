@@ -9,6 +9,7 @@
 #include <string>
 
 #include "LDPCCodec.hpp"
+#include "LDPC5041008SIMD.hpp"
 
 namespace {
 
@@ -103,15 +104,33 @@ void test_decoder(const std::string& root) {
     LDPCCodec::AlignedIntVector encoded;
     encoder.encode_frame(info, encoded);
     require(encoded.size() == kFrames * 1008, "unexpected LDPC codeword geometry");
+    LDPC5041008SIMD syndrome(root + "/LDPC_504_1008.alist", root + "/LDPC_504_1008G.alist");
+    const LDPC5041008SIMD::IntVec words(encoded.begin(), encoded.end());
+    const int invalid_codewords = syndrome.check_syndrome_frames(words);
+    std::cout << "Encoded codewords with nonzero syndrome=" << invalid_codewords << '\n';
+    require(invalid_codewords == 0, "encoder generated invalid codewords");
     LDPCCodec::AlignedFloatVector clean(encoded.size());
     for (size_t i = 0; i < encoded.size(); ++i) clean[i] = encoded[i] ? -10.0f : 10.0f;
-    require(decode_errors(defaults, root, clean, info) == 0, "default decode broke clean payloads");
+    const size_t default_clean_errors = decode_errors(defaults, root, clean, info);
+    std::cout << "Clean codewords: default=" << default_clean_errors << '\n';
+    require(default_clean_errors == 0, "default decode broke clean payloads");
 
     LdpcDecodeConfig tuned;
     tuned.decoder_iterations = 12;
     tuned.nms_normalization_factor = 0.75f;
     tuned.fixed_point_scale = 32;
-    require(decode_errors(tuned, root, clean, info) == 0, "tuned decode broke clean payloads");
+    auto iteration_clean = defaults;
+    iteration_clean.decoder_iterations = 12;
+    auto factor_clean = defaults;
+    factor_clean.nms_normalization_factor = 0.75f;
+    const size_t iteration_clean_errors = decode_errors(iteration_clean, root, clean, info);
+    const size_t factor_clean_errors = decode_errors(factor_clean, root, clean, info);
+    const size_t tuned_clean_errors = decode_errors(tuned, root, clean, info);
+    std::cout << "Clean codewords: iterations=" << iteration_clean_errors
+              << " factor=" << factor_clean_errors << " combined=" << tuned_clean_errors << '\n';
+    require(iteration_clean_errors == 0, "iteration tuning broke clean payloads");
+    require(factor_clean_errors == 0, "NMS tuning broke clean payloads");
+    require(tuned_clean_errors == 0, "tuned decode broke clean payloads");
     tuned.fixed_point = true;
     require(decode_errors(tuned, root, clean, info) == 0, "configured Q16 broke clean payloads");
     tuned.fixed_point = false;
