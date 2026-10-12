@@ -29,10 +29,19 @@ cd aff3ct
 git submodule update --init --recursive
 mkdir build
 cd build
-cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER="g++" -DCMAKE_BUILD_TYPE="Release" -DCMAKE_CXX_FLAGS="-funroll-loops -march=native" -DAFF3CT_COMPILE_EXE="OFF" -DAFF3CT_COMPILE_SHARED_LIB="ON" -DSPU_STACKTRACE="OFF" -DSPU_STACKTRACE_SEGFAULT="OFF" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS} -faligned-new"
+cmake .. -G"Unix Makefiles" \
+  -DCMAKE_CXX_COMPILER="g++" \
+  -DCMAKE_BUILD_TYPE="Release" \
+  -DCMAKE_CXX_FLAGS="-funroll-loops -march=native -faligned-new" \
+  -DAFF3CT_COMPILE_EXE="OFF" \
+  -DAFF3CT_COMPILE_SHARED_LIB="ON" \
+  -DSPU_STACKTRACE="OFF" \
+  -DSPU_STACKTRACE_SEGFAULT="OFF"
 make -j$(nproc)
 sudo make install
 ```
+
+Keep all compiler options in one `CMAKE_CXX_FLAGS` value. `-march=native` enables SIMD instructions supported by the build machine; rebuild Aff3ct when moving to a CPU with a different instruction set.
 
 ### 3. Clone Repository
 Clone the OpenISAC repository:

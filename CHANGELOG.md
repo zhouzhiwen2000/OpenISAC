@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-12 - 修正 Aff3ct 安装编译参数
+
+中英文安装教程将 `-funroll-loops -march=native -faligned-new` 合并到一次 `CMAKE_CXX_FLAGS` 设置，确保本机 SIMD 优化与对齐内存选项完整传入 Aff3ct。补充迁移到不同 CPU 指令集时需要重新编译的说明。
+
 ## 2026-10-11 - OpenISAC 论文正式发表
 
 ### Summary

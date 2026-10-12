@@ -29,10 +29,19 @@ cd aff3ct
 git submodule update --init --recursive
 mkdir build
 cd build
-cmake .. -G"Unix Makefiles" -DCMAKE_CXX_COMPILER="g++" -DCMAKE_BUILD_TYPE="Release" -DCMAKE_CXX_FLAGS="-funroll-loops -march=native" -DAFF3CT_COMPILE_EXE="OFF" -DAFF3CT_COMPILE_SHARED_LIB="ON" -DSPU_STACKTRACE="OFF" -DSPU_STACKTRACE_SEGFAULT="OFF" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS} -faligned-new"
+cmake .. -G"Unix Makefiles" \
+  -DCMAKE_CXX_COMPILER="g++" \
+  -DCMAKE_BUILD_TYPE="Release" \
+  -DCMAKE_CXX_FLAGS="-funroll-loops -march=native -faligned-new" \
+  -DAFF3CT_COMPILE_EXE="OFF" \
+  -DAFF3CT_COMPILE_SHARED_LIB="ON" \
+  -DSPU_STACKTRACE="OFF" \
+  -DSPU_STACKTRACE_SEGFAULT="OFF"
 make -j$(nproc)
 sudo make install
 ```
+
+将全部编译选项放在同一个 `CMAKE_CXX_FLAGS` 值中。`-march=native` 启用构建机器支持的 SIMD 指令；迁移到指令集不同的 CPU 时，应重新编译 Aff3ct。
 
 ### 3. 克隆仓库
 克隆 OpenISAC 仓库：
