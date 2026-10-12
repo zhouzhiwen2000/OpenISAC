@@ -14,6 +14,8 @@
 
 Web 停止后端使用 SIGINT 并等待清理，确保 UHD 收发正常结束。新增旧配置兼容性、非法输入保护、Web YAML 往返和带噪声实际译码回归检查。
 
+CPU LDPC 在设置 SIMD 批次数后显式重置全部译码状态，避免新分配的消息缓冲影响首次 float32/Q16 译码；独立精度基准也使用相同初始化。回归检查验证编码码字的 syndrome，并分别覆盖迭代次数、NMS 系数和两者组合的干净载荷译码。
+
 ## 2026-10-12 - 修正 Aff3ct 安装编译参数
 
 中英文安装教程将 `-funroll-loops -march=native -faligned-new` 合并到一次 `CMAKE_CXX_FLAGS` 设置，确保本机 SIMD 优化与对齐内存选项完整传入 Aff3ct。补充迁移到不同 CPU 指令集时需要重新编译的说明。

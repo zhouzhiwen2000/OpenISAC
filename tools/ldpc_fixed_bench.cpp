@@ -51,6 +51,7 @@ Codec<B, Q> make_codec(int n_frames, const std::string& implem = "NMS") {
     tools::Command_parser cp(static_cast<int>(argv.size()), argv.data(), pl, true);
     c.codec.reset(c.fac->template build<B, Q>());
     c.codec->set_n_frames(n_frames);
+    c.codec->get_decoder_siho().reset();
     return c;
 }
 

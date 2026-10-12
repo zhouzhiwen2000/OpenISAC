@@ -61,11 +61,15 @@ struct LDPCCodec::Impl {
         init_aff3ct_params();
         codec = std::unique_ptr<aff3ct::tools::Codec_LDPC<int, float>>(codec_factory->build<int, float>());
         codec->set_n_frames(cfg.n_frames);
+        // AFF3CT grows SIMD waves without initializing their message buffers.
+        // Reset after resizing so the first independent payload starts clean.
+        codec->get_decoder_siho().reset();
 
         if (cfg.fixed_point) {
             codec_q16 = std::unique_ptr<aff3ct::tools::Codec_LDPC<short, short>>(
                 codec_factory->build<short, short>());
             codec_q16->set_n_frames(cfg.n_frames * 2);
+            codec_q16->get_decoder_siho().reset();
         }
     }
 
