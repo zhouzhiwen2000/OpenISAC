@@ -5,8 +5,10 @@ import atexit
 import collections
 import copy
 import json
+import math
 import os
 import signal
+import struct
 import subprocess
 import threading
 import time
@@ -1576,6 +1578,31 @@ def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> 
     return normalized
 
 
+def validate_ldpc_config_values(data: dict[str, Any]) -> None:
+    """Reject CPU LDPC settings that the backend or Q16 decoder cannot use."""
+    iterations = data.get("decoder_iterations", 6)
+    if isinstance(iterations, (bool, float)):
+        raise RuntimeError("ldpc.decoder_iterations must be an integer >= 1.")
+    try:
+        valid_iterations = 1 <= int(iterations) <= 2_147_483_647
+    except (TypeError, ValueError):
+        valid_iterations = False
+    if not valid_iterations:
+        raise RuntimeError("ldpc.decoder_iterations must be an integer in [1, 2147483647].")
+    raw_factor = data.get("nms_normalization_factor", 1.0)
+    try:
+        # Match the float32 setting used by AFF3CT, including Q16's exact steps.
+        factor = struct.unpack("f", struct.pack("f", float(raw_factor)))[0]
+    except (TypeError, ValueError, OverflowError):
+        factor = float("nan")
+    if isinstance(raw_factor, bool) or not math.isfinite(factor) or not 0.0 < factor <= 1.0:
+        raise RuntimeError("ldpc.nms_normalization_factor must be finite and in (0, 1].")
+    if data.get("fixed_point", False) and factor * 8.0 != round(factor * 8.0):
+        raise RuntimeError(
+            "Q16 ldpc.nms_normalization_factor must be a multiple of 0.125 in [0.125, 1]."
+        )
+
+
 def load_yaml_with_layout(tab_name: str, path: Path, fallback_paths: tuple[Path, ...]) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Path]:
     exists = path.exists()
     source = path if exists else next((candidate for candidate in fallback_paths if candidate.exists()), path)
@@ -2167,6 +2194,7 @@ class ProcessController:
         # YAML affinity; non-critical threads can share system cores.
         if isolate_cpu:
             run_cmd += ["-p", f"AllowedCPUs={process_spec}"]
+        run_cmd += ["-p", "KillSignal=SIGINT", "-p", "TimeoutStopSec=20"]
         run_cmd += ["/bin/bash", "-lc", command]
 
         with self._lock:
@@ -2350,6 +2378,7 @@ class ConfigEditorApp:
         tab = self.tab_config(name)
         current_data, layout, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         new_data = normalize_payload_data(name, layout, payload, current_data)
+        validate_ldpc_config_values(new_data)
         warnings = sanitize_resource_blocks_around_tdd(new_data)
         cfo_warning = clip_sensing_mask_blocks_around_cfo(new_data)
         if cfo_warning is not None:

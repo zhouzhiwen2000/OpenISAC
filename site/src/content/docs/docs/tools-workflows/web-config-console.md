@@ -26,6 +26,29 @@ Then open `http://<your-host>:8765` in a browser.
 - Lets you draw payload / sensing-pilot rectangles for `data_resource_blocks`, or compact sensing rectangles for `mask_blocks`, snap the block boundaries to integer RE grid points, and apply the result independently to the transmitter or receiver YAML.
 - Includes a `Guard Band Grid` preset that follows `scripts/plot_const.py`, i.e. it keeps only subcarriers `1..489` and `535..N-1` before the normal sync/pilot stripping rules are applied.
 
+## CPU LDPC decoding parameters
+
+The **LDPC decode** section on both BS and UE tabs provides:
+
+- `decoder_iterations`: a positive maximum iteration count, default `6`.
+- `nms_normalization_factor`: a finite NMS factor in `(0, 1]`, default `1.0`.
+- `fixed_point`: selects Q16 decoding; enabling it reveals `fixed_point_scale`.
+
+For example, configure a maximum of 12 iterations and a factor of 0.75:
+
+```yaml
+ldpc:
+  decoder_iterations: 12
+  nms_normalization_factor: 0.75
+  fixed_point: false
+```
+
+Save to `build/UE.yaml` and restart UE to configure downlink CPU decoding, or save to `build/BS.yaml` and restart BS to configure uplink CPU decoding. Receiver settings can be tuned independently while keeping the transmitter's code matrices and frame geometry matched.
+
+Syndrome early stopping remains enabled, so decoding can finish before the maximum count. Increasing the maximum normally increases computation for weak signals. Evaluate NMS settings using BER/FER or full-payload integrity checks; the values above are a tuning example. Q16 supports `0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0`. Both Web saves and backend YAML loading validate these settings and report specific errors for unsupported values.
+
+Stopping a backend sends SIGINT so UHD streaming and thread cleanup finish before the next start.
+
 ## Notes
 
 - Default commands are `./BS` and `./UE`; switch to the CUDA preset if needed.

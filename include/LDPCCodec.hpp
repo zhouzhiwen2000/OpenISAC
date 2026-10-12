@@ -24,6 +24,7 @@ public:
         std::string h_matrix_path = "../LDPC_504_1008.alist";
         std::string g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
         int decoder_iterations = 6;
+        float nms_normalization_factor = 1.0f;
         size_t n_frames = 16;
         std::string enc_type = "LDPC_H";
         std::string enc_g_method = "IDENTITY";
@@ -72,5 +73,12 @@ private:
  * @brief Build the default LDPC(1008,504) codec configuration.
  */
 LDPCCodec::LDPCConfig make_ldpc_5041008_cfg();
+
+/**
+ * @brief Build a CPU LDPC(1008,504) codec using YAML decode settings.
+ * @param decode_cfg Validated iteration, NMS normalization, and precision settings.
+ * @throws std::invalid_argument If the decode settings are unsupported.
+ */
+LDPCCodec::LDPCConfig make_ldpc_5041008_cfg(const LdpcDecodeConfig& decode_cfg);
 
 #endif // LDPCCODEC_HPP

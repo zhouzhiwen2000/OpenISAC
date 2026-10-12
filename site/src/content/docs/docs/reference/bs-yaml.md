@@ -107,8 +107,12 @@ quantization (5 ns at a 200 MHz master clock).
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
+| `ldpc.decoder_iterations` | `int` | `6` | Maximum CPU LDPC iterations, at least 1; syndrome early stopping stays enabled. |
+| `ldpc.nms_normalization_factor` | `float` | `1.0` | CPU NMS normalization factor, finite and in `(0, 1]`; Q16 requires multiples of `0.125`. |
 | `ldpc.fixed_point` | `bool` | `false` | Use the int16/Q16 layered-NMS CPU decoder instead of float32. |
 | `ldpc.fixed_point_scale` | `int` | `16` | Power-of-two LLR scale before int16 saturation in fixed-point mode. |
+
+These fields configure CPU decoding on the BS uplink, for both float32 and Q16. Omitting them retains 6 iterations and a factor of 1.0. Edit them under **LDPC decode** in the [Web Config Console](/docs/tools-workflows/web-config-console/), save, and restart the backend. Q16 supports `0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0`; the LLR scale applies only when `fixed_point: true`. More iterations may improve error correction while increasing computation for weak signals.
 
 ### `downlink`
 

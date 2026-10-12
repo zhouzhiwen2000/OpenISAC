@@ -1546,12 +1546,39 @@ struct ResourcePreviewConfig {
  * Mirrors the sectioned YAML layout. YAML is parsed once into this structure;
  * hot paths use typed fields instead of querying YAML nodes.
  */
-// CPU LDPC decode precision options. Applies to both UE downlink RX and BS
+// CPU LDPC decode options. Applies to both UE downlink RX and BS
 // uplink RX. Default reproduces the float32 decode path exactly.
 struct LdpcDecodeConfig {
+    int decoder_iterations = 6;  ///< Maximum iterations; syndrome early stopping stays enabled.
+    float nms_normalization_factor = 1.0f; ///< NMS check-node scale in (0, 1].
     bool fixed_point = false;     // use int16 (Q16) layered-NMS decoder instead of float32
     int fixed_point_scale = 16;   // pow2 multiplier applied at the demapper before int16 saturation
 };
+
+/**
+ * @brief Validate CPU LDPC iteration and normalization settings.
+ * @throws std::invalid_argument If iterations are not positive, the NMS factor
+ * is outside (0, 1], or Q16 uses a factor other than a multiple of 1/8.
+ */
+inline void validate_ldpc_decode_config(const LdpcDecodeConfig& cfg) {
+    if (cfg.decoder_iterations < 1) {
+        throw std::invalid_argument("ldpc.decoder_iterations must be >= 1");
+    }
+    // UE builds use -ffast-math; inspect the exponent to reject NaN/Inf even
+    // when the compiler assumes floating-point values are finite.
+    uint32_t factor_bits = 0;
+    static_assert(sizeof(factor_bits) == sizeof(cfg.nms_normalization_factor));
+    std::memcpy(&factor_bits, &cfg.nms_normalization_factor, sizeof(factor_bits));
+    if ((factor_bits & 0x7f800000u) == 0x7f800000u ||
+        !(cfg.nms_normalization_factor > 0.0f && cfg.nms_normalization_factor <= 1.0f)) {
+        throw std::invalid_argument("ldpc.nms_normalization_factor must be finite and in (0, 1]");
+    }
+    const float scaled_factor = cfg.nms_normalization_factor * 8.0f;
+    if (cfg.fixed_point && scaled_factor != std::round(scaled_factor)) {
+        throw std::invalid_argument(
+            "Q16 ldpc.nms_normalization_factor must be a multiple of 0.125 in [0.125, 1]");
+    }
+}
 
 struct Config {
     RadioConfig radio;
@@ -3309,6 +3336,14 @@ inline void load_value(const YAML::Node& section, const char* key, T& value) {
     }
 }
 
+inline void load_ldpc_decode_config(const YAML::Node& section, LdpcDecodeConfig& cfg) {
+    load_value(section, "decoder_iterations", cfg.decoder_iterations);
+    load_value(section, "nms_normalization_factor", cfg.nms_normalization_factor);
+    load_value(section, "fixed_point", cfg.fixed_point);
+    load_value(section, "fixed_point_scale", cfg.fixed_point_scale);
+    validate_ldpc_decode_config(cfg);
+}
+
 inline void load_logging_config(const YAML::Node& config, LoggingConfig& logging) {
     const YAML::Node section = section_node(config, "logging");
     if (!section) {
@@ -3589,8 +3624,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
         const YAML::Node ldpc = config_detail::section_node(config, "ldpc");
 
-        config_detail::load_value(ldpc, "fixed_point", cfg.ldpc.fixed_point);
-        config_detail::load_value(ldpc, "fixed_point_scale", cfg.ldpc.fixed_point_scale);
+        config_detail::load_ldpc_decode_config(ldpc, cfg.ldpc);
 
         config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
         config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);
@@ -3774,6 +3808,9 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         return true;
     } catch (const YAML::Exception& e) {
         LOG_G_ERROR_M(Config) << "Error parsing YAML config: " << e.what();
+        return false;
+    } catch (const std::exception& e) {
+        LOG_G_ERROR_M(Config) << "Invalid BS config: " << e.what();
         return false;
     }
 }
@@ -4045,8 +4082,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node resource_preview = config_detail::section_node(config, "resource_preview");
         const YAML::Node ldpc = config_detail::section_node(config, "ldpc");
 
-        config_detail::load_value(ldpc, "fixed_point", cfg.ldpc.fixed_point);
-        config_detail::load_value(ldpc, "fixed_point_scale", cfg.ldpc.fixed_point_scale);
+        config_detail::load_ldpc_decode_config(ldpc, cfg.ldpc);
 
         config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
         config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);

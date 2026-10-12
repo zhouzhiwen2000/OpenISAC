@@ -103,6 +103,11 @@ measurement:
   measurement_mode: internal_prbs  # Measurement payload generator / checker mode
   measurement_payload_bytes: 1024  # Bytes per generated measurement payload
 
+# ===== LDPC decode =====
+ldpc:
+  decoder_iterations: 6  # CPU LDPC maximum iterations; syndrome early stopping remains enabled
+  nms_normalization_factor: 1.0  # CPU NMS factor in (0,1]; Q16 requires multiples of 0.125
+
 # ===== Network =====
 network_output:
   udp_output_port: 50001  # UE decoded downlink payload UDP destination port

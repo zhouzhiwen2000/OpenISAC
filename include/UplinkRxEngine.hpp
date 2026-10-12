@@ -79,9 +79,7 @@ private:
     };
 
     static LDPCCodec::LDPCConfig _ldpc_cfg(const Config& c) {
-        LDPCCodec::LDPCConfig cfg = make_ldpc_5041008_cfg();
-        cfg.fixed_point = c.ldpc.fixed_point;
-        return cfg;
+        return make_ldpc_5041008_cfg(c.ldpc);
     }
 
     static inline int16_t sat16_llr(float v) {

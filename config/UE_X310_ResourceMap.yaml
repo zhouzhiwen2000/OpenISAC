@@ -203,6 +203,11 @@ resource_preview:
       subcarrier_start: 0  # 0-based FFT-bin start index
       subcarrier_count: 1024  # Number of contiguous subcarriers in this block
 
+# ===== LDPC decode =====
+ldpc:
+  decoder_iterations: 6  # CPU LDPC maximum iterations; syndrome early stopping remains enabled
+  nms_normalization_factor: 1.0  # CPU NMS factor in (0,1]; Q16 requires multiples of 0.125
+
 # ===== Network =====
 network_output:
   udp_output_ip: ""  # UE decoded downlink payload UDP destination IP (empty = use default_out_ip)

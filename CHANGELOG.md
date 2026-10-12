@@ -8,6 +8,12 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-12 - YAML 与 Web 配置 CPU LDPC 译码参数
+
+新增 `ldpc.decoder_iterations` 和 `ldpc.nms_normalization_factor`，应用于 UE 下行与 BS 上行的 float32/Q16 CPU 译码。默认保持 6 次最大迭代、NMS 系数 1.0 和 syndrome 提前结束；YAML 与 Web 保存检查迭代次数、有限值范围及 Q16 支持的系数。所有 BS/UE 模板和中英文参数文档同步更新，Web 的 Q16 比例控件随定点开关显示，修改参数后重启后端生效。
+
+Web 停止后端使用 SIGINT 并等待清理，确保 UHD 收发正常结束。新增旧配置兼容性、非法输入保护、Web YAML 往返和带噪声实际译码回归检查。
+
 ## 2026-10-12 - 修正 Aff3ct 安装编译参数
 
 中英文安装教程将 `-funroll-loops -march=native -faligned-new` 合并到一次 `CMAKE_CXX_FLAGS` 设置，确保本机 SIMD 优化与对齐内存选项完整传入 Aff3ct。补充迁移到不同 CPU 指令集时需要重新编译的说明。

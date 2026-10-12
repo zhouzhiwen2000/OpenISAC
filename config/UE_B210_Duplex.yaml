@@ -157,6 +157,11 @@ sensing:
 measurement:
   measurement_enable: false  # Enable internal PRBS measurement traffic
 
+# ===== LDPC decode =====
+ldpc:
+  decoder_iterations: 6  # CPU LDPC maximum iterations; syndrome early stopping remains enabled
+  nms_normalization_factor: 1.0  # CPU NMS factor in (0,1]; Q16 requires multiples of 0.125
+
 # ===== Network =====
 network_output:
   udp_output_port: 50001  # UE decoded downlink payload UDP destination port

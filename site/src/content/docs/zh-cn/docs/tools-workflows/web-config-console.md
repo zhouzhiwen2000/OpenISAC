@@ -23,6 +23,29 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 - **CPU 配置**：按下行、上行、感知实时循环和主线程设置 CPU 绑核，并可启用 CPU 隔离或覆盖本次隔离列表。
 - **常用预设**：内置 `Guard Band Grid`，默认保留子载波 `1..489` 和 `535..N-1`，再排除同步与梳状导频资源。
 
+## CPU LDPC 译码参数
+
+BS 和 UE 选项卡的 **LDPC decode** 分组提供：
+
+- `decoder_iterations`：最大迭代次数，正整数，默认 `6`。
+- `nms_normalization_factor`：NMS 系数，有限值且在 `(0, 1]` 内，默认 `1.0`。
+- `fixed_point`：选择 Q16 定点译码；开启后显示 `fixed_point_scale`。
+
+例如，使用 12 次最大迭代和 0.75 系数：
+
+```yaml
+ldpc:
+  decoder_iterations: 12
+  nms_normalization_factor: 0.75
+  fixed_point: false
+```
+
+在 UE 侧保存到 `build/UE.yaml` 后重启 UE，作用于下行 CPU 译码；在 BS 侧保存到 `build/BS.yaml` 后重启 BS，作用于上行 CPU 译码。接收机可独立调节，发送端的码矩阵和帧结构保持匹配。
+
+syndrome 提前结束保持开启，所以实际迭代次数可以少于设定的最大次数。增加最大次数通常增加弱信号下的译码负载；NMS 系数需要通过 BER/FER 或完整载荷校验评估，上述值是调节示例。Q16 支持的系数为 `0.125、0.25、0.375、0.5、0.625、0.75、0.875、1.0`。Web 保存和后端 YAML 加载都会检查范围，不合法设置会显示具体错误。
+
+后端停止使用 SIGINT，以完成 UHD 收发和线程清理，再进行后续启动。
+
 ## 使用说明
 
 - 默认启动命令为 `./BS` 和 `./UE`；需要 CUDA 版本时，可在下拉框中切换。

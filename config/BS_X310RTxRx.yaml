@@ -105,6 +105,11 @@ sensing:
   symbol_stride: 20  # Default STRD applied at startup before runtime commands
   paired_frame_queue_size: 64  # Per-channel RX/TX pairing queue capacity; keep above tx_circular_buffer_size for RX startup/alignment headroom
 
+# ===== LDPC decode =====
+ldpc:
+  decoder_iterations: 6  # CPU LDPC maximum iterations; syndrome early stopping remains enabled
+  nms_normalization_factor: 1.0  # CPU NMS factor in (0,1]; Q16 requires multiples of 0.125
+
 # ===== Network =====
 network_output:
   udp_input_ip: 0.0.0.0  # BS downlink payload UDP bind IP

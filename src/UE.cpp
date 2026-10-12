@@ -659,9 +659,7 @@ public:
 private:
 private:
     static LDPCCodec::LDPCConfig ldpc_cfg_from_config(const Config& cfg) {
-        LDPCCodec::LDPCConfig c = make_ldpc_5041008_cfg();
-        c.fixed_point = cfg.ldpc.fixed_point;
-        return c;
+        return make_ldpc_5041008_cfg(cfg.ldpc);
     }
 
     static inline int16_t sat16_llr(float v) {

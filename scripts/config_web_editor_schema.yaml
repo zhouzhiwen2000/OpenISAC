@@ -548,6 +548,18 @@ common:
   order: 60
   fields:
   - type: scalar
+    key: decoder_iterations
+    kind: int
+    comment: CPU LDPC maximum iterations (>=1); syndrome early stopping remains enabled; restart backend to apply
+    default: 6
+    optional: true
+  - type: scalar
+    key: nms_normalization_factor
+    kind: float
+    comment: CPU NMS normalization in (0,1]; Q16 supports 0.125 steps; restart backend to apply
+    default: 1.0
+    optional: true
+  - type: scalar
     key: fixed_point
     kind: bool
     comment: int16 (Q16) layered-NMS CPU decoder (~1.6x faster, quant fused into demap); false = float32
@@ -559,6 +571,9 @@ common:
     comment: pow2 multiplier applied to LLRs before int16 saturation (Q16 path only)
     default: 32
     optional: true
+    enabled_if:
+      key: fixed_point
+      value: true
 bs:
 - title: OFDM Frame
   yaml_key: ofdm_frame

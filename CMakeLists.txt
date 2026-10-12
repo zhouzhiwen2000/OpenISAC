@@ -411,6 +411,28 @@ target_link_libraries(LDPCFixedBench PRIVATE
 target_compile_options(LDPCFixedBench PRIVATE ${COMMON_COMPILE_OPTIONS})
 message(STATUS "CPU target: LDPCFixedBench")
 
+if(BUILD_TESTING)
+    add_executable(LDPCConfigTest
+        tests/ldpc_config_test.cpp
+        ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
+        ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
+        ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    )
+    target_include_directories(LDPCConfigTest PRIVATE
+        ${UHD_INCLUDE_DIRS} ${FFTW3f_INCLUDE_DIRS} ${YAMLCPP_INCLUDE_DIRS}
+        ${OPENISAC_ZMQ_INCLUDE_DIRS} ${OPENISAC_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR} ${Boost_INCLUDE_DIRS}
+    )
+    target_link_libraries(LDPCConfigTest PRIVATE
+        ${UHD_LIBRARIES} ${FFTW3f_LIBRARIES} ${FFTW3f_THREADS_LIBRARY}
+        Threads::Threads OpenMP::OpenMP_CXX aff3ct::aff3ct-shared-lib
+        ${OPENISAC_YAMLCPP_TARGET} ${YAMLCPP_LIBRARIES} ${OPENISAC_ZMQ_LINK} rt
+    )
+    target_compile_options(LDPCConfigTest PRIVATE ${COMMON_COMPILE_OPTIONS} -ffast-math)
+    add_test(NAME LDPCConfig COMMAND LDPCConfigTest "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(LDPCConfig PROPERTIES LABELS "cpu;ldpc" TIMEOUT 120)
+endif()
+
 #===========================================================
 # Installation Rules
 #===========================================================

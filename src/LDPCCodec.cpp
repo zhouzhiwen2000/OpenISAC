@@ -21,6 +21,11 @@ struct LDPCCodec::Impl {
 
     explicit Impl(const LDPCConfig& config)
         : cfg(config) {
+        LdpcDecodeConfig decode_cfg;
+        decode_cfg.decoder_iterations = cfg.decoder_iterations;
+        decode_cfg.nms_normalization_factor = cfg.nms_normalization_factor;
+        decode_cfg.fixed_point = cfg.fixed_point;
+        validate_ldpc_decode_config(decode_cfg);
         auto parent_dir = [](const std::string& p) {
             const size_t slash = p.rfind('/');
             if (slash == std::string::npos) {
@@ -65,6 +70,9 @@ struct LDPCCodec::Impl {
     }
 
     void init_aff3ct_params() {
+        std::ostringstream normalization;
+        normalization << std::setprecision(std::numeric_limits<float>::max_digits10)
+                      << cfg.nms_normalization_factor;
         std::vector<std::string> args = {
             "LDPCEncoder",
             "--enc-type", cfg.enc_type,
@@ -72,6 +80,7 @@ struct LDPCCodec::Impl {
             "--dec-type", cfg.dec_type,
             "--dec-implem", cfg.dec_implem,
             "--dec-ite", std::to_string(cfg.decoder_iterations),
+            "--dec-norm", normalization.str(),
             "--dec-synd-depth", "1",
             "--dec-h-path", cfg.h_matrix_path,
         };
@@ -299,5 +308,14 @@ LDPCCodec::LDPCConfig make_ldpc_5041008_cfg() {
     c.dec_implem = "NMS";
     c.dec_simd = "INTER";
     c.use_custom_encoder = true;
+    return c;
+}
+
+LDPCCodec::LDPCConfig make_ldpc_5041008_cfg(const LdpcDecodeConfig& decode_cfg) {
+    validate_ldpc_decode_config(decode_cfg);
+    LDPCCodec::LDPCConfig c = make_ldpc_5041008_cfg();
+    c.decoder_iterations = decode_cfg.decoder_iterations;
+    c.nms_normalization_factor = decode_cfg.nms_normalization_factor;
+    c.fixed_point = decode_cfg.fixed_point;
     return c;
 }
