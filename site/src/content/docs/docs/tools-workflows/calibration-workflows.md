@@ -21,6 +21,8 @@ sensing:
 
 Start the BS backend from the `build/` directory. In this mode, the selected sensing channel disables the normal sensing pipeline and periodically runs a ZC-based delay test. Watch the BS console for `[SYSDLY CH <n>]` on CPU builds or `[CUDA SYSDLY CH <n>]` on CUDA builds. The CPU log prints `alignment_suggest=<value>`; the CUDA log prints `suggest=<value>`.
 
+With `ofdm_frame.enable_sec_sync_symbol` enabled, the full-frame correlator can select either of the two identical ZC sync peaks, producing suggestions one complete OFDM symbol (`fft_size + cp_length` samples) apart. If this occurs, stop BS and UE, temporarily set this flag to `false` in BS, and run only BS for delay estimation. After applying the alignment, repeat estimation to check that the residual delay is near zero. Stop BS and restore the duplicate sync symbol before Hsys calibration and communication.
+
 When the suggested value is stable, stop the backend, write that value back to the same channel's `alignment` field in `build/BS.yaml`, and turn the estimation mode off:
 
 ```yaml
@@ -77,6 +79,8 @@ The script does not change gains, rewrite YAML or restore files automatically. O
 File validation proves structural and numerical consistency, not absence of clipping, adequate SNR or correct RF wiring. The current file header does not record device serials, gains, antenna ports or cable/attenuator identity. Recalibrate when those RF conditions change, even if the backend accepts the file. The loopback cable and attenuator response are included in Hsys; this is not an absolute range or antenna calibration.
 
 The command-line workflow builds on [Henry Teall's calibration tooling](https://github.com/philippaPA/OpenISAC/commit/9b630f3744a2261b234d22f95bfe6e07b727d4d8). TX-off DC-baseline capture is not included.
+
+Hsys uses the original OFDM FFT in `ofdm_frame.fft_size`; `sensing.range_fft_size` and the viewer's padded range/Doppler FFT lengths can differ. Record the TX/RX gains and attenuation separately when using temporary loopback gains. Stop the backend and restore the experiment wiring before restoring operating gains, then check the correction. A matching file header does not prove that the RF response is unchanged at different gains.
 
 ## Analyze system-delay logs
 

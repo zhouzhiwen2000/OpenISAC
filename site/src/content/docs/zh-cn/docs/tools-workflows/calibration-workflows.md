@@ -21,6 +21,8 @@ sensing:
 
 从 `build/` 目录启动 BS 后端。该模式下，被选中的感知通道会关闭常规感知处理链，并周期性执行基于 ZC 相关的系统时延测试。观察 BS 控制台输出：CPU 版本会打印 `[SYSDLY CH <n>]`，CUDA 版本会打印 `[CUDA SYSDLY CH <n>]`。CPU 日志中的建议值字段是 `alignment_suggest=<value>`；CUDA 日志中的建议值字段是 `suggest=<value>`。
 
+若启用了 `ofdm_frame.enable_sec_sync_symbol`，两个相同的 ZC 同步符号可能使全帧相关器选中不同的峰，建议值相差一个完整 OFDM 符号（`fft_size + cp_length` 个采样点）。遇到这种情况，先停止 BS 和 UE，临时将 BS 的该开关设为 `false`，仅启动 BS 做时延估计。写入对齐值后再次估计，确认残余时延接近零；然后停止 BS，恢复重复同步符号设置，再进行 Hsys 校准和通信。
+
 当建议值稳定后，停止后端，把该值写回同一通道的 `alignment` 字段，并关闭估计模式：
 
 ```yaml
@@ -77,6 +79,8 @@ python3 scripts/calibrate_hsys.py inspect build/sensing_system_response_monostat
 文件校验只能证明结构和数值一致，不能证明没有削顶、信噪比足够或射频接线正确。目前文件头没有记录设备序列号、增益、天线端口或线缆／衰减器标识；这些射频条件变化后，即使后端仍接受文件，也应重新校准。Hsys 包含回环线缆及衰减器的响应，不是绝对距离或天线校准。
 
 命令行流程借鉴了 [Henry Teall 的校准工具](https://github.com/philippaPA/OpenISAC/commit/9b630f3744a2261b234d22f95bfe6e07b727d4d8)。不包含 TX-off DC 基线采集。
+
+Hsys 使用 `ofdm_frame.fft_size` 指定的原始 OFDM FFT；`sensing.range_fft_size` 和上位机的距离／多普勒补零长度可以不同。若直连校准使用了临时增益，请另行记录 TX/RX 增益和衰减量。恢复日常增益前先停止后端并恢复实验接线，再检查补偿效果；文件头匹配不会证明不同增益下的幅相响应相同。
 
 ## 分析系统时延日志
 

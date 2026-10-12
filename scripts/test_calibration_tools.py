@@ -104,10 +104,30 @@ class CalibrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 hsys.load_profile(self.root, "monostatic", channel)
 
+    def test_current_and_legacy_ofdm_sections(self):
+        for role in ["monostatic", "bistatic"]:
+            for section in ["ofdm_frame", "ofdm"]:
+                with self.subTest(role=role, section=section):
+                    config = dict(rf_sampling=dict(sample_rate=100e6, bandwidth=160e6),
+                                  downlink=dict(center_freq=3.1e9),
+                                  sensing=dict(rx_channels=[{}], bi_enabled=True,
+                                               range_fft_size=10240, doppler_fft_size=1000),
+                                  network_output=dict(control_port=9999))
+                    config[section] = dict(fft_size=1024)
+                    if section == "ofdm_frame":
+                        config["ofdm"] = dict(fft_size=8)
+                    name = "BS.yaml" if role == "monostatic" else "UE.yaml"
+                    (self.root / name).write_text(yaml.safe_dump(config))
+                    profile = hsys.load_profile(self.root, role, 0)
+                    self.assertEqual(profile["fft_size"], 1024)
+                    self.assertEqual(profile["sample_rate_hz"], 100e6)
+                    self.assertEqual(profile["center_freq_hz"], 3.1e9)
+                    self.assertEqual(profile["bandwidth_hz"], 160e6)
+
     def run_capture(self, role="monostatic", version=9, save=True):
         channel = 1 if role == "monostatic" else 0
         config = dict(rf_sampling=dict(sample_rate=50e6, bandwidth=40e6),
-                      ofdm=dict(fft_size=8), downlink=dict(center_freq=2.4e9),
+                      ofdm_frame=dict(fft_size=8), downlink=dict(center_freq=2.4e9),
                       sensing=dict(rx_channel_count=2, rx_channels=[{}, {}], bi_enabled=True),
                       network_output=dict(control_port=9999))
         (self.root / ("BS.yaml" if role == "monostatic" else "UE.yaml")).write_text(yaml.safe_dump(config))

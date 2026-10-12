@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-12 - 修正 Hsys 配置读取并补充时延校准步骤
+
+Hsys 命令行工具读取当前 YAML 的 `ofdm_frame.fft_size`，保留旧 `ofdm` 节兼容性；感知显示的补零 FFT 不参与 Hsys 文件几何校验。回归检查覆盖两端配置、节名优先级和真实控制传输。中英文校准流程补充重复同步符号导致相关峰歧义时的处理，以及恢复运行增益后的适用性检查。
+
 ## 2026-10-12 - 优化 CPU LDPC 默认译码参数
 
 CPU LDPC 默认使用 12 次最大迭代与 0.75 NMS 系数，统一到 YAML 缺省值、编解码器配置与工厂、全部 BS/UE 模板、Web 编辑器和 CPU 精度基准。保持 syndrome 提前结束，已有 YAML 的显式值继续生效。补充缺省配置与显式覆盖回归检查，并更新中英文参数参考、Web 使用说明及生成站点。

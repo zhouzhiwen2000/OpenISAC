@@ -95,7 +95,8 @@ def load_profile(directory: Path, role: str, channel: int) -> dict:
             raise ValueError("finish system-delay calibration and disable estimation first")
     elif channel != 0 or not sensing.get("bi_enabled", False):
         raise ValueError("bistatic calibration requires bi_enabled and logical channel 0")
-    profile = dict(fft_size=int(cfg["ofdm"]["fft_size"]),
+    ofdm = cfg["ofdm_frame"] if "ofdm_frame" in cfg else cfg["ofdm"]
+    profile = dict(fft_size=int(ofdm["fft_size"]),
                 sample_rate_hz=float(cfg["rf_sampling"]["sample_rate"]),
                 center_freq_hz=float(cfg["downlink"]["center_freq"]),
                 bandwidth_hz=float(cfg["rf_sampling"]["bandwidth"]),
