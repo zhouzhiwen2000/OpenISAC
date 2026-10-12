@@ -119,8 +119,8 @@ measurement:
 
 # ===== LDPC decode =====
 ldpc:
-  decoder_iterations: 6  # CPU LDPC maximum iterations; syndrome early stopping remains enabled
-  nms_normalization_factor: 1.0  # CPU NMS factor in (0,1]; Q16 requires multiples of 0.125
+  decoder_iterations: 12  # CPU LDPC maximum iterations; syndrome early stopping remains enabled
+  nms_normalization_factor: 0.75  # CPU NMS factor in (0,1]; Q16 requires multiples of 0.125
 
 # ===== Network =====
 network_output:

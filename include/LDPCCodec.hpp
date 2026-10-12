@@ -23,8 +23,8 @@ public:
     struct LDPCConfig {
         std::string h_matrix_path = "../LDPC_504_1008.alist";
         std::string g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
-        int decoder_iterations = 6;
-        float nms_normalization_factor = 1.0f;
+        int decoder_iterations = 12;
+        float nms_normalization_factor = 0.75f;
         size_t n_frames = 16;
         std::string enc_type = "LDPC_H";
         std::string enc_g_method = "IDENTITY";

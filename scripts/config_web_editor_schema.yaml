@@ -551,13 +551,13 @@ common:
     key: decoder_iterations
     kind: int
     comment: CPU LDPC maximum iterations (>=1); syndrome early stopping remains enabled; restart backend to apply
-    default: 6
+    default: 12
     optional: true
   - type: scalar
     key: nms_normalization_factor
     kind: float
     comment: CPU NMS normalization in (0,1]; Q16 supports 0.125 steps; restart backend to apply
-    default: 1.0
+    default: 0.75
     optional: true
   - type: scalar
     key: fixed_point

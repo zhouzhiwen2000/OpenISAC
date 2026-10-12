@@ -25,15 +25,15 @@ class LdpcWebConfigTest(unittest.TestCase):
         for role in ("bs", "ue"):
             form = self.app.load_config(role)
             fields = {f["key"]: f for section in form["sections"] for f in section["fields"]}
-            self.assertEqual(fields["decoder_iterations"]["default_text"], "6")
-            self.assertEqual(float(fields["nms_normalization_factor"]["default_text"]), 1.0)
+            self.assertEqual(fields["decoder_iterations"]["default_text"], "12")
+            self.assertEqual(float(fields["nms_normalization_factor"]["default_text"]), 0.75)
             self.assertEqual(fields["fixed_point_scale"]["enabled_if"],
                              {"key": "fixed_point", "value": True})
             self.app.save_config(role, {"scalars": {
-                "decoder_iterations": "12", "nms_normalization_factor": "0.75"}})
+                "decoder_iterations": "6", "nms_normalization_factor": "1.0"}})
             loaded = yaml.safe_load((self.build_dir / f"{role.upper()}.yaml").read_text())
-            self.assertEqual(loaded["ldpc"]["decoder_iterations"], 12)
-            self.assertEqual(loaded["ldpc"]["nms_normalization_factor"], 0.75)
+            self.assertEqual(loaded["ldpc"]["decoder_iterations"], 6)
+            self.assertEqual(loaded["ldpc"]["nms_normalization_factor"], 1.0)
             self.app.save_config(role, {"scalars": {"decoder_iterations": "",
                                                     "nms_normalization_factor": ""}})
             loaded = yaml.safe_load((self.build_dir / f"{role.upper()}.yaml").read_text())

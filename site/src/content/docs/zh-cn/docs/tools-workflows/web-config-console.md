@@ -27,11 +27,11 @@ python3 scripts/config_web_editor.py --host 0.0.0.0 --port 8765
 
 BS 和 UE 选项卡的 **LDPC decode** 分组提供：
 
-- `decoder_iterations`：最大迭代次数，正整数，默认 `6`。
-- `nms_normalization_factor`：NMS 系数，有限值且在 `(0, 1]` 内，默认 `1.0`。
+- `decoder_iterations`：最大迭代次数，正整数，默认 `12`。
+- `nms_normalization_factor`：NMS 系数，有限值且在 `(0, 1]` 内，默认 `0.75`。
 - `fixed_point`：选择 Q16 定点译码；开启后显示 `fixed_point_scale`。
 
-例如，使用 12 次最大迭代和 0.75 系数：
+默认使用 12 次最大迭代和 0.75 系数：
 
 ```yaml
 ldpc:
@@ -42,13 +42,13 @@ ldpc:
 
 在 UE 侧保存到 `build/UE.yaml` 后重启 UE，作用于下行 CPU 译码；在 BS 侧保存到 `build/BS.yaml` 后重启 BS，作用于上行 CPU 译码。接收机可独立调节，发送端的码矩阵和帧结构保持匹配。
 
-syndrome 提前结束保持开启，所以实际迭代次数可以少于设定的最大次数。增加最大次数通常增加弱信号下的译码负载；NMS 系数需要通过 BER/FER 或完整载荷校验评估，上述值是调节示例。Q16 支持的系数为 `0.125、0.25、0.375、0.5、0.625、0.75、0.875、1.0`。Web 保存和后端 YAML 加载都会检查范围，不合法设置会显示具体错误。
+syndrome 提前结束保持开启，所以实际迭代次数可以少于设定的最大次数。增加最大次数通常增加弱信号下的译码负载；NMS 系数需要通过 BER/FER 或完整载荷校验评估，升级后已有 YAML 的显式值继续生效。Q16 支持的系数为 `0.125、0.25、0.375、0.5、0.625、0.75、0.875、1.0`。Web 保存和后端 YAML 加载都会检查范围，不合法设置会显示具体错误。
 
 后端停止使用 SIGINT，以完成 UHD 收发和线程清理，再进行后续启动。
 
 ### 测量 CPU LDPC 吞吐
 
-构建公开 CPU 基准，并在 `build/` 中运行。例如，绑定一个空闲 CPU，比较默认参数与 12 次迭代、0.75 系数：
+构建公开 CPU 基准，并在 `build/` 中运行。例如，绑定一个空闲 CPU，比较 6 次迭代、1.0 系数与当前默认参数：
 
 ```bash
 cmake --build build --target LDPCFixedBench -j4
@@ -57,7 +57,7 @@ taskset -c 5 ./LDPCFixedBench 32768 32 4 6 1.0 2 7
 taskset -c 5 ./LDPCFixedBench 32768 32 4 12 0.75 2 7
 ```
 
-CPU 编号需按本机调整，避免与正在运行的实时线程共享物理核心。可选位置参数依次为 `frames`、`q16_scale`、`q8_scale`、`iterations`、`nms`、`timing_esn0_db` 和 `reps`，默认值为 `8192 64 4 6 1.0 2 5`。码字数必须是 64 的正整数倍。将计时信噪比 `2` 改为 `-0.5` 可比较弱信号场景。按待评估 YAML 填写迭代次数与系数；基准不会修改运行时 YAML。
+CPU 编号需按本机调整，避免与正在运行的实时线程共享物理核心。可选位置参数依次为 `frames`、`q16_scale`、`q8_scale`、`iterations`、`nms`、`timing_esn0_db` 和 `reps`，默认值为 `8192 64 4 12 0.75 2 5`。码字数必须是 64 的正整数倍。将计时信噪比 `2` 改为 `-0.5` 可比较弱信号场景。按待评估 YAML 填写迭代次数与系数；基准不会修改运行时 YAML。
 
 基准采用固定随机种子、BPSK AWGN，以及相同的 `(1008,504)` 矩阵，比较 float32 与 Q16 NMS。先独立检查 BER/FER，再报告重复译码计时的信息位 Mbps 中位数，保持 syndrome 提前结束。这里 Es/N0 使用每个编码后 BPSK 比特的能量；对于该 1/2 码率，Eb/N0 比它高 3.01 dB。编码位吞吐为信息位吞吐的两倍。Q16 的 `dec+quant_Mbps` 由独立计时的量化和译码串行估算，不是接收机端到端实测。Q8 使用 MS，不应用 NMS 系数。结果仅衡量单核译码，不包含 OFDM 处理、SDR 收发和 UDP 有效吞吐。
 

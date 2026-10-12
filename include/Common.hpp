@@ -1549,8 +1549,8 @@ struct ResourcePreviewConfig {
 // CPU LDPC decode options. Applies to both UE downlink RX and BS
 // uplink RX. Default reproduces the float32 decode path exactly.
 struct LdpcDecodeConfig {
-    int decoder_iterations = 6;  ///< Maximum iterations; syndrome early stopping stays enabled.
-    float nms_normalization_factor = 1.0f; ///< NMS check-node scale in (0, 1].
+    int decoder_iterations = 12; ///< Maximum iterations; syndrome early stopping stays enabled.
+    float nms_normalization_factor = 0.75f; ///< NMS check-node scale in (0, 1].
     bool fixed_point = false;     // use int16 (Q16) layered-NMS decoder instead of float32
     int fixed_point_scale = 16;   // pow2 multiplier applied at the demapper before int16 saturation
 };

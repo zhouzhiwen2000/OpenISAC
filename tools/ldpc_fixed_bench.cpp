@@ -65,7 +65,7 @@ double median_seconds(std::vector<double> elapsed) {
 
 void print_usage(const char* program) {
     std::printf("Usage: %s [frames=8192] [q16_scale=64] [q8_scale=4] "
-                "[iterations=6] [nms=1] [timing_esn0_db=2] [reps=5]\n"
+                "[iterations=12] [nms=0.75] [timing_esn0_db=2] [reps=5]\n"
                 "Run from build/. Frames must be a positive multiple of 64; "
                 "NMS must be a multiple of 0.125 in (0,1] for Q16.\n"
                 "Rates count 504 information bits per codeword. "
@@ -206,8 +206,8 @@ int main(int argc, char** argv) try {
     const int TOTAL = (argc > 1) ? parse_int(argv[1]) : 8192;
     const double q16_scale = (argc > 2) ? parse_double(argv[2]) : 64.0;
     const double q8_scale = (argc > 3) ? parse_double(argv[3]) : 4.0;
-    const int iterations = (argc > 4) ? parse_int(argv[4]) : 6;
-    const double nms = (argc > 5) ? parse_double(argv[5]) : 1.0;
+    const int iterations = (argc > 4) ? parse_int(argv[4]) : 12;
+    const double nms = (argc > 5) ? parse_double(argv[5]) : 0.75;
     const double thr_snr = (argc > 6) ? parse_double(argv[6]) : 2.0;
     const int reps = (argc > 7) ? parse_int(argv[7]) : 5;
     if (TOTAL <= 0 || TOTAL % 64 != 0)

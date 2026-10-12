@@ -70,8 +70,15 @@ void test_yaml() {
         file.write("{}\n");
         Config legacy;
         require(loader(legacy, file.path.string()), "legacy YAML failed to load");
-        require(legacy.ldpc.decoder_iterations == 6 &&
-                legacy.ldpc.nms_normalization_factor == 1.0f, "legacy defaults changed");
+        require(legacy.ldpc.decoder_iterations == 12 &&
+                legacy.ldpc.nms_normalization_factor == 0.75f, "omitted YAML defaults mismatch");
+
+        file.write("ldpc:\n  decoder_iterations: 6\n  nms_normalization_factor: 1.0\n");
+        Config explicit_values;
+        require(loader(explicit_values, file.path.string()), "explicit YAML failed to load");
+        require(explicit_values.ldpc.decoder_iterations == 6 &&
+                explicit_values.ldpc.nms_normalization_factor == 1.0f,
+                "explicit iteration and normalization values were overridden");
 
         file.write("ldpc:\n  decoder_iterations: 12\n  nms_normalization_factor: 0.75\n"
                    "  fixed_point: true\n  fixed_point_scale: 32\n");
@@ -94,6 +101,10 @@ void test_yaml() {
 }
 
 void test_decoder(const std::string& root) {
+    const auto factory_defaults = make_ldpc_5041008_cfg();
+    require(factory_defaults.decoder_iterations == 12 &&
+            factory_defaults.nms_normalization_factor == 0.75f,
+            "standalone codec defaults mismatch");
     constexpr size_t kFrames = 256;
     std::mt19937 rng(12345);
     std::uniform_int_distribution<int> byte(0, 255);
@@ -116,12 +127,15 @@ void test_decoder(const std::string& root) {
     require(default_clean_errors == 0, "default decode broke clean payloads");
 
     LdpcDecodeConfig tuned;
-    tuned.decoder_iterations = 12;
-    tuned.nms_normalization_factor = 0.75f;
     tuned.fixed_point_scale = 32;
-    auto iteration_clean = defaults;
+    auto previous = defaults;
+    previous.decoder_iterations = 6;
+    previous.nms_normalization_factor = 1.0f;
+    require(decode_errors(previous, root, clean, info) == 0,
+            "explicit previous settings broke clean payloads");
+    auto iteration_clean = previous;
     iteration_clean.decoder_iterations = 12;
-    auto factor_clean = defaults;
+    auto factor_clean = previous;
     factor_clean.nms_normalization_factor = 0.75f;
     const size_t iteration_clean_errors = decode_errors(iteration_clean, root, clean, info);
     const size_t factor_clean_errors = decode_errors(factor_clean, root, clean, info);
@@ -142,15 +156,15 @@ void test_decoder(const std::string& root) {
         const float signal = encoded[i] ? -1.0f : 1.0f;
         noisy[i] = 2.0f * (signal + noise(rng)) / (sigma * sigma);
     }
-    const size_t baseline = decode_errors(defaults, root, noisy, info);
-    auto iterations_only = defaults;
+    const size_t baseline = decode_errors(previous, root, noisy, info);
+    auto iterations_only = previous;
     iterations_only.decoder_iterations = 12;
-    auto factor_only = defaults;
+    auto factor_only = previous;
     factor_only.nms_normalization_factor = 0.875f;
     const size_t iteration_errors = decode_errors(iterations_only, root, noisy, info);
     const size_t factor_errors = decode_errors(factor_only, root, noisy, info);
     const size_t tuned_errors = decode_errors(tuned, root, noisy, info);
-    std::cout << "Noisy codewords: default=" << baseline << " iterations=" << iteration_errors
+    std::cout << "Noisy codewords: previous=" << baseline << " iterations=" << iteration_errors
               << " factor=" << factor_errors << " combined=" << tuned_errors << '\n';
     require(iteration_errors < baseline, "iteration setting did not improve the noisy fixture");
     require(factor_errors < baseline, "NMS setting did not improve the noisy fixture");

@@ -108,12 +108,12 @@ clock.
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `ldpc.decoder_iterations` | `int` | `6` | Maximum CPU LDPC iterations, at least 1; syndrome early stopping stays enabled. |
-| `ldpc.nms_normalization_factor` | `float` | `1.0` | CPU NMS normalization factor, finite and in `(0, 1]`; Q16 requires multiples of `0.125`. |
+| `ldpc.decoder_iterations` | `int` | `12` | Maximum CPU LDPC iterations, at least 1; syndrome early stopping stays enabled. |
+| `ldpc.nms_normalization_factor` | `float` | `0.75` | CPU NMS normalization factor, finite and in `(0, 1]`; Q16 requires multiples of `0.125`. |
 | `ldpc.fixed_point` | `bool` | `false` | Use int16/Q16 CPU LDPC decode path. |
 | `ldpc.fixed_point_scale` | `int` | `16` | LLR scale before int16 saturation. |
 
-These fields configure CPU decoding on the UE downlink, for both float32 and Q16. Omitting them retains 6 iterations and a factor of 1.0. Edit them under **LDPC decode** in the [Web Config Console](/docs/tools-workflows/web-config-console/), save, and restart the backend. Q16 supports `0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0`; the LLR scale applies only when `fixed_point: true`. More iterations may improve error correction while increasing computation for weak signals.
+These fields configure CPU decoding on the UE downlink, for both float32 and Q16. Omitting them selects 12 iterations and a factor of 0.75. Explicit YAML values remain in effect; update both fields to use these defaults in an existing config. Edit them under **LDPC decode** in the [Web Config Console](/docs/tools-workflows/web-config-console/), save, and restart the backend. Q16 supports `0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0`; the LLR scale applies only when `fixed_point: true`. More iterations may improve error correction while increasing computation for weak signals.
 
 ### `downlink`
 

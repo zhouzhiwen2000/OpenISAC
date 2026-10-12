@@ -1580,7 +1580,7 @@ def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> 
 
 def validate_ldpc_config_values(data: dict[str, Any]) -> None:
     """Reject CPU LDPC settings that the backend or Q16 decoder cannot use."""
-    iterations = data.get("decoder_iterations", 6)
+    iterations = data.get("decoder_iterations", 12)
     if isinstance(iterations, (bool, float)):
         raise RuntimeError("ldpc.decoder_iterations must be an integer >= 1.")
     try:
@@ -1589,7 +1589,7 @@ def validate_ldpc_config_values(data: dict[str, Any]) -> None:
         valid_iterations = False
     if not valid_iterations:
         raise RuntimeError("ldpc.decoder_iterations must be an integer in [1, 2147483647].")
-    raw_factor = data.get("nms_normalization_factor", 1.0)
+    raw_factor = data.get("nms_normalization_factor", 0.75)
     try:
         # Match the float32 setting used by AFF3CT, including Q16's exact steps.
         factor = struct.unpack("f", struct.pack("f", float(raw_factor)))[0]

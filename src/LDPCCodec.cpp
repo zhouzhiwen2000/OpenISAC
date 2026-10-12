@@ -304,7 +304,6 @@ LDPCCodec::LDPCConfig make_ldpc_5041008_cfg() {
     LDPCCodec::LDPCConfig c;
     c.h_matrix_path = "../LDPC_504_1008.alist";
     c.g_matrix_path = "../LDPC_504_1008_G_fromH.alist";
-    c.decoder_iterations = 6;
     c.n_frames = 16;
     c.enc_type = "LDPC_H";
     c.enc_g_method = "IDENTITY";
