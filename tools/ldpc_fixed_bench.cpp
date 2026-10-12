@@ -2,24 +2,28 @@
 //   <int,float>  (float32, current production decoder)
 //   <short,short>        (Q16 fixed-point)
 //   <signed char,signed char> (Q8 fixed-point)
-// Same (1008,504) H, same NMS / horizontal-layered / 6 iterations.
-// Reports BER vs SNR and single-thread decode throughput (decode only).
+// Same (1008,504) H and horizontal-layered decoding, with configurable
+// maximum iterations, NMS factor and throughput Es/N0. Reports BER/FER and
+// median single-thread information-bit throughput (decode only).
 //
 // This file is additive and does not touch the production float path or the
 // CUDA FP16 decoder. Fixed-point input is produced by a plain pow2 quantizer
 // of the float LLRs (q = sat(round(llr * 2^fp))).
-
-#include <aff3ct.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <aff3ct.hpp>
 
 using namespace aff3ct;
 
@@ -27,7 +31,47 @@ namespace {
 constexpr int K = 504;
 constexpr int N = 1008;
 const std::string HPATH = "../LDPC_504_1008.alist";
-constexpr int ITE = 6;
+volatile uint64_t quantized_checksum = 0;
+
+bool finite_value(double value) {
+    // Also works when the caller builds with -ffast-math.
+    uint64_t bits = 0;
+    static_assert(sizeof bits == sizeof value);
+    std::memcpy(&bits, &value, sizeof bits);
+    return (bits & UINT64_C(0x7ff0000000000000)) != UINT64_C(0x7ff0000000000000);
+}
+
+int parse_int(const char* value) {
+    size_t end = 0;
+    const int parsed = std::stoi(value, &end);
+    if (value[end] != '\0') throw std::invalid_argument("invalid integer argument");
+    return parsed;
+}
+
+double parse_double(const char* value) {
+    size_t end = 0;
+    const double parsed = std::stod(value, &end);
+    if (value[end] != '\0' || !finite_value(parsed))
+        throw std::invalid_argument("expected a finite numeric argument");
+    return parsed;
+}
+
+double median_seconds(std::vector<double> elapsed) {
+    std::sort(elapsed.begin(), elapsed.end());
+    const size_t middle = elapsed.size() / 2;
+    return elapsed.size() % 2 ? elapsed[middle] :
+        (elapsed[middle - 1] + elapsed[middle]) / 2.0;
+}
+
+void print_usage(const char* program) {
+    std::printf("Usage: %s [frames=8192] [q16_scale=64] [q8_scale=4] "
+                "[iterations=6] [nms=1] [timing_esn0_db=2] [reps=5]\n"
+                "Run from build/. Frames must be a positive multiple of 64; "
+                "NMS must be a multiple of 0.125 in (0,1] for Q16.\n"
+                "Rates count 504 information bits per codeword. "
+                "Es/N0 uses energy per coded BPSK bit; Eb/N0 = Es/N0 + 3.01 dB.\n",
+                program);
+}
 
 template <typename B, typename Q>
 struct Codec {
@@ -36,12 +80,16 @@ struct Codec {
 };
 
 template <typename B, typename Q>
-Codec<B, Q> make_codec(int n_frames, const std::string& implem = "NMS") {
+Codec<B, Q> make_codec(int n_frames, int iterations, double nms,
+                       const std::string& implem = "NMS") {
     std::vector<std::string> args = {
         "prog", "--enc-type", "LDPC_H", "--enc-g-method", "IDENTITY",
         "--dec-type", "BP_HORIZONTAL_LAYERED", "--dec-implem", implem,
-        "--dec-ite", std::to_string(ITE), "--dec-synd-depth", "1",
+        "--dec-ite", std::to_string(iterations), "--dec-synd-depth", "1",
         "--dec-simd", "INTER", "--dec-h-path", HPATH};
+    if (implem == "NMS") {
+        args.insert(args.end(), {"--dec-norm", std::to_string(nms)});
+    }
     std::vector<char*> argv;
     for (auto& a : args) argv.push_back(a.data());
 
@@ -61,9 +109,9 @@ double snr_to_sigma(double snr_db) {
 }
 
 // Decode `total` independent frames already laid out [total][N], in groups of
-// n_frames, return (info_bit_errors, frame_errors, seconds_min_over_reps).
+// n_frames. Correctness is checked separately from repeated timing passes.
 template <typename B, typename Q>
-struct Result { double ber; double fer; double mbps; };
+struct Result { double ber; double fer; double mbps; double best_mbps; long frame_errors; };
 
 template <typename B, typename Q>
 Result<B, Q> decode_all(Codec<B, Q>& cf, const std::vector<Q>& llr,
@@ -87,9 +135,10 @@ Result<B, Q> decode_all(Codec<B, Q>& cf, const std::vector<Q>& llr,
         }
         if (ferr) ++frame_err;
     }
-    double mbps = -1.0;
+    double mbps = -1.0, best_mbps = -1.0;
     if (time_it) {
-        double best = 1e30;
+        std::vector<double> elapsed;
+        elapsed.reserve(reps);
         for (int r = 0; r < reps; ++r) {
             const auto t0 = std::chrono::steady_clock::now();
             for (int g = 0; g < groups; ++g) {
@@ -97,12 +146,14 @@ Result<B, Q> decode_all(Codec<B, Q>& cf, const std::vector<Q>& llr,
                                 out.data() + static_cast<size_t>(g) * n_frames * K, -1, false);
             }
             const auto t1 = std::chrono::steady_clock::now();
-            best = std::min(best, std::chrono::duration<double>(t1 - t0).count());
+            elapsed.push_back(std::chrono::duration<double>(t1 - t0).count());
         }
-        mbps = static_cast<double>(total) * K / best / 1e6;
+        mbps = static_cast<double>(total) * K / median_seconds(elapsed) / 1e6;
+        best_mbps = static_cast<double>(total) * K /
+            *std::min_element(elapsed.begin(), elapsed.end()) / 1e6;
     }
     return {static_cast<double>(bit_err) / (static_cast<double>(total) * K),
-            static_cast<double>(frame_err) / total, mbps};
+            static_cast<double>(frame_err) / total, mbps, best_mbps, frame_err};
 }
 
 // Branchless pow2 quantizer; `f` is float-clamp friendly so the compiler can
@@ -129,27 +180,52 @@ template <typename Q>
 double time_quant_mbps(const std::vector<float>& llr, double scale, int sat,
                        int reps, int total) {
     std::vector<Q> out(llr.size());
-    double best = 1e30;
+    std::vector<double> elapsed;
+    elapsed.reserve(reps);
     for (int r = 0; r < reps; ++r) {
         const auto t0 = std::chrono::steady_clock::now();
         quantize_into<Q>(llr.data(), out.data(), llr.size(),
                          static_cast<float>(scale), static_cast<float>(sat));
         const auto t1 = std::chrono::steady_clock::now();
-        best = std::min(best, std::chrono::duration<double>(t1 - t0).count());
+        elapsed.push_back(std::chrono::duration<double>(t1 - t0).count());
+        // Consume all output outside the timed region to prevent dead stores.
+        uint64_t checksum = 0;
+        for (Q value : out) checksum += static_cast<uint64_t>(value);
+        quantized_checksum ^= checksum;
     }
-    return static_cast<double>(total) * K / best / 1e6;
+    return static_cast<double>(total) * K / median_seconds(elapsed) / 1e6;
 }
 } // namespace
 
-int main(int argc, char** argv) {
-    const int TOTAL = (argc > 1) ? std::atoi(argv[1]) : 8192; // multiple of 64
-    const double q16_scale = (argc > 2) ? std::atof(argv[2]) : 64.0;
-    const double q8_scale = (argc > 3) ? std::atof(argv[3]) : 4.0;
-    const int reps = 5;
+int main(int argc, char** argv) try {
+    if (argc == 2 && std::string(argv[1]) == "--help") {
+        print_usage(argv[0]);
+        return 0;
+    }
+    if (argc > 8) throw std::invalid_argument("too many arguments");
+    const int TOTAL = (argc > 1) ? parse_int(argv[1]) : 8192;
+    const double q16_scale = (argc > 2) ? parse_double(argv[2]) : 64.0;
+    const double q8_scale = (argc > 3) ? parse_double(argv[3]) : 4.0;
+    const int iterations = (argc > 4) ? parse_int(argv[4]) : 6;
+    const double nms = (argc > 5) ? parse_double(argv[5]) : 1.0;
+    const double thr_snr = (argc > 6) ? parse_double(argv[6]) : 2.0;
+    const int reps = (argc > 7) ? parse_int(argv[7]) : 5;
+    if (TOTAL <= 0 || TOTAL % 64 != 0)
+        throw std::invalid_argument("frames must be a positive multiple of 64");
+    if (iterations <= 0 || reps <= 0)
+        throw std::invalid_argument("iterations and repetitions must be positive");
+    if (q16_scale <= 0 || q8_scale <= 0 ||
+        q16_scale > std::numeric_limits<float>::max() ||
+        q8_scale > std::numeric_limits<float>::max())
+        throw std::invalid_argument("quantization scales must be positive finite floats");
+    if (nms <= 0 || nms > 1 || nms * 8 != std::round(nms * 8))
+        throw std::invalid_argument("Q16 NMS must be a multiple of 0.125 in (0,1]");
+    if (thr_snr < -100 || thr_snr > 100)
+        throw std::invalid_argument("timing Es/N0 must be in [-100,100] dB");
 
-    auto cf32 = make_codec<int, float>(16);            // NMS
-    auto cf16 = make_codec<short, short>(32);          // NMS (Q16)
-    auto cf8  = make_codec<signed char, signed char>(64, "MS"); // 8-bit: NMS unsupported, use MS
+    auto cf32 = make_codec<int, float>(16, iterations, nms);
+    auto cf16 = make_codec<short, short>(32, iterations, nms);
+    auto cf8 = make_codec<signed char, signed char>(64, iterations, nms, "MS");
 
     auto& enc = cf32.codec->get_encoder();
 
@@ -167,14 +243,19 @@ int main(int argc, char** argv) {
 
     std::printf("CPU LDPC(1008,504) precision comparison  TOTAL=%d  q16_scale=%.1f q8_scale=%.1f\n",
                 TOTAL, q16_scale, q8_scale);
-    std::printf("\n== BER / FER vs SNR ==\n");
-    std::printf("%6s | %-22s | %-22s | %-22s\n", "SNR", "float32/NMS", "Q16/NMS", "Q8/MS");
+    std::printf("iterations=%d nms=%.3f syndrome_early_stop=on reps=%d "
+                "statistic=median seed=12345 (Q8 uses MS without normalization)\n",
+                iterations, nms, reps);
+    std::printf("\n== BER / FER vs Es/N0 (coded BPSK-bit energy) ==\n");
+    std::printf("%6s | %-22s | %-22s | %-22s\n", "Es/N0", "float32/NMS", "Q16/NMS", "Q8/MS");
 
-    const double thr_snr = 2.0;
     Result<int, float> r32_thr{}; Result<short, short> r16_thr{}; Result<signed char, signed char> r8_thr{};
     double q16_quant_mbps = -1.0, q8_quant_mbps = -1.0;
 
-    for (double snr : {1.0, 1.5, 2.0, 2.5, 3.0, 4.0}) {
+    std::vector<double> snrs{1.0, 1.5, 2.0, 2.5, 3.0, 4.0, thr_snr};
+    std::sort(snrs.begin(), snrs.end());
+    snrs.erase(std::unique(snrs.begin(), snrs.end()), snrs.end());
+    for (double snr : snrs) {
         const double sigma = snr_to_sigma(snr);
         const double inv_s2 = 1.0 / (sigma * sigma);
         std::normal_distribution<float> noise(0.0f, static_cast<float>(sigma));
@@ -210,7 +291,7 @@ int main(int argc, char** argv) {
     const double q16_eff = combined(r16_thr.mbps, q16_quant_mbps);
     const double q8_eff = combined(r8_thr.mbps, q8_quant_mbps);
 
-    std::printf("\n== single-thread throughput @ SNR=%.1f dB ==\n", thr_snr);
+    std::printf("\n== single-thread median information-bit throughput @ Es/N0=%.2f dB ==\n", thr_snr);
     std::printf("%-14s %-12s %-12s %-14s %-9s %-9s\n",
                 "precision", "decode_Mbps", "quant_Mbps", "dec+quant_Mbps", "vs_flt", "qnt_ovh");
     std::printf("%-14s %-12.1f %-12s %-14.1f %-9.2f %-9s\n",
@@ -222,7 +303,22 @@ int main(int argc, char** argv) {
                 "Q8/MS", r8_thr.mbps, q8_quant_mbps, q8_eff,
                 q8_eff / r32_thr.mbps, 100.0 * (r8_thr.mbps - q8_eff) / r8_thr.mbps);
     std::printf("\n(quant_Mbps = info-bit-rate-equivalent of the float->int LLR quantization alone;\n"
-                " dec+quant assumes they run serially: 1/(1/dec + 1/quant). Fusing quant into the\n"
-                " QPSK demapper that already writes LLRs would hide most of it.)\n");
+                " dec+quant is a serial estimate: 1/(1/dec + 1/quant). Codeword-bit rates\n"
+                " are twice these rates. This does not measure SDR/OFDM or UDP goodput.)\n");
+    auto report = [&](const char* precision, const auto& result, double quant, double serial) {
+        std::printf("RESULT precision=%s iterations=%d nms=%.3f esn0_db=%.2f "
+                    "frames=%d reps=%d info_mbps_median=%.6f info_mbps_best=%.6f "
+                    "quant_info_mbps_median=%.6f serial_info_mbps_estimate=%.6f "
+                    "ber=%.9g fer=%.9g frame_errors=%ld\n",
+                    precision, iterations, nms, thr_snr, TOTAL, reps, result.mbps,
+                    result.best_mbps, quant, serial, result.ber, result.fer, result.frame_errors);
+    };
+    report("float32/NMS", r32_thr, -1.0, r32_thr.mbps);
+    report("Q16/NMS", r16_thr, q16_quant_mbps, q16_eff);
+    // Q8/MS has no NMS normalization factor; keep it in the human-readable table.
     return 0;
+} catch (const std::exception& error) {
+    std::fprintf(stderr, "LDPCFixedBench: %s\n", error.what());
+    print_usage(argv[0]);
+    return 1;
 }

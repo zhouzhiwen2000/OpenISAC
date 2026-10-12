@@ -49,6 +49,21 @@ Syndrome early stopping remains enabled, so decoding can finish before the maxim
 
 Stopping a backend sends SIGINT so UHD streaming and thread cleanup finish before the next start.
 
+### Measure CPU LDPC throughput
+
+Build the public CPU benchmark and run it from `build/`. For example, pin it to an available CPU and compare the defaults with the 12-iteration, 0.75-factor setting:
+
+```bash
+cmake --build build --target LDPCFixedBench -j4
+cd build
+taskset -c 5 ./LDPCFixedBench 32768 32 4 6 1.0 2 7
+taskset -c 5 ./LDPCFixedBench 32768 32 4 12 0.75 2 7
+```
+
+Choose a CPU that is available on your host and does not share a physical core with an active real-time worker. The optional positional arguments are `frames`, `q16_scale`, `q8_scale`, `iterations`, `nms`, `timing_esn0_db`, and `reps`; defaults are `8192 64 4 6 1.0 2 5`. Frame count must be a positive multiple of 64. Replace the timing value `2` with `-0.5` to compare a weak-signal case. Copy iteration and factor values from the YAML you want to evaluate; the benchmark does not edit runtime YAML.
+
+The benchmark uses a fixed random seed, BPSK AWGN, and the same `(1008,504)` matrix for float32 and Q16 NMS. It checks BER/FER separately, then reports median information-bit Mbps across repeated decoding passes, with syndrome early stopping enabled. Here Es/N0 refers to energy per coded BPSK bit; for this rate-1/2 code, Eb/N0 is 3.01 dB higher. Coded-bit rates are twice the information-bit rates. Q16 `dec+quant_Mbps` is an estimate that adds separately timed quantization to decoding; it is not an end-to-end measurement of the receiver. Q8 uses MS without the NMS factor. These results measure a single CPU decoder and do not include OFDM processing, SDR I/O, or UDP goodput.
+
 ## Notes
 
 - Default commands are `./BS` and `./UE`; switch to the CUDA preset if needed.

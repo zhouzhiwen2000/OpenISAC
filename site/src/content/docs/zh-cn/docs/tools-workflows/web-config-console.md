@@ -46,6 +46,21 @@ syndrome 提前结束保持开启，所以实际迭代次数可以少于设定�
 
 后端停止使用 SIGINT，以完成 UHD 收发和线程清理，再进行后续启动。
 
+### 测量 CPU LDPC 吞吐
+
+构建公开 CPU 基准，并在 `build/` 中运行。例如，绑定一个空闲 CPU，比较默认参数与 12 次迭代、0.75 系数：
+
+```bash
+cmake --build build --target LDPCFixedBench -j4
+cd build
+taskset -c 5 ./LDPCFixedBench 32768 32 4 6 1.0 2 7
+taskset -c 5 ./LDPCFixedBench 32768 32 4 12 0.75 2 7
+```
+
+CPU 编号需按本机调整，避免与正在运行的实时线程共享物理核心。可选位置参数依次为 `frames`、`q16_scale`、`q8_scale`、`iterations`、`nms`、`timing_esn0_db` 和 `reps`，默认值为 `8192 64 4 6 1.0 2 5`。码字数必须是 64 的正整数倍。将计时信噪比 `2` 改为 `-0.5` 可比较弱信号场景。按待评估 YAML 填写迭代次数与系数；基准不会修改运行时 YAML。
+
+基准采用固定随机种子、BPSK AWGN，以及相同的 `(1008,504)` 矩阵，比较 float32 与 Q16 NMS。先独立检查 BER/FER，再报告重复译码计时的信息位 Mbps 中位数，保持 syndrome 提前结束。这里 Es/N0 使用每个编码后 BPSK 比特的能量；对于该 1/2 码率，Eb/N0 比它高 3.01 dB。编码位吞吐为信息位吞吐的两倍。Q16 的 `dec+quant_Mbps` 由独立计时的量化和译码串行估算，不是接收机端到端实测。Q8 使用 MS，不应用 NMS 系数。结果仅衡量单核译码，不包含 OFDM 处理、SDR 收发和 UDP 有效吞吐。
+
 ## 使用说明
 
 - 默认启动命令为 `./BS` 和 `./UE`；需要 CUDA 版本时，可在下拉框中切换。

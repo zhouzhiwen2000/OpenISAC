@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-12 - CPU LDPC 参数吞吐基准
+
+`LDPCFixedBench` 支持设置最大迭代次数、NMS 系数、计时 Es/N0 和重复次数，并检查参数范围，保留原有前三个位置参数。吞吐按多次计时中位数报告，同时输出最佳值、BER/FER 与机器可读结果；明确区分信息位吞吐、编码位吞吐和 Q16 量化串行估算。补充中英文复现命令，可比较默认与调节后的 CPU 译码参数。
+
 ## 2026-10-12 - YAML 与 Web 配置 CPU LDPC 译码参数
 
 新增 `ldpc.decoder_iterations` 和 `ldpc.nms_normalization_factor`，应用于 UE 下行与 BS 上行的 float32/Q16 CPU 译码。默认保持 6 次最大迭代、NMS 系数 1.0 和 syndrome 提前结束；YAML 与 Web 保存检查迭代次数、有限值范围及 Q16 支持的系数。所有 BS/UE 模板和中英文参数文档同步更新，Web 的 Q16 比例控件随定点开关显示，修改参数后重启后端生效。
