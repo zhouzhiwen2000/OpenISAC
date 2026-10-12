@@ -18,6 +18,7 @@ from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
 import zmq
+from zmq.utils.monitor import recv_monitor_message
 
 from sensing_runtime_protocol import (
     AGGREGATE_HEADER_STRUCT,
@@ -594,6 +595,7 @@ LOCAL_CONTROL_PORT = 0
 control_socket_lock = threading.Lock()
 control_tx_queue = Queue(maxsize=256)
 connection_generation = 0
+backend_session_generation = 0
 
 aggregate_frame_queue = Queue(maxsize=AGGREGATE_FRAME_QUEUE_SIZE)
 startup_sync_queue = Queue(maxsize=8)
@@ -673,18 +675,41 @@ def _clear_control_tx_queue():
 
 def queue_startup_backend_sync():
     global startup_sync_queued_generation
-    generation = connection_generation
     with startup_sync_lock:
+        generation = (connection_generation, backend_session_generation)
         if startup_sync_queued_generation == generation:
             return
-        startup_sync_queued_generation = generation
-    try:
-        startup_sync_queue.put_nowait(generation)
-    except Full:
-        LOGGER.warning(
-            "Startup sync queue full; dropping sync request for generation %d",
-            generation,
-        )
+        try:
+            startup_sync_queue.put_nowait(generation)
+            startup_sync_queued_generation = generation
+        except Full:
+            LOGGER.warning("Startup sync queue full; dropping sync request for generation %s", generation)
+
+
+def _reset_backend_viewer_state():
+    for ch in CHANNELS:
+        set_viewer_params(ch, PENDING_VIEWER_PARAMS)
+        ch.last_frame_id = None
+        ch.current_display_data = {}
+        ch.last_param_error = None
+        _clear_queue(ch.display_queue)
+        with ch.range_time_lock:
+            ch.range_time_data = None
+        with ch.micro_lock:
+            ch.micro_doppler_buffer.clear()
+    _clear_queue(aggregate_frame_queue)
+    _clear_queue(radio_params_queue)
+
+
+def _invalidate_backend_session():
+    global backend_session_generation, startup_sync_queued_generation
+    with startup_sync_lock:
+        backend_session_generation += 1
+        startup_sync_queued_generation = None
+        _clear_queue(startup_sync_queue, "startup sync queue")
+    _clear_control_tx_queue()
+    _reset_backend_viewer_state()
+    LOGGER.info("Backend control connection lost; waiting for fresh parameters and controls")
 
 
 def reconnect_backend(host):
@@ -711,16 +736,7 @@ def reconnect_backend(host):
         with ch.sender_lock:
             ch.sender_ip = HOST
             ch.control_port = args.control_port
-        set_viewer_params(ch, PENDING_VIEWER_PARAMS)
-        ch.last_frame_id = None
-        ch.current_display_data = {}
-        ch.last_param_error = None
-        _clear_queue(ch.display_queue)
-        with ch.range_time_lock:
-            ch.range_time_data = None
-        with ch.micro_lock:
-            ch.micro_doppler_buffer.clear()
-    _clear_queue(aggregate_frame_queue)
+    _reset_backend_viewer_state()
     save_endpoint(SETTINGS_KEY, HOST, UDP_PORT)
     save_settings(SETTINGS_KEY, {"control_port": int(args.control_port)})
     print(f"[CTRL] Reconnected viewer sockets to backend {HOST}")
@@ -1062,23 +1078,43 @@ def control_receiver():
     print(f"[CTRL] DEALER connected to {CONTROL_ENDPOINT} for viewer params/control replies")
     poller = None
     local_socket = None
+    monitor_socket = None
     local_generation = -1
+    reconnect_pending = False
     while running:
         try:
             # The DEALER socket is not thread-safe, so this thread owns actual
             # send/recv. UI callbacks enqueue packets instead of touching it.
             with control_socket_lock:
                 if local_generation != connection_generation:
+                    if monitor_socket is not None:
+                        monitor_socket.close(0)
                     local_socket = control_socket
                     local_generation = connection_generation
+                    monitor_socket = local_socket.get_monitor_socket(
+                        events=zmq.EVENT_CONNECTED | zmq.EVENT_DISCONNECTED,
+                    )
+                    reconnect_pending = False
                     poller = zmq.Poller()
                     poller.register(local_socket, zmq.POLLIN)
+                    poller.register(monitor_socket, zmq.POLLIN)
                     print(f"[CTRL] DEALER connected to {CONTROL_ENDPOINT} for viewer params/control replies")
                 _flush_control_tx_queue(local_socket)
                 events = dict(poller.poll(timeout=20))
+                if monitor_socket in events:
+                    while monitor_socket.poll(0):
+                        event = recv_monitor_message(monitor_socket, flags=zmq.NOBLOCK)["event"]
+                        if event == zmq.EVENT_DISCONNECTED:
+                            reconnect_pending = True
+                            _invalidate_backend_session()
+                        elif event == zmq.EVENT_CONNECTED and reconnect_pending:
+                            reconnect_pending = False
+                            request_viewer_params(0 if CHANNELS else None)
                 if local_socket not in events:
                     continue
                 parts = local_socket.recv_multipart(flags=zmq.NOBLOCK)
+                if reconnect_pending:
+                    continue
         except zmq.Again:
             continue
         except Exception as e:
@@ -1122,6 +1158,8 @@ def control_receiver():
             print(f"[CTRL] Receiver error: {e}")
 
     try:
+        if monitor_socket is not None:
+            monitor_socket.close(0)
         control_socket.close()
     except Exception:
         pass
@@ -5675,9 +5713,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         while True:
             try:
-                startup_sync_queue.get_nowait()
+                generation = startup_sync_queue.get_nowait()
             except Exception:
                 break
+            if generation != (connection_generation, backend_session_generation):
+                continue
             strd_value = self.txt_strd.text()
             mti_enabled = bool(enable_mti)
             tx_gain_value = self.txt_tx_gain.text()

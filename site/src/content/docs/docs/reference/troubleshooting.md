@@ -61,6 +61,21 @@ Follow the signal chain instead of starting with LDPC tuning:
 4. Inspect channel estimates and constellation quality before LLR and LDPC diagnostics.
 5. On RF hardware, check center frequency, gains, and antenna ports for weak or saturated input.
 
+When repeated ZC synchronization is enabled, a strong ZC peak alone does not
+identify the main synchronization symbol. The UE checks the preceding repeated
+ZC and, when configured, the following CFO training field before committing the
+frame boundary. An incomplete startup preamble is rejected and acquisition
+continues. Keep these settings identical on BS and UE.
+
+During software or hardware tracking, frames with mismatched configured
+preamble fields are dropped before demodulation and sensing. Consecutive
+mismatches lasting `sync_tracking.reset_hold_s` trigger reacquisition through
+the existing reset cooldown. A valid preamble clears that failure count.
+Look for `Rejected ZC candidate`, `Dropping frame with mismatched preamble`,
+or `RESET Persistent preamble mismatch` in the `sync` log. A constellation on
+the real/imaginary axes with normal comb pilots can indicate a whole-symbol
+frame error and incorrect mid-frame pilot references.
+
 ## Uplink does not work
 
 Set `uplink.enabled: true` on both BS and UE, and match `uplink.duplex_mode`, the TDD symbol window, or the FDD center frequency. With `ChannelSimulator`, also enable `simulation.enable_uplink`. If samples arrive but decoding fails, inspect timing windows, channel estimation, equalization, and LDPC in that order.
@@ -78,5 +93,12 @@ Set `uplink.enabled: true` on both BS and UE, and match `uplink.duplex_mode`, th
 2. Match the viewer IP/port to YAML and allow the TCP port through host firewalls.
 3. Run `ss -ltnp` on the backend host and confirm that the expected endpoint is listening.
 4. Check that the backend is producing data and is not continuously dropping frames because of full queues or missing subscribers.
+
+The fast sensing viewer detects a lost control connection and automatically
+requests fresh parameters after reconnection. It then reapplies saved SKIP,
+MTI, and STRD controls once; the monostatic viewer also reapplies its saved
+gains. This includes backend restarts at the same IP and port. Ordinary READY
+heartbeats do not repeatedly apply those controls. MTI suppresses static
+reflections, so verify its setting when a static bistatic path disappears.
 
 If the problem remains, retain the complete YAML files, launch commands, logs from startup through the first failure, USRP connection details, and host environment information.

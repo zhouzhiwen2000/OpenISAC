@@ -170,7 +170,7 @@ requires both directions to use the same sample-time grid.
 | :--- | :--- | :--- | :--- |
 | `sync_tracking.sync_queue_size` | `int` | `32` | Sync-search batch queue capacity. |
 | `sync_tracking.sync_cfo_alias_search_range_hz` | `float` / Hz | `800000` | CFO range covered by the sync alias resolver. |
-| `sync_tracking.reset_hold_s` | `float` / s | `0.5` | Invalid-delay duration before a hard reset to sync search. |
+| `sync_tracking.reset_hold_s` | `float` / s | `0.5` | Consecutive invalid-delay or preamble-mismatch duration before a hard reset to sync search. |
 | `sync_tracking.software_sync` | `bool` | `true` | Enable software sync tracking. |
 | `sync_tracking.predictive_delay` | `bool` | `true` | Use CFO-based predictive delay compensation. |
 | `sync_tracking.hardware_sync` | `bool` | `false` | Enable hardware OCXO discipline. |

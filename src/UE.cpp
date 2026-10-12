@@ -1013,6 +1013,7 @@ private:
     DataSender<uint8_t> uplink_self_scan_sender_;
     DataSender<ErtmDebugFrameData> ertm_debug_sender_;
     uint32_t _reset_count = 0;
+    uint32_t _preamble_bad_count = 0; // process-thread-owned
     // Debug publish stride: constellation / channel / PDF snapshots are copied
     // out of the demod path once every N frames (senders pace at 50 ms anyway).
     static constexpr uint32_t kDebugPublishStride = 8;
@@ -2100,6 +2101,7 @@ private:
         _delay_adjustment_count = 0;
         _last_delay_index_err = 0;
         _reset_count = 0;
+        _preamble_bad_count = 0;
         _alignment_applied_consumed_id = 0;
         sfo_estimator.reset();
         _ocxo_to_pub_known = false;
@@ -3936,7 +3938,77 @@ private:
                               : 1);
     }
 
+    void _reset_for_reacquisition() {
+        _reset_count = 0;
+        _preamble_bad_count = 0;
+        adjust_rx_freq(0.0, true);
+        sfo_estimator.reset();
+        _cfo_ewma.reset();
+        _ocxo_cfo_quality_gate.reset();
+        _ocxo_log_counter = 0;
+        _ocxo_to_pub_known = false;
+        _ocxo_to_last_pub_gen = 0;
+        _ocxo_to_age_frames = 0;
+        if (ocxo_debug_sender_) {
+            ocxo_debug_sender_->reset_counter();
+        }
+        if (cfg_.sync_tracking.hardware_sync) {
+            if (_hw_sync) {
+                if (_ocxo_discipliner) {
+                    _ocxo_discipliner->begin_reacquisition_hold();
+                }
+                _hw_sync->rebase_frequency_control_slew();
+            }
+            LOG_RT_INFO_M(Ocxo)
+                << "OCXO reacquisition hold started after sync reset"
+                << " stage="
+                << (_ocxo_discipliner
+                        ? OCXODiscipliner::stage_name(
+                              _ocxo_discipliner->stage())
+                        : "inactive")
+                << " preserve_s="
+                << OCXODiscipliner::kReacquisitionModeHoldS
+                << " ppm=" << (_hw_sync ? _hw_sync->current_offset_ppm() : 0.0)
+                << " word=" << (_hw_sync ? _hw_sync->current_word() : 0);
+        }
+        _enter_sync_search_state();
+        _mute_uplink_tx_gain_for_sync_search();
+        _control_time_gates.mark_reset_now(radio_time_now());
+    }
+
+    // Process-thread-only validation before any demodulation or tracking.
+    bool _accept_normal_preamble(const RxFrame& frame) {
+        if (!(cfg_.sync_tracking.software_sync || cfg_.sync_tracking.hardware_sync)) {
+            return true;
+        }
+        const size_t symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
+        const auto preamble = SyncProcessor::validate_sync_preamble(
+            frame.frame_data, cfg_.ofdm.sync_pos * symbol_len,
+            cfg_.ofdm.fft_size, cfg_.ofdm.cp_length,
+            cfg_.ofdm.enable_sec_sync_symbol, cfo_training_sequence_enabled(cfg_),
+            cfg_.ofdm.cfo_training_period_samples, cfg_.rf_sampling.sample_rate);
+        if (preamble.valid) {
+            _preamble_bad_count = 0;
+            return true;
+        }
+        if (_preamble_bad_count < _reset_hold_frames) {
+            ++_preamble_bad_count;
+        }
+        LOG_RT_WARN_HZ_M(Sync, 2)
+            << "[sync] Dropping frame with mismatched preamble"
+            << ": count=" << _preamble_bad_count << "/" << _reset_hold_frames
+            << ", repeated_zc_metric=" << preamble.repeated_zc_metric
+            << ", cfo_training_metric=" << preamble.cfo_training_metric;
+        if (_preamble_bad_count >= _reset_hold_frames &&
+            _control_time_gates.allow_reset(frame.usrp_time_ns)) {
+            LOG_RT_WARN_M(Sync) << "[sync] RESET Persistent preamble mismatch";
+            _reset_for_reacquisition();
+        }
+        return false;
+    }
+
     void _enter_sync_search_state() {
+        _preamble_bad_count = 0;
         _sync_generation.fetch_add(1, std::memory_order_acq_rel);
         _sync_in_progress = false;
         _sync_in_progress_hold_frames = 0;
@@ -4475,6 +4547,14 @@ private:
             return estimate;
         };
 
+        auto validate_candidate = [&](int position) {
+            return position >= 0 && SyncProcessor::validate_sync_preamble(
+                sync_data, static_cast<size_t>(position),
+                cfg_.ofdm.fft_size, cfg_.ofdm.cp_length,
+                cfg_.ofdm.enable_sec_sync_symbol, cfo_training_sequence_enabled(cfg_),
+                cfg_.ofdm.cfo_training_period_samples, cfg_.rf_sampling.sample_rate).valid;
+        };
+
         if (cfg_.ofdm.enable_sec_sync_symbol) {
             const auto sec_result = SyncProcessor::detect_sec_sync_symbol(
                 sync_data,
@@ -4525,7 +4605,8 @@ private:
                 max_pos = refine_result.max_pos;
                 max_corr = refine_result.max_corr;
                 avg_corr = refine_result.avg_corr;
-                if (avg_corr > 0.0f && (max_corr / avg_corr) > kZcEnergyThreshold) {
+                if (refine_result.valid && avg_corr > 0.0f &&
+                    (max_corr / avg_corr) > kZcEnergyThreshold && validate_candidate(max_pos)) {
                     used_sec_sync_symbol = true;
                     sync_found = true;
                     initial_cfo_hz = refine_result.cfo_hz;
@@ -4555,14 +4636,6 @@ private:
         }
 
         if (sync_found) {
-            _restore_uplink_tx_gain_after_sync();
-            _sync_search_gain_sweep.note_sync_found();
-            LOG_RT_INFO_M(Sync) << "Sync found at pos: " << max_pos
-                          << " with peak/avg: " << peak_ratio_db(max_corr, avg_corr)
-                          << " dB (peak=" << power_to_db(max_corr)
-                          << " dB, avg=" << power_to_db(avg_corr)
-                          << " dB) Threshold: " << power_to_db(kZcEnergyThreshold)
-                          << " dB";
             int symbol_offset = max_pos % symbol_len;
             // Calculate available symbol count
             const size_t available_symbols = std::min(
@@ -4587,52 +4660,74 @@ private:
                     const int max_search_start = sync_data.size() >= symbol_len
                         ? static_cast<int>(sync_data.size() - symbol_len)
                         : 0;
-                    const size_t cp_alias_search_start = static_cast<size_t>(std::max(
-                        0,
-                        max_pos - static_cast<int>(local_zc_search_radius)));
-                    const size_t cp_alias_search_end = static_cast<size_t>(std::max(
-                        0,
-                        std::min(
-                            max_search_start,
-                            max_pos + static_cast<int>(local_zc_search_radius))));
                     const double cp_alias_period_hz =
                         cfg_.rf_sampling.sample_rate / static_cast<double>(cfg_.ofdm.fft_size);
                     const int cp_alias_span = sync_cfo_alias_span_from_range(
                         cfg_.sync_tracking.sync_cfo_alias_search_range_hz,
                         cp_alias_period_hz);
-                    auto cp_refine = _sync_processor.refine_sync_cfo_alias(
-                        sync_data,
-                        residual_cfo_hz,
-                        cp_alias_period_hz,
-                        cfg_.rf_sampling.sample_rate,
-                        cp_alias_search_start,
-                        cp_alias_search_end,
-                        cp_alias_span,
-                        _sync_cfo_compensated_buffer,
-                        collect_alias_candidates);
-                    const auto cfo_training_est = estimate_cfo_training(cp_refine.max_pos);
-                    const bool cfo_training_alias_selected =
-                        cfo_training_est.valid &&
-                        cfo_training_est.metric > kCfoTrainingMetricThreshold &&
-                        SyncProcessor::select_alias_closest_to_cfo_reference(
-                            cp_refine,
-                            cfo_training_est.cfo_hz);
-                    if (log_sync_profile) {
-                        LOG_RT_INFO_M(Sync) << format_sync_alias_candidates(
-                            "CP CFO ZC refine",
-                            cp_refine);
+                    const int first_candidate = max_pos;
+                    bool accepted = false;
+                    // A global peak may be the first of the two identical ZCs.
+                    // Check its following symbol as a main-ZC candidate too.
+                    for (int candidate = 0;
+                         candidate <= (cfg_.ofdm.enable_sec_sync_symbol ? 1 : 0);
+                         ++candidate) {
+                        const int center = first_candidate + candidate * static_cast<int>(symbol_len);
+                        if (center > max_search_start) {
+                            continue;
+                        }
+                        const size_t search_start = static_cast<size_t>(std::max(
+                            0, center - static_cast<int>(local_zc_search_radius)));
+                        const size_t search_end = static_cast<size_t>(std::min(
+                            max_search_start, center + static_cast<int>(local_zc_search_radius)));
+                        auto cp_refine = _sync_processor.refine_sync_cfo_alias(
+                            sync_data, residual_cfo_hz, cp_alias_period_hz,
+                            cfg_.rf_sampling.sample_rate, search_start, search_end,
+                            cp_alias_span, _sync_cfo_compensated_buffer, collect_alias_candidates);
+                        const auto cfo_training_est = estimate_cfo_training(cp_refine.max_pos);
+                        const bool cfo_training_alias_selected =
+                            cfo_training_est.valid &&
+                            cfo_training_est.metric > kCfoTrainingMetricThreshold &&
+                            SyncProcessor::select_alias_closest_to_cfo_reference(
+                                cp_refine, cfo_training_est.cfo_hz);
+                        if (log_sync_profile) {
+                            LOG_RT_INFO_M(Sync) << format_sync_alias_candidates(
+                                "CP CFO ZC refine", cp_refine);
+                        }
+                        if (cp_refine.valid && cp_refine.avg_corr > 0.0f &&
+                            (cp_refine.max_corr / cp_refine.avg_corr) > kZcEnergyThreshold &&
+                            validate_candidate(cp_refine.max_pos)) {
+                            cfo = cp_refine.cfo_hz;
+                            max_pos = cp_refine.max_pos;
+                            max_corr = cp_refine.max_corr;
+                            avg_corr = cp_refine.avg_corr;
+                            accepted = true;
+                            LOG_RT_INFO_M(Sync) << "CP CFO alias refine: modulo CFO=" << residual_cfo_hz
+                                          << " Hz, alias index=" << cp_refine.alias_index
+                                          << ", refined CFO=" << cfo << " Hz"
+                                          << (cfo_training_alias_selected ? " (CFO field deambiguated)" : "");
+                            break;
+                        }
                     }
-                    if (cp_refine.valid && cp_refine.avg_corr > 0.0f &&
-                        (cp_refine.max_corr / cp_refine.avg_corr) > kZcEnergyThreshold) {
-                        cfo = cp_refine.cfo_hz;
-                        max_pos = cp_refine.max_pos;
-                        LOG_RT_INFO_M(Sync) << "CP CFO alias refine: modulo CFO=" << residual_cfo_hz
-                                      << " Hz, alias index=" << cp_refine.alias_index
-                                      << ", refined CFO=" << cfo << " Hz"
-                                      << (cfo_training_alias_selected ? " (CFO field deambiguated)" : "");
+                    // ZC-only configurations retain the original coarse-lock
+                    // behavior if the optional CFO refinement cannot improve it.
+                    if (!accepted && (cfg_.ofdm.enable_sec_sync_symbol ||
+                                      cfo_training_sequence_enabled(cfg_))) {
+                        LOG_RT_WARN_HZ_M(Sync, 2)
+                            << "[sync] Rejected ZC candidate: configured preamble incomplete or mismatched";
+                        return;
                     }
                 }
-                
+
+                _restore_uplink_tx_gain_after_sync();
+                _sync_search_gain_sweep.note_sync_found();
+                LOG_RT_INFO_M(Sync) << "Sync found at pos: " << max_pos
+                                  << " with peak/avg: " << peak_ratio_db(max_corr, avg_corr)
+                                  << " dB (peak=" << power_to_db(max_corr)
+                                  << " dB, avg=" << power_to_db(avg_corr)
+                                  << " dB) Threshold: " << power_to_db(kZcEnergyThreshold)
+                                  << " dB";
+
                 LOG_RT_INFO_M(Sync) << "CFO estimate: " << cfo << " Hz (using " << available_symbols
                               << " symbols)";
 
@@ -4925,6 +5020,10 @@ private:
                     if (!running_.load()) {
                         break;
                     }
+                    continue;
+                }
+                if (!_accept_normal_preamble(frame)) {
+                    _rx_frame_pool.release(std::move(frame));
                     continue;
                 }
                 const int64_t frame_dequeue_time_ns = do_latency_profile ? host_now_ns() : 0;
@@ -6091,39 +6190,7 @@ private:
                     << " sfo_per_frame=" << sfo_per_frame
                     << " max_mag=" << result.delay_max_mag
                     << " avg_mag=" << result.delay_average_mag;
-                adjust_rx_freq(0.0, true);
-                sfo_estimator.reset();
-                _cfo_ewma.reset();
-                _ocxo_cfo_quality_gate.reset();
-                _ocxo_log_counter = 0;
-                _ocxo_to_pub_known = false;
-                _ocxo_to_last_pub_gen = 0;
-                _ocxo_to_age_frames = 0;
-                if (ocxo_debug_sender_) {
-                    ocxo_debug_sender_->reset_counter();
-                }
-                if (cfg_.sync_tracking.hardware_sync) {
-                    if (_hw_sync) {
-                        if (_ocxo_discipliner) {
-                            _ocxo_discipliner->begin_reacquisition_hold();
-                        }
-                        _hw_sync->rebase_frequency_control_slew();
-                    }
-                    LOG_RT_INFO_M(Ocxo)
-                        << "OCXO reacquisition hold started after sync reset"
-                        << " stage="
-                        << (_ocxo_discipliner
-                                ? OCXODiscipliner::stage_name(
-                                      _ocxo_discipliner->stage())
-                                : "inactive")
-                        << " preserve_s="
-                        << OCXODiscipliner::kReacquisitionModeHoldS
-                        << " ppm=" << (_hw_sync ? _hw_sync->current_offset_ppm() : 0.0)
-                        << " word=" << (_hw_sync ? _hw_sync->current_word() : 0);
-                }
-                _enter_sync_search_state();
-                _mute_uplink_tx_gain_for_sync_search();
-                _control_time_gates.mark_reset_now(radio_time_now());
+                _reset_for_reacquisition();
                 _release_cpu_demod_result(result);
                 return false;
             }

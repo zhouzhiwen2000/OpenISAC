@@ -167,7 +167,7 @@ RX/TX 采样率。两者相差超过 1 Hz 会在创建工作线程前中止启�
 | :--- | :--- | :--- | :--- |
 | `sync_tracking.sync_queue_size` | `int` | `32` | 同步搜索 batch 队列容量。 |
 | `sync_tracking.sync_cfo_alias_search_range_hz` | `float` / Hz | `800000` | 同步 alias 解析覆盖的 CFO 范围。 |
-| `sync_tracking.reset_hold_s` | `float` / s | `0.5` | 坏 delay 条件持续多久后硬 reset 回同步搜索。 |
+| `sync_tracking.reset_hold_s` | `float` / s | `0.5` | 坏 delay 或配置要求的前导字段不匹配连续持续多久后，硬 reset 回同步搜索。 |
 | `sync_tracking.software_sync` | `bool` | `true` | 开启软件同步跟踪。 |
 | `sync_tracking.predictive_delay` | `bool` | `true` | 使用基于 CFO 的预测性时延补偿。 |
 | `sync_tracking.hardware_sync` | `bool` | `false` | 开启硬件同步模式。 |

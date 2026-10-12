@@ -412,6 +412,16 @@ target_compile_options(LDPCFixedBench PRIVATE ${COMMON_COMPILE_OPTIONS})
 message(STATUS "CPU target: LDPCFixedBench")
 
 if(BUILD_TESTING)
+    add_executable(SyncPreambleTest tests/sync_preamble_test.cpp ${OPENISAC_SRC_DIR}/AsyncLogger.cpp)
+    target_include_directories(SyncPreambleTest PRIVATE
+        ${OPENISAC_INCLUDE_DIR} ${FFTW3f_INCLUDE_DIRS} ${OPENISAC_ZMQ_INCLUDE_DIRS}
+        ${UHD_INCLUDE_DIRS} ${YAMLCPP_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
+    target_link_libraries(SyncPreambleTest PRIVATE
+        ${FFTW3f_LIBRARIES} Threads::Threads OpenMP::OpenMP_CXX ${OPENISAC_ZMQ_LINK})
+    target_compile_options(SyncPreambleTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+    add_test(NAME SyncPreamble COMMAND SyncPreambleTest)
+    set_tests_properties(SyncPreamble PROPERTIES LABELS "cpu;sync" TIMEOUT 30)
+
     add_executable(LDPCConfigTest
         tests/ldpc_config_test.cpp
         ${OPENISAC_SRC_DIR}/LDPCCodec.cpp

@@ -2220,6 +2220,13 @@ public:
         bool valid = false;
     };
 
+    /** @brief Correlation quality and completeness of the configured sync preamble. */
+    struct PreambleValidation {
+        bool valid = false;
+        float repeated_zc_metric = 0.0f;
+        float cfo_training_metric = 0.0f;
+    };
+
     /**
      * @brief Construct a SyncProcessor with pre-allocated FFT plans and sync sequence.
      * @param data_len Expected data length (2 frames worth)
@@ -2554,6 +2561,73 @@ public:
                        std::isfinite(result.metric) &&
                        r0_sum > 0.0 &&
                        r1_sum > 0.0;
+        return result;
+    }
+
+    /**
+     * @brief Validate the configured fields around a main ZC candidate.
+     * @param data Time-domain samples, including cyclic prefixes.
+     * @param main_zc_start Candidate main-ZC cyclic-prefix start.
+     * @param fft_size Useful samples per OFDM symbol.
+     * @param cp_length Cyclic-prefix samples per symbol.
+     * @param require_repeated_zc Require a matching ZC immediately before the candidate.
+     * @param require_cfo_training Require the periodic field immediately after the candidate.
+     * @param period_samples CFO-field repetition period.
+     * @param sample_rate Sample rate in samples per second.
+     * @param min_metric Minimum normalized correlation for each enabled field.
+     * @return Field metrics and whether the complete configured preamble matches.
+     */
+    static PreambleValidation validate_sync_preamble(
+        const AlignedVector& data, size_t main_zc_start,
+        size_t fft_size, size_t cp_length,
+        bool require_repeated_zc, bool require_cfo_training,
+        size_t period_samples, double sample_rate, float min_metric = 0.10f)
+    {
+        PreambleValidation result;
+        if (fft_size == 0 || cp_length > std::numeric_limits<size_t>::max() - fft_size ||
+            !std::isfinite(min_metric) || min_metric < 0.0f || min_metric >= 1.0f) {
+            return result;
+        }
+        const size_t symbol_len = fft_size + cp_length;
+        if (main_zc_start > data.size() || data.size() - main_zc_start < symbol_len) {
+            return result;
+        }
+        if (require_repeated_zc) {
+            if (main_zc_start < symbol_len) {
+                return result;
+            }
+            const size_t first = main_zc_start - symbol_len + cp_length;
+            const size_t second = main_zc_start + cp_length;
+            double corr_re = 0.0, corr_im = 0.0, energy0 = 0.0, energy1 = 0.0;
+            #pragma omp simd reduction(+:corr_re,corr_im,energy0,energy1)
+            for (size_t i = 0; i < fft_size; ++i) {
+                const double ar = data[first + i].real(), ai = data[first + i].imag();
+                const double br = data[second + i].real(), bi = data[second + i].imag();
+                corr_re += ar * br + ai * bi;
+                corr_im += ar * bi - ai * br;
+                energy0 += ar * ar + ai * ai;
+                energy1 += br * br + bi * bi;
+            }
+            if (!(energy0 > 0.0) || !(energy1 > 0.0)) {
+                return result;
+            }
+            result.repeated_zc_metric = static_cast<float>(
+                (corr_re * corr_re + corr_im * corr_im) / (energy0 * energy1));
+            if (!std::isfinite(result.repeated_zc_metric) ||
+                result.repeated_zc_metric <= min_metric) {
+                return result;
+            }
+        }
+        if (require_cfo_training) {
+            const auto training = estimate_cfo_from_training_symbol(
+                data, main_zc_start + symbol_len, fft_size, cp_length,
+                period_samples, sample_rate);
+            result.cfo_training_metric = training.metric;
+            if (!training.valid || !std::isfinite(training.metric) || training.metric <= min_metric) {
+                return result;
+            }
+        }
+        result.valid = true;
         return result;
     }
 

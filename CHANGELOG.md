@@ -8,6 +8,12 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-13 - 校验 UE 前导并恢复重连后的感知控制
+
+UE 在提交同步帧边界前，检查配置要求的重复 ZC 与 CFO 训练字段；全局相关峰落在前一个重复 ZC 时，继续验证后一个符号，拒绝不完整或不匹配的前导。运行中的无效前导在解调和感知前丢弃，连续失败达到现有 `reset_hold_s` 后重新搜索同步，保留原有频率、队列世代、OCXO hold 与冷却处理。ZC-only 配置保留原同步行为。
+
+快速感知界面监测 ZeroMQ 控制连接断开与重连，清除旧参数和显示缓存，重新握手后下发一次保存的 MTI、STRD 等控制；普通心跳不重复下发。新增带噪声、频偏、CP 时延偏移和不完整前导检查，以及真实 ZeroMQ 后端重启回归。更新中英文故障排查与参数参考。
+
 ## 2026-10-12 - 修正 Hsys 配置读取并补充时延校准步骤
 
 Hsys 命令行工具读取当前 YAML 的 `ofdm_frame.fft_size`，保留旧 `ofdm` 节兼容性；感知显示的补零 FFT 不参与 Hsys 文件几何校验。回归检查覆盖两端配置、节名优先级和真实控制传输。中英文校准流程补充重复同步符号导致相关峰歧义时的处理，以及恢复运行增益后的适用性检查。

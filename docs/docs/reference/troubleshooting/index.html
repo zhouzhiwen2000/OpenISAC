@@ -120,6 +120,19 @@
 <li>Inspect channel estimates and constellation quality before LLR and LDPC diagnostics.</li>
 <li>On RF hardware, check center frequency, gains, and antenna ports for weak or saturated input.</li>
 </ol>
+<p>When repeated ZC synchronization is enabled, a strong ZC peak alone does not
+identify the main synchronization symbol. The UE checks the preceding repeated
+ZC and, when configured, the following CFO training field before committing the
+frame boundary. An incomplete startup preamble is rejected and acquisition
+continues. Keep these settings identical on BS and UE.</p>
+<p>During software or hardware tracking, frames with mismatched configured
+preamble fields are dropped before demodulation and sensing. Consecutive
+mismatches lasting <code dir="auto">sync_tracking.reset_hold_s</code> trigger reacquisition through
+the existing reset cooldown. A valid preamble clears that failure count.
+Look for <code dir="auto">Rejected ZC candidate</code>, <code dir="auto">Dropping frame with mismatched preamble</code>,
+or <code dir="auto">RESET Persistent preamble mismatch</code> in the <code dir="auto">sync</code> log. A constellation on
+the real/imaginary axes with normal comb pilots can indicate a whole-symbol
+frame error and incorrect mid-frame pilot references.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="uplink-does-not-work">Uplink does not work</h2><a class="sl-anchor-link" href="#uplink-does-not-work"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Uplink does not work”</span></a></div>
 <p>Set <code dir="auto">uplink.enabled: true</code> on both BS and UE, and match <code dir="auto">uplink.duplex_mode</code>, the TDD symbol window, or the FDD center frequency. With <code dir="auto">ChannelSimulator</code>, also enable <code dir="auto">simulation.enable_uplink</code>. If samples arrive but decoding fails, inspect timing windows, channel estimation, equalization, and LDPC in that order.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="sensing-output-is-unstable-or-incorrect">Sensing output is unstable or incorrect</h2><a class="sl-anchor-link" href="#sensing-output-is-unstable-or-incorrect"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Sensing output is unstable or incorrect”</span></a></div>
@@ -136,4 +149,10 @@
 <li>Run <code dir="auto">ss -ltnp</code> on the backend host and confirm that the expected endpoint is listening.</li>
 <li>Check that the backend is producing data and is not continuously dropping frames because of full queues or missing subscribers.</li>
 </ol>
+<p>The fast sensing viewer detects a lost control connection and automatically
+requests fresh parameters after reconnection. It then reapplies saved SKIP,
+MTI, and STRD controls once; the monostatic viewer also reapplies its saved
+gains. This includes backend restarts at the same IP and port. Ordinary READY
+heartbeats do not repeatedly apply those controls. MTI suppresses static
+reflections, so verify its setting when a static bistatic path disappears.</p>
 <p>If the problem remains, retain the complete YAML files, launch commands, logs from startup through the first failure, USRP connection details, and host environment information.</p></div><footer class="sl-flex astro-xhxjzfa7"><div class="meta sl-flex astro-xhxjzfa7"></div><div class="pagination-links print:hidden astro-jgq3vlii" dir="ltr"><a href="/docs/reference/scripts-tools/" rel="prev" class="astro-jgq3vlii"><svg aria-hidden="true" class="astro-jgq3vlii astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-jgq3vlii">Previous<br class="astro-jgq3vlii"><span class="link-title astro-jgq3vlii">Scripts and Tools</span></span></a></div></footer></div></div></main></div></div></div></div></body></html>
