@@ -8,6 +8,12 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-13 - 恢复 BS 重启后的双站感知流
+
+双站感知检测输入帧符号编号回退，重置采样游标并丢弃旧时间线的未完成批次，清除 MTI 与微多普勒历史，迁移待生效参数；保留当前 STRD、MTI 和 FFT 配置。修复 BS 重启后通信已恢复、双站感知却等待旧采样编号而暂停的问题，CPU 与 GPU 路径行为一致。正常帧仅增加时间戳比较与记录。
+
+新增真实 ZeroMQ 输出回归，覆盖时间线重启、旧批次丢弃、待生效参数迁移、跨帧大 STRD 和 MTI 历史清理；更新中英文故障排查说明。
+
 ## 2026-10-13 - 校验 UE 前导并恢复重连后的感知控制
 
 UE 在提交同步帧边界前，检查配置要求的重复 ZC 与 CFO 训练字段；全局相关峰落在前一个重复 ZC 时，继续验证后一个符号，拒绝不完整或不匹配的前导。运行中的无效前导在解调和感知前丢弃，连续失败达到现有 `reset_hold_s` 后重新搜索同步，保留原有频率、队列世代、OCXO hold 与冷却处理。ZC-only 配置保留原同步行为。

@@ -87,6 +87,13 @@ Set `uplink.enabled: true` on both BS and UE, and match `uplink.duplex_mode`, th
 - Check backend warnings for frame-pair queues, sensing-output queues, or ZMQ high-water-mark drops.
 - For bistatic sensing, match `sensing.sensing_delay_correction_mode` to the active LoS-tracking or eRTM configuration.
 
+When the BS restarts and its air-frame symbol counter moves backwards, the UE
+resets the bistatic sampling cursor, discards partial batches, and clears MTI
+and micro-Doppler history. Pending controls move to the new timeline; active
+STRD, MTI, and FFT settings remain in effect. Look for `bistatic timeline
+restarted` in the sensing log. Output resumes after one new sensing batch,
+without waiting for the new counter to catch up with the previous session.
+
 ## Visualization window does not update
 
 1. Enable the corresponding `network_output.*_enabled` switch.

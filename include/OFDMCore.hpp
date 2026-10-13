@@ -5641,6 +5641,12 @@ public:
                                std::complex<float>(0.0f, 0.0f));
     }
 
+    /** @brief Clear channel and MTI history when the input timeline restarts. */
+    void reset_history() {
+        clear_channel_buffer();
+        _mti_filter.reset();
+    }
+
     /**
      * @brief Copy frequency-domain symbols directly to internal channel buffer.
      * Used by UE where symbols are already in frequency domain.

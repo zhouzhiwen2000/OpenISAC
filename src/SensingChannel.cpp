@@ -1173,6 +1173,10 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
     if (!_compute.bistatic_active) {
         return;
     }
+    if (frame_start_symbol_index < _compute.last_bistatic_frame_start_symbol) {
+        _reset_bistatic_timeline(frame_start_symbol_index);
+    }
+    _compute.last_bistatic_frame_start_symbol = frame_start_symbol_index;
     _apply_batch_reset_if_due(frame_start_symbol_index);
     const auto now = std::chrono::steady_clock::now();
     _send_heartbeat_if_due(now);
@@ -1666,6 +1670,35 @@ void SensingChannel::_request_shared_batch_reset() {
     if (_batch_reset_requester) {
         _batch_reset_requester();
     }
+}
+
+void SensingChannel::_reset_bistatic_timeline(uint64_t frame_start_symbol_index) {
+    _compute.accumulated_rx_symbols.clear();
+    _compute.accumulated_tx_symbols.clear();
+    _compute.compact_selected_tx_symbols.clear();
+    _compute.pending_batch_gather_us = 0.0;
+    _compute.batch_has_first_symbol = false;
+    _compute.current_batch_first_symbol = frame_start_symbol_index;
+    _compute.next_symbol_to_sample = frame_start_symbol_index;
+    _compute.micro_doppler_state.clear();
+    _compute.sensing_core.reset_history();
+    if (_compute.compact_sensing_core) {
+        _compute.compact_sensing_core->reset_history();
+    }
+    {
+        std::lock_guard<std::mutex> lock(_shared_cfg_mutex);
+        if (_has_pending_shared_cfg &&
+            _pending_shared_cfg.generation > _compute.applied_generation) {
+            _pending_shared_cfg.apply_symbol_index = frame_start_symbol_index;
+        }
+    }
+    if (_shared_batch_reset_symbol) {
+        _applied_batch_reset_symbol = _shared_batch_reset_symbol->load(std::memory_order_relaxed);
+    }
+    LOG_RT_WARN_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+                  << "] bistatic timeline restarted: previous_frame_start_symbol="
+                  << _compute.last_bistatic_frame_start_symbol
+                  << ", frame_start_symbol=" << frame_start_symbol_index;
 }
 
 void SensingChannel::_apply_batch_reset_if_due(uint64_t frame_start_symbol_index) {

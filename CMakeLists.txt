@@ -412,6 +412,21 @@ target_compile_options(LDPCFixedBench PRIVATE ${COMMON_COMPILE_OPTIONS})
 message(STATUS "CPU target: LDPCFixedBench")
 
 if(BUILD_TESTING)
+    add_executable(BistaticTimelineTest
+        tests/bistatic_timeline_test.cpp ${OPENISAC_SRC_DIR}/SensingChannel.cpp
+        ${OPENISAC_SRC_DIR}/UhdBackend.cpp ${OPENISAC_SRC_DIR}/SimBackend.cpp
+        ${OPENISAC_SRC_DIR}/AsyncLogger.cpp)
+    target_include_directories(BistaticTimelineTest PRIVATE
+        ${OPENISAC_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW3f_INCLUDE_DIRS}
+        ${OPENISAC_ZMQ_INCLUDE_DIRS} ${UHD_INCLUDE_DIRS} ${YAMLCPP_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
+    target_link_libraries(BistaticTimelineTest PRIVATE
+        ${UHD_LIBRARIES} ${FFTW3f_LIBRARIES} ${FFTW3f_THREADS_LIBRARY}
+        Threads::Threads OpenMP::OpenMP_CXX ${OPENISAC_YAMLCPP_TARGET}
+        ${YAMLCPP_LIBRARIES} ${OPENISAC_ZMQ_LINK} rt)
+    target_compile_options(BistaticTimelineTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+    add_test(NAME BistaticTimeline COMMAND BistaticTimelineTest)
+    set_tests_properties(BistaticTimeline PROPERTIES LABELS "cpu;sensing;recovery" TIMEOUT 15)
+
     add_executable(SyncPreambleTest tests/sync_preamble_test.cpp ${OPENISAC_SRC_DIR}/AsyncLogger.cpp)
     target_include_directories(SyncPreambleTest PRIVATE
         ${OPENISAC_INCLUDE_DIR} ${FFTW3f_INCLUDE_DIRS} ${OPENISAC_ZMQ_INCLUDE_DIRS}

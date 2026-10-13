@@ -207,6 +207,7 @@ private:
         AlignedVector compact_channel_output;
         std::vector<AlignedVector> compact_selected_tx_symbols;
         uint64_t next_symbol_to_sample = 0;
+        uint64_t last_bistatic_frame_start_symbol = 0;
         uint64_t current_batch_first_symbol = 0;
         bool batch_has_first_symbol = false;
         bool bistatic_active = false;
@@ -314,6 +315,7 @@ private:
     void _apply_shared_sensing_if_due(uint64_t symbol_index);
     void _request_shared_batch_reset();
     void _apply_batch_reset_if_due(uint64_t frame_start_symbol_index);
+    void _reset_bistatic_timeline(uint64_t frame_start_symbol_index);
     std::string _system_response_calibration_file_path() const;
     bool _can_capture_full_band_system_response() const;
     void _load_system_response_calibration();

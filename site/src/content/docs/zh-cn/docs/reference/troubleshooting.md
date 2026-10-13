@@ -76,6 +76,8 @@ cd build
 - 检查后端是否报告帧配对队列、感知输出队列或 ZMQ 高水位丢帧。
 - 双站感知还需要确认 `sensing.sensing_delay_correction_mode` 与当前 LoS tracking / eRTM 配置一致。
 
+BS 重启导致空口帧符号编号回退时，UE 会重置双站感知采样游标、丢弃未完成批次，并清除 MTI 和微多普勒历史。待生效控制迁移到新时间线，当前 STRD、MTI 与 FFT 设置继续有效。感知日志会记录 `bistatic timeline restarted`，输出在收集一个新感知批次后恢复，无需等待新编号追上旧会话。
+
 ## 可视化窗口不更新
 
 1. 确认后端已启用相应的 `network_output.*_enabled` 开关。
