@@ -1,22 +1,39 @@
 ---
 title: Video and UDP Workflows
-description: Payload workflows for UDP traffic and video streaming demonstrations.
+description: Send video from the BS computer, play it on the UE computer, and control UDP transmission rate.
 ---
 
-OpenISAC can carry UDP payloads over the OFDM communication link. Video demos usually feed compressed packets into the same payload path.
+This demonstration sends video from BS to UE through OpenISAC. `ffmpeg` reads
+and encodes the video file, the BS and UE programs carry the data over the
+radio link, and `ffplay` receives it and plays the picture and sound.
 
-## Bring-up order
+## Follow the data path
 
-First validate the PHY with low-rate traffic. Then increase UDP payload rate. Finally add video encoding or decoding tools after link stability is confirmed.
+1. On the **BS computer**, `ffmpeg` sends video data to local UDP port `50000`, where the BS program receives it.
+2. BS transmits through its USRP. The UE program receives the signal through the other USRP and recovers the video data.
+3. On the **UE computer**, the UE program sends that data to local UDP port `50001`. `ffplay` listens on this port and plays the video.
 
-## Pace UDP video bursts
+These ports are examples. Check `network_output.udp_input_port` in `BS.yaml`
+and `network_output.udp_output_port` in `UE.yaml`. When the player runs on the
+UE computer, set `network_output.udp_output_ip` in `UE.yaml` to `127.0.0.1`.
 
-Video keyframes can produce short bursts even with a constant target encoding
-rate. Add `bitrate` and `burst_bits` to the FFmpeg **UDP output URL** to pace
-datagrams entering the BS. Keep the URL in quotes so the shell preserves `&`.
+## 1. Start BS and UE
 
-For a sender with NVIDIA NVENC, this example encodes 60 Mb/s video and allows
-up to 70 Mb/s of UDP payload, including audio and MPEG-TS overhead:
+Follow [First OTA Run](/docs/getting-started/first-ota-run/) to start both
+backends. Confirm that UE has synchronized with BS before sending video.
+
+The commands below use the settings from a 100 MS/s X310 test: a **60 Mb/s**
+video target and a **70 Mb/s** UDP sending limit. For a first test or a
+configuration with a lower sample rate, start by changing all four `60M`
+values to `3M` and `bitrate=70000000` to `bitrate=4000000`. Increase them
+gradually after playback works.
+
+## 2. Send video on the BS computer
+
+Open another terminal on the BS computer. Put `video.mp4` in the current
+directory, or replace `-i video.mp4` with the actual file path.
+
+If the BS computer supports NVIDIA NVENC hardware encoding, run:
 
 ```bash
 ffmpeg -re -stream_loop -1 -i video.mp4 \
@@ -28,51 +45,74 @@ ffmpeg -re -stream_loop -1 -i video.mp4 \
   "udp://127.0.0.1:50000?pkt_size=1316&bitrate=70000000&burst_bits=10528&buffer_size=4194304"
 ```
 
-Use the BS input address and port from YAML. For software encoding, replace
-the NVENC options with `-c:v libx264 -preset veryfast -tune zerolatency` and
-verify that encoding keeps up with real time. The UDP pacing options also
-apply to that encoder.
+The command loops the file, packages the video and any audio as MPEG-TS, and
+sends the data over UDP to the local BS program. `127.0.0.1` means this
+computer; `50000` is the BS video-data input port.
 
-| Setting | Meaning |
-| --- | --- |
-| `-b:v 60M` | Target video encoding rate: 60,000,000 bits/s. |
-| `bitrate=70000000` | UDP output pacing rate in bits/s; actual output can be lower when less data is available. |
-| `pkt_size=1316` | UDP payload size in bytes, holding seven 188-byte MPEG-TS packets. |
-| `burst_bits=10528` | Burst budget in bits: `1316 × 8`, approximately one datagram. Update it when changing packet size. |
-| `buffer_size=4194304` | Requested UDP socket buffer in bytes, subject to OS limits. |
+For CPU software encoding, replace
+`-c:v h264_nvenc -preset p4 -tune ll -rc cbr` with
+`-c:v libx264 -preset veryfast -tune zerolatency`. Check the `speed` reported
+by `ffmpeg`: encoding should sustain `1x`.
 
-Choose the UDP pacing rate above the measured average video/audio/container
-rate and below the OFDM link's sustainable payload throughput. For example,
-40 Mb/s video with `bitrate=55000000` or 50 Mb/s video with
-`bitrate=65000000` are settings to test. A 100 MS/s RF sample rate alone does
-not determine payload capacity; account for modulation, LDPC, CP, pilots,
-packet headers, padding, and complete-packet packing. A pacing rate below the
-average incoming stream causes backlog. `-re` and encoder `-maxrate` control
-different parts of this path, so also configure the UDP URL.
+## 3. Play video on the UE computer
 
-For this MPEG-TS-over-UDP stream, play the UE's decoded output directly:
+Open another terminal on the UE computer and run:
 
 ```bash
 ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
-  "udp://0.0.0.0:50001?fifo_size=65536&overrun_nonfatal=1&buffer_size=16777216"
+  "udp://127.0.0.1:50001?fifo_size=65536&overrun_nonfatal=1&buffer_size=16777216"
 ```
 
-Match the receiver port to YAML. If a relay already receives that decoded
-output, use its player port (for example, 50101) instead of binding a second
-receiver to the same port. This command uses raw MPEG-TS over UDP;
-the RTP/SDP examples in [First OTA Run](/docs/getting-started/first-ota-run/)
-have their own matching receiver commands. Measure received bytes over time,
-check UDP drops and backend queues, and inspect player decode errors and
-frame drops separately. Option definitions are in the
+`ffplay` receives the video data sent by the UE program to local port `50001`,
+decodes the compressed video into pictures, and plays the audio. Keep
+`ffmpeg` on BS, both backends, and `ffplay` on UE running.
+
+If a relay already receives port `50001` and forwards data to the player,
+change the playback command to its output port, such as `50101`. This gives
+the relay and player their own receiving ports.
+
+If the player runs on another computer, set
+`network_output.udp_output_ip` in `UE.yaml` to that computer's IP. On the
+player computer, run the same `ffplay` command with `127.0.0.1` replaced
+by `0.0.0.0` to listen on all local network interfaces. Match the port to
+`network_output.udp_output_port` as well.
+
+## Why limit UDP bursts too?
+
+After encoding a frame, `ffmpeg` may send many UDP packets together. Large
+keyframes make this more noticeable. These short bursts can put pressure
+on backend queues even when the average rate is moderate.
+
+Set both `bitrate` and `burst_bits` in the output URL to spread packet
+transmissions over time. Quote the URL so the shell passes the parameters
+after `&` to `ffmpeg` too.
+
+| Setting | What it controls |
+| --- | --- |
+| `-b:v 60M` | A 60 Mb/s target for video encoding. Audio and packaging need additional bandwidth. |
+| `-minrate:v 60M`, `-maxrate:v 60M` | The video rate range used by the encoder's rate control. |
+| `-bufsize:v 60M` | A 60 Mbit encoder rate-control buffer. |
+| `bitrate=70000000` | UDP sending paced at up to about 70 Mb/s; output is lower when less data is available. |
+| `pkt_size=1316` | Up to 1316 data bytes per UDP packet: seven 188-byte MPEG-TS packets. |
+| `burst_bits=10528` | About one UDP packet's worth of data per burst: `1316 × 8 = 10528` bits. Adjust it with packet size. |
+| `buffer_size=4194304` | A request for a 4 MiB UDP send buffer, subject to OS settings. |
+
+Leave room for video, audio, and packaging when choosing the UDP limit, while
+keeping it within the radio link's sustainable data throughput. Too low a
+limit causes backlog; too high a limit allows larger bursts. Validate the
+example's 60/70 Mb/s settings with your own device and configuration.
+
+`-re` reads the file at playback speed, the encoder options control how much
+video data is produced, and the UDP URL controls how it is sent. Use them
+together. A 100 MS/s RF sample rate is only one factor in video capacity;
+modulation, LDPC, CP, pilots, and frame overhead also matter.
+
+## Check problems in transmission order
+
+1. **Video sender:** confirm that the file opens, `ffmpeg` reports no errors, and `speed` stays at `1x`.
+2. **Radio link:** confirm continuous UE synchronization and check header validation, LDPC, and RX overflow logs.
+3. **UDP transfer:** check addresses and ports, packet-drop counters, and queue buildup. Calculate received throughput as received bytes × 8 ÷ elapsed time.
+4. **Player:** inspect video decode errors, player frame drops, and audio/video time difference separately. `-framedrop` lets the player skip frames that cannot be displayed in time to reduce playback delay; that count differs from radio packet loss.
+
+For complete option definitions, see the
 [FFmpeg UDP protocol documentation](https://ffmpeg.org/ffmpeg-protocols.html#udp).
-
-## Debugging
-
-Separate PHY failures from application failures:
-
-- If synchronization is unstable, fix the radio path first.
-- If LDPC decode fails, inspect channel and offset estimates.
-- If UDP drops occur with stable decode, inspect queues, datagram size, and application pacing.
-- If video freezes but UDP arrives, inspect codec and player behavior.
-
-This ordering prevents frontend or application symptoms from being mistaken for radio problems.

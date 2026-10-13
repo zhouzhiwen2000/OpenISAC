@@ -55,33 +55,36 @@ sudo ../scripts/isolate_cpus.py run ./UE
 ```
 *If you are using a separate frontend computer, point the bistatic viewer at the UE backend IP with `--host` or the viewer's Backend IP field. Set `default_out_ip` only for decoded/debug outputs that should be sent to another machine.*
 
-### 3. Stream video to the BS
-```bash
-ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 3000k -minrate 3000k -maxrate 3000k -bufsize 1M -f rtp -sdp_file video.sdp "rtp://<your IP of the BS>:50000"
-```
-*If you are streaming locally, your IP of the BS can be set to 127.0.0.1.*
+### 3. Send video on the BS computer
 
-If you want to stream audio together with the video, use RTP MPEG-TS instead:
+Confirm that BS and UE are running and UE has synchronized with BS. Open another terminal on the BS computer. Put `video.mp4` in the current directory, or replace it with the actual video file path.
+
+The command below uses NVIDIA NVENC encoding, a 60 Mb/s video target, and a 70 Mb/s UDP sending limit for an established 100 MS/s X310 link. For a first test or a configuration with a lower sample rate, change all four `60M` values to `3M` and `bitrate=70000000` to `bitrate=4000000`.
+
 ```bash
-ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts "rtp://<your IP of the BS>:50000"
+ffmpeg -re -stream_loop -1 -i video.mp4 \
+  -map 0:v:0 -map '0:a:0?' \
+  -c:v h264_nvenc -preset p4 -tune ll -rc cbr \
+  -b:v 60M -minrate:v 60M -maxrate:v 60M -bufsize:v 60M \
+  -g 30 -bf 0 -pix_fmt yuv420p -c:a aac -b:a 128k \
+  -f mpegts -mpegts_flags +resend_headers -muxdelay 0 -muxpreload 0 \
+  "udp://127.0.0.1:50000?pkt_size=1316&bitrate=70000000&burst_bits=10528&buffer_size=4194304"
 ```
 
-For explicit UDP burst pacing, use the MPEG-TS-over-UDP example in
-[Video and UDP Workflows](/docs/tools-workflows/video-udp-workflows/#pace-udp-video-bursts).
-Its output URL sets `bitrate` in bits/s and `burst_bits=10528` for 1316-byte
-datagrams; the same section provides its matching UDP player command.
+`ffmpeg` sends the video and any audio to the local BS program on input port `50000`. If it runs on another computer, replace `127.0.0.1` with the BS computer's IP. Match the port to `network_output.udp_input_port` in `BS.yaml`.
 
-### 4. Play video from the UE
-Copy `video.sdp` to the video receiver, modify `m=video 50000 RTP/AVP 96` to `m=video 50001 RTP/AVP 96`.
-```bash
-ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
-```
-*Note that this command should be run on the frontend.*
+For detailed video streaming settings, see [Video and UDP Workflows](/docs/tools-workflows/video-udp-workflows/).
 
-For the RTP MPEG-TS stream with audio, you can play it directly without an SDP file:
+### 4. Play video on the UE computer
+
+Set `network_output.udp_output_ip` to `127.0.0.1` and `network_output.udp_output_port` to `50001` in `UE.yaml`. Open another terminal on the UE computer and run:
+
 ```bash
-ffplay rtp://0.0.0.0:50001
+ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
+  "udp://127.0.0.1:50001?fifo_size=65536&overrun_nonfatal=1&buffer_size=16777216"
 ```
+
+The UE program sends the received video data to local port `50001`, where `ffplay` receives and plays it. If a relay forwards the data to `50101`, change the playback command to that port. For playback on another computer, follow the address and port settings in [Video and UDP Workflows](/docs/tools-workflows/video-udp-workflows/).
 
 ### 5. Run monostatic frontend
 ```bash

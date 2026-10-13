@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-13 - 明确视频推流与播放步骤
+
+重写中英文视频工作流，按 BS 电脑推流、USRP 空口传输、UE 电脑播放的顺序说明数据路径、命令执行位置和 UDP 端口。首次 OTA 的视频步骤统一使用带发送节奏控制的 MPEG-TS/UDP 命令，补充对应播放命令、异机播放与中转端口设置，并提供详细参数说明的入口。
+
 ## 2026-10-13 - 补充 UDP 视频突发限速说明
 
 中英文视频工作流补充 FFmpeg MPEG-TS-over-UDP 推流与匹配播放命令，说明 `bitrate`、`burst_bits`、包长和缓冲的单位与选值方法，区分编码目标、UDP 发送节奏及实测净荷吞吐。首次 OTA 视频步骤增加对应入口，补充关键帧突发、封装余量与接收验证说明。

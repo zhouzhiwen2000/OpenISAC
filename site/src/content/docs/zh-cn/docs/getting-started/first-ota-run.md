@@ -55,30 +55,36 @@ sudo ../scripts/isolate_cpus.py run ./UE
 ```
 *如果您使用单独的计算机作为前端，请在双站感知前端中用 `--host` 或 Backend IP 输入框指向 UE 后端 IP。只有解码/调试类输出需要发往另一台机器时才设置 `default_out_ip`。*
 
-### 3. 将视频流传输到 BS
-```bash
-ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 3000k -minrate 3000k -maxrate 3000k -bufsize 1M -f rtp -sdp_file video.sdp "rtp://<your IP of the BS>:50000"
-```
-*如果您在BS本地传输视频流，BS 的 IP 可以设置为 127.0.0.1。*
+### 3. 在 BS 电脑上推送视频
 
-如果您希望连同音频一起传输，可以改用 RTP MPEG-TS：
+确认 BS 和 UE 都已启动，UE 已同步到 BS。在 BS 电脑上另开一个终端，把 `video.mp4` 放在当前目录，或替换为视频文件的实际路径。
+
+下面的命令使用 NVIDIA NVENC 编码，视频目标码率为 60 Mb/s，UDP 发送上限为 70 Mb/s，适用于已调通的 100 MS/s X310 链路。首次测试或使用较低采样率时，先将四个 `60M` 改为 `3M`，将 `bitrate=70000000` 改为 `bitrate=4000000`。
+
 ```bash
-ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts "rtp://<your IP of the BS>:50000"
+ffmpeg -re -stream_loop -1 -i video.mp4 \
+  -map 0:v:0 -map '0:a:0?' \
+  -c:v h264_nvenc -preset p4 -tune ll -rc cbr \
+  -b:v 60M -minrate:v 60M -maxrate:v 60M -bufsize:v 60M \
+  -g 30 -bf 0 -pix_fmt yuv420p -c:a aac -b:a 128k \
+  -f mpegts -mpegts_flags +resend_headers -muxdelay 0 -muxpreload 0 \
+  "udp://127.0.0.1:50000?pkt_size=1316&bitrate=70000000&burst_bits=10528&buffer_size=4194304"
 ```
 
-需要显式限制 UDP 突发时，请使用[视频与 UDP 工作流](/zh-cn/docs/tools-workflows/video-udp-workflows/#限制-udp-视频突发)中的 MPEG-TS-over-UDP 示例。其输出 URL 用 `bitrate` 设置 bit/s 单位的发送上限，并用 `burst_bits=10528` 配合 1316 字节数据报；同节给出了对应的 UDP 播放命令。
+`ffmpeg` 会把视频和文件中已有的音频发送给本机 BS 程序，输入端口为 `50000`。如果 `ffmpeg` 在另一台电脑上运行，请将 `127.0.0.1` 改为 BS 电脑的 IP。端口应与 `BS.yaml` 的 `network_output.udp_input_port` 一致。
 
-### 4. 从 UE 播放视频
-将 `video.sdp` 复制到视频接收端，将 `m=video 50000 RTP/AVP 96` 修改为 `m=video 50001 RTP/AVP 96`。
-```bash
-ffplay -protocol_whitelist file,rtp,udp -i video1.sdp
-```
-*注意：此命令应在前端运行。*
+需要视频推流配置的详细信息，请参考[视频与 UDP 工作流](/zh-cn/docs/tools-workflows/video-udp-workflows/)。
 
-对于带音频的 RTP MPEG-TS 流，则可以不依赖 SDP 文件，直接播放：
+### 4. 在 UE 电脑上播放视频
+
+确认 `UE.yaml` 的 `network_output.udp_output_ip` 为 `127.0.0.1`，`network_output.udp_output_port` 为 `50001`。在 UE 电脑上另开一个终端，运行：
+
 ```bash
-ffplay rtp://0.0.0.0:50001
+ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
+  "udp://127.0.0.1:50001?fifo_size=65536&overrun_nonfatal=1&buffer_size=16777216"
 ```
+
+UE 程序将收到的视频数据发到本机 `50001` 端口，`ffplay` 从这里接收并播放。若使用中转程序转发到 `50101`，把播放命令中的端口改为 `50101`。播放器在另一台电脑上运行时，地址和端口的设置方法见[视频与 UDP 工作流](/zh-cn/docs/tools-workflows/video-udp-workflows/)。
 
 ### 5. 运行单站感知前端
 ```bash
