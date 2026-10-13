@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-13 - 补充 UDP 视频突发限速说明
+
+中英文视频工作流补充 FFmpeg MPEG-TS-over-UDP 推流与匹配播放命令，说明 `bitrate`、`burst_bits`、包长和缓冲的单位与选值方法，区分编码目标、UDP 发送节奏及实测净荷吞吐。首次 OTA 视频步骤增加对应入口，补充关键帧突发、封装余量与接收验证说明。
+
 ## 2026-10-13 - 恢复 BS 重启后的双站感知流
 
 双站感知检测输入帧符号编号回退，重置采样游标并丢弃旧时间线的未完成批次，清除 MTI 与微多普勒历史，迁移待生效参数；保留当前 STRD、MTI 和 FFT 配置。修复 BS 重启后通信已恢复、双站感知却等待旧采样编号而暂停的问题，CPU 与 GPU 路径行为一致。正常帧仅增加时间戳比较与记录。

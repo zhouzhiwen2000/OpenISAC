@@ -66,6 +66,8 @@ ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -an -c:v libx264 -x264-p
 ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts "rtp://<your IP of the BS>:50000"
 ```
 
+需要显式限制 UDP 突发时，请使用[视频与 UDP 工作流](/zh-cn/docs/tools-workflows/video-udp-workflows/#限制-udp-视频突发)中的 MPEG-TS-over-UDP 示例。其输出 URL 用 `bitrate` 设置 bit/s 单位的发送上限，并用 `burst_bits=10528` 配合 1316 字节数据报；同节给出了对应的 UDP 播放命令。
+
 ### 4. 从 UE 播放视频
 将 `video.sdp` 复制到视频接收端，将 `m=video 50000 RTP/AVP 96` 修改为 `m=video 50001 RTP/AVP 96`。
 ```bash

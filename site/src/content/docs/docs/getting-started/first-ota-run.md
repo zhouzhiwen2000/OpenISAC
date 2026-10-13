@@ -66,6 +66,11 @@ If you want to stream audio together with the video, use RTP MPEG-TS instead:
 ffmpeg -re -stream_loop -1 -fflags +genpts -i video.mp4 -c:v libx264 -x264-params keyint=5:min-keyint=1 -b:v 30000k -minrate 30000k -maxrate 30000k -bufsize 1M -c:a aac -b:a 128k -ar 48000 -ac 2 -f rtp_mpegts "rtp://<your IP of the BS>:50000"
 ```
 
+For explicit UDP burst pacing, use the MPEG-TS-over-UDP example in
+[Video and UDP Workflows](/docs/tools-workflows/video-udp-workflows/#pace-udp-video-bursts).
+Its output URL sets `bitrate` in bits/s and `burst_bits=10528` for 1316-byte
+datagrams; the same section provides its matching UDP player command.
+
 ### 4. Play video from the UE
 Copy `video.sdp` to the video receiver, modify `m=video 50000 RTP/AVP 96` to `m=video 50001 RTP/AVP 96`.
 ```bash
