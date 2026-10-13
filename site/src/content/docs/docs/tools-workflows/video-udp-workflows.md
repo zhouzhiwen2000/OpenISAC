@@ -7,7 +7,7 @@ This demonstration sends video from BS to UE through OpenISAC. `ffmpeg` reads
 and encodes the video file, the BS and UE programs carry the data over the
 radio link, and `ffplay` receives it and plays the picture and sound.
 
-## Follow the data path
+## Data path
 
 1. On the **BS computer**, `ffmpeg` sends video data to local UDP port `50000`, where the BS program receives it.
 2. BS transmits through its USRP. The UE program receives the signal through the other USRP and recovers the video data.
@@ -31,7 +31,7 @@ gradually after playback works.
 ## 2. Send video on the BS computer
 
 Open another terminal on the BS computer. Put `video.mp4` in the current
-directory, or replace `-i video.mp4` with the actual file path.
+directory, or replace `video.mp4` in the command below with the actual video file path.
 
 If the BS computer supports NVIDIA NVENC hardware encoding, run:
 
@@ -66,10 +66,6 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
 `ffplay` receives the video data sent by the UE program to local port `50001`,
 decodes the compressed video into pictures, and plays the audio. Keep
 `ffmpeg` on BS, both backends, and `ffplay` on UE running.
-
-If a relay already receives port `50001` and forwards data to the player,
-change the playback command to its output port, such as `50101`. This gives
-the relay and player their own receiving ports.
 
 If the player runs on another computer, set
 `network_output.udp_output_ip` in `UE.yaml` to that computer's IP. On the

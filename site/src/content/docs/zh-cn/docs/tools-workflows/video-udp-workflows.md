@@ -5,7 +5,7 @@ description: 在 BS 电脑上推送视频，在 UE 电脑上接收播放，并�
 
 这个演示用 OpenISAC 把视频从 BS 传到 UE。`ffmpeg` 负责读取视频文件、编码并发送数据，BS 和 UE 程序负责无线传输，`ffplay` 负责接收视频数据并播放画面和声音。
 
-## 先看清数据经过哪里
+## 数据路径
 
 1. 在 **BS 电脑**上，`ffmpeg` 把视频数据发到本机 UDP 端口 `50000`，交给 BS 程序。
 2. BS 程序通过 USRP 发射无线信号，UE 程序通过另一台 USRP 接收，还原出视频数据。
@@ -21,7 +21,7 @@ description: 在 BS 电脑上推送视频，在 UE 电脑上接收播放，并�
 
 ## 2. 在 BS 电脑上推送视频
 
-在 BS 电脑上另开一个终端。把 `video.mp4` 放在当前目录，或将 `-i video.mp4` 改成视频文件的实际路径。
+在 BS 电脑上另开一个终端。把 `video.mp4` 放在当前目录，或将下方命令中的 `video.mp4` 替换为视频文件的实际路径。
 
 BS 电脑支持 NVIDIA NVENC 硬件编码时，运行：
 
@@ -49,8 +49,6 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
 ```
 
 `ffplay` 从本机 `50001` 端口接收 UE 程序送出的视频数据，把压缩视频解码成画面，并播放音频。BS 上的 `ffmpeg`、两个后端和 UE 上的 `ffplay` 都需要保持运行。
-
-如果已有中转程序接收 `50001` 并转发给播放器，请把播放命令中的端口改为中转程序的输出端口，例如 `50101`，让中转程序和播放器各自使用一个端口。
 
 如果播放器放在另一台电脑上，将 `UE.yaml` 的 `network_output.udp_output_ip` 改为那台电脑的 IP。在播放器电脑上运行同一条 `ffplay` 命令，将 URL 中的 `127.0.0.1` 改为 `0.0.0.0`，表示监听本机所有网卡。端口也要与 `network_output.udp_output_port` 一致。
 

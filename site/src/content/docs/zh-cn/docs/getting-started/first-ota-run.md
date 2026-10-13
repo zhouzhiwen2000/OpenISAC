@@ -57,7 +57,7 @@ sudo ../scripts/isolate_cpus.py run ./UE
 
 ### 3. 在 BS 电脑上推送视频
 
-确认 BS 和 UE 都已启动，UE 已同步到 BS。在 BS 电脑上另开一个终端，把 `video.mp4` 放在当前目录，或替换为视频文件的实际路径。
+确认 BS 和 UE 都已启动，UE 已同步到 BS。在 BS 电脑上另开一个终端，把 `video.mp4` 放在当前目录，或将下方命令中的 `video.mp4` 替换为视频文件的实际路径。
 
 下面的命令使用 NVIDIA NVENC 编码，视频目标码率为 60 Mb/s，UDP 发送上限为 70 Mb/s，适用于已调通的 100 MS/s X310 链路。首次测试或使用较低采样率时，先将四个 `60M` 改为 `3M`，将 `bitrate=70000000` 改为 `bitrate=4000000`。
 
@@ -84,7 +84,7 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
   "udp://127.0.0.1:50001?fifo_size=65536&overrun_nonfatal=1&buffer_size=16777216"
 ```
 
-UE 程序将收到的视频数据发到本机 `50001` 端口，`ffplay` 从这里接收并播放。若使用中转程序转发到 `50101`，把播放命令中的端口改为 `50101`。播放器在另一台电脑上运行时，地址和端口的设置方法见[视频与 UDP 工作流](/zh-cn/docs/tools-workflows/video-udp-workflows/)。
+UE 程序将收到的视频数据发到本机 `50001` 端口，`ffplay` 从这里接收并播放。播放器在另一台电脑上运行时，地址和端口的设置方法见[视频与 UDP 工作流](/zh-cn/docs/tools-workflows/video-udp-workflows/)。
 
 ### 5. 运行单站感知前端
 ```bash

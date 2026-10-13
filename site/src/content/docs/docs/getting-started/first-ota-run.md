@@ -57,7 +57,7 @@ sudo ../scripts/isolate_cpus.py run ./UE
 
 ### 3. Send video on the BS computer
 
-Confirm that BS and UE are running and UE has synchronized with BS. Open another terminal on the BS computer. Put `video.mp4` in the current directory, or replace it with the actual video file path.
+Confirm that BS and UE are running and UE has synchronized with BS. Open another terminal on the BS computer. Put `video.mp4` in the current directory, or replace `video.mp4` in the command below with the actual video file path.
 
 The command below uses NVIDIA NVENC encoding, a 60 Mb/s video target, and a 70 Mb/s UDP sending limit for an established 100 MS/s X310 link. For a first test or a configuration with a lower sample rate, change all four `60M` values to `3M` and `bitrate=70000000` to `bitrate=4000000`.
 
@@ -84,7 +84,7 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext \
   "udp://127.0.0.1:50001?fifo_size=65536&overrun_nonfatal=1&buffer_size=16777216"
 ```
 
-The UE program sends the received video data to local port `50001`, where `ffplay` receives and plays it. If a relay forwards the data to `50101`, change the playback command to that port. For playback on another computer, follow the address and port settings in [Video and UDP Workflows](/docs/tools-workflows/video-udp-workflows/).
+The UE program sends the received video data to local port `50001`, where `ffplay` receives and plays it. For playback on another computer, follow the address and port settings in [Video and UDP Workflows](/docs/tools-workflows/video-udp-workflows/).
 
 ### 5. Run monostatic frontend
 ```bash
