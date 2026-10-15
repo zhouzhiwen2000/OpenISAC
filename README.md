@@ -20,6 +20,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 
 - Real-time OFDM communication plus monostatic and bistatic sensing
 - Over-the-air synchronization support for bistatic experiments
+- Optional [LoS phase reference](site/src/content/docs/docs/reference/ue-yaml.md#los-phase-reference) improves sensing with less stable clocks; requires LoS between transmitter and receiver and no relative motion between them (YAML option, restart required).
 - C++ backend for the radio path and Python frontend tools for visualization
 - YAML-based runtime configuration with sample presets for X310/B210, adaptable to other UHD-supported USRPs
 - Included utilities for CPU isolation, plotting, web-based config editing, and process control
@@ -39,6 +40,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - First end-to-end run: [First OTA Run](https://openisac.zzw123app.top/docs/getting-started/first-ota-run/)
 - Runtime configuration: [BS YAML Reference](https://openisac.zzw123app.top/docs/reference/bs-yaml/) and [UE YAML Reference](https://openisac.zzw123app.top/docs/reference/ue-yaml/)
 - USRP-free simulation: [Channel Simulator](https://openisac.zzw123app.top/docs/tools-workflows/channel-simulator/)
+- XR1710G receive-only UE: [preset](config/UE_XR1710G.yaml), [setup and limitations](site/src/content/docs/docs/getting-started/hardware.md#xr1710g-as-a-receive-only-ue).
 - Web control UI: [Web Config Console](https://openisac.zzw123app.top/docs/tools-workflows/web-config-console/)
 - Recent updates: [Changelog](CHANGELOG.md)
 

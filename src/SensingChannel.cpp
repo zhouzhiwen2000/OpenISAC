@@ -812,6 +812,7 @@ SensingChannel::SensingComputeContext::SensingComputeContext(
   : demod_fft_in(cfg.ofdm.fft_size),
     demod_fft_out(cfg.ofdm.fft_size),
     sensing_core({cfg.ofdm.fft_size, std::max(cfg.sensing.range_fft_size, cfg.ofdm.fft_size), cfg.sensing.doppler_fft_size, sensing_symbol_capacity(cfg)}),
+    phase_reference(cfg.ofdm.fft_size, sensing_symbol_capacity(cfg)),
     sensing_sender(
         output_ip,
         output_port,
@@ -1063,6 +1064,12 @@ SensingChannel::SensingChannel(
 
     _load_system_response_calibration();
 
+    if (_role == SensingRole::Bistatic && _cfg.sensing.bistatic_phase_reference) {
+        LOG_G_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+            << "] static LoS phase reference enabled before MTI; min_coherence="
+            << _cfg.sensing.phase_reference_min_coherence;
+    }
+
     if (_compute.delay_estimation_enabled && _compute.sensing_pipeline_disabled_by_mode) {
         LOG_G_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
                   << "] enable_system_delay_estimation=1, sensing pipeline disabled; "
@@ -1206,7 +1213,27 @@ void SensingChannel::process_bistatic_frame(const SensingFrame& frame, uint64_t 
 
     const uint64_t frame_start = frame_start_symbol_index;
     const uint64_t frame_end = frame_start + static_cast<uint64_t>(symbols_in_frame);
+    if (_cfg.sensing.bistatic_phase_reference &&
+        frame.user_delay_offset != _compute.phase_reference_user_delay) {
+        _reset_dense_bistatic_history();
+        if (!_compute.phase_reference.set_user_delay_offset(frame.user_delay_offset)) {
+            LOG_RT_WARN_HZ_M(Sensing, 1) << "Invalid sensing display delay; dropping sensing frame";
+            return;
+        }
+        _compute.phase_reference_user_delay = frame.user_delay_offset;
+        LOG_RT_INFO_M(Sensing) << "[Sensing CH " << _rx_io.logical_id
+            << "] phase reference follows display delay offset=" << frame.user_delay_offset;
+    }
     if (_compute.next_symbol_to_sample < frame_start) {
+        // A scheduled slow-time sample is missing. Do not concatenate irregular
+        // rows into a uniformly sampled Doppler FFT or keep its MTI history.
+        // A stride spanning whole frames is valid when its cursor is still ahead.
+        if (_compute.next_symbol_to_sample != 0) {
+            LOG_RT_WARN_HZ_M(Sensing, 1) << "[Sensing CH " << _rx_io.logical_id
+                << "] missing sensing sample; reset batch/history: expected="
+                << _compute.next_symbol_to_sample << ", received=" << frame_start;
+        }
+        _reset_dense_bistatic_history();
         _compute.next_symbol_to_sample = frame_start;
     }
 
@@ -2911,6 +2938,15 @@ void SensingChannel::_sensing_process(const SensingFrame& frame, uint64_t first_
     _sensing_process_finalize(frame.tx_symbols, first_symbol_index, gather_us, prep_us, symbol_count);
 }
 
+void SensingChannel::_reset_dense_bistatic_history() {
+    _compute.accumulated_rx_symbols.clear();
+    _compute.accumulated_tx_symbols.clear();
+    _compute.pending_batch_gather_us = 0.0;
+    _compute.batch_has_first_symbol = false;
+    _compute.micro_doppler_state.clear();
+    _compute.sensing_core.reset_history();
+}
+
 void SensingChannel::_sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us) {
     using ProfileClock = std::chrono::steady_clock;
     const size_t symbol_count = std::min(frame.rx_symbols.size(), _cfg.ofdm.sensing_symbol_num);
@@ -2951,6 +2987,20 @@ void SensingChannel::_sensing_process_finalize(
         _compute.sensing_core.params().range_fft_size,
         symbol_count,
         _compute.sensing_core.params().fft_size);
+    if (_role == SensingRole::Bistatic && _cfg.sensing.bistatic_phase_reference) {
+        float coherence = 0.0f;
+        if (!_compute.phase_reference.apply(channel_buf.data(), symbol_count,
+                _compute.sensing_core.params().range_fft_size,
+                _cfg.sensing.phase_reference_min_coherence, coherence)) {
+            // Reject only this sensing batch; never flush communication IQ.
+            _compute.sensing_core.reset_history();
+            _compute.micro_doppler_state.clear();
+            LOG_RT_WARN_HZ_M(Sensing, 1) << "[Sensing CH " << _rx_io.logical_id
+                << "] weak/invalid LoS phase reference; dropped sensing batch, coherence="
+                << coherence;
+            return;
+        }
+    }
     const double chest_shift_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - chest_start).count();
     const auto mti_start = ProfileClock::now();

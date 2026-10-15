@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -90,7 +92,7 @@ void check_amplitude(const AlignedVector& data, float expected) {
     }
 }
 
-void test_timeline(bool pending_update) {
+void test_timeline(bool pending_update, bool forward_gap = false) {
     const Config cfg = test_config();
     std::atomic<bool> running{true};
     const int port = free_tcp_port();
@@ -124,9 +126,10 @@ void test_timeline(bool pending_update) {
         channel.apply_shared_cfg(params);
     }
 
-    channel.process_bistatic_frame(frame(3.0f), 0);
-    require(subscriber.receive(50).empty(), "Old partial batch survived the restart");
-    channel.process_bistatic_frame(frame(3.0f), 10);
+    const uint64_t restart = forward_gap ? old_start + 20 : 0;
+    channel.process_bistatic_frame(frame(3.0f), restart);
+    require(subscriber.receive(50).empty(), "Old partial batch survived a timeline gap/restart");
+    channel.process_bistatic_frame(frame(3.0f), restart + 10);
     if (pending_update) {
         require(subscriber.receive(50).empty(), "Pending stride was not rebased to the new timeline");
         channel.process_bistatic_frame(frame(3.0f), 20);
@@ -181,12 +184,149 @@ void test_mti_history() {
                 "MTI retained history from the previous timeline");
     }
 }
+
+void test_phase_reference() {
+    constexpr size_t bins = 64, rows = 128, stride = 96;
+    SensingPhaseReference reference(bins, rows);
+    AlignedVector data(rows * stride), expected(rows * stride);
+    for (size_t m = 0; m < rows; ++m) {
+        const auto common = std::polar(1.0f, float(0.03 * m * m + 2.1 * (m % 7)));
+        const auto moving = std::polar(0.2f, float(2 * M_PI * 7 * m / rows));
+        for (size_t k = 0; k < bins; ++k) {
+            expected[m * stride + k] = std::complex<float>(0.8f + 0.4f * m / rows, 0) +
+                moving * std::polar(1.0f, float(-2 * M_PI * 12 * k / bins));
+            data[m * stride + k] = expected[m * stride + k] * common;
+        }
+    }
+    const auto before = data;
+    float coherence;
+    require(reference.apply(data.data(), rows, stride, 0.05f, coherence), "Valid LoS was rejected");
+    require(coherence > 0.9f, "Unexpected reference coherence");
+    std::complex<double> target_prev;
+    for (size_t m = 0; m < rows; ++m) {
+        std::complex<double> target;
+        for (size_t k = 0; k < bins; ++k) {
+            const auto i = m * stride + k;
+            require(std::abs(data[i] - expected[i]) < 0.001f, "Common phase was not removed");
+            require(std::abs(std::abs(data[i]) - std::abs(before[i])) < 2e-6f, "Amplitude changed");
+            target += std::complex<double>(data[i]) * std::polar(1.0, 2 * M_PI * 12 * k / bins) / double(bins);
+        }
+        require(std::abs(std::abs(target) - 0.2) < 0.0001, "Moving echo amplitude changed");
+        if (m) require(std::abs(std::arg(target * std::conj(target_prev)) - 2 * M_PI * 7 / rows) < 0.001,
+                       "Moving target Doppler was removed or biased");
+        target_prev = target;
+        for (size_t k = bins; k < stride; ++k)
+            require(data[m * stride + k] == std::complex<float>{}, "Padding was modified");
+    }
+    for (int mode = 0; mode < 4; ++mode) {
+        data.assign(rows * stride, {1.0f, 0.0f});
+        for (size_t k = 0; k < bins; ++k) {
+            if (mode == 0) data[stride + k] = {};
+            if (mode == 1) data[stride + k] = {(k % 2) ? 1.0f : -1.0f, 0.0f};
+            if (mode == 2) data[stride + k] = {std::numeric_limits<float>::quiet_NaN(), 0};
+            if (mode == 3) data[stride + k] = {std::numeric_limits<float>::infinity(), 0};
+        }
+        const auto original = data;
+        require(!reference.apply(data.data(), rows, stride, 0.05f, coherence), "Invalid reference accepted");
+        require(std::memcmp(data.data(), original.data(), data.size() * sizeof(data[0])) == 0,
+                "Rejected batch was partially rotated");
+    }
+
+    // Display translations, including fractional/negative and FFT-period wrapping,
+    // must move the output while preserving the same physical reference phase.
+    for (float delay : {3.0f, -3.0f, 0.375f, -11.25f, 67.0f}) {
+        data = before;
+        for (size_t m = 0; m < rows; ++m) for (size_t k = 0; k < bins; ++k)
+            data[m * stride + k] *= std::polar(1.0f, float(2 * M_PI * (double(k) - bins / 2) * delay / bins));
+        require(reference.set_user_delay_offset(delay), "Valid display shift was rejected");
+        require(reference.apply(data.data(), rows, stride, 0.05f, coherence), "Display shift lost the phase reference");
+        for (size_t m = 0; m < rows; ++m) for (size_t k = 0; k < bins; ++k) {
+            const auto shifted = expected[m * stride + k] * std::polar(1.0f, float(2 * M_PI * (double(k) - bins / 2) * delay / bins));
+            require(std::abs(data[m * stride + k] - shifted) < 0.001f, "Display shift changed reference phase or target Doppler");
+        }
+    }
+    std::cout << "Phase reference: arbitrary jumps, relative moving Doppler, amplitude and invalid data passed\n";
+}
+
+void test_phase_pipeline(bool enabled) {
+    Config cfg = test_config();
+    cfg.sensing.bistatic_phase_reference = enabled;
+    std::atomic<bool> running{true};
+    const int port = free_tcp_port();
+    SensingChannel channel(cfg, {}, SensingChannel::SensingRole::Bistatic,
+                          "127.0.0.1", port, 123458, running, nullptr, nullptr, {}, {}, {});
+    Subscriber subscriber(port);
+    SharedSensingRuntime params;
+    params.enable_mti = false;
+    params.sensing_symbol_stride = 10;
+    params.generation = 2;
+    channel.apply_shared_cfg(params);
+    channel.start_bistatic();
+    AlignedVector output;
+    for (int attempt = 0; attempt < 20 && output.empty(); ++attempt) {
+        auto input = frame(2.3f);
+        for (auto& row : input.rx_symbols) for (auto& value : row) value *= std::complex<float>(0, 1);
+        channel.process_bistatic_frame(input, attempt * 10);
+        output = subscriber.receive(100);
+    }
+    require(!output.empty(), "Phase pipeline produced no output");
+    for (const auto value : output)
+        require(std::abs(value - (enabled ? std::complex<float>(2.3f, 0) : std::complex<float>(0, 2.3f))) < 1e-4f,
+                "Phase correction placement/default-off behavior is wrong");
+
+    if (enabled) {
+        channel.process_bistatic_frame(frame(9.0f), 1000); // Partial old-coordinate batch.
+        require(subscriber.receive(50).empty(), "Partial display batch produced output");
+        auto shifted = frame(2.3f);
+        shifted.user_delay_offset = -3.0f;
+        shifted.delay_offset = -3.0f;
+        for (auto& row : shifted.rx_symbols) for (auto& value : row) value *= std::complex<float>(0, 1);
+        channel.process_bistatic_frame(shifted, 1010);
+        require(subscriber.receive(50).empty(), "Display change mixed old and new coordinates");
+        channel.process_bistatic_frame(shifted, 1020);
+        output = subscriber.receive(1000);
+        require(!output.empty(), "Display translation stopped sensing output");
+        for (size_t m = 0; m < 2; ++m) for (size_t k = 0; k < 64; ++k) {
+            const auto expected = std::polar(2.3f, float(-2 * M_PI * (double(k) - 32) * 3 / 64));
+            require(std::abs(output[m * 64 + k] - expected) < 1e-4f, "Display translation/reference sign mismatch");
+        }
+    }
+    channel.stop_bistatic();
+}
+
+void test_phase_config() {
+    char path[] = "/tmp/openisac-phase-config-XXXXXX";
+    const int fd = mkstemp(path);
+    require(fd >= 0, "Temporary config failed");
+    close(fd);
+    struct Cleanup { const char* path; ~Cleanup() { unlink(path); } } cleanup{path};
+    for (int mode = 0; mode < 7; ++mode) {
+        std::ofstream file(path);
+        file << "sensing:\n  bi_enabled: " << (mode == 3 ? "false" : "true")
+             << "\n  bistatic_phase_reference: true\n  phase_reference_min_coherence: "
+             << (mode == 1 ? "0" : mode == 2 ? "1.1" : mode == 6 ? ".nan" : "0.1")
+             << "\n  output_mode: " << (mode == 4 ? "compact_mask" : "dense")
+             << "\n  sensing_delay_correction_mode: " << (mode == 5 ? "ertm_absolute" : "los_tracking") << '\n';
+        file.close();
+        Config cfg = make_default_ue_config();
+        const bool loaded = load_ue_config_from_yaml(cfg, path);
+        if (loaded != (mode == 0)) throw std::runtime_error("Phase config validation mismatch mode=" + std::to_string(mode));
+        if (loaded) require(cfg.sensing.bistatic_phase_reference && cfg.sensing.phase_reference_min_coherence == 0.1f,
+                            "Phase config fields were not parsed");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         test_timeline(false);
         test_timeline(true);
+        test_timeline(false, true);
+        test_phase_reference();
+        test_phase_pipeline(false);
+        test_phase_pipeline(true);
+        test_phase_config();
         test_stride_larger_than_frame();
         test_mti_history();
         std::cout << "Bistatic timeline restart, pending controls, sparse stride and MTI checks passed\n";

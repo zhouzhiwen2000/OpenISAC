@@ -1,5 +1,6 @@
 #include "UhdBackend.hpp"
 #include "SimBackend.hpp"
+#include "Xr1710gBackend.hpp"
 
 #include <map>
 #include <mutex>
@@ -275,6 +276,11 @@ std::map<std::string, RegistryEntry>& registry() {
 }  // namespace
 
 IDevicePtr make_device(const DeviceConfig& cfg) {
+    if (cfg.backend != "uhd" && cfg.backend != "sim" && cfg.backend != "xr1710g")
+        throw std::invalid_argument("Unknown radio backend: " + cfg.backend);
+    // Read-only consumers have independent cursors and never share a hardware
+    // controller. UHD/SIM retain their existing per-process device registry.
+    if (cfg.backend == "xr1710g") return make_xr1710g_device(cfg);
     const bool is_sim = (cfg.backend == "sim");
     const std::string key = cfg.backend + "|" + (is_sim ? cfg.sim_session : cfg.device_args);
 

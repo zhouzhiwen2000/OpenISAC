@@ -1,0 +1,95 @@
+# Run CPU UE on the Linux host running w1700k-stream.
+# Configure the XR1710G RF source first; center_freq describes its initial LO.
+radio:
+  radio_backend: xr1710g
+  xr1710g_shm: /xr1710g-live
+  xr1710g_center_freq: 2442000000  # Actual LO from the source controller, Hz
+  xr1710g_attach_timeout_s: 5
+  xr1710g_pll_command: ""  # Optional PLL helper command; empty uses software NCO
+
+rf_sampling:
+  sample_rate: 40000000  # Match the source AND BS: 40/80/160/320 MS/s
+  bandwidth: 40000000
+  rx_agc_enable: false  # Hardware gain belongs to the XR1710G controller
+  rx_gain: 0
+
+usrp_device:
+  device_args: ""  # Unused by this backend
+  clock_source: internal
+  time_source: internal
+
+downlink:
+  center_freq: 2442000000  # BS carrier; backend corrects the offset from the initial source LO
+  rx_wire_format: sc16
+  rx_channel: 0
+  equalizer_mode: mmse
+  channel_tracking_mode: pilot_phase
+  arq_enabled: false
+
+uplink:
+  enabled: false
+  symbol_count: 0
+  ertm_to_enable: false
+  arq_enabled: false
+
+# Match these fields and the data-resource allocation to the transmitting BS.
+ofdm_frame:
+  fft_size: 1024
+  cp_length: 128
+  sync_pos: 1
+  enable_sec_sync_symbol: false
+  enable_cfo_training_sequence: false
+  cfo_training_period_samples: 16
+  num_symbols: 100
+  sensing_symbol_num: 100
+  frame_queue_size: 32
+  zc_root: 29
+  pilot_positions: [571, 631, 692, 752, 812, 872, 933, 993, 29, 89, 150, 210, 270, 330, 391, 451]
+  midframe_pilot_symbols: []
+  midframe_pilot_seed: 1296453708
+
+sync_tracking:
+  software_sync: true
+  hardware_sync: false
+  predictive_delay: false  # RF-CFO/sample-clock relationship has not been calibrated
+  sync_queue_size: 32
+  sync_cfo_alias_search_range_hz: 800000
+  reset_hold_s: 0.5
+  desired_peak_pos: 20
+
+sensing:
+  bistatic_phase_reference: false  # dense los_tracking; requires LoS and no relative TX/RX motion; restart to apply
+  phase_reference_min_coherence: 0.05  # Reject weak reference batches, (0, 1]
+  bi_enabled: false  # Enable after communication reception is validated
+  sensing_delay_correction_mode: los_tracking
+  range_fft_size: 1024
+  doppler_fft_size: 100
+  symbol_stride: 20
+
+ldpc:
+  decoder_iterations: 12
+  nms_normalization_factor: 0.75
+
+network_output:
+  udp_output_ip: 127.0.0.1
+  udp_output_port: 50001
+  control_port: 10001
+  bi_sensing_output_enabled: false
+
+cpu_cores:
+  downlink_cpu_cores: []
+  demod_worker_cpu_cores: []
+  ldpc_worker_cpu_cores: []
+  sensing_cpu_cores: []
+  uplink_cpu_cores: []
+  main_cpu_core: -1
+
+logging:
+  default_level: warn
+  force_error: true
+  modules:
+    radio: info
+    sync: info
+
+runtime:
+  default_out_ip: 127.0.0.1

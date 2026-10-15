@@ -5530,9 +5530,97 @@ private:
 
 
 /**
- * @brief Core Sensing Processing Operations.
- * 
+ * @brief Remove residual common phase from CPU dense bistatic CSI before MTI.
+ * Requires a stable LoS path and no relative motion between TX and RX.
+ * Doppler is measured relative to that path; echo targets may still move.
  */
+class SensingPhaseReference {
+public:
+    /** @brief Preallocate Hamming weights and per-row unit rotations. */
+    SensingPhaseReference(size_t bins, size_t max_rows)
+        : _weights(bins), _reference_weights(bins), _rotations(max_rows) {
+        for (size_t k = 0; k < bins; ++k) {
+            _weights[k] = bins > 1
+                ? 0.54f - 0.46f * std::cos(2.0 * M_PI * k / (bins - 1)) : 1.0f;
+            _weight_sum += _weights[k];
+        }
+        set_user_delay_offset(0.0f);
+    }
+
+    /** @brief Follow a known display shift when measuring the LoS reference.
+     * The channel output retains the ramp, so ALGN still moves displayed delay.
+     * @return False for non-finite shifts or an empty reference geometry.
+     */
+    bool set_user_delay_offset(float samples) {
+        if (!finite(samples) || _weights.empty()) return false;
+        const double delay = std::remainder(double(samples), double(_weights.size()));
+        for (size_t k = 0; k < _weights.size(); ++k) {
+            const double bin = double(k) - double(_weights.size() / 2);
+            const double phase = -2.0 * M_PI * bin * delay / _weights.size();
+            _reference_weights[k] = _weights[k] * std::polar(1.0f, static_cast<float>(phase));
+        }
+        return true;
+    }
+
+    /** @brief Validate the whole batch, then apply phase-only correction in place.
+     * No allocation; a rejected batch is unchanged. row_stride includes padding.
+     * @param weakest_coherence Minimum reference coherence inspected in this batch.
+     * @return True when every row has a finite, sufficiently coherent reference.
+     */
+    bool apply(std::complex<float>* data, size_t rows, size_t row_stride,
+               float min_coherence, float& weakest_coherence) {
+        weakest_coherence = 0.0f;
+        if (!data || rows == 0 || rows > _rotations.size() || _weights.empty() ||
+            row_stride < _weights.size() || !finite(min_coherence) ||
+            min_coherence <= 0.0f || min_coherence > 1.0f) return false;
+        weakest_coherence = 1.0f;
+        for (size_t m = 0; m < rows; ++m) {
+            const auto* row = data + m * row_stride;
+            double re = 0.0, im = 0.0, power = 0.0;
+            for (size_t k = 0; k < _weights.size(); ++k) {
+                if (!finite(row[k].real()) || !finite(row[k].imag())) {
+                    weakest_coherence = 0.0f;
+                    return false;
+                }
+                const double r = row[k].real(), i = row[k].imag(), w = _weights[k];
+                const double wr = _reference_weights[k].real(), wi = _reference_weights[k].imag();
+                re += wr * r - wi * i;
+                im += wr * i + wi * r;
+                power += w * (r * r + i * i);
+            }
+            const double reference_power = re * re + im * im;
+            const float coherence = power > 1e-20 * _weight_sum
+                ? static_cast<float>(reference_power / (_weight_sum * power)) : 0.0f;
+            weakest_coherence = std::min(weakest_coherence, coherence);
+            if (coherence < min_coherence) return false;
+            const double scale = 1.0 / std::sqrt(reference_power);
+            _rotations[m] = {static_cast<float>(re * scale), static_cast<float>(-im * scale)};
+        }
+        for (size_t m = 0; m < rows; ++m) {
+            auto* row = data + m * row_stride;
+            const float cr = _rotations[m].real(), ci = _rotations[m].imag();
+            #pragma omp simd
+            for (size_t k = 0; k < _weights.size(); ++k) {
+                const float re = row[k].real(), im = row[k].imag();
+                row[k] = {re * cr - im * ci, re * ci + im * cr};
+            }
+        }
+        return true;
+    }
+
+private:
+    // The CPU UE uses -ffast-math; std::isfinite may be optimized away.
+    static bool finite(float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return (bits & 0x7f800000u) != 0x7f800000u;
+    }
+    AlignedFloatVector _weights;
+    AlignedVector _reference_weights;
+    AlignedVector _rotations;
+    double _weight_sum = 0.0;
+};
+
 class SensingProcessor {
 public:
     struct Params {

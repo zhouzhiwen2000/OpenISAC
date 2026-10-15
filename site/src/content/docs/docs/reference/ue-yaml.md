@@ -17,7 +17,13 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `radio.radio_backend` | `string` | `uhd` | Radio I/O backend. Use `uhd` for real USRPs or `sim` for the channel simulator. |
+| `radio.radio_backend` | `string` | `uhd` | Radio I/O backend. Use `uhd` for USRPs, `sim` for the simulator, or `xr1710g` for the CPU receive-only UE. |
+| `radio.xr1710g_shm` | `string` | `/xr1710g-live` | POSIX shared-memory name of the external single-channel host receiver. |
+| `radio.xr1710g_center_freq` | `float` / Hz | `2442000000` | Required actual source LO, read from the XR1710G controller; not an RF tuning command. |
+| `radio.xr1710g_attach_timeout_s` | `float` / s | `5` | Wait for a live host receiver, within 0–3600 seconds. |
+| `radio.xr1710g_pll_command` | `string` | `""` | Optional persistent PLL helper command, executed on the receiver host. Empty uses software NCO; configured uses hardware LO fine correction within ±100 kHz. See setup below. |
+
+See [XR1710G setup](../../getting-started/hardware/#xr1710g-as-a-receive-only-ue) for supported rates, source ownership and timing limits.
 
 ### `simulation`
 
@@ -260,6 +266,8 @@ reuse the same AP request.
 | :--- | :--- | :--- | :--- |
 | `sensing.sensing_delay_correction_mode` | `string` | `los_tracking` | Bistatic sensing delay correction source: `los_tracking` or `ertm_absolute`. |
 | `sensing.bi_enabled` | `bool` | `true` | Enable bistatic sensing processing. |
+| `sensing.bistatic_phase_reference` | `bool` | `false` | LoS phase reference; improves sensing with less stable clocks. Requires LoS and a transmitter/receiver pair stationary relative to each other; restart UE to apply. |
+| `sensing.phase_reference_min_coherence` | `float` | `0.05` | Minimum reference coherence in `(0, 1]`; effective when phase reference is enabled. |
 | `sensing.range_fft_size` | `int` | `1024` | Range FFT size. |
 | `sensing.doppler_fft_size` | `int` | `100` | Doppler FFT size. |
 | `sensing.view_range_bins` | `int` | `0` | Backend RD view width; `0` means full range. |
@@ -268,6 +276,32 @@ reuse the same AP request.
 | `sensing.on_wire_format` | `string` | `complex_float32` | Sensing payload wire format. |
 | `sensing.backend_processing_enabled` | `bool` | `false` | Publish backend RD/CFAR/micro-Doppler sidecars when supported. |
 | `sensing.symbol_stride` | `int` | `20` | Default dense-mode STRD applied at startup. |
+
+
+#### LoS phase reference
+
+This option can improve bistatic sensing coherence and Doppler stability when independent or less stable transmitter/receiver clocks leave residual common phase drift after synchronization. **It requires a stable line-of-sight (LoS) path between the transmitter and receiver, and the two radios must remain stationary relative to each other.** Sensing targets may still move. Do not enable it for NLoS-only links or when the transmitter and receiver move relative to each other: motion of the reference path would also be subtracted from the measured Doppler.
+
+On the UE Linux host, merge these fields into the active `UE.yaml`:
+
+```yaml
+sensing:
+  bi_enabled: true
+  output_mode: dense
+  sensing_delay_correction_mode: los_tracking
+  bistatic_phase_reference: true
+  phase_reference_min_coherence: 0.05
+```
+
+This is a **startup YAML option**, also editable in the Web Config Console. Save the YAML and restart the UE to apply it; there is currently no online enable/disable command for this option.
+
+The correction removes residual common phase from bistatic CSI in `dense` output mode after CFO/SFO/delay and system-response correction, before MTI.
+
+Each slow-time row uses a Hamming-weighted LoS reference and a unit-magnitude conjugate rotation on all subcarriers. The reference follows the known `ALGN` display translation: it cancels that phase ramp only while measuring the reference, and retains the requested delay shift in the output. A translation clears the incomplete sensing batch and MTI/micro-Doppler history so the two display coordinates are not mixed. Amplitudes are preserved. The direct path must be static and dominant: the displayed Doppler is relative to this path; a moving reference also subtracts its own motion. This does not correct the radio sample clock.
+
+`sensing.phase_reference_min_coherence` defaults to `0.05`, with range `(0, 1]`. Coherence is `|sum(w H)|² / (sum(w) sum(w |H|²))`, where `w` is the Hamming weight and `H` is evaluated after cancelling the known display phase ramp. A weak, near-zero or non-finite reference rejects the entire sensing batch and clears MTI/micro-Doppler history. Communication samples are unaffected. Missing slow-time samples reset the sensing window and history to keep Doppler processing on a uniform timeline.
+
+Restart the UE after changing these YAML fields. On the UE Linux host, check the startup log for `static LoS phase reference enabled before MTI`. Frequent `weak/invalid LoS phase reference` messages indicate that this path is unsuitable as a reference; disable the feature or improve the direct-path signal.
 
 ### `resource_preview`
 

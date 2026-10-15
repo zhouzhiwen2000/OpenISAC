@@ -70,6 +70,8 @@ sync_tracking:
 
 # ===== Sensing =====
 sensing:
+  bistatic_phase_reference: false  # dense los_tracking; requires LoS and no relative TX/RX motion; restart to apply
+  phase_reference_min_coherence: 0.05  # Reject weak reference batches, (0, 1]
   bi_enabled: true  # Enable bistatic sensing processing pipeline
   range_fft_size: 1024  # Range FFT size
   doppler_fft_size: 100  # Doppler FFT size

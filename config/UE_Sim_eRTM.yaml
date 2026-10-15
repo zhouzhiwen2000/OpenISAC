@@ -92,6 +92,8 @@ sync_tracking:
 
 # ===== Sensing =====
 sensing:
+  bistatic_phase_reference: false  # dense los_tracking; requires LoS and no relative TX/RX motion; restart to apply
+  phase_reference_min_coherence: 0.05  # Reject weak reference batches, (0, 1]
   sensing_delay_correction_mode: ertm_absolute  # Correct bistatic sensing delay with the absolute eRTM TO estimate
   bi_enabled: true  # Enable bistatic sensing processing pipeline
   range_fft_size: 1024  # Range FFT size

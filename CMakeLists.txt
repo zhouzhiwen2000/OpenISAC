@@ -281,6 +281,11 @@ endif()
 set(OPENISAC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(OPENISAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+# This I/O boundary validates finite configuration values. Preserve those checks
+# even in UE targets that enable fast-math for their DSP implementation.
+set_source_files_properties(${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp
+    PROPERTIES COMPILE_OPTIONS "-fno-fast-math")
+
 #===========================================================
 # BS Executable
 #===========================================================
@@ -289,6 +294,7 @@ add_executable(BS
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
     ${OPENISAC_SRC_DIR}/UhdBackend.cpp
     ${OPENISAC_SRC_DIR}/SimBackend.cpp
+    ${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
     ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
@@ -331,6 +337,7 @@ add_executable(UE
     ${OPENISAC_SRC_DIR}/SensingChannel.cpp
     ${OPENISAC_SRC_DIR}/UhdBackend.cpp
     ${OPENISAC_SRC_DIR}/SimBackend.cpp
+    ${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp
     ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
     ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
     ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
@@ -411,10 +418,44 @@ target_link_libraries(LDPCFixedBench PRIVATE
 target_compile_options(LDPCFixedBench PRIVATE ${COMMON_COMPILE_OPTIONS})
 message(STATUS "CPU target: LDPCFixedBench")
 
+# Read-only XR1710G consumer/probe; no UHD dependency in the adapter itself.
+add_executable(Xr1710gRxProbe tools/xr1710g_rx_probe.cpp ${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp)
+target_include_directories(Xr1710gRxProbe PRIVATE ${OPENISAC_INCLUDE_DIR})
+target_link_libraries(Xr1710gRxProbe PRIVATE Threads::Threads OpenMP::OpenMP_CXX rt)
+target_compile_options(Xr1710gRxProbe PRIVATE ${COMMON_COMPILE_OPTIONS})
+
+add_executable(Xr1710gConvertBench tools/xr1710g_convert_bench.cpp)
+target_include_directories(Xr1710gConvertBench PRIVATE ${OPENISAC_INCLUDE_DIR})
+target_link_libraries(Xr1710gConvertBench PRIVATE OpenMP::OpenMP_CXX)
+target_compile_options(Xr1710gConvertBench PRIVATE ${COMMON_COMPILE_OPTIONS})
+
 if(BUILD_TESTING)
+    add_executable(Xr1710gBsBridge tests/xr1710g_bs_bridge.cpp)
+    target_include_directories(Xr1710gBsBridge PRIVATE ${OPENISAC_INCLUDE_DIR})
+    target_link_libraries(Xr1710gBsBridge PRIVATE Threads::Threads rt)
+    target_compile_options(Xr1710gBsBridge PRIVATE ${COMMON_COMPILE_OPTIONS})
+
+    add_executable(Xr1710gBackendTest tests/xr1710g_backend_test.cpp ${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp)
+    target_include_directories(Xr1710gBackendTest PRIVATE ${OPENISAC_INCLUDE_DIR})
+    target_link_libraries(Xr1710gBackendTest PRIVATE Threads::Threads OpenMP::OpenMP_CXX rt)
+    target_compile_options(Xr1710gBackendTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+    add_test(NAME Xr1710gBackend COMMAND Xr1710gBackendTest)
+    set_tests_properties(Xr1710gBackend PROPERTIES LABELS "cpu;radio;xr1710g" TIMEOUT 15)
+
+    add_executable(Xr1710gConfigTest tests/xr1710g_config_test.cpp
+        ${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp ${OPENISAC_SRC_DIR}/AsyncLogger.cpp)
+    target_include_directories(Xr1710gConfigTest PRIVATE ${OPENISAC_INCLUDE_DIR}
+        ${FFTW3f_INCLUDE_DIRS} ${YAMLCPP_INCLUDE_DIRS} ${OPENISAC_ZMQ_INCLUDE_DIRS} ${UHD_INCLUDE_DIRS})
+    target_link_libraries(Xr1710gConfigTest PRIVATE Threads::Threads OpenMP::OpenMP_CXX
+        ${OPENISAC_YAMLCPP_TARGET} ${YAMLCPP_LIBRARIES} ${OPENISAC_ZMQ_LINK} rt)
+    target_compile_options(Xr1710gConfigTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+    add_test(NAME Xr1710gConfig COMMAND Xr1710gConfigTest "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(Xr1710gConfig PROPERTIES LABELS "cpu;radio;xr1710g" TIMEOUT 15)
+
     add_executable(BistaticTimelineTest
         tests/bistatic_timeline_test.cpp ${OPENISAC_SRC_DIR}/SensingChannel.cpp
         ${OPENISAC_SRC_DIR}/UhdBackend.cpp ${OPENISAC_SRC_DIR}/SimBackend.cpp
+        ${OPENISAC_SRC_DIR}/Xr1710gBackend.cpp
         ${OPENISAC_SRC_DIR}/AsyncLogger.cpp)
     target_include_directories(BistaticTimelineTest PRIVATE
         ${OPENISAC_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${FFTW3f_INCLUDE_DIRS}
@@ -423,7 +464,7 @@ if(BUILD_TESTING)
         ${UHD_LIBRARIES} ${FFTW3f_LIBRARIES} ${FFTW3f_THREADS_LIBRARY}
         Threads::Threads OpenMP::OpenMP_CXX ${OPENISAC_YAMLCPP_TARGET}
         ${YAMLCPP_LIBRARIES} ${OPENISAC_ZMQ_LINK} rt)
-    target_compile_options(BistaticTimelineTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+    target_compile_options(BistaticTimelineTest PRIVATE ${COMMON_COMPILE_OPTIONS} -ffast-math)
     add_test(NAME BistaticTimeline COMMAND BistaticTimelineTest)
     set_tests_properties(BistaticTimeline PROPERTIES LABELS "cpu;sensing;recovery" TIMEOUT 15)
 

@@ -6,12 +6,49 @@ common:
   - type: scalar
     key: radio_backend
     kind: string
-    comment: Radio I/O backend; uhd = real USRP, sim = channel simulator
+    comment: Radio I/O backend; uhd = USRP, sim = simulator, xr1710g = CPU UE receive-only
     default: uhd
     optional: true
     options:
     - uhd
     - sim
+    - xr1710g
+  - type: scalar
+    key: xr1710g_shm
+    kind: string
+    comment: XR1710G host stream POSIX shared-memory name
+    default: /xr1710g-live
+    optional: true
+    enabled_if:
+      key: radio_backend
+      value: xr1710g
+  - type: scalar
+    key: xr1710g_center_freq
+    kind: float
+    comment: Actual source LO in Hz; read it from the external XR1710G controller
+    default: 2442000000
+    optional: true
+    enabled_if:
+      key: radio_backend
+      value: xr1710g
+  - type: scalar
+    key: xr1710g_attach_timeout_s
+    kind: float
+    comment: Seconds to wait for a live host stream service
+    default: 5
+    optional: true
+    enabled_if:
+      key: radio_backend
+      value: xr1710g
+  - type: scalar
+    key: xr1710g_pll_command
+    kind: string
+    comment: PLL helper command on the receiver host; empty uses software NCO
+    default: ''
+    optional: true
+    enabled_if:
+      key: radio_backend
+      value: xr1710g
 - title: Channel simulator
   yaml_key: simulation
   order: 11
@@ -1712,6 +1749,31 @@ ue:
         value: true
       - key: uplink.ertm_to_enable
         value: true
+  - type: scalar
+    key: bistatic_phase_reference
+    data_key: sensing.bistatic_phase_reference
+    kind: bool
+    comment: Startup option; improves sensing with less stable clocks; requires LoS and no relative TX/RX motion; restart UE to apply
+    default: false
+    optional: true
+    enabled_if:
+      all:
+      - key: sensing.bi_enabled
+        value: true
+      - key: sensing.output_mode
+        value: dense
+      - key: sensing.sensing_delay_correction_mode
+        value: los_tracking
+  - type: scalar
+    key: phase_reference_min_coherence
+    data_key: sensing.phase_reference_min_coherence
+    kind: float
+    comment: Minimum weighted LoS coherence in (0, 1]; reject invalid sensing batches
+    default: 0.05
+    optional: true
+    enabled_if:
+      key: sensing.bistatic_phase_reference
+      value: true
   - type: scalar
     key: backend_processing_enabled
     data_key: sensing.backend_processing_enabled

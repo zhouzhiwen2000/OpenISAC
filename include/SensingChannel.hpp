@@ -228,6 +228,8 @@ private:
         AlignedVector demod_fft_out;
         fftwf_plan demod_fft_plan = nullptr;
         SensingProcessor sensing_core;
+        SensingPhaseReference phase_reference;
+        float phase_reference_user_delay = 0.0f;
         std::unique_ptr<SensingProcessor> compact_sensing_core;
         SensingOutputDispatcher sensing_sender;
         AlignedFloatVector range_window;
@@ -297,6 +299,7 @@ private:
     );
     void _sensing_process(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us);
     void _sensing_process_freq(const SensingFrame& frame, uint64_t first_symbol_index, double gather_us);
+    void _reset_dense_bistatic_history();
     void _sensing_process_finalize(
         const std::vector<AlignedVector>& tx_symbols,
         uint64_t first_symbol_index,

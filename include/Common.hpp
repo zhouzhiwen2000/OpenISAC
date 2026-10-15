@@ -44,6 +44,7 @@
 #include <functional>
 #include <unordered_map>
 #include "RadioTypes.hpp"
+#include "Xr1710gConfig.hpp"
 #include "AirFrameClock.hpp"
 #include <uhd/types/metadata.hpp>
 #include <uhd/utils/thread.hpp>
@@ -1418,11 +1419,14 @@ struct SensingConfig {
     size_t symbol_stride = 20;     // Default sensing STRD applied at startup
     size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
     bool bi_enabled = true;
+    bool bistatic_phase_reference = false; // LoS phase-only reference before MTI
+    float phase_reference_min_coherence = 0.05f;
     std::string delay_correction_mode = kSensingDelayCorrectionModeLosTracking; // los_tracking or ertm_absolute
 };
 
 struct RadioConfig {
-    std::string radio_backend = "uhd";  // Radio I/O backend: "uhd" (real USRP) or "sim" (channel simulator)
+    std::string radio_backend = "uhd";  // "uhd", "sim", or receive-only "xr1710g"
+    radio::Xr1710gConfig xr1710g;
 };
 
 struct UdpEgressPacerConfig {
@@ -2859,6 +2863,22 @@ inline void load_simulation_config(const YAML::Node& config, Config& cfg) {
     if (config["radio"] && config["radio"].IsMap() && config["radio"]["radio_backend"]) {
         cfg.radio.radio_backend = config["radio"]["radio_backend"].as<std::string>();
     }
+    if (cfg.radio.radio_backend != "uhd" && cfg.radio.radio_backend != "sim" &&
+        cfg.radio.radio_backend != "xr1710g") {
+        throw std::runtime_error("Unknown radio.radio_backend: " + cfg.radio.radio_backend);
+    }
+    const auto radio_node = config["radio"];
+    if (radio_node && radio_node.IsMap()) {
+        if (radio_node["xr1710g_shm"])
+            cfg.radio.xr1710g.shm_name = radio_node["xr1710g_shm"].as<std::string>();
+        if (radio_node["xr1710g_center_freq"])
+            cfg.radio.xr1710g.center_freq = radio_node["xr1710g_center_freq"].as<double>();
+        if (radio_node["xr1710g_attach_timeout_s"])
+            cfg.radio.xr1710g.attach_timeout_s = radio_node["xr1710g_attach_timeout_s"].as<double>();
+        if (radio_node["xr1710g_pll_command"])
+            cfg.radio.xr1710g.pll_command = radio_node["xr1710g_pll_command"].as<std::string>();
+    }
+    cfg.radio.xr1710g.sample_rate = cfg.rf_sampling.sample_rate;
     if (config["simulation"] && config["simulation"].IsMap()) {
         const YAML::Node& sim_node = config["simulation"];
         SimConfig& sim = cfg.simulation;
@@ -3744,6 +3764,9 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
             uplink, "channel_tracking_min_pilot_snr", cfg.uplink.equalizer.channel_tracking_min_pilot_snr);
 
         load_simulation_config(config, cfg);
+        if (cfg.radio.radio_backend == "xr1710g") {
+            throw std::runtime_error("XR1710G is a receive-only UE backend; BS needs a transmit-capable radio");
+        }
         load_duplex_config(config, cfg);
 
         config_detail::load_value(measurement, "measurement_enable", cfg.measurement.measurement_enable);
@@ -4022,6 +4045,19 @@ inline std::string resolve_ue_time_source(const Config& cfg) {
         : cfg.clock_time.time_source;
 }
 
+/** @brief Reject UE modes unsupported by the external XR1710G RX source. */
+inline void validate_xr1710g_ue_config(const Config& cfg) {
+    if (cfg.radio.radio_backend != "xr1710g") return;
+    if (uplink_enabled(cfg) || cfg.network_output.arq_enabled || cfg.uplink.ertm_to_enable)
+        throw std::runtime_error("XR1710G is receive-only: disable duplex/uplink, ARQ feedback and eRTM");
+    if (cfg.sync_tracking.hardware_sync || cfg.sync_tracking.predictive_delay || !cfg.sync_tracking.software_sync)
+        throw std::runtime_error("XR1710G requires software_sync=true, hardware_sync=false and predictive_delay=false; its RF/sample-clock relation is uncalibrated");
+    if (cfg.downlink.rx_channel != 0 || cfg.downlink.rx_wire_format != "sc16")
+        throw std::runtime_error("XR1710G requires downlink.rx_channel=0 and rx_wire_format=sc16");
+    if (cfg.clock_time.clock_source != "internal" || resolve_ue_time_source(cfg) != "internal")
+        throw std::runtime_error("XR1710G requires internal clock and time sources; PPS is unsupported");
+}
+
 inline void validate_ue_pps_phase_config(const Config& cfg) {
     if (cfg.sync_tracking.ocxo_mode != kOCXOModePpsPhase) {
         return;
@@ -4121,6 +4157,14 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
             cuda, "cuda_ldpc_cross_frame_flush_us", cfg.cuda.cuda_ldpc_cross_frame_flush_us);
 
         config_detail::load_value(sensing, "bi_enabled", cfg.sensing.bi_enabled);
+        config_detail::load_value(sensing, "bistatic_phase_reference", cfg.sensing.bistatic_phase_reference);
+        config_detail::load_value(sensing, "phase_reference_min_coherence", cfg.sensing.phase_reference_min_coherence);
+        uint32_t coherence_bits;
+        std::memcpy(&coherence_bits, &cfg.sensing.phase_reference_min_coherence, sizeof(coherence_bits));
+        // Positive IEEE-754 float bit ordering also rejects NaN/Inf under fast-math.
+        if (coherence_bits == 0 || coherence_bits > 0x3f800000u) {
+            throw std::runtime_error("sensing.phase_reference_min_coherence must be in (0, 1]");
+        }
         config_detail::load_value(sensing, "range_fft_size", cfg.sensing.range_fft_size);
         config_detail::load_value(sensing, "doppler_fft_size", cfg.sensing.doppler_fft_size);
         config_detail::load_value(sensing, "output_mode", cfg.sensing.output_mode);
@@ -4426,6 +4470,13 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
                 "to cpu_cores.sensing_cpu_cores.");
         }
 
+        validate_xr1710g_ue_config(cfg);
+        if (cfg.sensing.bistatic_phase_reference &&
+            (!cfg.sensing.bi_enabled ||
+             cfg.sensing.output_mode != kSensingOutputModeDense ||
+             cfg.sensing.delay_correction_mode != kSensingDelayCorrectionModeLosTracking)) {
+            throw std::runtime_error("sensing.bistatic_phase_reference requires bi_enabled=true, dense output and los_tracking");
+        }
         validate_ue_pps_phase_config(cfg);
 
         if (!config_detail::load_data_resource_blocks_from_yaml(
@@ -5040,6 +5091,7 @@ struct SensingFrame {
     float CFO;
     float SFO;
     float delay_offset;
+    float user_delay_offset = 0.0f; // Known display shift included in delay_offset
     int alignment_samples = 0;
     /// Cumulative UL-TX mirror of RX Alignment at DL frame N (not a live atomic).
     int32_t ertm_rx_alignment_shift_samples = 0;

@@ -1020,7 +1020,9 @@ private:
     uint32_t _constellation_frame_counter = 0;
     
     // Sensing related variables
-    SPSCRingBuffer<SensingFrame> sensing_queue_{4};
+    // Parallel demod workers can complete a burst while sensing publishes a batch.
+    // Pool sizing below includes this bounded queue's actual capacity.
+    SPSCRingBuffer<SensingFrame> sensing_queue_{16};
     std::thread sensing_thread_;
     std::atomic<bool> sensing_running_{false};
     SharedSensingRuntime _shared_sensing_cfg;
@@ -2585,7 +2587,7 @@ private:
             sync_generation);
     }
 
-    float _select_sensing_delay_offset(float tracking_delay_offset) {
+    float _select_sensing_delay_offset(float tracking_delay_offset, float user_delay_offset) {
         float base_delay_offset = tracking_delay_offset;
         if (cfg_.sensing.delay_correction_mode == kSensingDelayCorrectionModeErtmAbsolute) {
             const ErtmToPublishSnapshot snap = _load_ertm_to_publish_snapshot();
@@ -2602,7 +2604,7 @@ private:
                     << "but no valid TO_UE estimate is available yet; using los_tracking delay";
             }
         }
-        return base_delay_offset + _user_delay_offset.load(std::memory_order_relaxed);
+        return base_delay_offset + user_delay_offset;
     }
 
     void _log_arq_profile_if_due(const char* reason, int64_t now_ms) {
@@ -3228,6 +3230,7 @@ private:
         dcfg.sim_tick_rate = cfg_.rf_sampling.sample_rate;
         dcfg.sim_center_freq = cfg_.downlink.center_freq;
         dcfg.sim_predictive_delay = cfg_.sync_tracking.predictive_delay;
+        dcfg.xr1710g = cfg_.radio.xr1710g;
         return radio::make_device(dcfg);
     }
 
@@ -3236,12 +3239,13 @@ private:
     // Hardware-only behavior is gated on IDevice capability queries.
     void init_radio() {
         const bool is_sim = radio_is_sim(cfg_);
+        validate_xr1710g_ue_config(cfg_);
         dev_ = _make_device();
         dev_->set_rx_rate(cfg_.rf_sampling.sample_rate);
         dev_->set_rx_bandwidth(cfg_.rf_sampling.bandwidth, cfg_.downlink.rx_channel);
+        dev_->set_rx_freq_correction(0.0);
         current_rx_tune_ = dev_->set_rx_freq(radio::TuneRequest(cfg_.downlink.center_freq), cfg_.downlink.rx_channel);
         tune_initialized_ = true;
-        dev_->set_rx_freq_correction(0.0);  // reset comm correction (sim); no-op on real
         LOG_G_INFO_M(Radio) << "Actual RX RF Freq: " << format_freq_hz(current_rx_tune_.actual_rf_freq)
                      << " Hz, DSP: " << format_freq_hz(current_rx_tune_.actual_dsp_freq)
                      << " Hz";
@@ -3281,11 +3285,19 @@ private:
                          << "', no USRP).";
         }
 
+        if (cfg_.radio.radio_backend == "xr1710g") {
+            LOG_G_INFO_M(Radio) << "RX radio backend: XR1710G, shm='"
+                << cfg_.radio.xr1710g.shm_name << "', source="
+                << cfg_.radio.xr1710g.center_freq << " Hz, "
+                << cfg_.rf_sampling.sample_rate << " samples/s; local sample timestamps";
+        }
+
         if (uplink_enabled(cfg_)) {
             _init_uplink_tx();
         }
         const std::string time_source = resolve_ue_time_source(cfg_);
-        if (!is_sim && radio::clock_source_enables_pps_alignment(
+        if (dev_->supports(radio::Capability::PpsTimeSync) &&
+            !is_sim && radio::clock_source_enables_pps_alignment(
                 cfg_.clock_time.clock_source)) {
             LOG_G_INFO_M(Radio)
                 << "Waiting for PPS with clock_source='"
@@ -6724,7 +6736,9 @@ private:
                     frame.identity,
                     frame.ertm_rx_alignment_shift_samples,
                     frame.generation);
-                frame.delay_offset = _select_sensing_delay_offset(frame.delay_offset);
+                // One snapshot ties the reference coordinate to the applied display shift.
+                frame.user_delay_offset = _user_delay_offset.load(std::memory_order_relaxed);
+                frame.delay_offset = _select_sensing_delay_offset(frame.delay_offset, frame.user_delay_offset);
                 const uint64_t frame_symbol_count = static_cast<uint64_t>(frame.rx_symbols.size());
                 // Prefer absolute air-frame identity when locked; otherwise fall
                 // back to the local monotonic symbol counter.

@@ -4,11 +4,12 @@
 // Radio hardware abstraction layer (HAL).
 //
 // IDevice / ITxStream / IRxStream are the backend-independent interfaces the
-// engines drive. Two backends implement them today:
+// engines drive. Backends:
 //   - UhdBackend  (include/UhdBackend.hpp, src/UhdBackend.cpp) — real USRP via UHD.
 //   - SimBackend  (include/SimBackend.hpp, src/SimBackend.cpp) — shared-memory
 //                  channel simulator, ZERO dependency on UHD.
-// A third backend is a new IDevice/I*Stream implementation plus one branch in
+//   - Xr1710gBackend — receive-only consumer of an external host IQ stream.
+// A new backend is an IDevice/I*Stream implementation plus one branch in
 // make_device(). Engines never name a concrete backend or a uhd:: symbol; they
 // hold IDevicePtr / I*StreamPtr and query supports(Capability) where behavior
 // differs between backends.
@@ -18,6 +19,7 @@
 #include <string>
 
 #include "RadioTypes.hpp"
+#include "Xr1710gConfig.hpp"
 
 namespace radio {
 
@@ -86,7 +88,7 @@ enum class Capability {
     TimedTx,        // honors tx_metadata time_spec / timed bursts (real radio)
     FreeRunningClock, // device time advances independently of streamed samples
     AsyncTxEvents,  // produces TX async messages (underflow / seq error / ...)
-    StreamRestart,  // RX stream can be stopped + timed-restarted
+    StreamRestart,  // RX stream can be stopped + restarted (timed when TimedTx is supported)
     HardwareGain,   // set_*_gain / get_*_gain_range act on real hardware
     RfDspTune,      // supports manual RF/DSP split retuning
     PpsTimeSync,    // supports PPS-based multi-device time alignment
@@ -127,8 +129,8 @@ public:
     // Tuning.
     virtual TuneResult set_tx_freq(const TuneRequest& req, size_t chan = 0) = 0;
     virtual TuneResult set_rx_freq(const TuneRequest& req, size_t chan = 0) = 0;
-    // Receiver-side comm frequency correction used by the simulator's DSP path.
-    // No-op (and 0) on real hardware, which retunes via set_rx_freq instead.
+    // Backend-specific total RX correction (simulator and XR1710G). UHD uses
+    // set_rx_freq instead. XR1710G reports the applied PLL grid or software NCO.
     virtual void set_rx_freq_correction(double /*hz*/) {}
     virtual double rx_freq_correction() const { return 0.0; }
 
@@ -150,7 +152,7 @@ using IDevicePtr = std::shared_ptr<IDevice>;
 // Everything a backend needs to materialize one device. Callers (BS/UE/sensing)
 // populate the fields relevant to the selected backend; the rest are ignored.
 struct DeviceConfig {
-    std::string backend = "uhd";  // "uhd" | "sim"
+    std::string backend = "uhd";  // "uhd" | "sim" | "xr1710g"
 
     // --- UHD ---
     std::string device_args;      // multi_usrp::make() args (also the cache key)
@@ -162,12 +164,16 @@ struct DeviceConfig {
     double sim_tick_rate = 0.0;   // sample rate (Hz) reported as the radio clock
     double sim_center_freq = 0.0; // center freq used to synthesize tune results
     bool sim_predictive_delay = false; // validate simulator CFO/SRO consistency for UE prediction
+
+    // --- XR1710G (receive-only, external stream controller) ---
+    Xr1710gConfig xr1710g;
 };
 
 // Create (or return a shared, cached) device for the given config. Devices are
 // deduplicated per process by backend + key (device_args for UHD, session for
 // SIM) so a TX device shared with uplink-RX / sensing-RX is the same object
-// (pointer identity preserved). Throws on backend errors / clock-source conflict.
+// (pointer identity preserved). XR1710G consumers have independent read cursors.
+// Throws on backend errors / clock-source conflict.
 IDevicePtr make_device(const DeviceConfig& cfg);
 
 // RT-thread priority helper (wraps uhd::set_thread_priority_safe). Declared here

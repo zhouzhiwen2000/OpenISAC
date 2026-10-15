@@ -17,7 +17,14 @@ description: UE 运行配置参数、取值和作用说明。
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `radio.radio_backend` | `string` | `uhd` | 无线设备输入/输出后端。`uhd` 使用真实 USRP，`sim` 使用信道仿真器。 |
+| `radio.radio_backend` | `string` | `uhd` | 无线设备输入/输出后端。`uhd` 使用 USRP，`sim` 使用信道仿真器，`xr1710g` 使用 CPU 纯接收后端。 |
+| `radio.xr1710g_shm` | `string` | `/xr1710g-live` | 外部单路主机接收程序的 POSIX 共享内存名称。 |
+| `radio.xr1710g_center_freq` | `float` / Hz | `2442000000` | 必填：从 XR1710G 控制器读取的实际源 LO；此字段不执行射频调谐。 |
+| `radio.xr1710g_attach_timeout_s` | `float` / s | `5` | 等待主机接收服务的时间，范围 0–3600 秒。 |
+| `radio.xr1710g_pll_command` | `string` | `""` | 可选的常驻 PLL 控制命令，在接收电脑执行。留空使用软件 NCO；配置后通过硬件 LO 微调校正 ±100 kHz 内的频偏，见下方接入说明。 |
+
+CPU 纯接收 UE 可选择 `radio.radio_backend: xr1710g`。
+支持的采样率、控制方式和时间戳限制见 [XR1710G 接入说明](../../getting-started/hardware/#使用-xr1710g-作为纯接收-ue)。
 
 ### `simulation`
 
@@ -244,6 +251,8 @@ clock、清空 eRTM 状态或重新建立 TO。若旧 AP 仍处于 Queued/InFlig
 | :--- | :--- | :--- | :--- |
 | `sensing.sensing_delay_correction_mode` | `string` | `los_tracking` | 双站感知时延校正来源：`los_tracking` 或 `ertm_absolute`。 |
 | `sensing.bi_enabled` | `bool` | `true` | 开启双站感知处理。 |
+| `sensing.bistatic_phase_reference` | `bool` | `false` | LoS 相位参考，可改善较差时钟下的感知表现；要求收发机具有 LoS 且两者相对静止，重启 UE 生效。 |
+| `sensing.phase_reference_min_coherence` | `float` | `0.05` | 最低参考相干度，范围 `(0, 1]`；开启相位参考时有效。 |
 | `sensing.range_fft_size` | `int` | `1024` | 距离向 FFT 点数。 |
 | `sensing.doppler_fft_size` | `int` | `100` | 多普勒向 FFT 点数。 |
 | `sensing.view_range_bins` | `int` | `0` | 后端距离-多普勒视图的距离维宽度；`0` 表示完整距离维。 |
@@ -252,6 +261,32 @@ clock、清空 eRTM 状态或重新建立 TO。若旧 AP 仍处于 Queued/InFlig
 | `sensing.on_wire_format` | `string` | `complex_float32` | 感知负载的网络传输格式。 |
 | `sensing.backend_processing_enabled` | `bool` | `false` | 在支持时额外输出后端距离-多普勒、CFAR 和微多普勒处理结果。 |
 | `sensing.symbol_stride` | `int` | `20` | dense 模式启动时默认 STRD。 |
+
+
+#### LoS 相位参考
+
+该选项可在收发机使用独立时钟或时钟稳定性较差、同步后仍存在残余公共相位漂移时，改善双站感知的慢时间相干性和多普勒稳定性。**启用前必须保证收发机之间有稳定的视距（LoS）直达路径，而且收发机两者相对静止。** 被感知目标仍可运动。仅有非视距路径，或收发机之间存在相对运动时，不应启用：参考路径自身的运动也会被从测得的多普勒中减去。
+
+在 UE Linux 主机的实际运行配置 `UE.yaml` 中合并以下字段：
+
+```yaml
+sensing:
+  bi_enabled: true
+  output_mode: dense
+  sensing_delay_correction_mode: los_tracking
+  bistatic_phase_reference: true
+  phase_reference_min_coherence: 0.05
+```
+
+这是**启动时读取的 YAML 配置开关**，也可以在 Web 配置页编辑。保存后需重启 UE 才会生效，目前没有对应的在线启停命令。
+
+相位校正在现有 CFO/SFO/时延及系统响应校正之后、MTI 之前，消除双站 CSI 的残余公共相位，适用于完整信道矩阵输出（`dense`）。
+
+每个慢时间采样行用 Hamming 加权的直达径分量作为参考，对所有子载波施加模长为 1 的共轭旋转，保留幅度。参考跟随已知的 `ALGN` 显示平移：只在测量参考时抵消对应相位斜坡，输出仍保留用户指定的时延平移。平移变化会清空未完成的感知批次和 MTI/微多普勒历史，避免混合两个显示坐标。直达径需要静止且占主导：显示的多普勒相对于该参考路径；若参考路径运动，其运动也会被减去。此功能不校正射频采样时钟。
+
+`sensing.phase_reference_min_coherence` 默认 `0.05`，范围为 `(0, 1]`。相干度定义为 `|sum(w H)|² / (sum(w) sum(w |H|²))`，其中 `w` 为 Hamming 权重，`H` 为抵消已知显示相位斜坡后的信道值。参考过弱、接近零或出现非有限值时，整批感知数据被丢弃并清空 MTI/微多普勒历史，通信样本不受影响。缺少慢时间采样点时会重建感知窗口和历史，以保持多普勒处理所需的均匀时间轴。
+
+修改这些 YAML 字段后重启 UE，在 UE Linux 主机启动日志中确认 `static LoS phase reference enabled before MTI`。若频繁出现 `weak/invalid LoS phase reference`，说明该路径不适合作为参考，应关闭此功能或改善直达径信号。
 
 ### `resource_preview`
 
