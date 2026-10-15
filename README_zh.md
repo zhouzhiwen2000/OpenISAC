@@ -98,7 +98,7 @@ OpenISAC 是一个面向实时实验的 OFDM 通信感知一体化（ISAC）平�
 
 <img src="docs/images/SEUlogo.png" height="80" alt="SEU Logo" style="border:none; box-shadow:none;"> &nbsp;&nbsp; <img src="docs/images/PML.png" height="80" alt="PML Logo" style="border:none; box-shadow:none;">
 
-**东南大学移动通信国家重点实验室 & 紫金山实验室 曾勇课题组**
+**东南大学移动通信全国重点实验室 & 紫金山实验室 曾勇课题组**
 
 ## 社区
 
