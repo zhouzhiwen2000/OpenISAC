@@ -97,3 +97,7 @@ python3 ./scripts/plot_sensing_fast.py
 python3 ./scripts/plot_bi_sensing_fast.py
 ```
 这是当前维护的统一前端，会自动选择 CUDA、MLX、Intel GPU 或 CPU 后端。
+
+## 可选的 UE 接收设备
+
+UE 接收也可以选择 [XR1710G](/zh-cn/docs/tools-workflows/xr1710g-receiver/)。目前仍处于测试阶段，不建议用于正式实验。

@@ -97,3 +97,7 @@ This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.
 python3 ./scripts/plot_bi_sensing_fast.py
 ```
 This maintained viewer auto-selects CUDA, MLX, Intel GPU, or CPU backends.
+
+## Optional UE receiver
+
+You can also use [XR1710G](/docs/tools-workflows/xr1710g-receiver/) for UE reception. This option is still experimental and is not recommended for formal experiments.

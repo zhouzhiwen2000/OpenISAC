@@ -56,6 +56,7 @@ const sidebar = [
     translations: { "zh-CN": "工具与工作流" },
     items: [
       { label: "Channel Simulator", translations: { "zh-CN": "信道仿真器" }, link: "/docs/tools-workflows/channel-simulator/" },
+      { label: "XR1710G Receiver", translations: { "zh-CN": "XR1710G 接收 UE" }, link: "/docs/tools-workflows/xr1710g-receiver/" },
       { label: "Web Config Console", translations: { "zh-CN": "网页配置台" }, link: "/docs/tools-workflows/web-config-console/" },
       { label: "Calibration Workflows", translations: { "zh-CN": "校准流程" }, link: "/docs/tools-workflows/calibration-workflows/" },
       { label: "Video and UDP Workflows", translations: { "zh-CN": "视频与 UDP 工作流" }, link: "/docs/tools-workflows/video-udp-workflows/" },

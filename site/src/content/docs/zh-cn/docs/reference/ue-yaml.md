@@ -24,7 +24,7 @@ description: UE 运行配置参数、取值和作用说明。
 | `radio.xr1710g_pll_command` | `string` | `""` | 可选的常驻 PLL 控制命令，在接收电脑执行。留空使用软件 NCO；配置后通过硬件 LO 微调校正 ±100 kHz 内的频偏，见下方接入说明。 |
 
 CPU 纯接收 UE 可选择 `radio.radio_backend: xr1710g`。
-支持的采样率、控制方式和时间戳限制见 [XR1710G 接入说明](../../getting-started/hardware/#使用-xr1710g-作为纯接收-ue)。
+支持的采样率、控制方式和时间戳限制见 [XR1710G 接入说明](../../tools-workflows/xr1710g-receiver/)。
 
 ### `simulation`
 

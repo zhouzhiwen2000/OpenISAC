@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-20 - 独立 XR1710G 接收 UE 指南
+
+将 XR1710G 接入说明整理为中英文独立页面，按设备准备、数据源配置、BS/UE 参数匹配、启动停止和可选硬件频偏校正组织操作步骤。快速开始末尾提供入口并注明测试阶段适用范围，更新导航、README 和参数参考链接。
+
 ## 2026-10-15 - 双站感知 LoS 相位参考
 
 新增启动配置 `sensing.bistatic_phase_reference`，改善独立或稳定性较差时钟下残余公共相位漂移造成的感知相干性下降和多普勒不稳定。启用要求收发机之间存在稳定且占主导的 LoS 路径，收发机相对静止；感知目标可以运动。此选项适用于 `dense` / `los_tracking` 感知，保留幅度，输出相对于参考路径的多普勒，不改变通信 IQ 和频偏控制。无效参考、慢时间采样缺口或显示坐标改变时重建感知窗口及历史。

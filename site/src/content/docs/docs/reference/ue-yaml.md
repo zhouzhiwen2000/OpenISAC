@@ -23,7 +23,7 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `radio.xr1710g_attach_timeout_s` | `float` / s | `5` | Wait for a live host receiver, within 0–3600 seconds. |
 | `radio.xr1710g_pll_command` | `string` | `""` | Optional persistent PLL helper command, executed on the receiver host. Empty uses software NCO; configured uses hardware LO fine correction within ±100 kHz. See setup below. |
 
-See [XR1710G setup](../../getting-started/hardware/#xr1710g-as-a-receive-only-ue) for supported rates, source ownership and timing limits.
+See [XR1710G setup](../../tools-workflows/xr1710g-receiver/) for supported rates, source ownership and timing limits.
 
 ### `simulation`
 

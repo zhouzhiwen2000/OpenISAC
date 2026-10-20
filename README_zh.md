@@ -40,7 +40,7 @@ OpenISAC 是一个面向实时实验的 OFDM 通信感知一体化（ISAC）平�
 - 先跑起来：[首次 OTA 运行](https://openisac.zzw123app.top/zh-cn/docs/getting-started/first-ota-run/)
 - 运行参数说明：[BS YAML 参考](https://openisac.zzw123app.top/zh-cn/docs/reference/bs-yaml/) 和 [UE YAML 参考](https://openisac.zzw123app.top/zh-cn/docs/reference/ue-yaml/)
 - 无 USRP 仿真：[信道仿真器](https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/channel-simulator/)
-- XR1710G 纯接收 UE：[配置预设](config/UE_XR1710G.yaml)、[接入说明与限制](site/src/content/docs/zh-cn/docs/getting-started/hardware.md#使用-xr1710g-作为纯接收-ue)。
+- XR1710G 纯接收 UE：[配置预设](config/UE_XR1710G.yaml)、[接入说明与限制](site/src/content/docs/zh-cn/docs/tools-workflows/xr1710g-receiver.md)。目前处于测试阶段，不建议用于正式实验。
 - 网页控制台：[Web Config Console](https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/web-config-console/)
 - 最近更新：[更新日志](CHANGELOG.md)
 
