@@ -60,6 +60,7 @@ const sidebar = [
       { label: "Web Config Console", translations: { "zh-CN": "网页配置台" }, link: "/docs/tools-workflows/web-config-console/" },
       { label: "Calibration Workflows", translations: { "zh-CN": "校准流程" }, link: "/docs/tools-workflows/calibration-workflows/" },
       { label: "Video and UDP Workflows", translations: { "zh-CN": "视频与 UDP 工作流" }, link: "/docs/tools-workflows/video-udp-workflows/" },
+      { label: "UDP Link Test", translations: { "zh-CN": "UDP 链路测试" }, link: "/docs/tools-workflows/udp-link-test/" },
       { label: "macOS and Development Notes", translations: { "zh-CN": "macOS 与开发说明" }, link: "/docs/tools-workflows/macos-development/" },
     ],
   },

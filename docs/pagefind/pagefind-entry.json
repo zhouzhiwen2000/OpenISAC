@@ -1,1 +1,1 @@
-{"include_characters":["_","\u203f","\u2040","\u2054","\ufe33","\ufe34","\ufe4d","\ufe4e","\ufe4f","\uff3f"],"languages":{"en":{"hash":"en_5f923b328a","page_count":30,"wasm":"en"},"zh-cn":{"hash":"zh-cn_9f387dc5f5f2a","page_count":30,"wasm":null}},"version":"1.5.2"}
+{"version":"1.5.2","languages":{"zh-cn":{"hash":"zh-cn_a54ed33b5c3cf","wasm":null,"page_count":31},"en":{"hash":"en_f76c8f1491","wasm":"en","page_count":31}},"include_characters":["_","‿","⁀","⁔","︳","︴","﹍","﹎","﹏","＿"]}

@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-23 - UDP 链路测试与实时展示
+
+新增 C++ `UdpLinkTest`，发送可配置速率的已知 UDP 数据包，统计接收吞吐、丢包率、误比特率及重复、乱序等情况。支持 ZeroMQ 实时统计与在线码率控制，新增 BS 端 PyQt 性能面板，展示收发流量曲线和用户可输入的 LDPC 码率所对应的编码后速率，默认码率为 `1/2`。补充中英文使用说明。
+
 ## 2026-10-23 - 大频偏捕获后的连续跟踪
 
 修复 UE 在捕获并补偿大频偏后，正常跟踪仍可能选择错误频偏分支并重复调频的问题。跟踪保留初始捕获与后续有效观测的频偏参考，按实际接收调谐变化更新残余频偏；重捕时清理旧参考，忽略调频前的排队观测。补充外部变频器场景下关闭 CFO 时延预测的配置说明。

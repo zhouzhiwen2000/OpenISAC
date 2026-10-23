@@ -404,6 +404,22 @@ target_compile_options(ChannelSimulator PRIVATE
 )
 
 #===========================================================
+# Standalone UDP link tester
+#===========================================================
+add_executable(UdpLinkTest tools/udp_link_test.cpp)
+target_include_directories(UdpLinkTest PRIVATE ${OPENISAC_INCLUDE_DIR} ${OPENISAC_ZMQ_INCLUDE_DIRS})
+target_link_libraries(UdpLinkTest PRIVATE Threads::Threads ${OPENISAC_ZMQ_LINK}
+    ${OPENISAC_YAMLCPP_TARGET} ${YAMLCPP_LIBRARIES})
+target_compile_options(UdpLinkTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+if(BUILD_TESTING)
+    add_executable(UdpLinkProtocolTest tests/udp_link_test_test.cpp)
+    target_include_directories(UdpLinkProtocolTest PRIVATE ${OPENISAC_INCLUDE_DIR})
+    target_compile_options(UdpLinkProtocolTest PRIVATE ${COMMON_COMPILE_OPTIONS})
+    add_test(NAME UdpLinkProtocol COMMAND UdpLinkProtocolTest)
+    set_tests_properties(UdpLinkProtocol PROPERTIES LABELS "cpu;network" TIMEOUT 10)
+endif()
+
+#===========================================================
 # Standalone CPU LDPC fixed-point precision benchmark (no CUDA)
 #===========================================================
 add_executable(LDPCFixedBench tools/ldpc_fixed_bench.cpp)
@@ -502,7 +518,7 @@ endif()
 #===========================================================
 # Installation Rules
 #===========================================================
-set(INSTALL_TARGETS BS UE)
+set(INSTALL_TARGETS BS UE UdpLinkTest)
 
 install(TARGETS ${INSTALL_TARGETS}
     RUNTIME DESTINATION bin
