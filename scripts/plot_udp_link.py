@@ -107,7 +107,7 @@ class LinkDashboard(QtWidgets.QMainWindow):
 
         controls = QtWidgets.QHBoxLayout()
         controls.setSpacing(12)
-        controls.addWidget(QtWidgets.QLabel("目标码率"))
+        controls.addWidget(QtWidgets.QLabel("目标速率"))
         self.target = QtWidgets.QDoubleSpinBox()
         self.target.setRange(0, 10000)
         self.target.setDecimals(1)

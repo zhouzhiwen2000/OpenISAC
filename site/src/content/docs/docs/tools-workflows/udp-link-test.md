@@ -51,7 +51,7 @@ python scripts/plot_udp_link.py \
   --control tcp://127.0.0.1:18102 --code-rate 1/2 --rate-mbps 50
 ```
 
-Change **目标码率** and click **应用** to change the sender's target rate.
+Change **目标速率** and click **应用** to change the sender's target rate.
 Set it to zero to pause traffic. Enter a fraction such as `1/2` or `2/3` in
 **LDPC 码率** and press Enter to update the encoded-rate display. This field
 does not change the backend's LDPC codec.
