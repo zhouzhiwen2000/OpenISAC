@@ -64,3 +64,29 @@ def image_bounds_from_centers(extent, rows: int, cols: int) -> tuple[float, floa
     dx = (x1 - x0) / max(1, cols - 1)
     dy = (y1 - y0) / max(1, rows - 1)
     return x0 - dx / 2, y0 - dy / 2, max(dx, 1e-12) * cols, max(dy, 1e-12) * rows
+
+
+def parse_velocity_carrier_ghz(text: str) -> float | None:
+    """Parse an optional RF carrier; blank keeps the frequency display."""
+    if not text.strip():
+        return None
+    carrier_hz = float(text) * 1e9
+    if not math.isfinite(carrier_hz) or carrier_hz <= 0:
+        raise ValueError("RF carrier must be a finite positive frequency in GHz")
+    return carrier_hz
+
+
+def doppler_display_units(carrier_hz: float | None = None, *, bistatic: bool = False) -> tuple[float, str]:
+    """Scale Hz to signed monostatic radial speed, preserving the Doppler sign."""
+    if carrier_hz is None or bistatic:
+        return 1.0, "Hz"
+    if not math.isfinite(carrier_hz) or carrier_hz <= 0:
+        raise ValueError("RF carrier must be finite and positive")
+    return C_LIGHT_MPS / (2.0 * carrier_hz), "m/s"
+
+
+def format_doppler_readout(doppler_hz: float, carrier_hz: float | None = None, *, precision: int = 3) -> str:
+    """Use the same physical conversion for target readouts and plot axes."""
+    factor, unit = doppler_display_units(carrier_hz)
+    label = "v_r" if unit == "m/s" else "f_D"
+    return f"{label}={doppler_hz * factor:+.{precision}f} {unit}"

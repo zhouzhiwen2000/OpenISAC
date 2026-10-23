@@ -279,4 +279,4 @@ If a low STRD overloads sensing processing or the viewer, set `sensing.frame_dec
 
 Decimation preserves each retained frame’s symbol spacing, sample count, and unambiguous Doppler interval while reducing the display update rate. Sampling, channel estimation, and MTI continue; omitted frames skip range–Doppler FFTs, detection, and transmission, primarily reducing downstream processing and transport load. All sensing channels use the same frame-selection rule.
 
-Gaps interrupt micro-Doppler history accumulation, so larger factors may prevent a sufficiently long continuous window from forming. Use `1` for continuous micro-Doppler analysis. Communication traffic and RF transmission timing are unaffected. Update the backend and viewer together to the same version.
+The monostatic fast viewer retains rolling micro-Doppler history and zero-fills missing samples using timestamps. Missing echoes are not recovered; gaps may weaken peaks or introduce sidelobes. Use `1` for continuous observations. Communication traffic and RF transmission timing are unaffected. Update the backend and viewer together to the same version.

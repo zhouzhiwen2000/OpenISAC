@@ -6,7 +6,6 @@ import os
 import time
 import threading
 from queue import Queue, Empty, Full
-from collections import deque
 from pathlib import Path
 import struct
 import datetime
@@ -51,7 +50,11 @@ from viewer_panel_utils import (
 )
 from viewer_endpoint_store import load_endpoint, save_endpoint, save_settings
 from sensing_plot_axes import SensingPlotAxes
-from sensing_physical_axes import image_bounds_from_centers, physical_axes
+from sensing_micro_history import TimestampedSensingHistory
+from sensing_physical_axes import (
+    image_bounds_from_centers, physical_axes, display_doppler_mapping,
+    parse_velocity_carrier_ghz, format_doppler_readout,
+)
 
 from sensing_detection import (
     CleanParams,
@@ -544,7 +547,7 @@ class ChannelRuntime:
         self.range_time_data = None
         self.range_time_lock = threading.Lock()
 
-        self.micro_doppler_buffer = deque(maxlen=BUFFER_LENGTH)
+        self.micro_doppler_buffer = TimestampedSensingHistory(maxlen=BUFFER_LENGTH)
         self.micro_lock = threading.Lock()
 
         self.current_display_data = {}
@@ -2617,7 +2620,7 @@ def run_delay_superresolution(
     }
 
 
-def accumulate_range_time_data_batch(channel_range_time_views):
+def accumulate_range_time_data_batch(channel_range_time_views, frame_id=None, viewer_params=None):
     updated_channels = []
     for ch_idx, range_time_view in channel_range_time_views:
         if range_time_view is None or getattr(range_time_view, "size", 0) == 0:
@@ -2625,7 +2628,11 @@ def accumulate_range_time_data_batch(channel_range_time_views):
         range_idx = min(selected_range_bin, range_time_view.shape[1] - 1)
         signal_slice = to_cpu_array(range_time_view[:, range_idx], dtype=np.complex64)
         with CHANNELS[ch_idx].micro_lock:
-            CHANNELS[ch_idx].micro_doppler_buffer.extend(signal_slice)
+            history = CHANNELS[ch_idx].micro_doppler_buffer
+            if not IS_BI_MODE and frame_id is not None and viewer_params is not None:
+                history.append_frame(signal_slice, frame_id, viewer_params)
+            else:
+                history.extend(signal_slice)
         updated_channels.append(ch_idx)
     return updated_channels
 
@@ -3108,7 +3115,7 @@ def dsp_worker():
                 continue
             ch = CHANNELS[ch_idx]
             previous = getattr(ch, "last_micro_frame_symbol", None)
-            if sensing_history_discontinuous(
+            if IS_BI_MODE and sensing_history_discontinuous(
                 viewer_params, previous, int(frame_id),
                 getattr(ch, "last_micro_frame_decimation", 1),
             ):
@@ -3147,7 +3154,9 @@ def dsp_worker():
                     (ch_idx, CHANNELS[ch_idx].range_time_data)
                     for ch_idx, _ in active_frames
                     if ch_idx in batch_outputs and bundle_results[ch_idx] is not None
-                ]
+                ],
+                frame_id=frame_id,
+                viewer_params=viewer_params,
             )
             md_outputs = calculate_micro_doppler_batch(updated_channels)
             for ch_idx, md_result in md_outputs.items():
@@ -3280,6 +3289,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.phase_calibration_last_doppler_bin = None
         self.phase_calibration_last_saved_path = None
         self.center_freq_hz = 2.4e9
+        self.velocity_carrier_hz = None
         self.antenna_spacing_m = ANTENNA_SPACING_M
         self.range_scale_sample_rate_hz = None
         self.range_scale_source = "range bin"
@@ -3374,6 +3384,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # RD uses col-major mapping: x <- first index(doppler), y <- second index(range)
         self.rd_img = pg.ImageItem(axisOrder='col-major')
         self.rd_plot.addItem(self.rd_img)
+        self.strongest_target_label = pg.TextItem(
+            "", color="#facc15", anchor=(1, 0), fill=pg.mkBrush(7, 16, 29, 190))
+        target_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        target_font.setPointSize(13)
+        target_font.setBold(True)
+        self.strongest_target_label.setFont(target_font)
+        self.strongest_target_label.setTextWidth(self._scale_px(250))
+        self.strongest_target_label.setZValue(20)
+        self.rd_plot.addItem(self.strongest_target_label, ignoreBounds=True)
+        self.strongest_target_label.setVisible(not IS_BI_MODE)
+        self.rd_plot.getViewBox().sigRangeChanged.connect(self._position_strongest_target_label)
+        self.rd_plot.getViewBox().sigResized.connect(self._position_strongest_target_label)
         self.rd_plot.setLabel('left', 'Range / Relative Delay (waiting for parameters)')
         self.rd_plot.setLabel('bottom', 'Doppler Frequency (Hz)')
         spectrum_cmap = sensing_colormap()
@@ -3519,6 +3541,28 @@ class MainWindow(QtWidgets.QMainWindow):
         ch_select_layout.addWidget(self.combo_display_channel)
         disp.addWidget(self.display_channel_selector)
         self.refresh_display_button_text()
+
+        self.velocity_carrier_controls = QtWidgets.QWidget()
+        velocity_layout = QtWidgets.QHBoxLayout(self.velocity_carrier_controls)
+        velocity_layout.setContentsMargins(0, 0, 0, 0)
+        velocity_layout.addWidget(QtWidgets.QLabel("Velocity RF Carrier (GHz):"))
+        self.txt_velocity_carrier_ghz = QtWidgets.QLineEdit()
+        self.txt_velocity_carrier_ghz.setPlaceholderText("Blank: Doppler (Hz)")
+        self.txt_velocity_carrier_ghz.setToolTip(
+            "Actual radiated RF carrier, including any external frequency conversion. "
+            "Displays v = f_D c / (2 f_c) in m/s; sign follows Doppler. "
+            "This display setting does not tune the USRP. Clear to return to Hz.")
+        velocity_layout.addWidget(self.txt_velocity_carrier_ghz)
+        btn_velocity_carrier = QtWidgets.QPushButton("Set")
+        btn_velocity_carrier.clicked.connect(self.set_velocity_carrier)
+        self.txt_velocity_carrier_ghz.returnPressed.connect(self.set_velocity_carrier)
+        velocity_layout.addWidget(btn_velocity_carrier)
+        disp.addWidget(self.velocity_carrier_controls)
+        self.lbl_velocity_carrier_error = QtWidgets.QLabel()
+        self.lbl_velocity_carrier_error.setWordWrap(True)
+        disp.addWidget(self.lbl_velocity_carrier_error)
+        self.velocity_carrier_controls.setVisible(not IS_BI_MODE)
+        self.lbl_velocity_carrier_error.setVisible(not IS_BI_MODE)
 
         disp.addSpacing(8)
 
@@ -4112,6 +4156,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_toggle_style(self.btn_range_win, enable_range_window)
         self.update_toggle_style(self.btn_doppler_win, enable_doppler_window)
 
+        if not IS_BI_MODE:
+            self.txt_velocity_carrier_ghz.setText(str(s.get("velocity_carrier_ghz", "") or ""))
+            self.set_velocity_carrier()
+
         # Apply restored processing/display values after all widgets are populated.
         self.set_range_bin()
         self.set_delay_fft_size()
@@ -4690,6 +4738,67 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_rx_gain(self):
         send_rx_gain_command(self.txt_rx_gain.text())
 
+    def set_velocity_carrier(self):
+        """Apply a display-only monostatic carrier, independent of backend tuning."""
+        if IS_BI_MODE:
+            return
+        try:
+            carrier = parse_velocity_carrier_ghz(self.txt_velocity_carrier_ghz.text())
+        except ValueError:
+            self.lbl_velocity_carrier_error.setText(
+                "Enter a finite positive RF carrier in GHz, or leave blank for Hz. Previous setting retained.")
+            self.lbl_velocity_carrier_error.show()
+            return
+        self.velocity_carrier_hz = carrier
+        self.lbl_velocity_carrier_error.clear()
+        self.lbl_velocity_carrier_error.hide()
+        self._settings.set("velocity_carrier_ghz", "" if carrier is None else format(carrier / 1e9, ".12g"))
+        self._settings.save_now()
+        self._last_top_targets_key = None
+        self._force_ui_refresh = True
+        self._set_spectrum_titles()
+
+    def _position_strongest_target_label(self, *_args):
+        view = self.rd_plot.getViewBox()
+        x_range, y_range = view.viewRange()
+        dx, dy = view.viewPixelSize()
+        self.strongest_target_label.setPos(x_range[1] - 8 * dx, y_range[1] - 8 * dy)
+
+    def _set_spectrum_titles(self, strongest=None, range_scale=1.0, range_unit="m"):
+        """Show the strongest return in a separate top-right plot annotation."""
+        if IS_BI_MODE:
+            return
+        base = "Range-Velocity Spectrum" if self.velocity_carrier_hz is not None else "Range-Doppler Spectrum"
+        axis_label = "Radial Velocity (m/s)" if self.velocity_carrier_hz is not None else "Doppler Frequency (Hz)"
+        self.rd_plot.setLabel("bottom", axis_label)
+        self.md_plot.setLabel("left", axis_label)
+        if strongest is None:
+            motion_label = "v_r: N/A m/s" if self.velocity_carrier_hz is not None else "f_D: N/A Hz"
+            summary = f"Strongest Target\nR: N/A m\n{motion_label}"
+        else:
+            # Match the main plot's origin, independently of the sector-view offset.
+            distance = strongest['range_idx'] * range_scale
+            motion = format_doppler_readout(strongest['doppler_hz'], self.velocity_carrier_hz, precision=1)
+            summary = f"Strongest Target\nR: {distance:.1f} {range_unit}\n{motion.replace('=', ': ', 1)}"
+        self.strongest_target_label.setText(summary, color="#facc15")
+        self._position_strongest_target_label()
+        self.rd_plot.setTitle(base)
+        self.md_plot.setTitle("Micro-Velocity Spectrum" if self.velocity_carrier_hz is not None
+                              else "Micro-Doppler Spectrum")
+
+    def _target_doppler_hz(self, latest_disp, doppler_idx):
+        """Convert a detected image row using the displayed frame's FFT geometry."""
+        axes = physical_axes(latest_disp['viewer_params'], latest_disp['range_fft_size'],
+                             latest_disp['doppler_fft_size'])
+        rows = latest_disp['rd'].shape[0]
+        factor, offset = display_doppler_mapping(
+            latest_disp['source_doppler_rows'], latest_disp['display_doppler_bins'], rows,
+            latest_disp['display_downsample'], axes.doppler_bin_hz)
+        return (doppler_idx - rows / 2.0) * factor + offset
+
+    def _target_doppler_text(self, latest_disp, doppler_idx):
+        return format_doppler_readout(self._target_doppler_hz(latest_disp, doppler_idx), self.velocity_carrier_hz)
+
     def set_center_freq(self):
         try:
             freq_ghz = float(self.txt_center_freq_ghz.text())
@@ -5135,8 +5244,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         aoa_text = "AoA= n/a"
 
+            doppler_text = (f"D={doppler_bin:+5.0f}" if IS_BI_MODE
+                            else self._target_doppler_text(latest_disp, d_idx))
             line = (
-                f"{rank}. R={r_idx:4d} (rel={range_text}) D={doppler_bin:+5.0f}"
+                f"{rank}. R={r_idx:4d} (rel={range_text}) {doppler_text}"
                 f" S={strength_db:6.1f}dB N={int(cluster['cluster_size']):2d}"
                 f" C=({centroid_r:5.1f},{centroid_d:5.1f}) {aoa_text}"
             )
@@ -5144,6 +5255,8 @@ class MainWindow(QtWidgets.QMainWindow):
             entries.append({
                 'rank': rank,
                 'range_idx': r_idx,
+                'doppler_text': doppler_text,
+                'doppler_hz': self._target_doppler_hz(latest_disp, d_idx) if not IS_BI_MODE else None,
                 'relative_range_bins': relative_range_bins,
                 'range_value': range_value,
                 'aoa_deg': aoa_deg,
@@ -5543,6 +5656,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_top_targets_text(self, ch, latest_disp):
         entries, text, axis_unit, scale_text, range_scale = self._build_top_target_entries(ch, latest_disp)
         self.targets_text.setPlainText(text)
+        self._set_spectrum_titles(entries[0] if entries else None, range_scale, axis_unit)
         if entries is None:
             self._update_target_sector_plot([], "bin", self._format_target_sector_scale_text("range bin"), 1.0)
             return
@@ -5846,6 +5960,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     display_bins=latest_disp['display_doppler_bins'],
                     displayed_rows=rd_data.shape[0], downsample=latest_disp['display_downsample'],
                     range_downsample=latest_disp['display_range_downsample'],
+                    velocity_carrier_hz=self.velocity_carrier_hz if not IS_BI_MODE else None,
                 )
             overlay_points = self._get_overlay_cluster_points(latest_disp)
             frame_id = int(latest_disp.get('frame_id', -1))
@@ -5857,6 +5972,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 int(self.synced_frame_id) if self.synced_frame_id is not None else -1,
                 int(bool(self.phase_calibrated)),
                 int(round(self.center_freq_hz)),
+                self.velocity_carrier_hz,
                 int(self.target_sector_min_range_bin),
                 int(self.target_sector_max_range_bins),
                 int(cfar_os_suppress_doppler),

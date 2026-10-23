@@ -6,7 +6,10 @@ import unittest
 
 import numpy as np
 
-from sensing_physical_axes import C_LIGHT_MPS, display_doppler_mapping, image_bounds_from_centers, physical_axes
+from sensing_physical_axes import (C_LIGHT_MPS, display_doppler_mapping, image_bounds_from_centers,
+                                   physical_axes, parse_velocity_carrier_ghz, doppler_display_units,
+                                   format_doppler_readout)
+from sensing_micro_history import TimestampedSensingHistory
 from sensing_runtime_protocol import (
     FLAG_AGGREGATED_STREAM, sensing_history_discontinuous,
     FLAG_BISTATIC, PARAMS_PACKET_STRUCT, PARAMS_VERSION, ViewerRuntimeParams, parse_params_packet,
@@ -99,6 +102,64 @@ class PhysicalAxesTest(unittest.TestCase):
             for version in (7, 8, 9, 11):
                 invalid = packet[:8] + struct.pack("!I", version) + packet[12:]
                 self.assertIsNone(parse_params_packet(invalid))
+
+    def test_micro_history_survives_decimated_and_dropped_frames(self):
+        p = replace(self.params, sensing_symbol_stride=4, frame_decimation=2)
+        history = TimestampedSensingHistory(32)
+        history.append_frame(np.array([1j, 2j, 3j, 4j]), 100, p)
+        self.assertEqual(history.append_frame(np.array([5j, 6j, 7j, 8j]), 132, p), 4)
+        self.assertEqual(list(history), [1j, 2j, 3j, 4j, 0j, 0j, 0j, 0j, 5j, 6j, 7j, 8j])
+        # Changing decimation alone does not invalidate old observations.
+        history.append_frame([9j], 148, replace(p, frame_decimation=1))
+        self.assertEqual(history[0], 1j)
+        history.append_frame([10j], 156, p)
+        self.assertEqual(list(history)[-3:], [9j, 0j, 10j])
+        history.append_frame([11j], 10**12, p)
+        self.assertEqual(len(history), 32)
+        self.assertEqual(list(history), [0j] * 31 + [11j])
+        history.append_frame([12j], 0, p)
+        self.assertEqual(list(history), [12j])
+        history.append_frame([13j], 4, replace(p, sensing_symbol_stride=8))
+        self.assertEqual(list(history), [13j])
+        history.clear()
+        history.append_frame([14j], 999999, p)
+        self.assertEqual(list(history), [14j])
+
+    def test_gapped_tone_keeps_doppler_frequency(self):
+        p = replace(self.params, sensing_symbol_stride=4)
+        history = TimestampedSensingHistory(1024)
+        # Keep alternate 64-sample CPIs of a bin-centred complex tone.
+        for start in range(0, 1024, 128):
+            t = np.arange(start, start + 64)
+            history.append_frame(np.exp(2j * np.pi * 80 * t / 1024), start * 4, p)
+        spectrum = np.abs(np.fft.fft(np.asarray(history), n=1024))
+        self.assertEqual(int(np.argmax(spectrum)), 80)
+        self.assertEqual(len(history), 960)
+
+    def test_optional_monostatic_velocity_carrier(self):
+        self.assertIsNone(parse_velocity_carrier_ghz("  "))
+        carrier = parse_velocity_carrier_ghz("77")
+        self.assertEqual(carrier, 77e9)
+        factor, unit = doppler_display_units(carrier)
+        self.assertEqual(unit, "m/s")
+        self.assertAlmostEqual(1000 * factor, 1.9467042727272728)
+        self.assertEqual(format_doppler_readout(-1000, carrier), "v_r=-1.947 m/s")
+        self.assertEqual(format_doppler_readout(1000), "f_D=+1000.000 Hz")
+        self.assertEqual(doppler_display_units(carrier, bistatic=True), (1.0, "Hz"))
+        for bad in ("nan", "inf", "-77", "0", "abc", "1e309"):
+            with self.assertRaises(ValueError):
+                parse_velocity_carrier_ghz(bad)
+
+    def test_velocity_preserves_crop_offset_and_runtime_stride(self):
+        carrier = 77e9
+        conversion, _ = doppler_display_units(carrier)
+        for stride in (8, 20, 40):
+            axes = physical_axes(replace(self.params, sensing_symbol_stride=stride), 2048, 1024)
+            factor, offset = display_doppler_mapping(101, 51, 17, 3, axes.doppler_bin_hz)
+            for row in (0, 8, 16):
+                v = ((row - 17 / 2) * factor + offset) * conversion
+                expected_fd = (-25 + 3 * row) * axes.doppler_bin_hz
+                self.assertAlmostEqual(v, expected_fd * C_LIGHT_MPS / (2 * carrier))
 
     def test_stft_pixels_match_first_and_last_sample_centers(self):
         x, y, width, height = image_bounds_from_centers([0, 128, -0.5, 127 / 256], 256, 3)

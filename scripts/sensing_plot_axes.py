@@ -5,7 +5,7 @@ import math
 
 import pyqtgraph as pg
 
-from sensing_physical_axes import display_doppler_mapping, physical_axes
+from sensing_physical_axes import display_doppler_mapping, doppler_display_units, physical_axes
 
 
 class ScaledAxisItem(pg.AxisItem):
@@ -38,17 +38,20 @@ class SensingPlotAxes:
         self.time = ScaledAxisItem("bottom")
 
     def update(self, rd_plot, md_plot, params, *, range_fft_size, doppler_fft_size,
-               source_rows, display_bins, displayed_rows, downsample, range_downsample=None):
+               source_rows, display_bins, displayed_rows, downsample, range_downsample=None, velocity_carrier_hz=None):
         axes = physical_axes(params, range_fft_size, doppler_fft_size)
         self.range.set_mapping(axes.range_bin_scale * (downsample if range_downsample is None else range_downsample))
-        self.doppler.set_mapping(*display_doppler_mapping(
-            source_rows, display_bins, displayed_rows, downsample, axes.doppler_bin_hz))
+        velocity_scale, unit = doppler_display_units(velocity_carrier_hz, bistatic=axes.bistatic)
+        factor, offset = display_doppler_mapping(
+            source_rows, display_bins, displayed_rows, downsample, axes.doppler_bin_hz)
+        self.doppler.set_mapping(factor * velocity_scale, offset * velocity_scale)
         # Both STFT implementations use fs=1: frequency is cycles/sample and time is samples.
-        self.micro_doppler.set_mapping(axes.slow_time_rate_hz)
+        self.micro_doppler.set_mapping(axes.slow_time_rate_hz * velocity_scale)
         self.time.set_mapping(1.0 / axes.slow_time_rate_hz)
         rd_plot.setLabel("left", axes.range_label if math.isfinite(axes.range_bin_scale)
                          else "Delay unavailable (nonuniform subcarriers)")
-        rd_plot.setLabel("bottom", "Doppler Frequency (Hz)")
-        md_plot.setLabel("left", "Doppler Frequency (Hz)")
+        label = "Radial Velocity (m/s)" if unit == "m/s" else "Doppler Frequency (Hz)"
+        rd_plot.setLabel("bottom", label)
+        md_plot.setLabel("left", label)
         md_plot.setLabel("bottom", "Time (s)")
         return axes

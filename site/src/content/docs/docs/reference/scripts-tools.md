@@ -95,3 +95,13 @@ Monostatic range uses $R=c\tau/2$; bistatic delay uses $10^9\tau$ ns and is **re
 ## Calibration tools
 
 Run `calibrate_hsys.py capture` to request and verify a saved response, or `calibrate_hsys.py inspect` for an offline file check. `calibrate_system_delay.py` summarizes recent per-channel alignment estimates from backend logs. See [Calibration Workflows](/docs/tools-workflows/calibration-workflows/) for setup, commands and validation limits.
+
+### Optional radial velocity in the monostatic viewer
+
+In `plot_sensing_fast.py`, open **Display & View**, enter the actual radiated carrier in **Velocity RF Carrier (GHz)**, and click **Set** (or press Enter). The range-spectrum horizontal axis, micro-Doppler vertical axis, and detected-target list then show radial velocity in **m/s**. Clear the field and apply it to return to Doppler frequency in **Hz**. The applied value is saved for the next launch.
+
+The conversion is $v_r = f_D c / (2 f_c)$, with the sign inherited from the displayed Doppler frequency. For an external millimetre-wave converter, enter its RF output carrier rather than the USRP intermediate frequency; for example, enter `77` only when the actual RF carrier is 77 GHz. This display setting does not tune the radio or change FFT processing, detector thresholds, or bin coordinates. Positive/negative motion direction must be checked against the converter and experiment's frequency-sign convention. The bistatic viewer keeps its Doppler-frequency display because radial speed cannot be inferred with the monostatic formula.
+
+A separate yellow annotation at the top right of the main spectrum shows the strongest detected return's range and velocity to one decimal place (or Doppler frequency when the carrier is blank). The annotation keeps a fixed position and size; missing target values are shown as **N/A**.
+
+The monostatic fast viewer keeps its rolling micro-Doppler history across dropped or decimated frames and inserts zeros at missing slow-time positions. This preserves elapsed time; it does not reconstruct missing echoes, and gaps can weaken peaks or introduce sidelobes. History restarts when the range cell or sampling geometry changes, or the timestamp moves backwards.
