@@ -310,6 +310,19 @@ def build_channel_sim_snr_request() -> bytes:
     return REQUEST_PACKET_STRUCT.pack(REQ_HEADER, CHANNEL_SIM_SNR_COMMAND, 0)
 
 
+
+def sensing_history_discontinuous(params: ViewerRuntimeParams, previous: int | None,
+                                  current: int, previous_decimation: int = 1) -> bool:
+    """Detect CPI gaps without treating legacy dense receive counters as symbol times."""
+    if previous is None:
+        return False
+    if params.frame_decimation > 1 or previous_decimation > 1:
+        return True
+    if params.aggregated_stream() or params.is_compact_mask():
+        span = int(params.active_rows) * int(params.sensing_symbol_stride)
+        return int(current) != int(previous) + span
+    return False
+
 def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
     """Decode the exact current protocol; legacy and future layouts are rejected."""
     if len(data) != PARAMS_PACKET_STRUCT.size:

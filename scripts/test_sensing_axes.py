@@ -8,6 +8,7 @@ import numpy as np
 
 from sensing_physical_axes import C_LIGHT_MPS, display_doppler_mapping, image_bounds_from_centers, physical_axes
 from sensing_runtime_protocol import (
+    FLAG_AGGREGATED_STREAM, sensing_history_discontinuous,
     FLAG_BISTATIC, PARAMS_PACKET_STRUCT, PARAMS_VERSION, ViewerRuntimeParams, parse_params_packet,
 )
 
@@ -64,6 +65,17 @@ class PhysicalAxesTest(unittest.TestCase):
         self.assertEqual(b.delay_bin_ns, a.delay_bin_ns / 2)
         nonuniform = physical_axes(replace(self.params, sensing_subcarrier_stride=0), 2048, 512)
         self.assertTrue(np.isnan(nonuniform.delay_bin_ns))
+
+    def test_micro_doppler_gap_detection(self):
+        dense = replace(self.params, active_rows=100, sensing_symbol_stride=10)
+        self.assertFalse(sensing_history_discontinuous(dense, 1, 2))
+        self.assertFalse(sensing_history_discontinuous(dense, None, 20))
+        decimated = replace(dense, frame_decimation=5)
+        self.assertTrue(sensing_history_discontinuous(decimated, 1, 2))
+        self.assertTrue(sensing_history_discontinuous(dense, 1, 2, 5))
+        stamped = replace(dense, flags=FLAG_AGGREGATED_STREAM)
+        self.assertFalse(sensing_history_discontinuous(stamped, 1000, 2000))
+        self.assertTrue(sensing_history_discontinuous(stamped, 1000, 3000))
 
     def test_exact_protocol_only(self):
         fields = [PARAMS_VERSION, FLAG_BISTATIC, 0, 100, 2048, 100, 1024,

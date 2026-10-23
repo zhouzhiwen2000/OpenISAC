@@ -37,6 +37,7 @@ from sensing_runtime_protocol import (
     make_tcp_endpoint,
     parse_params_packet,
     recv_sensing_frame,
+    sensing_history_discontinuous,
 )
 from viewer_panel_utils import (
     CollapsibleSection,
@@ -3107,10 +3108,13 @@ def dsp_worker():
                 continue
             ch = CHANNELS[ch_idx]
             previous = getattr(ch, "last_micro_frame_symbol", None)
-            span = (int(viewer_params.active_rows) * int(viewer_params.sensing_symbol_stride))
-            if previous is not None and int(frame_id) != previous + span:
+            if sensing_history_discontinuous(
+                viewer_params, previous, int(frame_id),
+                getattr(ch, "last_micro_frame_decimation", 1),
+            ):
                 ch.micro_doppler_buffer.clear()
             ch.last_micro_frame_symbol = int(frame_id)
+            ch.last_micro_frame_decimation = viewer_params.frame_decimation
             rd_spectrum, range_time_view, rd_complex = batch_outputs[ch_idx]
             try:
                 result = _finalize_channel_result(
