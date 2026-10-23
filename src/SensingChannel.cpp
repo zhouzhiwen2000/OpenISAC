@@ -1062,6 +1062,7 @@ SensingChannel::SensingChannel(
         }
     }
 
+    _frame_decimator.schedule(cfg.sensing.frame_decimation, 0);
     _load_system_response_calibration();
 
     if (_role == SensingRole::Bistatic && _cfg.sensing.bistatic_phase_reference) {
@@ -2510,10 +2511,10 @@ void SensingChannel::_process_compact_monostatic_frame(
     _apply_sparse_compact_system_response_calibration(
         compact_output,
         layout.flat_subcarrier_indices);
-    _compute.sensing_sender.push_compact_data(
-        compact_output,
-        layout.mask_hash,
-        tx_frame.frame_start_symbol_index);
+    if (_keep_sensing_frame(tx_frame.frame_start_symbol_index, _cfg.ofdm.num_symbols)) {
+        _compute.sensing_sender.push_compact_data(
+            compact_output, layout.mask_hash, tx_frame.frame_start_symbol_index);
+    }
 }
 
 void SensingChannel::_process_compact_bistatic_frame(
@@ -2554,10 +2555,10 @@ void SensingChannel::_process_compact_bistatic_frame(
     _apply_sparse_compact_system_response_calibration(
         compact_output,
         layout.flat_subcarrier_indices);
-    _compute.sensing_sender.push_compact_data(
-        compact_output,
-        layout.mask_hash,
-        frame_start_symbol_index);
+    if (_keep_sensing_frame(frame_start_symbol_index, _cfg.ofdm.num_symbols)) {
+        _compute.sensing_sender.push_compact_data(
+            compact_output, layout.mask_hash, frame_start_symbol_index);
+    }
 }
 
 void SensingChannel::_process_regular_compact_monostatic_frame(
@@ -2744,6 +2745,11 @@ void SensingChannel::_process_regular_compact_buffer(
         symbol_count,
         analysis.common_subcarrier_indices);
     compact_core.apply_mti(_compute.active_enable_mti, symbol_count);
+    if (!_keep_sensing_frame(frame_start_symbol_index,
+            symbol_count * analysis.implicit_symbol_stride)) {
+        compact_core.clear_channel_buffer();
+        return;
+    }
 
     if (_compute.active_skip_sensing_fft) {
         AlignedVector compact_output(symbol_count * analysis.common_subcarrier_count);
@@ -3007,6 +3013,11 @@ void SensingChannel::_sensing_process_finalize(
     _compute.sensing_core.apply_mti(_compute.active_enable_mti, symbol_count);
     const double mti_us = std::chrono::duration<double, std::micro>(
         ProfileClock::now() - mti_start).count();
+
+    if (!_keep_sensing_frame(first_symbol_index, symbol_count * _compute.active_stride)) {
+        _compute.sensing_core.clear_channel_buffer();
+        return;
+    }
 
     double windows_fft_us = 0.0;
     const size_t fft_rows = _compute.sensing_core.params().doppler_fft_size;
@@ -3274,6 +3285,7 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
 
     const size_t previous_stride = _compute.active_stride;
     _compute.active_stride = std::max<size_t>(1, snapshot.sensing_symbol_stride);
+    _frame_decimator.schedule(snapshot.frame_decimation, snapshot.apply_symbol_index);
     _compute.active_enable_mti = snapshot.enable_mti;
     _compute.active_skip_sensing_fft = backend_sensing_processing_supported(_cfg)
         ? false
@@ -3302,4 +3314,11 @@ void SensingChannel::_apply_shared_sensing_if_due(uint64_t symbol_index) {
                   << "/" << _compute.cfar_params.os_suppress_range
                   << ", MD=" << (_compute.micro_doppler_enabled ? 1 : 0)
                   << ")";
+}
+
+// Keep the original symbol index on retained frames; never renumber across gaps.
+bool SensingChannel::_keep_sensing_frame(uint64_t first_symbol, uint64_t span) {
+    if (_frame_decimator.keep(first_symbol, span)) return true;
+    _compute.micro_doppler_state.clear();
+    return false;
 }

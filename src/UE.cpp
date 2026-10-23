@@ -3408,6 +3408,17 @@ private:
             LOG_G_INFO_M(Sensing) << "Received skip sensing FFT command: " << value;
         });
 
+        _control_handler.register_command("FDEC", [this](int32_t value) {
+            if (value < 1 || value > 1000) {
+                LOG_G_WARN() << "Ignoring FDEC: expected 1..1000";
+                return;
+            }
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.frame_decimation = static_cast<uint32_t>(value);
+            });
+            LOG_G_INFO() << "Sensing frame decimation requested: " << value;
+        });
+
         _control_handler.register_command("STRD", [this, compact_mask_mode](int32_t value) {
             if (compact_mask_mode) {
                 LOG_G_INFO_M(Sensing) << "Ignoring STRD command in compact_mask sensing mode: stride is defined by sensing_mask_blocks";
@@ -3592,7 +3603,7 @@ private:
                     snapshot.cfar_os_suppress_range,
                     true,
                     1u, 0x1u, false, 0.0,
-                    snapshot.sensing_symbol_stride);
+                    snapshot.sensing_symbol_stride, snapshot.frame_decimation);
             _control_handler.send_sensing_viewer_params(peer, packet);
         });
     }
@@ -3613,6 +3624,7 @@ private:
         }
 
         const CompactSensingMaskAnalysis compact_mask_analysis = analyze_compact_sensing_mask(cfg_);
+        _shared_sensing_cfg.frame_decimation = cfg_.sensing.frame_decimation;
         _shared_sensing_cfg.sensing_symbol_stride =
             compact_mask_analysis.local_delay_doppler_supported
                 ? compact_mask_analysis.implicit_symbol_stride

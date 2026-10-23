@@ -81,7 +81,7 @@ npm run build
 
 Both the fast viewers and backend sensing viewers display Doppler frequency in **Hz**. Monostatic spectra display **range in metres**, while bistatic spectra display **relative delay in nanoseconds (ns)**. Micro-Doppler time is displayed in seconds. Detector configuration and bin-selection controls still use bin indices.
 
-The backend and viewer must be updated together: sensing `PARM` **V9 is required**, and older or unknown layouts are rejected. The packet supplies the original OFDM FFT size, CP length, active sensing symbol stride and uniform subcarrier stride; the viewer uses the actual processing FFT lengths, including zero padding. Cropping or display downsampling does not change the physical calibration. A nonuniform compact subcarrier grid has no single FFT-bin delay scale and is marked unavailable instead of being assigned an incorrect distance.
+The backend and viewer must be updated together: sensing `PARM` **V10 is required**, and older or unknown layouts are rejected. The packet supplies the original OFDM FFT size, CP length, active sensing symbol stride and uniform subcarrier stride; the viewer uses the actual processing FFT lengths, including zero padding. Cropping or display downsampling does not change the physical calibration. A nonuniform compact subcarrier grid has no single FFT-bin delay scale and is marked unavailable instead of being assigned an incorrect distance.
 
 With sample rate $F_s$, OFDM FFT size $N$, CP length $N_{CP}$, symbol stride $S_t$, subcarrier stride $S_f$, and processing FFT sizes $N_R,N_D$:
 

@@ -276,6 +276,7 @@ reuse the same AP request.
 | `sensing.on_wire_format` | `string` | `complex_float32` | Sensing payload wire format. |
 | `sensing.backend_processing_enabled` | `bool` | `false` | Publish backend RD/CFAR/micro-Doppler sidecars when supported. |
 | `sensing.symbol_stride` | `int` | `20` | Default dense-mode STRD applied at startup. |
+| `sensing.frame_decimation` | `int` | `1` | Process/output one complete sensing frame out of N (`1..1000`), preserving within-frame STRD. Set live with the viewer’s `Frame every N` control. |
 
 
 #### LoS phase reference
@@ -409,3 +410,11 @@ Resource-map notes:
 * Built-in ZC sync symbols, the optional CFO training field, comb pilots, and mid-frame BPSK pilots take precedence over configured resource blocks.
 * `resource_preview.mask_blocks` controls compact sensing export only. In `output_mode=compact_mask`, runtime `STRD` is ignored because the mask defines the sampling pattern.
 * Compact sensing payloads begin with `CompactSensingFrameHeader`, followed by fixed-order raw `complex<float>` samples.
+
+## Sensing frame decimation
+
+If a low STRD overloads sensing processing or the viewer, set `sensing.frame_decimation: 5` to output one complete sensing frame (CPI) out of every five. The default, `1`, keeps all frames. Adjust it live with the viewer’s `Frame every N` input and `Set` button; `every=N` in `Params` shows the value reported by the backend. Live changes do not write YAML; save the startup setting with config_web_editor.
+
+Decimation preserves each retained frame’s symbol spacing, sample count, and unambiguous Doppler interval while reducing the display update rate. Sampling, channel estimation, and MTI continue; omitted frames skip range–Doppler FFTs, detection, and transmission, primarily reducing downstream processing and transport load. All sensing channels use the same frame-selection rule.
+
+Gaps interrupt micro-Doppler history accumulation, so larger factors may prevent a sufficiently long continuous window from forming. Use `1` for continuous micro-Doppler analysis. Communication traffic and RF transmission timing are unaffected. Update the backend and viewer together to the same version.

@@ -65,6 +65,7 @@ sensing:
   range_fft_size: 1024
   doppler_fft_size: 100
   symbol_stride: 20
+  frame_decimation: 1  # Process/output one complete sensing frame out of N (1..1000)
 
 ldpc:
   decoder_iterations: 12

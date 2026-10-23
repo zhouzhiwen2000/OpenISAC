@@ -201,6 +201,7 @@ public:
                     : (_cfg.measurement.measurement_output_dir + "/bs_measurement_summary.csv"));
         }
         const CompactSensingMaskAnalysis compact_mask_analysis = analyze_compact_sensing_mask(_cfg);
+        _shared_sensing_cfg.frame_decimation = cfg.sensing.frame_decimation;
         _shared_sensing_cfg.sensing_symbol_stride =
             compact_mask_analysis.local_delay_doppler_supported
                 ? compact_mask_analysis.implicit_symbol_stride
@@ -1132,6 +1133,7 @@ private:
     void _schedule_shared_sensing_update(std::function<void(SharedSensingRuntime&)> updater) {
         auto same_runtime_values = [](const SharedSensingRuntime& lhs, const SharedSensingRuntime& rhs) {
             return lhs.sensing_symbol_stride == rhs.sensing_symbol_stride &&
+                   lhs.frame_decimation == rhs.frame_decimation &&
                    lhs.enable_mti == rhs.enable_mti &&
                    lhs.skip_sensing_fft == rhs.skip_sensing_fft &&
                    lhs.cfar_enabled == rhs.cfar_enabled &&
@@ -1238,7 +1240,7 @@ private:
             stream_channel_mask,
             aggregated_stream,
             antenna_spacing_m,
-            snapshot.sensing_symbol_stride);
+            snapshot.sensing_symbol_stride, snapshot.frame_decimation);
         return packet;
     }
 
@@ -1341,6 +1343,17 @@ private:
                 cfg.skip_sensing_fft = new_skip;
             });
             LOG_G_INFO_M(Sensing) << "Received SKIP command: " << (new_skip ? 1 : 0);
+        });
+
+        _control_handler.register_command("FDEC", [this](int32_t value) {
+            if (value < 1 || value > 1000) {
+                LOG_G_WARN() << "Ignoring FDEC: expected 1..1000";
+                return;
+            }
+            _schedule_shared_sensing_update([value](SharedSensingRuntime& cfg) {
+                cfg.frame_decimation = static_cast<uint32_t>(value);
+            });
+            LOG_G_INFO() << "Sensing frame decimation requested: " << value;
         });
 
         _control_handler.register_command("STRD", [this, compact_mask_mode](int32_t value) {

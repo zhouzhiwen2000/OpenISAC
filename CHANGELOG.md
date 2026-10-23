@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-23 - 在线感知帧抽取
+
+新增 `sensing.frame_decimation` 和上位机 `Frame every N` 在线控制，每 N 个完整感知帧处理并输出 1 帧，默认 1。保留帧内 STRD、连续信道估计与 MTI，跳过后续距离–多普勒处理和数据发送，并在观测空档处重新积累微多普勒历史。同步配置编辑器与中英文参数说明；感知参数协议更新为 V10，后端与上位机需配套更新。
+
 ## 2026-10-20 - 独立 XR1710G 接收 UE 指南
 
 将 XR1710G 接入说明整理为中英文独立页面，按设备准备、数据源配置、BS/UE 参数匹配、启动停止和可选硬件频偏校正组织操作步骤。快速开始末尾提供入口并注明测试阶段适用范围，更新导航、README 和参数参考链接。

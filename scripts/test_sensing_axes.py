@@ -68,19 +68,23 @@ class PhysicalAxesTest(unittest.TestCase):
     def test_exact_protocol_only(self):
         fields = [PARAMS_VERSION, FLAG_BISTATIC, 0, 100, 2048, 100, 1024,
                   100, 2048, 512, 0, 0, 1, 1, 7500, 2, 2,
-                  58_000_000, 500_000, 0, 1024, 128, 8, 1]
+                  58_000_000, 500_000, 0, 1024, 128, 8, 1, 5]
         packet = PARAMS_PACKET_STRUCT.pack(b"CTRL", b"PARM", *fields)
-        self.assertEqual(len(packet), 104)
+        self.assertEqual(len(packet), 108)
         p = parse_params_packet(packet)
         self.assertEqual(p.center_freq_hz, 5.8e9)
         self.assertEqual(p.sensing_symbol_stride, 8)
         self.assertEqual(p.sensing_subcarrier_stride, 1)
+        self.assertEqual(p.frame_decimation, 5)
+        a = physical_axes(p, 2048, 512)
+        b = physical_axes(replace(p, frame_decimation=1), 2048, 512)
+        self.assertEqual(a, b)
         self.assertEqual(physical_axes(p, 2048, 512).range_unit, "ns")
         with self.assertLogs("sensing_runtime_protocol", level="WARNING"):
-            for old_size in (52, 60, 64, 76, 88, 100):
+            for old_size in (52, 60, 64, 76, 88, 100, 104):
                 self.assertIsNone(parse_params_packet(packet[:old_size]))
             self.assertIsNone(parse_params_packet(packet + b"\x00"))
-            for version in (7, 8, 10):
+            for version in (7, 8, 9, 11):
                 invalid = packet[:8] + struct.pack("!I", version) + packet[12:]
                 self.assertIsNone(parse_params_packet(invalid))
 

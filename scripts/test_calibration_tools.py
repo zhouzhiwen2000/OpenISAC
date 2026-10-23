@@ -28,11 +28,11 @@ def response_bytes(role="monostatic", channel=0, symbols=32, values=None):
                                  50e6, 2.4e9, 40e6, symbols) + values.tobytes()
 
 
-def params_packet(role="monostatic", version=9):
+def params_packet(role="monostatic", version=10):
     return PARAMS_PACKET_STRUCT.pack(
         b"CTRL", b"PARM", version, FLAG_BISTATIC if role == "bistatic" else 0,
         0, 100, 8, 100, 8, 100, 8, 100, 0, 0, 1, 1, 7500, 2, 2,
-        24000000, 500000, 0, 8, 2, 1, 1)
+        24000000, 500000, 0, 8, 2, 1, 1, 1)
 
 
 class CalibrationTests(unittest.TestCase):
@@ -124,7 +124,7 @@ class CalibrationTests(unittest.TestCase):
                     self.assertEqual(profile["center_freq_hz"], 3.1e9)
                     self.assertEqual(profile["bandwidth_hz"], 160e6)
 
-    def run_capture(self, role="monostatic", version=9, save=True):
+    def run_capture(self, role="monostatic", version=10, save=True):
         channel = 1 if role == "monostatic" else 0
         config = dict(rf_sampling=dict(sample_rate=50e6, bandwidth=40e6),
                       ofdm_frame=dict(fft_size=8), downlink=dict(center_freq=2.4e9),
@@ -172,7 +172,7 @@ class CalibrationTests(unittest.TestCase):
                                symbols=32, connect_timeout=.5, timeout=.3, yes=True)
         try:
             with redirect_stdout(io.StringIO()):
-                if version != 9:
+                if version != 10:
                     with self.assertRaisesRegex(ValueError, "incompatible"):
                         hsys.capture(args)
                 elif not save:
@@ -191,7 +191,7 @@ class CalibrationTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertFalse(state["errors"])
         commands = [(c, v) for h, c, v in state["commands"] if h == b"CMD "]
-        expected = [] if version != 9 else ([(b"ALCH", channel)] if role == "monostatic" else []) + [(b"CALB", 32)]
+        expected = [] if version != 10 else ([(b"ALCH", channel)] if role == "monostatic" else []) + [(b"CALB", 32)]
         self.assertEqual(commands, expected)  # No TXGN, RXGN or CALD on any path.
 
     def test_monostatic_transport_and_backup(self):

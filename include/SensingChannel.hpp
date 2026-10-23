@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "Common.hpp"
+#include "SensingFrameDecimator.hpp"
 #include "OFDMCore.hpp"
 #include "PpsTimeAlignment.hpp"
 #include "RadioBackend.hpp"
@@ -20,6 +21,7 @@
 
 struct SharedSensingRuntime {
     size_t sensing_symbol_stride = 20;
+    uint32_t frame_decimation = 1;
     bool enable_mti = true;
     bool skip_sensing_fft = true;
     bool cfar_enabled = false;
@@ -360,6 +362,8 @@ private:
     SensingComputeContext _compute;
 
     std::mutex _shared_cfg_mutex;
+    bool _keep_sensing_frame(uint64_t first_symbol, uint64_t span);
+    SensingFrameDecimator _frame_decimator;
     SharedSensingRuntime _pending_shared_cfg;
     bool _has_pending_shared_cfg = false;
     std::mutex _system_response_mutex;

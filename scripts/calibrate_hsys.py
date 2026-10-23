@@ -114,7 +114,7 @@ def check_params(params, profile: dict, role: str) -> None:
         raise ValueError("connected backend role does not match --role")
     if params.ofdm_fft_size != profile["fft_size"]:
         raise ValueError("backend FFT size differs from the working-directory YAML")
-    # V9 transports RF values in units of 100 Hz.
+    # V10 transports RF values in units of 100 Hz.
     for key in ("sample_rate_hz", "center_freq_hz"):
         if abs(getattr(params, key) - profile[key]) > 100:
             raise ValueError(f"backend {key} differs from the working-directory YAML")
@@ -126,7 +126,7 @@ def check_params(params, profile: dict, role: str) -> None:
 
 
 def request_params(sock, timeout: float):
-    """Wait for an exact V9 reply; readiness alone does not prove compatibility."""
+    """Wait for an exact current PARM reply; readiness alone does not prove compatibility."""
     sock.send(build_params_request())
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -139,7 +139,7 @@ def request_params(sock, timeout: float):
         if params is None:
             raise ValueError("backend PARM is incompatible; update backend and tools together")
         return params
-    raise TimeoutError("no V9 PARM response from backend")
+    raise TimeoutError("no compatible PARM response from backend")
 
 
 def file_stamp(path: Path):

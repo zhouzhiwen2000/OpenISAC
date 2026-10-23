@@ -897,6 +897,13 @@ bs:
     default: 50
     optional: true
   - type: scalar
+    key: frame_decimation
+    data_key: sensing.frame_decimation
+    kind: int
+    comment: Process/output one complete sensing frame out of N (1..1000); preserves STRD and MTI
+    default: 1
+    optional: true
+  - type: scalar
     key: symbol_stride
     data_key: sensing.symbol_stride
     kind: int
@@ -1794,6 +1801,13 @@ ue:
     kind: int
     comment: Backend RD view height in Doppler bins; 0 uses full doppler_fft_size
     default: 0
+    optional: true
+  - type: scalar
+    key: frame_decimation
+    data_key: sensing.frame_decimation
+    kind: int
+    comment: Process/output one complete sensing frame out of N (1..1000); preserves STRD and MTI
+    default: 1
     optional: true
   - type: scalar
     key: symbol_stride

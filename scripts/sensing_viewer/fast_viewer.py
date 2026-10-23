@@ -1016,7 +1016,7 @@ def _handle_viewer_params(target_channels, params, prefix):
         warn_unsupported_backend_params(prefix, params)
     # Push any radio params the backend provided so the Qt timer can apply them
     # on the main thread (center_freq, sample_rate, antenna_spacing).
-    radio = {}
+    radio = {"frame_decimation": params.frame_decimation}
     if params.center_freq_hz > 0.0:
         radio['center_freq_hz'] = params.center_freq_hz
     if params.sample_rate_hz > 0.0:
@@ -3106,6 +3106,11 @@ def dsp_worker():
                 )
                 continue
             ch = CHANNELS[ch_idx]
+            previous = getattr(ch, "last_micro_frame_symbol", None)
+            span = (int(viewer_params.active_rows) * int(viewer_params.sensing_symbol_stride))
+            if previous is not None and int(frame_id) != previous + span:
+                ch.micro_doppler_buffer.clear()
+            ch.last_micro_frame_symbol = int(frame_id)
             rd_spectrum, range_time_view, rd_complex = batch_outputs[ch_idx]
             try:
                 result = _finalize_channel_result(
@@ -3792,6 +3797,20 @@ class MainWindow(QtWidgets.QMainWindow):
         strd_layout.addWidget(self.txt_strd)
         strd_layout.addWidget(btn_strd)
         hw_sec.addLayout(strd_layout)
+
+        decimation_layout = QtWidgets.QHBoxLayout()
+        decimation_layout.addWidget(QtWidgets.QLabel("Frame every N:"))
+        self.spin_frame_decimation = QtWidgets.QSpinBox()
+        self.spin_frame_decimation.setRange(1, 1000)
+        self.spin_frame_decimation.setValue(1)
+        self.spin_frame_decimation.setToolTip(
+            "Process/output one complete sensing frame out of N. "
+            "1 keeps all frames; STRD and within-frame Doppler sampling stay unchanged.")
+        decimation_layout.addWidget(self.spin_frame_decimation)
+        btn_decimation = QtWidgets.QPushButton("Set")
+        btn_decimation.clicked.connect(self.set_frame_decimation)
+        decimation_layout.addWidget(btn_decimation)
+        hw_sec.addLayout(decimation_layout)
 
         self.tx_gain_controls = QtWidgets.QWidget()
         tx_gain_layout = QtWidgets.QHBoxLayout(self.tx_gain_controls)
@@ -4653,6 +4672,10 @@ class MainWindow(QtWidgets.QMainWindow):
             send_alignment_command(int(self.txt_delay.text()))
         except ValueError:
             print("Invalid alignment value")
+
+    def set_frame_decimation(self):
+        send_shared_control_command(b"FDEC", self.spin_frame_decimation.value())
+        request_shared_viewer_params()
 
     def set_strd(self):
         send_strd_command(self.txt_strd.text())
@@ -5734,6 +5757,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 radio = radio_params_queue.get_nowait()
             except Exception:
                 break
+            if 'frame_decimation' in radio:
+                self.spin_frame_decimation.setValue(int(radio['frame_decimation']))
             if 'center_freq_hz' in radio:
                 self.center_freq_hz = radio['center_freq_hz']
                 if hasattr(self, 'txt_center_freq_ghz'):

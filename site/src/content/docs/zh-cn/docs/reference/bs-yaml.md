@@ -181,6 +181,7 @@ X310 PPS 捕获本身的量化（200 MHz master clock 下为 5 ns）。
 | `sensing.on_wire_format` | `string` | `complex_float32` | 感知负载的网络传输格式。 |
 | `sensing.backend_processing_enabled` | `bool` | `false` | 在支持时额外输出后端距离-多普勒、CFAR 和微多普勒处理结果。 |
 | `sensing.symbol_stride` | `int` | `20` | dense 模式启动时默认 STRD。 |
+| `sensing.frame_decimation` | `int` | `1` | 每 N 个完整感知帧处理并输出 1 帧，范围 `1..1000`；不改变帧内 STRD。上位机 `Frame every N` 可在线设置。 |
 | `sensing.paired_frame_queue_size` | `int` | `64` | 每个感知通道的 RX/TX 帧配对队列容量。 |
 | `sensing.mask_blocks` | 来自 `resource_preview.mask_blocks` | 可选 | 由 resource preview 生成的运行时感知 mask。 |
 
@@ -268,3 +269,11 @@ X310 PPS 捕获本身的量化（200 MHz master clock 下为 5 ns）。
 | `logging.force_error` | `bool` | `true` | 不可恢复 `Error` 始终输出。 |
 | `logging.timestamps` | `bool` | `false` | 行首加本地时间戳 `HH:MM:SS.uuuuuu`。 |
 | `logging.modules` | `map` | `{}` | 按模块覆盖。**诊断**模块继承父级（如 `mod`、`sensing`、`ertm`）。**性能**模块以 `_profiling` 结尾（如 `mod_profiling`），默认关闭，需显式打开。 |
+
+## 感知帧抽取
+
+当较低 STRD 导致感知处理或上位机负载过高时，可设置 `sensing.frame_decimation: 5`，每 5 个完整感知帧（CPI）输出 1 帧。默认 `1` 输出全部帧。上位机的 `Frame every N` 输入框和 `Set` 按钮可在线调整，`Params` 中的 `every=N` 显示后端回报值；在线修改不写回 YAML，启动默认值可通过 config_web_editor 保存。
+
+抽取保留每个输出帧内的符号间隔、采样点数和多普勒无模糊范围，降低画面刷新率。采样、信道估计和 MTI 保持连续；跳过帧的距离–多普勒 FFT、检测及数据发送不再执行，因此主要降低后级处理和传输负载。多通道使用相同的帧选择规则。
+
+帧间空档会中断微多普勒历史累积，较大的抽取倍数可能无法积累足够长的连续窗口；需要连续微多普勒分析时使用 `1`。这项设置不改变通信数据传输或射频发射时序。更新后应配套使用同一版本的后端和上位机。

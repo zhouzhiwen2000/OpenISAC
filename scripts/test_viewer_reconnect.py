@@ -84,9 +84,9 @@ class ViewerReconnectTest(unittest.TestCase):
                 self.last_peer, payload = parts[0], parts[-1]
                 if payload[:4] == b"REQ ":
                     packet = PARAMS_PACKET_STRUCT.pack(
-                        b"CTRL", b"PARM", 9, 16, 0, 100, 1024, 100, 1024,
+                        b"CTRL", b"PARM", 10, 16, 0, 100, 1024, 100, 1024,
                         100, 1024, 100, 0, 0, 1, 1, 7500, 2, 2,
-                        31000000, 1000000, 0, 1024, 128, 100, 1)
+                        31000000, 1000000, 0, 1024, 128, 100, 1, 1)
                     self.router.send_multipart([self.last_peer, packet])
                 elif payload[:4] == b"CMD ":
                     self.controls.append((payload[4:8], int.from_bytes(payload[8:12], "big", signed=True)))
@@ -120,7 +120,7 @@ class ViewerReconnectTest(unittest.TestCase):
         self.pump_until(lambda: not self.ns["startup_sync_queue"].empty())
         self.apply_saved_controls()
         self.pump_until(lambda: len(self.controls) == 3)
-        self.assertEqual(self.channel.viewer_params.version, 9)
+        self.assertEqual(self.channel.viewer_params.version, 10)
         self.assertEqual(self.controls, [(b"SKIP", 1), (b"MTI ", 0), (b"STRD", 100)])
         for _ in range(5):
             self.router.send_multipart([self.last_peer, b"CTRL" + READY_COMMAND])

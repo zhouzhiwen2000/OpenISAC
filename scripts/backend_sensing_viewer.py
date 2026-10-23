@@ -1296,6 +1296,20 @@ class MainWindow(QtWidgets.QMainWindow):
         strd_layout.addWidget(btn_strd)
         control_layout.addLayout(strd_layout)
 
+        decimation_layout = QtWidgets.QHBoxLayout()
+        decimation_layout.addWidget(QtWidgets.QLabel("Frame every N:"))
+        self.spin_frame_decimation = QtWidgets.QSpinBox()
+        self.spin_frame_decimation.setRange(1, 1000)
+        self.spin_frame_decimation.setValue(1)
+        self.spin_frame_decimation.setToolTip(
+            "Process/output one complete sensing frame out of N. "
+            "1 keeps all frames; STRD and within-frame Doppler sampling stay unchanged.")
+        decimation_layout.addWidget(self.spin_frame_decimation)
+        btn_decimation = QtWidgets.QPushButton("Set")
+        btn_decimation.clicked.connect(self.set_frame_decimation)
+        decimation_layout.addWidget(btn_decimation)
+        control_layout.addLayout(decimation_layout)
+
         tx_gain_layout = QtWidgets.QHBoxLayout()
         tx_gain_layout.addWidget(QtWidgets.QLabel("TX Gain(dB):"))
         self.txt_tx_gain = QtWidgets.QLineEdit("20.0")
@@ -1485,6 +1499,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._send_alignment_command(int(self.txt_delay.text()))
         except ValueError:
             print("Invalid alignment value")
+
+    def set_frame_decimation(self):
+        self.runtime.send_control_command(b"FDEC", self.spin_frame_decimation.value())
+        self.runtime.request_viewer_params()
 
     def set_strd(self) -> None:
         try:
@@ -2350,6 +2368,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         frame = channel.latest_frame
         params = self.runtime.get_viewer_params()
+        if getattr(self, "_reported_frame_decimation", None) != params.frame_decimation:
+            self.spin_frame_decimation.setValue(params.frame_decimation)
+            self._reported_frame_decimation = params.frame_decimation
         sender_ip, control_port = self.runtime.sender_endpoint()
 
         if sender_ip is None:

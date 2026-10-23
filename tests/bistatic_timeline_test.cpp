@@ -316,10 +316,93 @@ void test_phase_config() {
     }
 }
 
+void test_frame_decimator() {
+    SensingFrameDecimator a, b;
+    a.schedule(5, 0);
+    b.schedule(5, 0);
+    for (uint64_t i = 0; i < 30; ++i) {
+        const bool expected = i % 5 == 0;
+        require(a.keep(3 + i * 100, 100) == expected, "Incorrect CPI selection");
+        // Losing an entire input CPI must not shift another channel's selection.
+        if (i != 7) require(b.keep(3 + i * 100, 100) == expected, "Channels selected different CPIs");
+    }
+    a.schedule(1, 3050);
+    require(a.keep(3003, 100), "CPI before control boundary changed unexpectedly");
+    require(a.keep(3103, 100), "Control did not apply on next complete CPI");
+    a.schedule(3, 10000);
+    require(a.keep(0, 100), "Timeline restart lost the first CPI");
+    require(!a.keep(100, 100), "Pending factor was not rebased after timeline restart");
+    a.schedule(1, 150);
+    require(!a.keep(100, 100), "Control changed a CPI starting before the boundary");
+    require(a.keep(200, 100), "Restoring all frames failed");
+}
+
+void test_frame_decimation_pipeline() {
+    Config cfg = test_config();
+    std::atomic<bool> running{true};
+    const int ref_port = free_tcp_port(), dec_port = free_tcp_port();
+    SensingChannel reference(cfg, {}, SensingChannel::SensingRole::Bistatic,
+        "127.0.0.1", ref_port, 124000, running, nullptr, nullptr, {}, {}, {});
+    SensingChannel decimated(cfg, {}, SensingChannel::SensingRole::Bistatic,
+        "127.0.0.1", dec_port, 124001, running, nullptr, nullptr, {}, {}, {});
+    Subscriber ref_sub(ref_port), dec_sub(dec_port);
+    SharedSensingRuntime params;
+    params.sensing_symbol_stride = 10;
+    params.enable_mti = true;
+    params.skip_sensing_fft = true;
+    params.generation = 2;
+    reference.apply_shared_cfg(params);
+    decimated.apply_shared_cfg(params);
+    reference.start_bistatic();
+    decimated.start_bistatic();
+    auto feed = [&](uint64_t start, float amplitude) {
+        for (uint64_t offset : {0u, 10u}) {
+            auto data = frame(amplitude + float(offset) * 0.01f);
+            reference.process_bistatic_frame(data, start + offset);
+            decimated.process_bistatic_frame(data, start + offset);
+        }
+    };
+    uint64_t start = 0;
+    bool ready = false;
+    for (; start < 400; start += 20) {
+        feed(start, 1.0f);
+        auto r = ref_sub.receive(100), d = dec_sub.receive(100);
+        if (!r.empty() && !d.empty()) { ready = true; start += 20; break; }
+    }
+    require(ready, "Decimation test subscriptions did not connect");
+    params.frame_decimation = 3;
+    params.generation++;
+    params.apply_symbol_index = start;
+    decimated.apply_shared_cfg(params);
+    for (int i = 0; i < 12; ++i, start += 20) {
+        feed(start, 1.0f + float(i % 4));
+        auto r = ref_sub.receive(1000), d = dec_sub.receive(50);
+        require(!r.empty(), "Reference lost a CPI");
+        if ((start / 20) % 3) {
+            require(d.empty(), "A skipped CPI was transmitted");
+        } else {
+            require(d.size() == r.size(), "Selected CPI was not transmitted whole");
+            for (size_t k = 0; k < r.size(); ++k)
+                require(std::abs(d[k] - r[k]) < 1e-6f, "Decimation changed MTI history/retained samples");
+        }
+    }
+    params.frame_decimation = 1;
+    params.generation++;
+    params.apply_symbol_index = start;
+    decimated.apply_shared_cfg(params);
+    feed(start, 2.0f);
+    require(!ref_sub.receive(1000).empty() && !dec_sub.receive(1000).empty(),
+            "Live restoration of all frames failed");
+    reference.stop_bistatic();
+    decimated.stop_bistatic();
+}
+
 } // namespace
 
 int main() {
     try {
+        test_frame_decimator();
+        test_frame_decimation_pipeline();
         test_timeline(false);
         test_timeline(true);
         test_timeline(false, true);

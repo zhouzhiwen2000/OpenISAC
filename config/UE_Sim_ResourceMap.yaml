@@ -78,6 +78,7 @@ sensing:
   output_mode: compact_mask  # dense or compact_mask
   backend_processing_enabled: false  # true lets backend publish RD/CFAR/MD metadata sidecars
   symbol_stride: 20  # Default STRD applied at startup before runtime commands
+  frame_decimation: 1  # Process/output one complete sensing frame out of N (1..1000)
 
 # ===== LDPC decode =====
 ldpc:

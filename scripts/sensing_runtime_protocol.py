@@ -46,8 +46,8 @@ FLAG_SENSING_METADATA_SIDECAR = 1 << 7
 WIRE_DATA_FORMAT_COMPLEX_FLOAT32 = 0
 WIRE_DATA_FORMAT_COMPLEX_FLOAT16 = 1
 
-PARAMS_VERSION = 9
-PARAMS_PACKET_STRUCT = struct.Struct("!4s4s24I")
+PARAMS_VERSION = 10
+PARAMS_PACKET_STRUCT = struct.Struct("!4s4s25I")
 COMPACT_HEADER_STRUCT = struct.Struct("!IIIQ")
 AGGREGATE_HEADER_STRUCT = struct.Struct("!IIIIQ")
 REQUEST_PACKET_STRUCT = struct.Struct("!4s4si")
@@ -92,6 +92,7 @@ class ViewerRuntimeParams:
     cp_length: int = 0
     sensing_symbol_stride: int = 0
     sensing_subcarrier_stride: int = 0
+    frame_decimation: int = 1
 
 
     def is_compact_mask(self) -> bool:
@@ -155,7 +156,7 @@ class ViewerRuntimeParams:
             fmt = "compact_sparse"
         else:
             fmt = f"unknown({self.frame_format})"
-        extras = []
+        extras = [f"every={self.frame_decimation}"]
         if self.is_compact_mask():
             extras.append("compact")
         if self.compact_local_delay_doppler_supported():
@@ -324,12 +325,16 @@ def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
         os_cfar_suppress_doppler, os_cfar_suppress_range,
         center_freq_raw, sample_rate_hz_div100, antenna_spacing_um,
         ofdm_fft_size, cp_length, sensing_symbol_stride, sensing_subcarrier_stride,
+        frame_decimation,
     ) = PARAMS_PACKET_STRUCT.unpack(data)
     if header != CTRL_HEADER or command != PARAMS_COMMAND:
         return None
     if version != PARAMS_VERSION:
         LOGGER.warning("Sensing PARM version %d is unsupported; require V%d. Update backend and viewer together.",
                        version, PARAMS_VERSION)
+        return None
+    if not 1 <= frame_decimation <= 1000:
+        LOGGER.warning("Sensing PARM has invalid frame decimation")
         return None
     if sample_rate_hz_div100 == 0 or ofdm_fft_size == 0:
         LOGGER.warning("Sensing PARM has invalid physical sampling parameters")
@@ -363,6 +368,7 @@ def parse_params_packet(data: bytes) -> ViewerRuntimeParams | None:
         cp_length=int(cp_length),
         sensing_symbol_stride=int(sensing_symbol_stride),
         sensing_subcarrier_stride=int(sensing_subcarrier_stride),
+        frame_decimation=int(frame_decimation),
     )
 
 

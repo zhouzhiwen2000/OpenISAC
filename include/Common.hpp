@@ -1417,6 +1417,7 @@ struct SensingConfig {
     uint32_t rx_channel_count = 1; // Number of sensing RX channels
     std::vector<SensingRxChannelConfig> rx_channels; // Per-channel sensing RX config
     size_t symbol_stride = 20;     // Default sensing STRD applied at startup
+    uint32_t frame_decimation = 1; // Keep one complete sensing CPI out of N (1..1000)
     size_t paired_frame_queue_size = 16;   // Keep headroom above the default TX frame queue
     bool bi_enabled = true;
     bool bistatic_phase_reference = false; // LoS phase-only reference before MTI
@@ -3689,6 +3690,7 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(sensing, "rx_time_source", cfg.sensing.rx_time_source);
         config_detail::load_value(sensing, "rx_wire_format", cfg.sensing.rx_wire_format);
         config_detail::load_value(sensing, "symbol_stride", cfg.sensing.symbol_stride);
+        config_detail::load_value(sensing, "frame_decimation", cfg.sensing.frame_decimation);
         config_detail::load_value(sensing, "paired_frame_queue_size", cfg.sensing.paired_frame_queue_size);
         const bool has_sensing_count_key = static_cast<bool>(sensing["rx_channel_count"]);
         if (has_sensing_count_key) {
@@ -3858,6 +3860,9 @@ inline void normalize_bs_sensing_channels(Config& cfg) {
     if (cfg.sensing.paired_frame_queue_size == 0) {
         LOG_G_WARN_M(Sensing) << "paired_frame_queue_size=0 is invalid. Clamping to 1.";
         cfg.sensing.paired_frame_queue_size = 1;
+    }
+    if (cfg.sensing.frame_decimation < 1 || cfg.sensing.frame_decimation > 1000) {
+        throw std::runtime_error("sensing.frame_decimation must be between 1 and 1000");
     }
     if (cfg.sensing.symbol_stride == 0) {
         LOG_G_WARN_M(Sensing) << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
@@ -4183,6 +4188,7 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         config_detail::load_value(
             sensing, "view_doppler_bins", cfg.sensing.view_doppler_bins);
         config_detail::load_value(sensing, "symbol_stride", cfg.sensing.symbol_stride);
+        config_detail::load_value(sensing, "frame_decimation", cfg.sensing.frame_decimation);
 
         config_detail::load_value(rf, "sample_rate", cfg.rf_sampling.sample_rate);
         config_detail::load_value(rf, "bandwidth", cfg.rf_sampling.bandwidth);
@@ -4537,6 +4543,9 @@ inline void finalize_ue_network_defaults(Config& cfg) {
     if (cfg.sync_tracking.reset_hold_s <= 0.0) {
         LOG_G_WARN_M(Sensing) << "reset_hold_s<=0 is invalid. Clamping to 0.5 s.";
         cfg.sync_tracking.reset_hold_s = 0.5;
+    }
+    if (cfg.sensing.frame_decimation < 1 || cfg.sensing.frame_decimation > 1000) {
+        throw std::runtime_error("sensing.frame_decimation must be between 1 and 1000");
     }
     if (cfg.sensing.symbol_stride == 0) {
         LOG_G_WARN_M(Sensing) << "sensing_symbol_stride=0 is invalid. Clamping to 1.";
@@ -5204,7 +5213,7 @@ enum class SensingViewerWireDataFormat : uint32_t {
 inline constexpr uint32_t kSensingMetadataFlagCfarEnabled = 1u << 0;
 inline constexpr uint32_t kSensingMetadataFlagMicroDopplerEnabled = 1u << 1;
 
-inline constexpr uint32_t kSensingViewerParamsVersion = 9u;
+inline constexpr uint32_t kSensingViewerParamsVersion = 10u;
 inline constexpr uint32_t kSensingViewerFlagCompactMask = 1u << 0;
 inline constexpr uint32_t kSensingViewerFlagCompactLocalDelayDoppler = 1u << 1;
 inline constexpr uint32_t kSensingViewerFlagSkipSensingFft = 1u << 2;
@@ -5235,7 +5244,7 @@ struct SensingViewerParamsPacket {
     uint32_t os_cfar_rank_percent_x100 = 0;
     uint32_t os_cfar_suppress_doppler = 0;
     uint32_t os_cfar_suppress_range = 0;
-    // Physical radio parameters; all viewers require the exact V9 packet layout.
+    // Physical radio parameters; all viewers require the exact V10 packet layout.
     uint32_t center_freq_hz_div100 = 0; // center_freq / 100 (units: 100 Hz; uint32 covers up to ~429 GHz)
     uint32_t sample_rate_hz_div100 = 0; // sample_rate / 100 (units: 100 Hz; uint32 covers up to ~429 GHz)
     uint32_t antenna_spacing_um = 0;    // physical ULA element spacing in micrometres (0 = not provided)
@@ -5243,10 +5252,11 @@ struct SensingViewerParamsPacket {
     uint32_t cp_length = 0;
     uint32_t sensing_symbol_stride = 0;
     uint32_t sensing_subcarrier_stride = 0; // 0: no uniform frequency grid
+    uint32_t frame_decimation = 1;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SensingViewerParamsPacket) == 104, "SensingViewerParamsPacket size mismatch");
+static_assert(sizeof(SensingViewerParamsPacket) == 108, "SensingViewerParamsPacket size mismatch");
 
 inline std::vector<uint8_t> serialize_sensing_metadata(
     const SensingMetadata& metadata,
@@ -5492,7 +5502,8 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
     uint32_t stream_channel_mask = 0x1u,
     bool aggregated_stream = false,
     double antenna_spacing_m = 0.0,
-    size_t sensing_symbol_stride = 0)
+    size_t sensing_symbol_stride = 0,
+    uint32_t frame_decimation = 0)
 {
     SensingViewerParamsPacket packet{};
     std::memcpy(packet.header, "CTRL", 4);
@@ -5556,6 +5567,7 @@ inline SensingViewerParamsPacket make_sensing_viewer_params_packet(
         }
     }
     packet.sensing_symbol_stride = htonl(static_cast<uint32_t>(symbol_stride));
+    packet.frame_decimation = htonl(frame_decimation > 0 ? frame_decimation : cfg.sensing.frame_decimation);
     packet.sensing_subcarrier_stride = htonl(static_cast<uint32_t>(subcarrier_stride));
     return packet;
 }
