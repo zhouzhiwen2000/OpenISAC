@@ -1,1 +1,1 @@
-{"version":"1.5.2","languages":{"en":{"hash":"en_e1b3dd403e","wasm":"en","page_count":30},"zh-cn":{"hash":"zh-cn_9a166279f3a8e","wasm":null,"page_count":30}},"include_characters":["_","‿","⁀","⁔","︳","︴","﹍","﹎","﹏","＿"]}
+{"include_characters":["_","\u203f","\u2040","\u2054","\ufe33","\ufe34","\ufe4d","\ufe4e","\ufe4f","\uff3f"],"languages":{"en":{"hash":"en_5f923b328a","page_count":30,"wasm":"en"},"zh-cn":{"hash":"zh-cn_9f387dc5f5f2a","page_count":30,"wasm":null}},"version":"1.5.2"}

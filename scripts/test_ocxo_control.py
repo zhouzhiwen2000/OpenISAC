@@ -95,6 +95,72 @@ void test_normal_cfo_dealiasing() {
           "branch-scale CFO jump restarts the quality gate");
 }
 
+void test_cfo_acquisition_to_tracking() {
+    constexpr double period = 100e6 / 1152.0;
+    const auto modulo = [](double hz) { return std::remainder(hz, period); };
+    // Reproduce the observed failure: after correcting -142807 Hz, the old
+    // tune-only reference adds two alias periods to a 309 Hz residual.
+    const auto old = dealias_normal_cfo_hz(309.0, period, 142807.0);
+    CHECK_NEAR(old.dealiased_hz, 309.0 + 2.0 * period, 1e-7,
+               "tune-only reference reproduces erroneous 173.9 kHz correction");
+
+    for (const double physical_cfo : {-142807.0, 142807.0, -1861000.0, 1861000.0}) {
+        NormalCfoTracker tracker;
+        double tune = -4020.0; // nonzero initial UHD tune quantization
+        double physical = physical_cfo;
+        const double acquired = physical + tune;
+        tracker.acquire(acquired, tune);
+        // Before any correction, retain the full CFO (hardware-only tracking).
+        auto estimate = tracker.update(modulo(acquired), period, tune, true);
+        CHECK(estimate.valid, "full acquisition initializes normal tracking");
+        CHECK_NEAR(estimate.dealiased_hz, acquired, 1e-7,
+                   "uncorrected large CFO retains its acquired branch");
+        tune -= acquired; // initial DSP correction
+        physical += 309.0;
+        // Old pipeline results must not move the post-retune reference.
+        CHECK(!tracker.update(period * .49, period, tune, false).valid,
+              "stale result is rejected without changing the CFO anchor");
+        estimate = tracker.update(modulo(physical + tune), period, tune, true);
+        CHECK_NEAR(estimate.dealiased_hz, 309.0, 1e-7,
+                   "post-acquisition residual stays near zero for both CFO signs");
+        for (int i = 0; i < 30; ++i) {
+            // Actual retune may differ from the requested value. The next
+            // observation must use the returned tune, not assume exact zero.
+            tune -= estimate.dealiased_hz - 0.25;
+            physical += (i % 2 ? -37.0 : 51.0);
+            estimate = tracker.update(modulo(physical + tune), period, tune, true);
+            CHECK_NEAR(estimate.dealiased_hz, physical + tune, 1e-7,
+                       "repeated corrections track actual small residuals");
+        }
+        // Drift across multiple wraps with software correction disabled.
+        for (int i = 0; i < 20; ++i) {
+            physical += period * .2;
+            estimate = tracker.update(modulo(physical + tune), period, tune, true);
+            CHECK_NEAR(estimate.dealiased_hz, physical + tune, 1e-7,
+                       "continuous oscillator drift crosses modulo boundaries");
+        }
+        tracker.reset();
+        CHECK(!tracker.update(0.0, period, tune, true).valid,
+              "reset requires a new full acquisition");
+        tracker.acquire(-physical, 0.0);
+        estimate = tracker.update(modulo(-physical), period, 0.0, true);
+        CHECK_NEAR(estimate.dealiased_hz, -physical, 1e-7,
+                   "reacquisition discards the old sign and branch");
+    }
+
+    NormalCfoTracker gated;
+    gated.acquire(0.0, 0.0);
+    DemodControlTimeGates gates;
+    gates.mark_freq_adjust(1000);
+    CHECK(!gated.update(period * .49, period, 0.0,
+                        gates.allow_freq_adjust(999)).valid,
+          "timestamp gate rejects pre-retune IQ");
+    const auto fresh = gated.update(-period * .1, period, 0.0,
+                                    gates.allow_freq_adjust(1001));
+    CHECK_NEAR(fresh.dealiased_hz, -period * .1, 1e-7,
+               "stale IQ cannot drag a fresh observation onto another branch");
+}
+
 void test_ocxo_debug_packet_layout() {
     ocxo_debug_protocol::Channels channels{};
     for (size_t i = 0; i < channels.size(); ++i) {
@@ -2055,6 +2121,7 @@ void test_reacquisition_preserves_mode_for_thirty_seconds() {
 int main() {
     test_ewma_control_step_polarity();
     test_normal_cfo_dealiasing();
+    test_cfo_acquisition_to_tracking();
     test_ocxo_debug_packet_layout();
     test_fll_velocity_pi_polarity();
     test_fll_fast_half_step_control();

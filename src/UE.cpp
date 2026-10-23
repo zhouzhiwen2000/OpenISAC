@@ -2699,6 +2699,7 @@ private:
     double _rx_gain_min_db = 0.0;
     double _rx_gain_max_db = 0.0;
     CfoErrorEwma _cfo_ewma;
+    NormalCfoTracker _normal_cfo_tracker;
     NormalCfoQualityGate _ocxo_cfo_quality_gate;
     size_t _ocxo_log_counter = 0;
     // eRTM TO age tracking for OCXO Mode B (frames since last publication gen).
@@ -3701,6 +3702,9 @@ private:
         // simulator backend set_rx_freq applies the comm correction internally and
         // returns a synthetic tune result; on real hardware it retunes the DSP.
         current_rx_tune_ = dev_->set_rx_freq(new_tune_req, cfg_.downlink.rx_channel);
+        // Averages must not mix residuals from different tune states.
+        _freq_offset_sum = 0.0;
+        _freq_offset_count = 0;
         if (dev_->supports(radio::Capability::RfDspTune)) {
             _retune_uplink_tx_from_rx_correction(current_rx_tune_.actual_dsp_freq);
         }
@@ -3969,6 +3973,7 @@ private:
         sfo_estimator.reset();
         _cfo_ewma.reset();
         _ocxo_cfo_quality_gate.reset();
+        _normal_cfo_tracker.reset();
         _ocxo_log_counter = 0;
         _ocxo_to_pub_known = false;
         _ocxo_to_last_pub_gen = 0;
@@ -4531,6 +4536,10 @@ private:
     void process_sync_data(const AlignedVector& sync_data, int64_t sync_time_ns) {
         const size_t symbol_len = cfg_.ofdm.fft_size + cfg_.ofdm.cp_length;
         const bool allow_freq_adjust = _control_time_gates.allow_freq_adjust(sync_time_ns);
+        // Acquisition must describe IQ captured after the latest RX retune.
+        if (!allow_freq_adjust) {
+            return;
+        }
         bool issued_freq_adjust = false;
         bool issued_alignment = false;
 
@@ -4754,6 +4763,14 @@ private:
 
                 LOG_RT_INFO_M(Sync) << "CFO estimate: " << cfo << " Hz (using " << available_symbols
                               << " symbols)";
+
+                // Preserve the full acquisition CFO before applying its correction.
+                _normal_cfo_tracker.acquire(cfo, rx_tune_system_cfo_hz(
+                    cfg_.downlink.center_freq,
+                    current_rx_tune_.actual_rf_freq,
+                    current_rx_tune_.actual_dsp_freq));
+                _freq_offset_sum = 0.0;
+                _freq_offset_count = 0;
 
                 int predictive_delay_samples = 0;
                 if (cfg_.sync_tracking.predictive_delay) {
@@ -5736,10 +5753,10 @@ private:
         const double normal_cfo_alias_period_hz =
             cfg_.rf_sampling.sample_rate /
             static_cast<double>(cfg_.ofdm.fft_size + cfg_.ofdm.cp_length);
-        const auto normal_cfo = dealias_normal_cfo_hz(
+        const auto normal_cfo = _normal_cfo_tracker.update(
             static_cast<double>(result.detected_freq_offset),
             normal_cfo_alias_period_hz,
-            tune_system_cfo_hz);
+            tune_system_cfo_hz, cfo_observation_valid);
         cfo_observation_valid = cfo_observation_valid && normal_cfo.valid;
         const bool ocxo_cfo_quality_valid = _ocxo_cfo_quality_gate.update(
             normal_cfo,

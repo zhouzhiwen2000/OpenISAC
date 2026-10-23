@@ -176,7 +176,7 @@ RX/TX 采样率。两者相差超过 1 Hz 会在创建工作线程前中止启�
 | `sync_tracking.sync_cfo_alias_search_range_hz` | `float` / Hz | `800000` | 同步 alias 解析覆盖的 CFO 范围。 |
 | `sync_tracking.reset_hold_s` | `float` / s | `0.5` | 坏 delay 或配置要求的前导字段不匹配连续持续多久后，硬 reset 回同步搜索。 |
 | `sync_tracking.software_sync` | `bool` | `true` | 开启软件同步跟踪。 |
-| `sync_tracking.predictive_delay` | `bool` | `true` | 使用基于 CFO 的预测性时延补偿。 |
+| `sync_tracking.predictive_delay` | `bool` | `true` | 使用基于 CFO 的预测性时延补偿。若外部变频器引入的 CFO 不随采样时钟误差变化，应关闭此项。 |
 | `sync_tracking.hardware_sync` | `bool` | `false` | 开启硬件同步模式。 |
 | `sync_tracking.hardware_sync_tty` | `string` | `/dev/ttyUSB0` | 硬件同步控制器串口设备。 |
 | `sync_tracking.desired_peak_pos` | `int` | `20` | 定时对齐逻辑使用的目标时延峰位置。 |

@@ -98,6 +98,54 @@ inline NormalCfoDealiasResult dealias_normal_cfo_hz(
     return out;
 }
 
+/**
+ * @brief Track residual CFO across acquisition, phase wrapping and RX retunes.
+ *
+ * The tune offset alone is not a residual-CFO reference: an external LO or
+ * oscillator error can be much larger than the adjacent-symbol alias period.
+ * Anchor the reference to a full acquisition estimate, then translate it by
+ * the actual tune-chain change. Only fresh, valid observations advance it.
+ * Owned by the demod/control thread; no allocation or additional IQ processing.
+ */
+class NormalCfoTracker {
+public:
+    /** @brief Invalidate the old acquisition before searching for a new frame. */
+    void reset() { _valid = false; }
+
+    /** @brief Seed from full CFO and the tune offset used to capture that IQ. */
+    void acquire(double cfo_hz, double tune_cfo_hz) {
+        _valid = std::isfinite(cfo_hz) && std::isfinite(tune_cfo_hz);
+        _reference_hz = cfo_hz;
+        _reference_tune_hz = tune_cfo_hz;
+    }
+
+    /**
+     * @brief Resolve fresh modulo CFO using acquisition/observation continuity.
+     * @param observation_valid False for stale or invalid demod results; these
+     * leave the reference unchanged and return an invalid result.
+     */
+    NormalCfoDealiasResult update(double modulo_hz, double alias_period_hz,
+                                double tune_cfo_hz, bool observation_valid) {
+        if (!_valid || !observation_valid || !std::isfinite(tune_cfo_hz)) {
+            return {};
+        }
+        const double expected_hz =
+            _reference_hz + (tune_cfo_hz - _reference_tune_hz);
+        const auto estimate = dealias_normal_cfo_hz(
+            modulo_hz, alias_period_hz, expected_hz);
+        if (estimate.valid) {
+            _reference_hz = estimate.dealiased_hz;
+            _reference_tune_hz = tune_cfo_hz;
+        }
+        return estimate;
+    }
+
+private:
+    bool _valid = false;
+    double _reference_hz = 0.0;
+    double _reference_tune_hz = 0.0;
+};
+
 /** Require a short continuous run before de-aliased normal CFO drives OCXO. */
 class NormalCfoQualityGate {
 public:
