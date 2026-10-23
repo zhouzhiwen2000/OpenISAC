@@ -104,7 +104,7 @@ inline NormalCfoDealiasResult dealias_normal_cfo_hz(
  * The tune offset alone is not a residual-CFO reference: an external LO or
  * oscillator error can be much larger than the adjacent-symbol alias period.
  * Anchor the reference to a full acquisition estimate, then translate it by
- * the actual tune-chain change. Only fresh, valid observations advance it.
+ * the actual tune-chain change. Only averaged, valid observations advance it.
  * Owned by the demod/control thread; no allocation or additional IQ processing.
  */
 class NormalCfoTracker {
@@ -112,7 +112,7 @@ public:
     /** @brief Invalidate the old acquisition before searching for a new frame. */
     void reset() { _valid = false; }
 
-    /** @brief Seed from full CFO and the tune offset used to capture that IQ. */
+    /** @brief Anchor full acquisition or averaged CFO to its capture tune. */
     void acquire(double cfo_hz, double tune_cfo_hz) {
         _valid = std::isfinite(cfo_hz) && std::isfinite(tune_cfo_hz);
         _reference_hz = cfo_hz;
@@ -120,24 +120,18 @@ public:
     }
 
     /**
-     * @brief Resolve fresh modulo CFO using acquisition/observation continuity.
+     * @brief Resolve fresh modulo CFO without letting single frames move the anchor.
      * @param observation_valid False for stale or invalid demod results; these
      * leave the reference unchanged and return an invalid result.
      */
-    NormalCfoDealiasResult update(double modulo_hz, double alias_period_hz,
-                                double tune_cfo_hz, bool observation_valid) {
+    NormalCfoDealiasResult resolve(double modulo_hz, double alias_period_hz,
+                                 double tune_cfo_hz, bool observation_valid) const {
         if (!_valid || !observation_valid || !std::isfinite(tune_cfo_hz)) {
             return {};
         }
         const double expected_hz =
             _reference_hz + (tune_cfo_hz - _reference_tune_hz);
-        const auto estimate = dealias_normal_cfo_hz(
-            modulo_hz, alias_period_hz, expected_hz);
-        if (estimate.valid) {
-            _reference_hz = estimate.dealiased_hz;
-            _reference_tune_hz = tune_cfo_hz;
-        }
-        return estimate;
+        return dealias_normal_cfo_hz(modulo_hz, alias_period_hz, expected_hz);
     }
 
 private:

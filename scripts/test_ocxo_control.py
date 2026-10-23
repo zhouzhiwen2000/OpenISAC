@@ -111,16 +111,16 @@ void test_cfo_acquisition_to_tracking() {
         const double acquired = physical + tune;
         tracker.acquire(acquired, tune);
         // Before any correction, retain the full CFO (hardware-only tracking).
-        auto estimate = tracker.update(modulo(acquired), period, tune, true);
+        auto estimate = tracker.resolve(modulo(acquired), period, tune, true);
         CHECK(estimate.valid, "full acquisition initializes normal tracking");
         CHECK_NEAR(estimate.dealiased_hz, acquired, 1e-7,
                    "uncorrected large CFO retains its acquired branch");
         tune -= acquired; // initial DSP correction
         physical += 309.0;
         // Old pipeline results must not move the post-retune reference.
-        CHECK(!tracker.update(period * .49, period, tune, false).valid,
+        CHECK(!tracker.resolve(period * .49, period, tune, false).valid,
               "stale result is rejected without changing the CFO anchor");
-        estimate = tracker.update(modulo(physical + tune), period, tune, true);
+        estimate = tracker.resolve(modulo(physical + tune), period, tune, true);
         CHECK_NEAR(estimate.dealiased_hz, 309.0, 1e-7,
                    "post-acquisition residual stays near zero for both CFO signs");
         for (int i = 0; i < 30; ++i) {
@@ -128,34 +128,44 @@ void test_cfo_acquisition_to_tracking() {
             // observation must use the returned tune, not assume exact zero.
             tune -= estimate.dealiased_hz - 0.25;
             physical += (i % 2 ? -37.0 : 51.0);
-            estimate = tracker.update(modulo(physical + tune), period, tune, true);
+            estimate = tracker.resolve(modulo(physical + tune), period, tune, true);
             CHECK_NEAR(estimate.dealiased_hz, physical + tune, 1e-7,
                        "repeated corrections track actual small residuals");
         }
         // Drift across multiple wraps with software correction disabled.
         for (int i = 0; i < 20; ++i) {
+            tracker.acquire(estimate.dealiased_hz, tune);
             physical += period * .2;
-            estimate = tracker.update(modulo(physical + tune), period, tune, true);
+            estimate = tracker.resolve(modulo(physical + tune), period, tune, true);
             CHECK_NEAR(estimate.dealiased_hz, physical + tune, 1e-7,
                        "continuous oscillator drift crosses modulo boundaries");
         }
         tracker.reset();
-        CHECK(!tracker.update(0.0, period, tune, true).valid,
+        CHECK(!tracker.resolve(0.0, period, tune, true).valid,
               "reset requires a new full acquisition");
         tracker.acquire(-physical, 0.0);
-        estimate = tracker.update(modulo(-physical), period, 0.0, true);
+        estimate = tracker.resolve(modulo(-physical), period, 0.0, true);
         CHECK_NEAR(estimate.dealiased_hz, -physical, 1e-7,
                    "reacquisition discards the old sign and branch");
+    }
+
+    NormalCfoTracker noisy;
+    noisy.acquire(0.0, 0.0);
+    for (int i = 0; i < 20; ++i) {
+        const double residual = (i % 2 ? -.49 : .49) * period;
+        const auto sample = noisy.resolve(residual, period, 0.0, true);
+        CHECK_NEAR(sample.dealiased_hz, residual, 1e-7,
+                   "noisy fresh frames cannot walk the alias reference");
     }
 
     NormalCfoTracker gated;
     gated.acquire(0.0, 0.0);
     DemodControlTimeGates gates;
     gates.mark_freq_adjust(1000);
-    CHECK(!gated.update(period * .49, period, 0.0,
+    CHECK(!gated.resolve(period * .49, period, 0.0,
                         gates.allow_freq_adjust(999)).valid,
           "timestamp gate rejects pre-retune IQ");
-    const auto fresh = gated.update(-period * .1, period, 0.0,
+    const auto fresh = gated.resolve(-period * .1, period, 0.0,
                                     gates.allow_freq_adjust(1001));
     CHECK_NEAR(fresh.dealiased_hz, -period * .1, 1e-7,
                "stale IQ cannot drag a fresh observation onto another branch");

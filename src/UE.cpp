@@ -5753,7 +5753,7 @@ private:
         const double normal_cfo_alias_period_hz =
             cfg_.rf_sampling.sample_rate /
             static_cast<double>(cfg_.ofdm.fft_size + cfg_.ofdm.cp_length);
-        const auto normal_cfo = _normal_cfo_tracker.update(
+        const auto normal_cfo = _normal_cfo_tracker.resolve(
             static_cast<double>(result.detected_freq_offset),
             normal_cfo_alias_period_hz,
             tune_system_cfo_hz, cfo_observation_valid);
@@ -5786,6 +5786,8 @@ private:
             _freq_offset_count++;
             if (_freq_offset_count >= 434) {
                 _avg_freq_offset = _freq_offset_sum / _freq_offset_count;
+                // Do not let noisy per-frame phases walk the alias reference.
+                _normal_cfo_tracker.acquire(_avg_freq_offset, tune_system_cfo_hz);
                 _freq_offset_sum = 0.0;
                 _freq_offset_count = 0;
                 if (std::abs(_avg_freq_offset) > 2.0f &&
