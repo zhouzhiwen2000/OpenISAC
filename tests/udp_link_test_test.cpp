@@ -40,8 +40,31 @@ int main() {
         check(stats.record(19) && stats.lost() == 15, "late packet inside retained window");
         SequenceStats empty(8);
         empty.confirm(1000000);
-        check(empty.lost() == 1000000, "complete blackout / trailing loss");
-        check(empty.record(999999) && empty.lost() == 999999, "late recovery after blackout");
+        check(!empty.started() && empty.expected() == 0 && empty.lost() == 0,
+              "loss must wait for the first received packet");
+        empty.reset_loss(1000000);
+        check(!empty.started(), "reset must not start loss accounting");
+        check(empty.record(999999), "first received packet after sender telemetry rejected");
+        empty.confirm(1000000);
+        check(empty.expected() == 1 && empty.lost() == 0, "leading loss was included");
+        empty.confirm(1000005);
+        check(empty.expected() == 6 && empty.lost() == 5, "blackout after first RX not counted");
+
+        SequenceStats reset(32);
+        reset.record(10); reset.record(12); reset.confirm(14);
+        check(reset.expected() == 4 && reset.lost() == 2, "first RX sequence is not the origin");
+        reset.reset_loss(16);
+        check(reset.expected() == 0 && reset.lost() == 0 && reset.unique == 2,
+              "loss reset changed cumulative receive statistics");
+        reset.confirm(15);
+        check(reset.record(11) && reset.lost() == 0, "old late packet changed reset loss");
+        check(!reset.record(12), "loss reset forgot duplicate history");
+        reset.record(16); reset.record(18); reset.confirm(20);
+        check(reset.expected() == 4 && reset.lost() == 2, "post-reset loss denominator");
+        reset.record(17);
+        check(reset.lost() == 1, "post-reset late recovery");
+        reset.reset_loss(); reset.confirm(23);
+        check(reset.expected() == 3 && reset.lost() == 3, "reset after blackout moved origin backwards");
         std::cout << "UDP packet, bit-error and sequence accounting tests passed\n";
         return 0;
     } catch (const std::exception& e) {

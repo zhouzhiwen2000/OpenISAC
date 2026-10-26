@@ -48,7 +48,7 @@ static Options parse(int argc, char** argv) {
           "  --rate-mbps RATE        UDP datagram bit rate, default 50; 0 pauses TX\n"
           "  --packet-bytes BYTES    Whole UDP datagram size, default 1316 (104..65507)\n"
           "  --telemetry ENDPOINT    PUB bind: tx tcp://127.0.0.1:18100, rx :18101\n"
-          "  --control ENDPOINT      TX REP bind, default tcp://127.0.0.1:18102\n"
+          "  --control ENDPOINT      REP bind: TX :18102 (RATE), RX :18103 (RESET_LOSS/RESET_ERRORS), localhost by default\n"
           "  --sender-telemetry EP   RX SUB connect, default tcp://127.0.0.1:18100\n"
           "  --session HEX          Shared session ID; default TX random, RX automatic\n"
           "  --loss-grace SEC       Reordering grace, default 1 (0.1..10)\n"
@@ -63,7 +63,7 @@ static Options parse(int argc, char** argv) {
     o.tx = role == "tx";
     o.port = o.tx ? 50000 : 50001;
     o.telemetry = o.tx ? "tcp://127.0.0.1:18100" : "tcp://127.0.0.1:18101";
-    o.control = "tcp://127.0.0.1:18102";
+    o.control = o.tx ? "tcp://127.0.0.1:18102" : "tcp://127.0.0.1:18103";
     o.sender_telemetry = "tcp://127.0.0.1:18100";
     for (int i = 2; i < argc; ++i) {
         std::string key = argv[i];
@@ -209,6 +209,9 @@ static int transmit(Options o) {
 static int receive(const Options& o) {
     UdpSocket udp(o);
     Telemetry telemetry(o);
+    zmq::socket_t control(telemetry.context, zmq::socket_type::rep);
+    control.set(zmq::sockopt::linger, 0);
+    control.bind(o.control);
     zmq::socket_t sender(telemetry.context, zmq::socket_type::sub);
     sender.set(zmq::sockopt::subscribe, "");
     sender.set(zmq::sockopt::linger, 0);
@@ -219,6 +222,7 @@ static int receive(const Options& o) {
     uint64_t session = o.session, received_bytes = 0, compared_bits = 0, errors = 0;
     uint64_t invalid = 0, foreign = 0, all_packets = 0, last_bytes = 0;
     bool sender_seen = false;
+    uint64_t sender_count = 0, loss_resets = 0, error_resets = 0;
     auto began = Clock::now(), last_publish = began;
     std::deque<std::pair<Clock::time_point, uint64_t>> pending;
     double rate = 0;
@@ -231,8 +235,11 @@ static int receive(const Options& o) {
           << ",\"reordered_packets\":" << sequence.reordered << ",\"late_packets\":" << sequence.late
           << ",\"too_old_packets\":" << sequence.too_old << ",\"invalid_packets\":" << invalid
           << ",\"foreign_packets\":" << foreign << ",\"confirmed_sent_packets\":" << sequence.confirmed_sent
+          << ",\"loss_started\":" << (sequence.started() ? "true" : "false")
+          << ",\"loss_expected_packets\":" << sequence.expected()
+          << ",\"loss_resets\":" << loss_resets << ",\"error_resets\":" << error_resets
           << ",\"lost_packets\":" << sequence.lost() << ",\"loss_percent\":"
-          << (sequence.confirmed_sent ? 100.0 * sequence.lost() / sequence.confirmed_sent : 0)
+          << (sequence.expected() ? 100.0 * sequence.lost() / sequence.expected() : 0)
           << ",\"bit_errors\":" << errors << ",\"compared_bits\":" << compared_bits
           << ",\"ber\":" << (compared_bits ? double(errors) / compared_bits : 0)
           << ",\"rx_mbps\":" << rate << ",\"sender_seen\":" << (sender_seen ? "true" : "false")
@@ -260,6 +267,9 @@ static int receive(const Options& o) {
             }
             if (!session) session = header.session;
             if (header.session != session) { ++foreign; continue; }
+            if (!sequence.started() && sender_seen)
+                pending.emplace_back(Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                    std::chrono::duration<double>(o.grace_s)), sender_count);
             if (!sequence.record(header.sequence)) continue;
             make_packet(expected.data(), size_t(size), header.session, header.sequence);
             errors += bit_errors(packet.data(), expected.data(), size_t(size));
@@ -275,9 +285,27 @@ static int receive(const Options& o) {
                 if (!session) session = incoming;
                 if (session != incoming) continue;
                 sender_seen = true;
-                pending.emplace_back(Clock::now() + std::chrono::duration_cast<Clock::duration>(
-                    std::chrono::duration<double>(o.grace_s)), data["sent_packets"].as<uint64_t>());
+                sender_count = std::max(sender_count, data["sent_packets"].as<uint64_t>());
+                if (sequence.started())
+                    pending.emplace_back(Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                        std::chrono::duration<double>(o.grace_s)), sender_count);
             } catch (const std::exception&) { /* Ignore unrelated telemetry. */ }
+        }
+        zmq::message_t request;
+        if (control.recv(request, zmq::recv_flags::dontwait)) {
+            const auto command = request.to_string();
+            const bool valid = command == "RESET_LOSS" || command == "RESET_ERRORS";
+            if (command == "RESET_LOSS") {
+                sequence.reset_loss(sender_count);
+                pending.clear();
+                ++loss_resets;
+            } else if (command == "RESET_ERRORS") {
+                errors = compared_bits = 0;
+                ++error_resets;
+            }
+            const std::string response = valid ? "{\"ok\":true}" : "{\"ok\":false}";
+            (void)control.send(zmq::buffer(response), zmq::send_flags::none);
+            if (valid) telemetry.publish(report(true));
         }
         now = Clock::now();
         while (!pending.empty() && pending.front().first <= now) {
@@ -286,7 +314,7 @@ static int receive(const Options& o) {
         }
         if (seconds(now - last_publish) >= .2) {
             // A missing sender monitor still permits in-stream gap accounting.
-            if (!sender_seen) pending.emplace_back(now + std::chrono::duration_cast<Clock::duration>(
+            if (!sender_seen && sequence.started()) pending.emplace_back(now + std::chrono::duration_cast<Clock::duration>(
                 std::chrono::duration<double>(o.grace_s)), sequence.highest);
             rate = (received_bytes - last_bytes) * 8.0 / seconds(now - last_publish) / 1e6;
             telemetry.publish(report(true));

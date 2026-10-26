@@ -31,7 +31,7 @@ the BS computer's address on the management network:
 
 ```bash
 ./build/UdpLinkTest rx --port 50001 \
-  --telemetry tcp://0.0.0.0:18101 \
+  --telemetry tcp://0.0.0.0:18101 --control tcp://0.0.0.0:18103 \
   --sender-telemetry tcp://192.168.50.1:18100
 ```
 
@@ -48,13 +48,18 @@ the UE computer's management address:
 ```bash
 python scripts/plot_udp_link.py \
   --tx tcp://127.0.0.1:18100 --rx tcp://192.168.50.19:18101 \
-  --control tcp://127.0.0.1:18102 --code-rate 1/2 --rate-mbps 50
+  --control tcp://127.0.0.1:18102 --rx-control tcp://192.168.50.19:18103 \
+  --code-rate 1/2 --rate-mbps 50
 ```
 
 Change **目标速率** and click **应用** to change the sender's target rate.
 Set it to zero to pause traffic. Enter a fraction such as `1/2` or `2/3` in
 **LDPC 码率** and press Enter to update the encoded-rate display. This field
 only affects the displayed rates. Match it to `ldpc.code_rate` in both YAML files. To change the actual payload code rate, edit YAML or the configuration editor and restart both backends.
+
+Click **清除** beside the packet-loss value to restart its statistics from the current test progress.
+The **清除** button beside BER resets both BER and the accumulated bit-error count.
+The two buttons act independently and leave traffic, cumulative received data and the flow chart running.
 
 Use Ctrl+C to stop the sender, then allow at least one second for the receiver
 to confirm the last packet counts before stopping it. Closing the dashboard
@@ -73,10 +78,12 @@ new test session.
 - **LDPC encoded rate:** displayed UDP rate divided by the user-entered code
   rate. It excludes additional air-interface framing, padding, pilots and CP.
 - **Packet loss:** missing identifiable sequence numbers divided by the
-  confirmed sent count. A one-second grace interval allows for transport delay
-  and reordering. Sender telemetry also accounts for losses before the first
-  received packet, at the end of a test and during a complete outage. A late
-  packet within the retained window corrects the accumulated loss count.
+  confirmed sent count in the current statistics interval. Counting begins with
+  the first identifiable RX packet from this test; earlier packets are excluded.
+  A one-second grace interval allows for transport delay and reordering. After
+  counting starts, sender telemetry also accounts for trailing losses and complete
+  outages. Late packets within the retained window correct loss only in the
+  interval to which they belong.
 - **BER:** differing bits divided by compared bits in received, identifiable,
   nonduplicate datagrams. It includes bit errors in recoverable packet headers;
   lost packets are not counted as bit errors. Unrecoverable headers cannot be
@@ -89,4 +96,4 @@ then remain unknown. Keep the management network connected during a test.
 
 The default packet size is 1316 bytes. Use `--help` for packet size, finite
 packet-count, duration and telemetry options. The data path is UDP; telemetry
-and rate control use ZeroMQ over the management network.
+and controls use ZeroMQ over the management network.

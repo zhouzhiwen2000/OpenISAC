@@ -111,6 +111,10 @@ public:
     }
     /** @brief Record one identifiable packet; return true only for a new sequence. */
     bool record(uint64_t sequence) {
+        if (!_started) {
+            _started = true;
+            _loss_begin = confirmed_sent = sequence;
+        }
         const uint64_t horizon = std::max(highest, confirmed_sent);
         if (horizon > _seen.size() && sequence < horizon - _seen.size()) {
             ++too_old;
@@ -125,12 +129,15 @@ public:
         slot = sequence;
         ++unique;
         if (sequence + 1 < previous_highest) ++reordered;
-        if (sequence < confirmed_sent) { ++late; ++confirmed_received; }
+        if (sequence < confirmed_sent) {
+            ++late;
+            if (sequence >= _loss_begin) ++confirmed_received;
+        }
         return true;
     }
     /** @brief Confirm an aged sender count, including loss during a full blackout. */
     void confirm(uint64_t sent) {
-        if (sent <= confirmed_sent) return;
+        if (!_started || sent <= confirmed_sent) return;
         if (sent - confirmed_sent <= _seen.size()) {
             for (uint64_t i = confirmed_sent; i < sent; ++i)
                 confirmed_received += (_seen[i % _seen.size()] == i);
@@ -140,12 +147,24 @@ public:
         }
         confirmed_sent = sent;
     }
-    /** @brief Missing packets among the confirmed sender count. */
-    uint64_t lost() const { return confirmed_sent - confirmed_received; }
+    /** @brief Clear loss accounting while retaining duplicate and receive history. */
+    void reset_loss(uint64_t sender_count = 0) {
+        if (!_started) return;
+        _loss_begin = confirmed_sent = std::max({highest, confirmed_sent, sender_count});
+        confirmed_received = 0;
+    }
+    /** @brief Whether a packet from this session has started loss accounting. */
+    bool started() const { return _started; }
+    /** @brief Confirmed packet count since the first RX packet or latest reset. */
+    uint64_t expected() const { return confirmed_sent - _loss_begin; }
+    /** @brief Missing packets in the current loss interval. */
+    uint64_t lost() const { return expected() - confirmed_received; }
     uint64_t highest = 0, unique = 0, duplicates = 0, reordered = 0, late = 0, too_old = 0;
     uint64_t confirmed_sent = 0, confirmed_received = 0;
 private:
     std::vector<uint64_t> _seen;
+    uint64_t _loss_begin = 0;
+    bool _started = false;
 };
 
 } // namespace udp_link_test

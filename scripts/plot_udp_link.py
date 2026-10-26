@@ -37,7 +37,7 @@ def number(data: dict, key: str) -> float:
 
 
 class MetricCard(QtWidgets.QFrame):
-    def __init__(self, title: str, color: str, large: bool = False):
+    def __init__(self, title: str, color: str, large: bool = False, clearable: bool = False):
         super().__init__()
         self.setObjectName("card")
         layout = QtWidgets.QVBoxLayout(self)
@@ -52,13 +52,23 @@ class MetricCard(QtWidgets.QFrame):
         self.detail = QtWidgets.QLabel(" ")
         self.detail.setStyleSheet(f"color: {MUTED}; font-size: {17 if large else 13}px;")
         layout.addWidget(heading)
-        layout.addWidget(self.value)
+        value_row = QtWidgets.QHBoxLayout()
+        value_row.addWidget(self.value, 1)
+        self.clear_button = None
+        if clearable:
+            self.clear_button = QtWidgets.QPushButton("清除")
+            self.clear_button.setFixedWidth(48)
+            self.clear_button.setStyleSheet("font-size: 12px; padding: 6px 4px;")
+            self.clear_button.setEnabled(False)
+            value_row.addWidget(self.clear_button)
+        layout.addLayout(value_row)
         layout.addWidget(self.detail)
 
 
 class LinkDashboard(QtWidgets.QMainWindow):
     def __init__(self, tx_endpoint: str, rx_endpoint: str, control_endpoint: str,
-                 code_rate: str = "1/2", target_mbps: float = 50):
+                 code_rate: str = "1/2", target_mbps: float = 50,
+                 rx_control_endpoint: str = "tcp://127.0.0.1:18103"):
         super().__init__()
         self.setWindowTitle("OpenISAC · 链路性能")
         self.resize(1440, 940)
@@ -78,8 +88,10 @@ class LinkDashboard(QtWidgets.QMainWindow):
             sock.connect(endpoint)
             self.subscribers[role] = sock
         self.control_endpoint = control_endpoint
+        self.rx_control_endpoint = rx_control_endpoint
         self.request = None
         self.request_time = 0.0
+        self.request_messages = ("", "")
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -176,8 +188,12 @@ class LinkDashboard(QtWidgets.QMainWindow):
 
         quality = QtWidgets.QHBoxLayout()
         quality.setSpacing(18)
-        self.loss_card = MetricCard("丢包率", AMBER)
-        self.ber_card = MetricCard("误比特率 BER", AMBER)
+        self.loss_card = MetricCard("丢包率", AMBER, clearable=True)
+        self.ber_card = MetricCard("误比特率 BER", AMBER, clearable=True)
+        self.loss_card.clear_button.setToolTip("清除丢包统计")
+        self.ber_card.clear_button.setToolTip("清除误码统计")
+        self.loss_card.clear_button.clicked.connect(self.clear_loss)
+        self.ber_card.clear_button.clicked.connect(self.clear_errors)
         self.packet_card = MetricCard("累计接收", TEXT)
         self.error_card = MetricCard("累计误比特", TEXT)
         for card in (self.loss_card, self.ber_card, self.packet_card, self.error_card):
@@ -206,14 +222,29 @@ class LinkDashboard(QtWidgets.QMainWindow):
             self.notice.setText("请输入有效的 LDPC 码率")
 
     def change_rate(self):
+        self.send_control(self.control_endpoint, f"RATE {self.target.value():.6f}",
+                          "目标速率已更新", "未能更新目标速率")
+
+    def clear_loss(self):
+        self.send_control(self.rx_control_endpoint, "RESET_LOSS",
+                          "丢包统计已清除", "未能清除丢包统计")
+
+    def clear_errors(self):
+        self.send_control(self.rx_control_endpoint, "RESET_ERRORS",
+                          "误码统计已清除", "未能清除误码统计")
+
+    def send_control(self, endpoint: str, command: str, success: str, failure: str):
         if self.request is not None:
             return
         self.request = self.context.socket(zmq.REQ)
         self.request.setsockopt(zmq.LINGER, 0)
-        self.request.connect(self.control_endpoint)
-        self.request.send_string(f"RATE {self.target.value():.6f}", flags=zmq.DONTWAIT)
+        self.request.connect(endpoint)
+        self.request.send_string(command, flags=zmq.DONTWAIT)
         self.request_time = time.monotonic()
+        self.request_messages = (success, failure)
         self.apply_rate.setEnabled(False)
+        self.loss_card.clear_button.setEnabled(False)
+        self.ber_card.clear_button.setEnabled(False)
         self.notice.setText("正在应用…")
 
     def accept(self, role: str, data: dict, now: float):
@@ -241,7 +272,7 @@ class LinkDashboard(QtWidgets.QMainWindow):
             except ValueError:
                 reply = {"ok": False}
             if reply is not None or now - self.request_time > 2:
-                self.notice.setText("码率已更新" if reply and reply.get("ok") else "未能更新码率")
+                self.notice.setText(self.request_messages[0 if reply and reply.get("ok") else 1])
                 self.request.close()
                 self.request = None
                 self.apply_rate.setEnabled(True)
@@ -270,8 +301,14 @@ class LinkDashboard(QtWidgets.QMainWindow):
         elapsed = int(number(tx, "elapsed_s"))
         self.elapsed.setText(f"{elapsed // 3600:02d}:{elapsed // 60 % 60:02d}:{elapsed % 60:02d}")
         valid_stats = bool(rx) and session_match
+        loss_started = rx.get("loss_started", number(rx, "unique_packets") > 0)
+        reset_enabled = fresh["rx"] and session_match and self.request is None
+        self.loss_card.clear_button.setEnabled(reset_enabled and loss_started)
+        self.ber_card.clear_button.setEnabled(reset_enabled and number(rx, "compared_bits") > 0)
         self.loss_card.value.setText(f"{number(rx, 'loss_percent'):.3f}%" if valid_stats else "—")
-        self.loss_card.detail.setText(f"丢失 {int(number(rx, 'lost_packets')):,} 包" if valid_stats else " ")
+        self.loss_card.detail.setText(
+            (f"丢失 {int(number(rx, 'lost_packets')):,} 包" if loss_started else "等待首个 RX 包")
+            if valid_stats else " ")
         self.ber_card.value.setText(f"{number(rx, 'ber'):.2e}" if valid_stats else "—")
         self.ber_card.detail.setText("")
         self.packet_card.value.setText(f"{int(number(rx, 'unique_packets') + number(rx, 'invalid_packets')):,}" if valid_stats else "—")
@@ -294,13 +331,15 @@ def main():
     parser.add_argument("--tx", default="tcp://127.0.0.1:18100")
     parser.add_argument("--rx", default="tcp://127.0.0.1:18101")
     parser.add_argument("--control", default="tcp://127.0.0.1:18102")
+    parser.add_argument("--rx-control", default="tcp://127.0.0.1:18103")
     parser.add_argument("--code-rate", default="1/2")
     parser.add_argument("--rate-mbps", type=float, default=50)
     args = parser.parse_args()
     app = QtWidgets.QApplication(sys.argv[:1])
     app.setFont(QtGui.QFont("Noto Sans CJK SC", 11))
     pg.setConfigOptions(antialias=True)
-    window = LinkDashboard(args.tx, args.rx, args.control, args.code_rate, args.rate_mbps)
+    window = LinkDashboard(args.tx, args.rx, args.control, args.code_rate, args.rate_mbps,
+                           args.rx_control)
     window.show()
     return app.exec()
 
