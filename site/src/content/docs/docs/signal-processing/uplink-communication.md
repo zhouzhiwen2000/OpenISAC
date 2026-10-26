@@ -13,7 +13,7 @@ $$
 b_{n,m_{\mathrm{UL},0},\gamma}^\mathrm{UL}=z_n^\mathrm{UL}.
 $$
 
-The remaining symbols with $m\in\mathcal S_\mathrm{UL}\setminus\{m_{\mathrm{UL},0}\}$ carry known pilots on $n\in\mathcal P$ and coded QPSK on $n\in\mathcal D$:
+The remaining symbols with $m\in\mathcal S_\mathrm{UL}\setminus\{m_{\mathrm{UL},0}\}$ carry known pilots on $n\in\mathcal P$ and coded payload symbols selected by `modulation.scheme` on $n\in\mathcal D$:
 
 $$
 b_{n,m,\gamma}^\mathrm{UL}=
@@ -124,7 +124,7 @@ $$
 =G_{n,m}^\mathrm{UL}Y_{n,m,\gamma}^\mathrm{UL}.
 $$
 
-Equalized pilot residuals estimate $\hat\sigma_\mathrm{eq}^2$, which scales the QPSK LLRs. Soft deinterleaving, descrambling, and LDPC decoding then recover the UE information bits. All channel, frequency-offset, and noise estimates come from the uplink's own references.
+Equalized pilot residuals estimate $\hat\sigma_\mathrm{eq}^2$, which scales the payload LLRs for the selected constellation. Soft deinterleaving, descrambling, and LDPC decoding then recover the UE information bits. All channel, frequency-offset, and noise estimates come from the uplink's own references.
 
 ## Relation to eRTM
 

@@ -7,6 +7,8 @@ This page lists tools that users launch directly. Unless stated otherwise, run c
 
 ## Sensing visualization
 
+See the [Sensing Viewer Guide](/docs/tools-workflows/sensing-viewers/) for the purpose of each viewer, screenshots, controls, and experiment workflows.
+
 After the BS and UE backends are running and the corresponding sensing outputs are enabled, launch a viewer:
 
 ```bash

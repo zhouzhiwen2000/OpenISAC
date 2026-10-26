@@ -7,6 +7,8 @@ OpenISAC uses a layered C++ and Python architecture. The C++ backend handles bid
 
 ## Responsibilities of the two layers
 
+See the [Sensing Viewer Guide](/docs/tools-workflows/sensing-viewers/) for interface screenshots, controls, and experiment workflows.
+
 - **Real-time layer:** performs uplink/downlink OFDM modulation and demodulation, synchronization, communication coding/decoding, and multi-channel sensing while keeping all USRP streams continuous.
 - **Interaction layer:** displays multi-channel monostatic sensing, bistatic sensing, and communication-link status; adjusts parameters that support online updates; and receives data for further analysis.
 

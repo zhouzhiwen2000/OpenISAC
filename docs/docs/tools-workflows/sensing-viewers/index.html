@@ -1,0 +1,736 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-vdxcvpsm"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Sensing Viewer Guide | OpenISAC Docs</title><link rel="canonical" href="https://openisac.zzw123app.top/docs/tools-workflows/sensing-viewers/"/><link rel="alternate" hreflang="en" href="https://openisac.zzw123app.top/docs/tools-workflows/sensing-viewers/"/><link rel="alternate" hreflang="zh-CN" href="https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/sensing-viewers/"/><link rel="alternate" hreflang="x-default" href="https://openisac.zzw123app.top/docs/tools-workflows/sensing-viewers/"/><link rel="sitemap" href="/sitemap-index.xml"/><link rel="shortcut icon" href="/images/icon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.0.7"/><meta name="generator" content="Starlight v0.41.3"/><meta property="og:title" content="Sensing Viewer Guide"/><meta property="og:type" content="article"/><meta property="og:url" content="https://openisac.zzw123app.top/docs/tools-workflows/sensing-viewers/"/><meta property="og:locale" content="en"/><meta property="og:description" content="Screenshots, controls, parameter adjustments, and experiment workflows for the monostatic and bistatic sensing viewers."/><meta property="og:site_name" content="OpenISAC Docs"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="Screenshots, controls, parameter adjustments, and experiment workflows for the monostatic and bistatic sensing viewers."/><script>
+  window.StarlightThemeProvider = (() => {
+    const storageKey = "starlight-theme";
+    const storedTheme =
+      typeof localStorage !== "undefined" && localStorage.getItem(storageKey);
+    const getPreferredColorScheme = () =>
+      window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    const theme =
+      storedTheme === null
+        ? "light"
+        : storedTheme === "dark" || storedTheme === "light"
+          ? storedTheme
+          : getPreferredColorScheme();
+
+    document.documentElement.dataset.theme = theme;
+
+    return {
+      updatePickers(theme = storedTheme === null ? "light" : storedTheme || "auto") {
+        document.querySelectorAll("starlight-theme-select").forEach((picker) => {
+          const select = picker.querySelector("select");
+          if (select) select.value = theme;
+          const tmpl = document.querySelector("#theme-icons");
+          const newIcon = tmpl && tmpl.content.querySelector("." + theme);
+          if (newIcon) {
+            const oldIcon = picker.querySelector("svg.label-icon");
+            if (oldIcon) {
+              oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+            }
+          }
+        });
+      },
+      getPreferredColorScheme,
+    };
+  })();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 6.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Zm0-3.5a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1ZM4 11h1a1 1 0 1 1 0 2H4a1 1 0 0 1 0-2Zm15 0h1a1 1 0 1 1 0 2h-1a1 1 0 1 1 0-2ZM6.34 4.93l.71.71a1 1 0 0 1-1.41 1.41l-.71-.71a1 1 0 0 1 1.41-1.41Zm11.32 0a1 1 0 0 1 1.41 1.41l-.71.71a1 1 0 0 1-1.41-1.41l.71-.71ZM6.34 19.07a1 1 0 0 1-1.41-1.41l.71-.71a1 1 0 0 1 1.41 1.41l-.71.71Zm12.73-1.41a1 1 0 0 1-1.41 1.41l-.71-.71a1 1 0 0 1 1.41-1.41l.71.71ZM12 19a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0v-1a1 1 0 0 1 1-1Z"></path></svg><svg aria-hidden="true" class="dark" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8 8 0 0 1-11.5-9.36A1 1 0 0 0 7.82 2.3 10 10 0 1 0 22 14.05a1 1 0 0 0-.36-1.05Z"></path></svg><svg aria-hidden="true" class="auto" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17 4H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1h-1V7a3 3 0 0 0-3-3ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"></path></svg></template><link rel="stylesheet" href="/_astro/print.ehPL0gv-.css" media="print"><link rel="stylesheet" href="/_astro/common.Bsh3d0Jh.css"><script type="module" src="/_astro/page.B2uBVZjk.js"></script></head><body class="astro-vdxcvpsm"><a class="sl-skip-link astro-vxeigawq" href="#_top">Skip to content</a><div class="page sl-flex astro-gqpr5s5a"><header class="header astro-gqpr5s5a"><div class="header astro-nczgtkxc"><div class="title-wrapper sl-flex astro-nczgtkxc"><a href="/" class="site-title sl-flex astro-clw6ags5"><img class="light:sl-hidden print:hidden astro-clw6ags5" alt="OpenISAC" src="/_astro/logo_light.BdIggePt.svg" width="975" height="509"><img class="dark:sl-hidden print:block astro-clw6ags5" alt="OpenISAC" src="/_astro/logo.OnmkP0qs.svg" width="975" height="509"><span class="astro-clw6ags5" translate="no">OpenISAC Docs</span></a></div><div class="sl-flex print:hidden astro-nczgtkxc"><site-search class="astro-nczgtkxc astro-r5ar4xm7" data-translations="{&quot;placeholder&quot;:&quot;Search&quot;}"><button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-r5ar4xm7"><svg aria-hidden="true" class="astro-r5ar4xm7 astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg><span class="sl-hidden md:sl-block astro-r5ar4xm7" aria-hidden="true">Search</span><kbd class="sl-hidden md:sl-flex astro-r5ar4xm7" style="display: none;"><kbd class="astro-r5ar4xm7">Ctrl</kbd><kbd class="astro-r5ar4xm7">K</kbd></kbd></button><dialog style="padding:0" aria-label="Search" class="astro-r5ar4xm7"><div class="dialog-frame sl-flex astro-r5ar4xm7"><button data-close-modal class="sl-flex md:sl-hidden astro-r5ar4xm7">Cancel</button><div class="search-container astro-r5ar4xm7"><div id="starlight__search" class="astro-r5ar4xm7"></div></div></div></dialog></site-search><script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script><script type="module" src="/_astro/Search.astro_astro_type_script_index_0_lang.vTFUHulS.js"></script></div><div class="sl-hidden md:sl-flex print:hidden right-group astro-nczgtkxc"><div class="sl-flex social-icons astro-nczgtkxc"><a href="https://github.com/zhouzhiwen2000/OpenISAC" rel="me" class="sl-flex astro-cg55etiy"><span class="sr-only astro-cg55etiy">GitHub</span><svg aria-hidden="true" class="astro-cg55etiy astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="dark" class="astro-r2p65idu">Dark</option><option value="light" class="astro-r2p65idu">Light</option><option value="auto" selected class="astro-r2p65idu">Auto</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><script type="module">var e=`starlight-theme`,t=e=>e===`auto`||e===`dark`||e===`light`?e:`auto`,n=()=>t(typeof localStorage<`u`&&localStorage.getItem(e));function r(t){typeof localStorage<`u`&&localStorage.setItem(e,t===`light`||t===`dark`?t:``)}var i=()=>matchMedia(`(prefers-color-scheme: light)`).matches?`light`:`dark`;function a(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e===`auto`?i():e,r(e)}matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,()=>{n()===`auto`&&a(`auto`)});var o=class extends HTMLElement{constructor(){super(),a(n()),this.querySelector(`select`)?.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&a(t(e.currentTarget.value))})}};customElements.define(`starlight-theme-select`,o);</script><starlight-lang-select><label style="--sl-select-width: 7em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">Select language</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path fill-rule="evenodd" d="M8.516 3a.94.94 0 0 0-.941.94v1.15H2.94a.94.94 0 1 0 0 1.882h7.362a7.422 7.422 0 0 1-1.787 3.958 7.42 7.42 0 0 1-1.422-2.425.94.94 0 1 0-1.774.627 9.303 9.303 0 0 0 1.785 3.043 7.422 7.422 0 0 1-4.164 1.278.94.94 0 1 0 0 1.881 9.303 9.303 0 0 0 5.575-1.855 9.303 9.303 0 0 0 4.11 1.74l-.763 1.525a.968.968 0 0 0-.016.034l-1.385 2.77a.94.94 0 1 0 1.683.841l1.133-2.267h5.806l1.134 2.267a.94.94 0 0 0 1.683-.841l-1.385-2.769a.95.95 0 0 0-.018-.036l-3.476-6.951a.94.94 0 0 0-1.682 0l-1.82 3.639a7.423 7.423 0 0 1-3.593-1.256 9.303 9.303 0 0 0 2.27-5.203h1.894a.94.94 0 0 0 0-1.881H9.456V3.94A.94.94 0 0 0 8.516 3Zm6.426 11.794a1.068 1.068 0 0 1-.02.039l-.703 1.407h3.924l-1.962-3.924-1.24 2.478Z" clip-rule="evenodd"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="/docs/tools-workflows/sensing-viewers/" class="astro-r2p65idu">English</option><option value="/zh-cn/docs/tools-workflows/sensing-viewers/" class="astro-r2p65idu">简体中文</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-lang-select><script type="module">var e=class extends HTMLElement{constructor(){super();let e=this.querySelector(`select`);e&&(e.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=e.currentTarget.value)}),window.addEventListener(`pageshow`,t=>{if(!t.persisted)return;let n=e.querySelector(`option[selected]`)?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}};customElements.define(`starlight-lang-select`,e);</script></div></div></header><nav class="sidebar print:hidden astro-gqpr5s5a" aria-label="Main"><starlight-menu-button class="print:hidden astro-vvx7mffu"><button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-vvx7mffu"><svg aria-hidden="true" class="open-menu astro-vvx7mffu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg><svg aria-hidden="true" class="close-menu astro-vvx7mffu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg></button></starlight-menu-button><script type="module">var e=class extends HTMLElement{btn=this.querySelector(`button`);constructor(){super(),this.btn.addEventListener(`click`,()=>this.toggleExpanded());let e=this.closest(`nav`);e&&e.addEventListener(`keyup`,e=>this.closeOnEscape(e)),matchMedia(`(min-width: 50em)`).addEventListener(`change`,()=>this.setExpanded(!1))}setExpanded(e){this.setAttribute(`aria-expanded`,String(e)),document.body.toggleAttribute(`data-mobile-menu-expanded`,e),document.querySelectorAll(`.main-frame, .sl-skip-link`).forEach(t=>{t.toggleAttribute(`inert`,e)})}toggleExpanded(){this.setExpanded(this.getAttribute(`aria-expanded`)!==`true`)}closeOnEscape(e){e.code===`Escape`&&(this.setExpanded(!1),this.btn.focus())}};customElements.define(`starlight-menu-button`,e);</script><div id="starlight__sidebar" class="sidebar-pane astro-gqpr5s5a"><div class="sidebar-content sl-flex astro-gqpr5s5a"><sl-sidebar-state-persist data-hash="10nkq6u" class="astro-f5yvicm7"><script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script><ul class="top-level astro-ojxuodky"><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Overview</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="0"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/docs/" class="astro-ojxuodky"><span class="astro-ojxuodky">OpenISAC Overview</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Getting Started</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="1"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/docs/getting-started/hardware/" class="astro-ojxuodky"><span class="astro-ojxuodky">Hardware</span></a></li><li class="astro-ojxuodky"><a href="/docs/getting-started/installation/" class="astro-ojxuodky"><span class="astro-ojxuodky">Installation</span></a></li><li class="astro-ojxuodky"><a href="/docs/getting-started/build/" class="astro-ojxuodky"><span class="astro-ojxuodky">Build</span></a></li><li class="astro-ojxuodky"><a href="/docs/getting-started/performance-tuning/" class="astro-ojxuodky"><span class="astro-ojxuodky">System Performance Tuning</span></a></li><li class="astro-ojxuodky"><a href="/docs/getting-started/cpu-isolation-execution/" class="astro-ojxuodky"><span class="astro-ojxuodky">CPU Isolation and Execution</span></a></li><li class="astro-ojxuodky"><a href="/docs/getting-started/first-ota-run/" class="astro-ojxuodky"><span class="astro-ojxuodky">First OTA Run</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Architecture</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="2"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/docs/architecture/system/" class="astro-ojxuodky"><span class="astro-ojxuodky">System Architecture</span></a></li><li class="astro-ojxuodky"><a href="/docs/architecture/bs-pipeline/" class="astro-ojxuodky"><span class="astro-ojxuodky">BS Runtime Pipeline</span></a></li><li class="astro-ojxuodky"><a href="/docs/architecture/ue-pipeline/" class="astro-ojxuodky"><span class="astro-ojxuodky">UE Runtime Pipeline</span></a></li><li class="astro-ojxuodky"><a href="/docs/architecture/frontend-transport/" class="astro-ojxuodky"><span class="astro-ojxuodky">Frontend and Transport</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Signal Processing</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="3"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/docs/signal-processing/" class="astro-ojxuodky"><span class="astro-ojxuodky">Processing Overview</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/signal-model/" class="astro-ojxuodky"><span class="astro-ojxuodky">Signal Model</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/ofdm-resources/" class="astro-ojxuodky"><span class="astro-ojxuodky">OFDM Resources</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/initial-synchronization/" class="astro-ojxuodky"><span class="astro-ojxuodky">Initial Synchronization</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/ue-reception/" class="astro-ojxuodky"><span class="astro-ojxuodky">Downlink Communication</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/uplink-communication/" class="astro-ojxuodky"><span class="astro-ojxuodky">Uplink Communication</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/monostatic-sensing/" class="astro-ojxuodky"><span class="astro-ojxuodky">Multichannel Monostatic Sensing</span></a></li><li class="astro-ojxuodky"><a href="/docs/signal-processing/bistatic-sensing/" class="astro-ojxuodky"><span class="astro-ojxuodky">UE Bistatic Sensing</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Tools and Workflows</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="4"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/docs/tools-workflows/channel-simulator/" class="astro-ojxuodky"><span class="astro-ojxuodky">Channel Simulator</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/xr1710g-receiver/" class="astro-ojxuodky"><span class="astro-ojxuodky">XR1710G Receiver</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/web-config-console/" class="astro-ojxuodky"><span class="astro-ojxuodky">Web Config Console</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/sensing-viewers/" aria-current="page" class="astro-ojxuodky"><span class="astro-ojxuodky">Sensing Viewer Guide</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/calibration-workflows/" class="astro-ojxuodky"><span class="astro-ojxuodky">Calibration Workflows</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/video-udp-workflows/" class="astro-ojxuodky"><span class="astro-ojxuodky">Video and UDP Workflows</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/udp-link-test/" class="astro-ojxuodky"><span class="astro-ojxuodky">UDP Link Test</span></a></li><li class="astro-ojxuodky"><a href="/docs/tools-workflows/macos-development/" class="astro-ojxuodky"><span class="astro-ojxuodky">macOS and Development Notes</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">Reference</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="5"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/docs/reference/" class="astro-ojxuodky"><span class="astro-ojxuodky">Reference Overview</span></a></li><li class="astro-ojxuodky"><a href="/docs/reference/bs-yaml/" class="astro-ojxuodky"><span class="astro-ojxuodky">BS YAML Reference</span></a></li><li class="astro-ojxuodky"><a href="/docs/reference/ue-yaml/" class="astro-ojxuodky"><span class="astro-ojxuodky">UE YAML Reference</span></a></li><li class="astro-ojxuodky"><a href="/docs/reference/scripts-tools/" class="astro-ojxuodky"><span class="astro-ojxuodky">Scripts and Tools</span></a></li><li class="astro-ojxuodky"><a href="/docs/reference/troubleshooting/" class="astro-ojxuodky"><span class="astro-ojxuodky">Troubleshooting</span></a></li></ul></details></li></ul><script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script></sl-sidebar-state-persist><div class="md:sl-hidden"><div class="mobile-preferences sl-flex astro-b5gddk54"><div class="social-icons astro-b5gddk54"><a href="https://github.com/zhouzhiwen2000/OpenISAC" rel="me" class="sl-flex astro-cg55etiy"><span class="sr-only astro-cg55etiy">GitHub</span><svg aria-hidden="true" class="astro-cg55etiy astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="dark" class="astro-r2p65idu">Dark</option><option value="light" class="astro-r2p65idu">Light</option><option value="auto" selected class="astro-r2p65idu">Auto</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><starlight-lang-select><label style="--sl-select-width: 7em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">Select language</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path fill-rule="evenodd" d="M8.516 3a.94.94 0 0 0-.941.94v1.15H2.94a.94.94 0 1 0 0 1.882h7.362a7.422 7.422 0 0 1-1.787 3.958 7.42 7.42 0 0 1-1.422-2.425.94.94 0 1 0-1.774.627 9.303 9.303 0 0 0 1.785 3.043 7.422 7.422 0 0 1-4.164 1.278.94.94 0 1 0 0 1.881 9.303 9.303 0 0 0 5.575-1.855 9.303 9.303 0 0 0 4.11 1.74l-.763 1.525a.968.968 0 0 0-.016.034l-1.385 2.77a.94.94 0 1 0 1.683.841l1.133-2.267h5.806l1.134 2.267a.94.94 0 0 0 1.683-.841l-1.385-2.769a.95.95 0 0 0-.018-.036l-3.476-6.951a.94.94 0 0 0-1.682 0l-1.82 3.639a7.423 7.423 0 0 1-3.593-1.256 9.303 9.303 0 0 0 2.27-5.203h1.894a.94.94 0 0 0 0-1.881H9.456V3.94A.94.94 0 0 0 8.516 3Zm6.426 11.794a1.068 1.068 0 0 1-.02.039l-.703 1.407h3.924l-1.962-3.924-1.24 2.478Z" clip-rule="evenodd"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="/docs/tools-workflows/sensing-viewers/" class="astro-r2p65idu">English</option><option value="/zh-cn/docs/tools-workflows/sensing-viewers/" class="astro-r2p65idu">简体中文</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-lang-select></div></div></div></div></nav><div class="main-frame astro-gqpr5s5a"><script type="module">var e=document.getElementById(`starlight__sidebar`),t=e?.querySelector(`sl-sidebar-state-persist`),n=`sl-sidebar-state`,r=()=>{let r=[],i=t?.dataset.hash||``;try{let e=sessionStorage.getItem(n),t=JSON.parse(e||`{}`);Array.isArray(t.open)&&t.hash===i&&(r=t.open)}catch{}return{hash:i,open:r,scroll:e?.scrollTop||0}},i=e=>{try{sessionStorage.setItem(n,JSON.stringify(e))}catch{}},a=()=>i(r()),o=(e,t)=>{let n=r();n.open[t]=e,i(n)};t?.addEventListener(`click`,e=>{if(!(e.target instanceof Element))return;let t=e.target.closest(`summary`)?.closest(`details`);if(!t)return;let n=t.querySelector(`sl-sidebar-restore`),r=parseInt(n?.dataset.index||``);isNaN(r)||o(!t.open,r)}),addEventListener(`visibilitychange`,()=>{document.visibilityState===`hidden`&&a()}),addEventListener(`pageHide`,a);</script><div class="lg:sl-flex astro-abfeecmu"><aside class="right-sidebar-container print:hidden astro-abfeecmu"><div class="right-sidebar astro-abfeecmu"><div class="lg:sl-hidden astro-q5mffni3"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-5ulgm6bh"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-5ulgm6bh"><details id="starlight__mobile-toc" class="astro-5ulgm6bh"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-5ulgm6bh"><span class="toggle sl-flex astro-5ulgm6bh">On this page<svg aria-hidden="true" class="caret astro-5ulgm6bh astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></span><span class="display-current astro-5ulgm6bh"></span></summary><div class="dropdown astro-5ulgm6bh"><ul class="isMobile astro-cxyftcne" style="--depth: 0;"><li style="--depth: 0;" class="astro-cxyftcne"><a href="#_top" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Overview</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#interface-purpose" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Interface purpose</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#startup-and-connection" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Startup and connection</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#interface-overview" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Interface overview</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#monostatic-viewer" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Monostatic viewer</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#bistatic-viewer" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Bistatic viewer</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#main-spectrum" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Main spectrum</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#micro-doppler-plot" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Micro-Doppler plot</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#status-area" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Status area</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#display-and-observation-range" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Display and observation range</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#bins-range-delay-and-frequency" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Bins, range, delay, and frequency</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#sensing-processing-switches" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Sensing processing switches</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#target-detection" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Target detection</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#method-and-controls" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Method and controls</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#os-cfar-parameters" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">OS-CFAR parameters</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#clean-parameters" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">CLEAN parameters</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#target-clustering" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Target clustering</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#monostatic-delay-estimation" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Monostatic delay estimation</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#delay-alignment" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Delay alignment</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#system-control-and-calibration" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">System control and calibration</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#sampling-stride-and-gain" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Sampling stride and gain</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#hsys-system-response-calibration" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Hsys system-response calibration</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#target-list" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Target list</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#saving-data" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Saving data</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#typical-workflows" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Typical workflows</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#moving-targets" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Moving targets</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#static-paths" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Static paths</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#micro-doppler" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Micro-Doppler</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#runtime-checks" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Runtime checks</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#related-documentation" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Related documentation</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#optional-radial-velocity-in-the-monostatic-viewer" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Optional radial velocity in the monostatic viewer</span></a></li></ul></li></ul></div></details></nav></mobile-starlight-toc><script type="module" src="/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.BcSo_yiZ.js"></script></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-q5mffni3"><div class="sl-container astro-q5mffni3"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-cxyftcne" style="--depth: 0;"><li style="--depth: 0;" class="astro-cxyftcne"><a href="#_top" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Overview</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#interface-purpose" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Interface purpose</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#startup-and-connection" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Startup and connection</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#interface-overview" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Interface overview</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#monostatic-viewer" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Monostatic viewer</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#bistatic-viewer" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Bistatic viewer</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#main-spectrum" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Main spectrum</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#micro-doppler-plot" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Micro-Doppler plot</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#status-area" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Status area</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#display-and-observation-range" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Display and observation range</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#bins-range-delay-and-frequency" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Bins, range, delay, and frequency</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#sensing-processing-switches" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Sensing processing switches</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#target-detection" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Target detection</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#method-and-controls" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Method and controls</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#os-cfar-parameters" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">OS-CFAR parameters</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#clean-parameters" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">CLEAN parameters</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#target-clustering" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Target clustering</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#monostatic-delay-estimation" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Monostatic delay estimation</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#delay-alignment" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Delay alignment</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#system-control-and-calibration" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">System control and calibration</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#sampling-stride-and-gain" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Sampling stride and gain</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#hsys-system-response-calibration" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Hsys system-response calibration</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#target-list" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Target list</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#saving-data" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Saving data</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#typical-workflows" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Typical workflows</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#moving-targets" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Moving targets</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#static-paths" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Static paths</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#micro-doppler" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Micro-Doppler</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#runtime-checks" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Runtime checks</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#related-documentation" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">Related documentation</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#optional-radial-velocity-in-the-monostatic-viewer" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Optional radial velocity in the monostatic viewer</span></a></li></ul></li></ul></nav></starlight-toc><script type="module" src="/_astro/TableOfContents.astro_astro_type_script_index_0_lang.Csloo1VZ.js"></script></div></div></div></aside><div class="main-pane astro-abfeecmu"><main data-pagefind-body class="astro-vdxcvpsm" lang="en" dir="ltr"><div class="content-panel astro-oil7k7jf"><div class="sl-container astro-oil7k7jf"><h1 id="_top" class="astro-2sm4b3ln">Sensing Viewer Guide</h1></div></div><div class="content-panel astro-oil7k7jf"><div class="sl-container astro-oil7k7jf"><div class="sl-markdown-content"><p>This guide covers <code dir="auto">scripts/plot_sensing_fast.py</code> and <code dir="auto">scripts/plot_bi_sensing_fast.py</code> as of October 15, 2026. It is intended for users with a background in radar, wireless communications, or signal processing.</p>
+<p>The viewers connect to a running OpenISAC system to display range or delay versus Doppler, observe micro-motion, extract targets, and adjust sensing and RF parameters.</p>
+<p>Screenshots were generated offline from the viewer code, using illustrative spectra and readings.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="interface-purpose">Interface purpose</h2><a class="sl-anchor-link" href="#interface-purpose"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Interface purpose”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Item</th><th>Monostatic viewer</th><th>Bistatic viewer</th></tr></thead><tbody><tr><td>Launch script</td><td><code dir="auto">plot_sensing_fast.py</code></td><td><code dir="auto">plot_bi_sensing_fast.py</code></td></tr><tr><td>Connection destination</td><td>Computer running BS</td><td>Computer running UE</td></tr><tr><td>Main observation</td><td>Echoes of the base station’s signal reflected by targets</td><td>Propagation paths and target scattering with separate transmit and receive sites</td></tr><tr><td>Main plot vertical axis</td><td>Range in m</td><td>Relative delay in ns</td></tr><tr><td>Main plot horizontal axis</td><td>Doppler frequency in Hz, or optional radial velocity in m/s</td><td>Doppler frequency in Hz</td></tr><tr><td>Micro-Doppler and detection</td><td>Micro-Doppler, OS-CFAR, CLEAN</td><td>Micro-Doppler, OS-CFAR, CLEAN</td></tr><tr><td>Delay estimation</td><td>FFT, MUSIC, CAPON, ROOTMUSIC, ESPRIT</td><td>FFT</td></tr><tr><td>RF gain adjustment</td><td>TX/RX gain controls in the viewer</td><td>BS/UE configuration</td></tr><tr><td>Hsys system-response calibration</td><td>Monostatic transmit/receive path</td><td>BS-to-UE sensing path</td></tr></tbody></table>
+<p>Monostatic range uses the round-trip propagation relationship, with its origin established by system-delay calibration. Bistatic relative delay uses the current synchronization, compensation, and manual alignment settings as its reference. With direct-path tracking, it typically shows the additional delay of a scattered path relative to the direct path. Doppler describes changes in propagation-path length over time; interpret it using the corresponding monostatic or bistatic geometry.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="startup-and-connection">Startup and connection</h2><a class="sl-anchor-link" href="#startup-and-connection"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Startup and connection”</span></a></div>
+<p><img src="/images/sensing-viewers/connection.webp" alt="Backend IP, Connect, and connection status"></p>
+<p>Start the corresponding BS/UE backend and enable sensing output, then launch the viewer from the repository root:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/_astro/ec.v4551.css"><script type="module" src="/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># Monostatic sensing</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">python</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/plot_sensing_fast.py</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># Bistatic sensing</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">python</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/plot_bi_sensing_fast.py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="python scripts/plot_sensing_fast.pypython scripts/plot_bi_sensing_fast.py"><div></div></button></div></figure></div>
+<p>Use <code dir="auto">python3</code> if that is the Python command in your environment. Enter <code dir="auto">127.0.0.1</code> for a backend on the same computer, or the backend computer’s IP address for a remote connection.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Control or action</th><th>Function and operation</th></tr></thead><tbody><tr><td><code dir="auto">Backend IP</code> + <code dir="auto">Connect</code></td><td>Enter the address of the computer running BS or UE, then connect or reconnect. Pressing Enter in the address field also connects. Wait for status and plot updates before observing results.</td></tr><tr><td>Arrow beside a section heading</td><td>Expand or collapse <code dir="auto">Display &#x26; View</code>, <code dir="auto">Delay Estimation</code>, <code dir="auto">Target Detection</code>, <code dir="auto">Clustering</code>, <code dir="auto">Alignment</code>, <code dir="auto">Hardware &#x26; RF</code>, or <code dir="auto">Processing Toggles</code>. Enabled functions continue while their sections are collapsed.</td></tr><tr><td>Main window close button</td><td>Exit the viewer and close its target window. The independently running BS/UE backend continues.</td></tr></tbody></table>
+<p>The viewer remembers several inputs and switches. After a successful connection or backend reconnection, it restores saved controls such as MTI and STRD; the monostatic viewer also sends its saved gain settings. Check the gains before connecting, particularly during RF loopback calibration.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="interface-overview">Interface overview</h2><a class="sl-anchor-link" href="#interface-overview"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Interface overview”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="monostatic-viewer">Monostatic viewer</h3><a class="sl-anchor-link" href="#monostatic-viewer"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Monostatic viewer”</span></a></div>
+<p><img src="/images/sensing-viewers/monostatic-overview.webp" alt="Monostatic viewer with range-Doppler and micro-Doppler plots and control sections"></p>
+<div class="sl-heading-wrapper level-h3"><h3 id="bistatic-viewer">Bistatic viewer</h3><a class="sl-anchor-link" href="#bistatic-viewer"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Bistatic viewer”</span></a></div>
+<p><img src="/images/sensing-viewers/bistatic-overview.webp" alt="Bistatic viewer with relative-delay-Doppler and micro-Doppler plots and control sections"></p>
+<div class="sl-heading-wrapper level-h3"><h3 id="main-spectrum">Main spectrum</h3><a class="sl-anchor-link" href="#main-spectrum"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Main spectrum”</span></a></div>
+<p><code dir="auto">Range-Doppler Spectrum</code> displays the joint distribution of range or delay and Doppler. Bright regions indicate stronger spectral responses. With detection enabled, markers identify extracted targets. The area near zero Doppler commonly contains static reflections, direct leakage, and slow targets. Doppler sign indicates frequency-shift direction; relate it to motion using the experiment geometry.</p>
+<p>Click the main plot to mark an observation position with a cross. Select the micro-Doppler observation cell separately through <code dir="auto">Range Bin</code>.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="micro-doppler-plot">Micro-Doppler plot</h3><a class="sl-anchor-link" href="#micro-doppler-plot"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Micro-Doppler plot”</span></a></div>
+<p><code dir="auto">Micro-Doppler Spectrum</code> shows Doppler variation over time at the selected range cell. The horizontal axis is time in seconds; the vertical axis is Doppler frequency in Hz. Use it to observe arm swing, limb motion, rotation, and other micro-motion. Select a new cell when a target moves across range cells.</p>
+<p>FFT color scales use the current sensing spectrum’s dB scale to compare relative component strength. MUSIC/CAPON use relative pseudospectrum scales to compare peak locations and separation.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="status-area">Status area</h3><a class="sl-anchor-link" href="#status-area"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Status area”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Status</th><th>Meaning and use</th></tr></thead><tbody><tr><td><code dir="auto">Display</code></td><td>Source of the displayed data.</td></tr><tr><td><code dir="auto">FPS</code></td><td>Viewer refresh rate, indicating display smoothness.</td></tr><tr><td><code dir="auto">Queue</code></td><td>Data waiting for processing or display. Persistent accumulation with delayed plots suggests reducing local processing load.</td></tr><tr><td><code dir="auto">Sender</code>, <code dir="auto">Status</code></td><td>Data source, connection, and reception status.</td></tr><tr><td><code dir="auto">Params</code></td><td>Current data and processing parameters; check after connecting or changing STRD.</td></tr><tr><td><code dir="auto">MD Buffer</code></td><td>Accumulated micro-Doppler history. History starts again after selecting a different range cell.</td></tr><tr><td><code dir="auto">Detector</code></td><td>Detection method, enabled state, and result summary.</td></tr></tbody></table>
+<p>Hover over long status text for the full tooltip. Confirm device-control actions using new data, reported parameters, and backend logs.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="display-and-observation-range">Display and observation range</h2><a class="sl-anchor-link" href="#display-and-observation-range"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Display and observation range”</span></a></div>
+<p><img src="/images/sensing-viewers/display-view.webp" alt="Display &#x26; View settings"></p>
+<p><code dir="auto">Display &#x26; View</code> controls the observation cell, processing grids, visible region, and color scales. After editing a value, click <code dir="auto">Set</code> or <code dir="auto">Apply</code> on that row.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Control or button</th><th>Function</th><th>Usage notes</th></tr></thead><tbody><tr><td><code dir="auto">Range Bin</code> + <code dir="auto">Set</code></td><td>Select the range or delay cell for micro-Doppler observation, indexed from 0.</td><td>Locate the target first, then select the cell. Applying the setting clears micro-Doppler history; allow it to accumulate again.</td></tr><tr><td><code dir="auto">Delay FFT</code> + <code dir="auto">Set</code></td><td>Set the viewer’s range or delay transform length.</td><td>More zero padding produces a finer spectral grid for reading peaks and increases processing load. Physical range resolution depends on effective bandwidth and other acquisition conditions. The effective transform length covers at least the input data.</td></tr><tr><td><code dir="auto">Doppler FFT</code> + <code dir="auto">Set</code></td><td>Set the Doppler transform length.</td><td>More zero padding refines the frequency grid. Doppler resolving ability depends on coherent observation time and other acquisition conditions.</td></tr><tr><td><code dir="auto">Delay View</code> + <code dir="auto">Set</code></td><td>Set the number of range or delay bins displayed from the origin.</td><td>Focus on the near region or extend the view. The local target list also covers this region. Range Bin may be adjusted when the visible region shrinks.</td></tr><tr><td><code dir="auto">Doppler View</code> + <code dir="auto">Set</code></td><td>Set the number of bins displayed around zero Doppler.</td><td>A smaller view emphasizes slow targets; a larger view includes greater frequency shifts. Local target output follows the selected region.</td></tr><tr><td><code dir="auto">Delay Doppler dB</code> Min, Max + <code dir="auto">Apply</code></td><td>Set the main plot’s color limits.</td><td>Lowering the minimum reveals weaker background; lowering the maximum makes weak responses brighter. These controls mainly apply to FFT; super-resolution methods use their own color scales.</td></tr><tr><td><code dir="auto">MicroDoppler dB</code> Min, Max + <code dir="auto">Apply</code></td><td>Set the micro-Doppler plot’s color limits independently.</td><td>Emphasize weak motion patterns. Set the minimum below the maximum.</td></tr></tbody></table>
+<p>Color-scale adjustments affect the display. Use detection parameters to adjust target selection, and RX gain to adjust received signal amplitude.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="bins-range-delay-and-frequency">Bins, range, delay, and frequency</h3><a class="sl-anchor-link" href="#bins-range-delay-and-frequency"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Bins, range, delay, and frequency”</span></a></div>
+<p>Plot axes show m, ns, and Hz; bin inputs select discrete grid indices. Changing the FFT length changes the physical position represented by an index, so check the observation cell again.</p>
+<p>The bistatic FFT display currently shows one point for every two range and Doppler cells. <code dir="auto">Range Bin</code> selects a micro-Doppler cell on the full range grid. For example, a target listed at <code dir="auto">R=40</code> can be located starting at <code dir="auto">Range Bin=80</code>. The monostatic display uses the full grid by default. Plot axes already account for this conversion.</p>
+<p>After changing FFT lengths or display ranges, sensing results and micro-Doppler history are rebuilt. Wait for new data to stabilize before continuing.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="sensing-processing-switches">Sensing processing switches</h2><a class="sl-anchor-link" href="#sensing-processing-switches"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Sensing processing switches”</span></a></div>
+<p><img src="/images/sensing-viewers/processing-toggles.webp" alt="Micro-Doppler, MTI, and window switches"></p>
+<p><code dir="auto">Processing Toggles</code> controls micro-Doppler, moving-target indication, and window functions. MTI and the two window buttons are green when enabled.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Button</th><th>Effect when enabled</th><th>Typical use</th></tr></thead><tbody><tr><td><code dir="auto">Micro-Doppler: ON/OFF</code></td><td>Start or stop micro-Doppler history accumulation and processing.</td><td>Enable for human or mechanical micro-motion. Disable when observing only the main spectrum to reduce processing load. The retained image after disabling shows earlier results.</td></tr><tr><td><code dir="auto">MTI</code></td><td>Control backend moving-target indication to suppress static or slowly varying background.</td><td>Reduce static clutter for moving-target detection. Compare with MTI disabled when studying stationary reflections, direct paths, or slow motion.</td></tr><tr><td><code dir="auto">Range Window</code></td><td>Apply a Hamming window in range processing to reduce range sidelobes.</td><td>Useful when strong-return sidelobes obscure weaker returns. Windowing also broadens the main lobe, affecting separation of nearby targets.</td></tr><tr><td><code dir="auto">Doppler Window</code></td><td>Apply a Hamming window in Doppler processing to reduce spectral leakage and Doppler sidelobes.</td><td>Useful for weaker motion components, while accounting for main-lobe broadening.</td></tr></tbody></table>
+<p>Selecting CLEAN in FFT mode automatically turns off and disables both Window buttons. After switching back to OS-CFAR, enable them as needed.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="target-detection">Target detection</h2><a class="sl-anchor-link" href="#target-detection"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Target detection”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="method-and-controls">Method and controls</h3><a class="sl-anchor-link" href="#method-and-controls"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Method and controls”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Control or button</th><th>Function and operation</th></tr></thead><tbody><tr><td><code dir="auto">Local Detector</code> dropdown</td><td>Select <code dir="auto">OS-CFAR</code> or <code dir="auto">CLEAN</code> for local detection. The method changes immediately.</td></tr><tr><td><code dir="auto">Local OS-CFAR: ON/OFF</code></td><td>Enable or disable OS-CFAR. When enabled, it estimates a local background threshold and produces target markers and a list.</td></tr><tr><td><code dir="auto">Local CLEAN: ON/OFF</code></td><td>The same switch uses this label when CLEAN is selected. It extracts strong targets and subtracts their responses to find remaining components.</td></tr><tr><td><code dir="auto">Apply OS-CFAR</code></td><td>Apply the current OS-CFAR parameters. Confirm that detection is ON after applying.</td></tr><tr><td><code dir="auto">Apply CLEAN</code></td><td>Apply the current CLEAN parameters. Confirm that detection is ON after applying.</td></tr></tbody></table>
+<p>OS-CFAR extracts significant returns relative to local noise and clutter. CLEAN helps examine additional components affected by strong targets and their sidelobes. Markers indicate candidate scattering targets in the current frame; assess them using position, stability, and the experiment scene.</p>
+<p>When the monostatic viewer switches to a non-FFT method such as MUSIC, that method supplies targets directly and the regular detection controls are hidden. Switching back to FFT restores them.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="os-cfar-parameters">OS-CFAR parameters</h3><a class="sl-anchor-link" href="#os-cfar-parameters"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “OS-CFAR parameters”</span></a></div>
+<p><img src="/images/sensing-viewers/os-cfar.webp" alt="OS-CFAR switch and parameters"></p>
+<p><code dir="auto">D</code> denotes Doppler; <code dir="auto">R</code> denotes range or delay. Window sizes are expressed in bins on the current detection grid.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Parameter</th><th>Meaning</th><th>Adjustment effect</th></tr></thead><tbody><tr><td><code dir="auto">Rank(%)</code></td><td>Percentile of sorted reference-cell powers used to estimate the background.</td><td>With other settings fixed, raising the rank typically raises the background estimate and threshold, making detection more conservative.</td></tr><tr><td><code dir="auto">Train D</code>, <code dir="auto">Train R</code></td><td>Reference-region widths along Doppler and range.</td><td>Small windows are more sensitive to local fluctuations; large windows can include other targets or different clutter regions.</td></tr><tr><td><code dir="auto">Guard D</code>, <code dir="auto">Guard R</code></td><td>Half-widths of the protected region around a target, excluded from background estimation.</td><td>Cover the region around the main lobe to reduce target-energy contamination of the background estimate.</td></tr><tr><td><code dir="auto">Supp D</code>, <code dir="auto">Supp R</code></td><td>Half-widths of the region where repeated reports are suppressed after accepting a peak.</td><td>Larger values reduce duplicate points but can suppress nearby real targets. They also set the DBSCAN neighborhood.</td></tr><tr><td><code dir="auto">Alpha(dB)</code></td><td>Threshold offset above the estimated background.</td><td>Increasing it reduces weak detections and false alarms; decreasing it increases sensitivity to weak targets.</td></tr><tr><td><code dir="auto">Min R</code></td><td>Minimum range-bin index searched for targets.</td><td>Exclude near-end leakage or an unwanted near region.</td></tr><tr><td><code dir="auto">Min P(dB)</code></td><td>Minimum spectral strength for candidate points.</td><td>Uses the current spectrum’s scale and works together with the local adaptive threshold.</td></tr><tr><td><code dir="auto">DC Excl</code></td><td>Half-width of the excluded region around zero Doppler. A value of 0 retains that region.</td><td>Larger values reduce static residuals as well as detections of stationary and slow targets.</td></tr></tbody></table>
+<p>Start with <code dir="auto">Alpha(dB)</code> and <code dir="auto">Min P(dB)</code> to obtain stable targets, then adjust guard, suppression, and reference regions according to sidelobe width and target spacing. Detection near plot boundaries requires enough reference cells.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="clean-parameters">CLEAN parameters</h3><a class="sl-anchor-link" href="#clean-parameters"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “CLEAN parameters”</span></a></div>
+<p><img src="/images/sensing-viewers/clean.webp" alt="CLEAN switch and parameters"></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Parameter</th><th>Meaning</th><th>Adjustment effect</th></tr></thead><tbody><tr><td><code dir="auto">Loop Gain</code></td><td>Fraction of the selected target response subtracted each iteration, from 0.001 to 1.</td><td>Smaller values leave more residual response and can produce nearby candidate components. Larger values subtract more fully and are more sensitive to model error.</td></tr><tr><td><code dir="auto">Max Targets</code></td><td>Maximum number of target components extracted in one processing pass.</td><td>Set the extraction limit according to scene complexity.</td></tr><tr><td><code dir="auto">Min R</code></td><td>Exclude range cells below this index.</td><td>Avoid strong components such as leakage.</td></tr><tr><td><code dir="auto">Min P(dB)</code></td><td>Stop extracting when the remaining peak falls below this strength.</td><td>Lower values extract more weak components and may include noise or residual sidelobes.</td></tr><tr><td><code dir="auto">DC Excl</code></td><td>Half-width of the excluded region around zero Doppler.</td><td>Set to 0 for static targets and compare with MTI disabled.</td></tr></tbody></table>
+<p>Both methods share the current <code dir="auto">Min R</code> and <code dir="auto">DC Excl</code> limits. Check these two settings after switching methods.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="target-clustering">Target clustering</h2><a class="sl-anchor-link" href="#target-clustering"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Target clustering”</span></a></div>
+<p><img src="/images/sensing-viewers/clustering.webp" alt="DBSCAN neighborhood, MinPts, and Apply DBSCAN"></p>
+<p><code dir="auto">Clustering</code> organizes OS-CFAR detection points. A scattering target can produce several adjacent points; clustering merges these into target entries to reduce duplicate reports.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Control or button</th><th>Function and operation</th></tr></thead><tbody><tr><td><code dir="auto">DBSCAN Eps</code></td><td>Display the Doppler and range neighborhood sizes, respectively <code dir="auto">Supp D + 1</code> and <code dir="auto">Supp R + 1</code>. Change them by adjusting and applying the OS-CFAR suppression settings.</td></tr><tr><td><code dir="auto">MinPts</code> + <code dir="auto">Apply DBSCAN</code></td><td>Set the neighboring-point count required for a dense region. Increasing it helps reject isolated points and may reduce weak-target detections. A value of 1 permits a single point to form a target.</td></tr></tbody></table>
+<p>DBSCAN applies to OS-CFAR results. CLEAN and super-resolution methods output targets directly; selecting a super-resolution method hides the clustering controls.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="monostatic-delay-estimation">Monostatic delay estimation</h2><a class="sl-anchor-link" href="#monostatic-delay-estimation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Monostatic delay estimation”</span></a></div>
+<p><img src="/images/sensing-viewers/delay-estimation.webp" alt="Delay Estimator selection and Peak Rel threshold"></p>
+<p><code dir="auto">Delay Estimation</code> changes the estimator along range or delay to compare the separation of nearby paths or targets.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code dir="auto">Delay Estimator</code> option</th><th>Result and use</th></tr></thead><tbody><tr><td><code dir="auto">FFT</code></td><td>Conventional range-Doppler spectrum for a baseline, scene overview, and OS-CFAR or CLEAN detection.</td></tr><tr><td><code dir="auto">MUSIC</code></td><td>Delay pseudospectrum and peaks for examining nearby paths. Results depend on SNR, data conditions, and model error.</td></tr><tr><td><code dir="auto">CAPON</code></td><td>Adaptive delay spectrum for comparing nearby-component separation and interference effects.</td></tr><tr><td><code dir="auto">ROOTMUSIC</code></td><td>Delay candidates, presented primarily as target points and list entries.</td></tr><tr><td><code dir="auto">ESPRIT</code></td><td>Direct delay estimates for comparison with FFT and MUSIC results.</td></tr></tbody></table>
+<p><code dir="auto">Peak Rel(dB)</code> + <code dir="auto">Apply</code> sets the candidate-peak threshold relative to the strongest peak in the current result. For example, <code dir="auto">-12</code> retains candidates within about 12 dB of the strongest peak. <code dir="auto">-6</code> is more selective; <code dir="auto">-20</code> retains more weak peaks.</p>
+<p>Wait for recalculation after changing methods. Assess super-resolution results against known target positions, peak stability, and the FFT baseline.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="delay-alignment">Delay alignment</h2><a class="sl-anchor-link" href="#delay-alignment"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Delay alignment”</span></a></div>
+<p><img src="/images/sensing-viewers/alignment.webp" alt="Alignment increment input and adjustment buttons"></p>
+<p><code dir="auto">Alignment</code> adjusts the sensing delay reference. Values are in original signal samples, and every button applies an increment.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Button</th><th>Function</th></tr></thead><tbody><tr><td><code dir="auto">Delay</code> + <code dir="auto">Apply</code></td><td>Apply the signed integer as the next alignment increment. Entering 10 and clicking twice applies two successive +10 adjustments.</td></tr><tr><td><code dir="auto">+57600</code></td><td>Adjust by +57600 samples for coarse correction of large offsets.</td></tr><tr><td><code dir="auto">-57600</code></td><td>Adjust by -57600 samples.</td></tr><tr><td><code dir="auto">+10</code></td><td>Adjust by +10 samples.</td></tr><tr><td><code dir="auto">-10</code></td><td>Adjust by -10 samples.</td></tr><tr><td><code dir="auto">+1</code></td><td>Adjust by +1 sample for fine correction.</td></tr><tr><td><code dir="auto">-1</code></td><td>Adjust by -1 sample.</td></tr></tbody></table>
+<p>The monostatic viewer adjusts sensing receive alignment; the bistatic viewer adds a manual delay correction to UE sensing. Select a clear reference peak, use +1 or -1 to observe the direction of change, then choose a suitable step.</p>
+<p>Alignment directly affects the range or delay reference. Record the final alignment conditions and save suitable calibration values in the system configuration to reproduce the experiment.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="system-control-and-calibration">System control and calibration</h2><a class="sl-anchor-link" href="#system-control-and-calibration"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “System control and calibration”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="sampling-stride-and-gain">Sampling stride and gain</h3><a class="sl-anchor-link" href="#sampling-stride-and-gain"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Sampling stride and gain”</span></a></div>
+<p><img src="/images/sensing-viewers/hardware-rf.webp" alt="Hardware &#x26; RF sampling stride, gains, and Hsys calibration"></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Control or button</th><th>Function</th><th>Usage notes</th></tr></thead><tbody><tr><td><code dir="auto">STRD</code> + <code dir="auto">Set</code></td><td>Set the OFDM-symbol interval used for sensing slow-time samples.</td><td>For a fixed sample count, a larger stride spans more time but reduces the slow-time sampling rate and unambiguous Doppler interval. Smaller strides suit faster motion.</td></tr><tr><td><code dir="auto">Frame every N</code> + <code dir="auto">Set</code></td><td>Process/output one complete sensing frame out of N; <code dir="auto">1</code> keeps all.</td><td>Preserves within-frame STRD and unambiguous Doppler interval; reduces refresh rate and downstream load. Micro-Doppler history restarts across gaps; use <code dir="auto">1</code> for continuous analysis.</td></tr><tr><td><code dir="auto">TX Gain(dB)</code> + <code dir="auto">Set</code></td><td>Change BS transmit gain; available in the monostatic viewer.</td><td>Changes the transmitted signal and affects both sensing echoes and the communication link.</td></tr><tr><td><code dir="auto">RX Gain(dB)</code> + <code dir="auto">Set</code></td><td>Change monostatic sensing receive gain.</td><td>Balance weak-target visibility with the receiver’s linear operating range.</td></tr></tbody></table>
+<p>The system configuration determines valid STRD values. With <code dir="auto">compact_mask</code> resource patterns, sampling locations follow the pattern and are adjusted in configuration. Confirm changes using reported parameters and logs. Bistatic TX/RX gains are set in the corresponding BS/UE configurations.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="hsys-system-response-calibration">Hsys system-response calibration</h3><a class="sl-anchor-link" href="#hsys-system-response-calibration"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Hsys system-response calibration”</span></a></div>
+<p><code dir="auto">Calibrate Hsys</code> requests a measurement and compensation of the transmit/receive frequency response to reduce hardware amplitude and phase variations in the sensing spectrum. Monostatic calibration covers its transmit/receive path; bistatic calibration covers the BS-to-UE sensing path.</p>
+<ol>
+<li>Complete system-delay alignment, set suitable TX/RX gains, and prepare enough external attenuation to keep the receiver in its linear operating range.</li>
+<li>Connect the transmit and receive RF ports for the calibration path. For bistatic calibration, connect BS transmit to UE receive and run both backends.</li>
+<li>Click <code dir="auto">Calibrate Hsys</code> and keep the connections and gains stable.</li>
+<li>Wait for backend logs to confirm completion and file saving.</li>
+<li>Stop the relevant backends before restoring antennas or experiment connections, then resume over-the-air measurements.</li>
+</ol>
+<p>The current session uses the new calibration; later sessions load a matching file. Reassess calibration after changing gain, cables, or other RF conditions. Perform Hsys calibration with the prepared RF loopback connection. See <a href="https://openisac.zzw123app.top/docs/tools-workflows/calibration-workflows/">Calibration Workflows</a> for the complete preparation and verification procedure.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="target-list">Target list</h2><a class="sl-anchor-link" href="#target-list"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Target list”</span></a></div>
+<p><img src="/images/sensing-viewers/targets.webp" alt="OpenISAC Top Targets list"></p>
+<p><code dir="auto">OpenISAC Top Targets</code> lists up to 12 entries, sorted by target strength in the current frame. Entry numbers update with each frame’s ordering.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody><tr><td><code dir="auto">R</code></td><td>Range or delay index on the current display grid.</td></tr><tr><td><code dir="auto">rel</code></td><td>Range or delay relative to the current reference, expressed in m or ns when physical parameters are available.</td></tr><tr><td><code dir="auto">f_D</code> / <code dir="auto">v_r</code> (monostatic), <code dir="auto">D</code> (bistatic)</td><td>Monostatic target frequency in Hz or radial velocity in m/s, matching the plot. Bistatic <code dir="auto">D</code> remains a bin index relative to zero Doppler.</td></tr><tr><td><code dir="auto">S</code></td><td>Target strength, interpreted using the selected method’s spectral scale.</td></tr><tr><td><code dir="auto">N</code></td><td>Number of detection points in the target entry.</td></tr><tr><td><code dir="auto">C</code></td><td>Range and Doppler indices of the detection cluster’s center.</td></tr></tbody></table>
+<p>Use the list to inspect target position, strength, and cluster distribution. Compare the stability of nearby results across frames and with the plot when assessing detection thresholds and clustering settings.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="saving-data">Saving data</h2><a class="sl-anchor-link" href="#saving-data"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Saving data”</span></a></div>
+<p><img src="/images/sensing-viewers/save-data.webp" alt="Save Raw, Save RD, and Save MD buttons"></p>
+<p>Each button saves one snapshot in MATLAB <code dir="auto">.mat</code> format, which can also be read with Python.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Button</th><th>Saved content</th><th>Use</th></tr></thead><tbody><tr><td><code dir="auto">Save Raw</code></td><td>Sensing input frame received by the viewer, usually complex channel data, in <code dir="auto">raw_frame</code>.</td><td>Reprocess offline or compare algorithms. The system output mode determines the data’s processing stage.</td></tr><tr><td><code dir="auto">Save RD</code></td><td>Current range/delay-Doppler display matrix in <code dir="auto">rd_map</code>.</td><td>Retain the current spectrum, including display cropping and algorithm effects. ROOTMUSIC/ESPRIT primarily produce target points; record their point lists separately.</td></tr><tr><td><code dir="auto">Save MD</code></td><td>Accumulated micro-Doppler display matrix in <code dir="auto">md_map</code>.</td><td>Save the motion time-frequency result after confirming the plot has updated.</td></tr></tbody></table>
+<p>Files are written to <code dir="auto">capture/</code> under the directory from which the viewer was launched, for example <code dir="auto">capture/capture_rd_20261015_143000.mat</code>. The terminal displays the saved path.</p>
+<p>Record FFT lengths, STRD, algorithm, observation cell, and other experiment conditions to restore range, delay, and frequency units and reproduce results. Filenames have one-second time resolution, so space saves of the same type by at least one second. When comparing data from the same frame, also check acquisition times.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="typical-workflows">Typical workflows</h2><a class="sl-anchor-link" href="#typical-workflows"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Typical workflows”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="moving-targets">Moving targets</h3><a class="sl-anchor-link" href="#moving-targets"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Moving targets”</span></a></div>
+<ol>
+<li>Connect to BS or UE, confirm continuous main-plot updates, and establish an FFT baseline.</li>
+<li>Enable MTI. With OS-CFAR, enable the window functions as needed and observe sidelobes and main-lobe width.</li>
+<li>Set Delay View, Doppler View, and color limits to show the target clearly.</li>
+<li>Enable OS-CFAR, adjust Alpha and Min P, then tune suppression and clustering to reduce duplicate points.</li>
+<li>Check target-list positions, strengths, and stability; save RD and record the settings.</li>
+</ol>
+<div class="sl-heading-wrapper level-h3"><h3 id="static-paths">Static paths</h3><a class="sl-anchor-link" href="#static-paths"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Static paths”</span></a></div>
+<ol>
+<li>Disable MTI and apply a DC Excl value of 0.</li>
+<li>Check Min R so the reference path and near targets fall inside the search region.</li>
+<li>Observe the spectrum near zero Doppler, then enable and tune detection.</li>
+<li>For bistatic experiments, record the delay-compensation method and manual alignment offset when comparing path changes.</li>
+</ol>
+<div class="sl-heading-wrapper level-h3"><h3 id="micro-doppler">Micro-Doppler</h3><a class="sl-anchor-link" href="#micro-doppler"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Micro-Doppler”</span></a></div>
+<ol>
+<li>Locate the target’s range or delay on the main plot.</li>
+<li>Enter its full-grid range index in Range Bin and click Set; apply the ratio described above for the bistatic viewer.</li>
+<li>Enable Micro-Doppler, wait for history to accumulate, and adjust color limits to observe motion patterns.</li>
+<li>Select a new cell when the target crosses range cells, then allow new history to build.</li>
+<li>Click Save MD and record the observation cell, STRD, and sampling conditions.</li>
+</ol>
+<div class="sl-heading-wrapper level-h2"><h2 id="runtime-checks">Runtime checks</h2><a class="sl-anchor-link" href="#runtime-checks"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Runtime checks”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Observation</th><th>Items to check</th></tr></thead><tbody><tr><td>No spectrum after connecting</td><td>Backend computer address, BS/UE status, sensing-output setting, data mode, and terminal errors.</td></tr><tr><td>Target visible in the spectrum but list empty</td><td>Detection switch, Alpha and Min P, Min R and DC Excl, observation range, and OS-CFAR MinPts.</td></tr><tr><td>Static reflection or direct path disappears</td><td>Compare with MTI disabled and check the zero-Doppler exclusion region.</td></tr><tr><td>Micro-Doppler blank or showing an old image</td><td>Micro-Doppler switch, history accumulation, Range Bin, and recent parameter changes.</td></tr><tr><td>Both Window buttons disabled</td><td>Check whether CLEAN is selected; switch to OS-CFAR to enable the windows as needed.</td></tr><tr><td>Some controls hidden</td><td>Viewer type, FFT/super-resolution selection, and expanded or collapsed sections.</td></tr><tr><td>Larger FFT still gives poor target separation</td><td>Effective bandwidth, coherent observation time, SNR, windowing, and target spacing. Zero padding refines the grid.</td></tr><tr><td>STRD change has no visible effect</td><td>Resource-pattern sampling and valid configuration values; confirm reported parameters and logs.</td></tr><tr><td>Previous settings restored after restarting</td><td>Remembered inputs and switches; apply edits with Set/Apply and check the current session.</td></tr></tbody></table>
+<div class="sl-heading-wrapper level-h2"><h2 id="related-documentation">Related documentation</h2><a class="sl-anchor-link" href="#related-documentation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Related documentation”</span></a></div>
+<ul>
+<li><a href="https://openisac.zzw123app.top/docs/reference/scripts-tools/">Scripts and Tools</a></li>
+<li><a href="https://openisac.zzw123app.top/docs/tools-workflows/calibration-workflows/">System Delay and Hsys Calibration</a></li>
+<li><a href="https://openisac.zzw123app.top/docs/signal-processing/monostatic-sensing/">Monostatic Sensing</a></li>
+<li><a href="https://openisac.zzw123app.top/docs/signal-processing/bistatic-sensing/">Bistatic Sensing</a></li>
+<li><a href="https://openisac.zzw123app.top/docs/reference/troubleshooting/">Troubleshooting</a></li>
+</ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="optional-radial-velocity-in-the-monostatic-viewer">Optional radial velocity in the monostatic viewer</h3><a class="sl-anchor-link" href="#optional-radial-velocity-in-the-monostatic-viewer"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Optional radial velocity in the monostatic viewer”</span></a></div>
+<p>In <code dir="auto">plot_sensing_fast.py</code>, open <strong>Display &#x26; View</strong>, enter the actual radiated carrier in <strong>Velocity RF Carrier (GHz)</strong>, and click <strong>Set</strong> (or press Enter). The range-spectrum horizontal axis, micro-Doppler vertical axis, and detected-target list then show radial velocity in <strong>m/s</strong>. Clear the field and apply it to return to Doppler frequency in <strong>Hz</strong>. The applied value is saved for the next launch.</p>
+<p>The conversion is <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>v</mi><mi>r</mi></msub><mo>=</mo><msub><mi>f</mi><mi>D</mi></msub><mi>c</mi><mi mathvariant="normal">/</mi><mo stretchy="false">(</mo><mn>2</mn><msub><mi>f</mi><mi>c</mi></msub><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">v_r = f_D c / (2 f_c)</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.5806em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.0359em;">v</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:-0.0359em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.0278em;">r</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.1076em;">f</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3283em;"><span style="top:-2.55em;margin-left:-0.1076em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.0278em;">D</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mord mathnormal">c</span><span class="mord">/</span><span class="mopen">(</span><span class="mord">2</span><span class="mord"><span class="mord mathnormal" style="margin-right:0.1076em;">f</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:-0.1076em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">c</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mclose">)</span></span></span></span>, with the sign inherited from the displayed Doppler frequency. For an external millimetre-wave converter, enter its RF output carrier rather than the USRP intermediate frequency; for example, enter <code dir="auto">77</code> only when the actual RF carrier is 77 GHz. This display setting does not tune the radio or change FFT processing, detector thresholds, or bin coordinates. Positive/negative motion direction must be checked against the converter and experiment’s frequency-sign convention. The bistatic viewer keeps its Doppler-frequency display because radial speed cannot be inferred with the monostatic formula.</p>
+<p>A separate yellow annotation at the top right of the main spectrum shows the strongest detected return’s range and velocity to one decimal place (or Doppler frequency when the carrier is blank). The annotation keeps a fixed position and size; missing target values are shown as <strong>N/A</strong>.</p>
+<p>The monostatic fast viewer keeps its rolling micro-Doppler history across dropped or decimated frames and inserts zeros at missing slow-time positions. This preserves elapsed time; it does not reconstruct missing echoes, and gaps can weaken peaks or introduce sidelobes. History restarts when the range cell or sampling geometry changes, or the timestamp moves backwards.</p></div><footer class="sl-flex astro-xhxjzfa7"><div class="meta sl-flex astro-xhxjzfa7"></div><div class="pagination-links print:hidden astro-jgq3vlii" dir="ltr"><a href="/docs/tools-workflows/web-config-console/" rel="prev" class="astro-jgq3vlii"><svg aria-hidden="true" class="astro-jgq3vlii astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-jgq3vlii">Previous<br class="astro-jgq3vlii"><span class="link-title astro-jgq3vlii">Web Config Console</span></span></a><a href="/docs/tools-workflows/calibration-workflows/" rel="next" class="astro-jgq3vlii"><svg aria-hidden="true" class="astro-jgq3vlii astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-jgq3vlii">Next<br class="astro-jgq3vlii"><span class="link-title astro-jgq3vlii">Calibration Workflows</span></span></a></div></footer></div></div></main></div></div></div></div></body></html>

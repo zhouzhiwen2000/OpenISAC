@@ -13,7 +13,7 @@ $$
 b_{n,m_{\mathrm{UL},0},\gamma}^\mathrm{UL}=z_n^\mathrm{UL}.
 $$
 
-其余 $m\in\mathcal S_\mathrm{UL}\setminus\{m_{\mathrm{UL},0}\}$ 的符号在 $n\in\mathcal P$ 上放置已知导频，在 $n\in\mathcal D$ 上放置编码 QPSK：
+其余 $m\in\mathcal S_\mathrm{UL}\setminus\{m_{\mathrm{UL},0}\}$ 的符号在 $n\in\mathcal P$ 上放置已知导频，在 $n\in\mathcal D$ 上放置按 `modulation.scheme` 映射的编码载荷：
 
 $$
 b_{n,m,\gamma}^\mathrm{UL}=
@@ -126,7 +126,7 @@ $$
 =G_{n,m}^\mathrm{UL}Y_{n,m,\gamma}^\mathrm{UL}.
 $$
 
-由均衡导频残差估计 $\hat\sigma_\mathrm{eq}^2$，再按 QPSK 星座距离计算 LLR。软信息依次经过解交织、解扰和 LDPC 解码，恢复 UE 发送的信息比特。该过程与下行采用相同的软判决原则，但信道估计、频偏和噪声方差均来自上行自身的参考资源。
+由均衡导频残差估计 $\hat\sigma_\mathrm{eq}^2$，再按所选星座距离计算载荷 LLR。软信息依次经过解交织、解扰和 LDPC 解码，恢复 UE 发送的信息比特。该过程与下行采用相同的软判决原则，但信道估计、频偏和噪声方差均来自上行自身的参考资源。
 
 ## 与 eRTM 的关系
 

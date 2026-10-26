@@ -688,6 +688,7 @@ private:
     const DataResourceGridLayout _data_resource_layout;
     std::vector<uint8_t> _cfo_symbol_skip_mask;
     std::vector<int> _payload_subcarrier_indices_flat;
+    std::vector<size_t> _payload_symbol_rows_flat;
     radio::IDevicePtr dev_;        // RX (+ uplink TX) radio device, any backend
     radio::IRxStreamPtr rx_stream_;
     std::unique_ptr<UplinkTxEngine> _uplink_tx;  // non-null when duplex uplink enabled
@@ -1302,6 +1303,7 @@ private:
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
         AirFrameIdentity identity;
+        float iq_scale = 1.0f; // Per-frame multiplier of the interleaved I/Q transport.
     };
     // int16 (Q16) variant used when cfg_.ldpc.fixed_point is set. The demapper
     // quantizes LLRs directly into this so the whole pipeline runs int16.
@@ -1312,6 +1314,7 @@ private:
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
         AirFrameIdentity identity;
+        float iq_scale = 1.0f; // Per-frame multiplier of the interleaved I/Q transport.
     };
     struct LatencyAccumulator {
         std::atomic<int64_t> rx_queue_total_ns{0};
@@ -1380,6 +1383,7 @@ private:
         AlignedVector fft_output;
         fftwf_plan fft_plan = nullptr;
         std::vector<AlignedVector> symbols;
+        std::vector<uint8_t> modulation_mask;
         AlignedVector sync_symbol_freq;
         std::vector<AlignedVector> midframe_symbol_freqs;
         std::vector<int> pilot_indices;
@@ -1416,6 +1420,7 @@ private:
                 FFTW_FORWARD,
                 FFTW_MEASURE);
             const DataResourceGridLayout layout = build_data_resource_grid_layout(cfg);
+            if (cfg.modulation.scheme != ModulationScheme::Qpsk) modulation_mask.resize(layout.payload_re_count);
             symbols.resize(layout.data_symbol_count);
             for (auto& s : symbols) {
                 s.resize(cfg.ofdm.fft_size);
@@ -1478,6 +1483,7 @@ private:
         AlignedFloatVector llr;
         LDPCCodec::AlignedShortVector llr_i16;
         CpuDemodProfile profile;
+        float iq_scale = 1.0f; // Per-frame multiplier of the interleaved I/Q transport.
     };
 
     struct CpuDemodTask {
@@ -1541,6 +1547,7 @@ private:
         int64_t process_dequeue_time_ns = 0;
         int64_t demod_done_time_ns = 0;
         AirFrameIdentity identity;
+        float iq_scale = 1.0f; // Per-frame multiplier of the interleaved I/Q transport.
     };
 
     struct CpuLdpcWorkerContext {
@@ -1587,11 +1594,12 @@ private:
     LatencyAccumulator _latency_accumulator;
 
     const bool _ldpc_fixed_point{cfg_.ldpc.fixed_point};
+    const DigitalModulation _payload_modulation{cfg_.modulation.scheme};
     // Per-worker LDPCCodec instances live in _cpu_ldpc_contexts (aff3ct
     // decoders are stateful and not shareable); the interleaver/scrambler are
     // const after construction and shared by all workers.
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
-    Scrambler _descrambler{201600, 0x5A};
+    Scrambler _descrambler{LdpcPacketFraming::scrambler_bits(_payload_modulation), 0x5A};
     std::unique_ptr<UdpSender> _udp_output_sender;
 
     // ARQ: downlink receive window for duplicate suppression + ordered delivery
@@ -2776,6 +2784,8 @@ private:
     void _build_compact_payload_indices() {
         _payload_subcarrier_indices_flat.clear();
         _payload_subcarrier_indices_flat.reserve(_data_resource_layout.payload_re_count);
+        _payload_symbol_rows_flat.clear();
+        _payload_symbol_rows_flat.reserve(_data_resource_layout.payload_re_count);
 
         for (size_t sym_idx = 0; sym_idx < _data_resource_layout.data_symbol_count; ++sym_idx) {
             const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[sym_idx];
@@ -2785,6 +2795,7 @@ private:
                 }
                 const int k = _data_resource_layout.non_pilot_subcarrier_indices[di];
                 _payload_subcarrier_indices_flat.push_back(k);
+                _payload_symbol_rows_flat.push_back(sym_idx);
             }
             if (_payload_subcarrier_indices_flat.size() != _data_resource_layout.payload_offsets[sym_idx + 1]) {
                 throw std::runtime_error("Failed to compact payload subcarrier indices for CPU RX.");
@@ -2796,7 +2807,8 @@ private:
         _cfo_symbol_skip_mask = build_cfo_tracking_skip_mask(cfg_, _duplex_layout);
     }
 
-    FrameEvmStats _compute_frame_evm_stats(const std::vector<AlignedVector>& symbols) const
+    FrameEvmStats _compute_frame_evm_stats(const std::vector<AlignedVector>& symbols,
+                                           const std::vector<uint8_t>& modulation_mask) const
     {
         FrameEvmStats stats;
         if (symbols.empty() || _payload_subcarrier_indices_flat.empty()) {
@@ -2814,20 +2826,11 @@ private:
             const auto* __restrict__ sym_ptr = symbol.data();
             const size_t payload_begin = _data_resource_layout.payload_offsets[sym_idx];
             const size_t payload_end = _data_resource_layout.payload_offsets[sym_idx + 1];
-            double sym_err_power_acc = 0.0;
-            uint64_t sym_err_count = 0;
-            // No omp simd: sym_ptr[_payload_subcarrier_indices_flat[idx]] is a gather;
-            // scalar matches the vectorized version here.
-            for (size_t idx = payload_begin; idx < payload_end; ++idx) {
-                const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
-                const float ref_re = std::copysign(QPSKModulator::SQRT_2_INV, sym_ptr[k].real());
-                const float ref_im = std::copysign(QPSKModulator::SQRT_2_INV, sym_ptr[k].imag());
-                const float err_re = sym_ptr[k].real() - ref_re;
-                const float err_im = sym_ptr[k].imag() - ref_im;
-                const double err_power = static_cast<double>(err_re * err_re + err_im * err_im);
-                sym_err_power_acc += err_power;
-                sym_err_count += 1;
-            }
+            double sym_err_power_acc = _payload_modulation.decision_error_sum(
+                sym_ptr, _payload_subcarrier_indices_flat.data() + payload_begin,
+                _payload_modulation.is_qpsk() ? nullptr : modulation_mask.data() + payload_begin,
+                payload_end - payload_begin);
+            uint64_t sym_err_count = payload_end - payload_begin;
             for (size_t i = 0; i < cfg_.ofdm.pilot_positions.size(); ++i) {
                 const size_t k = cfg_.ofdm.pilot_positions[i];
                 if (k >= symbol.size()) {
@@ -5548,6 +5551,12 @@ private:
         prof_step_end = ProfileClock::now();
         result.profile.equalization_total += std::chrono::duration<double, std::micro>(
             prof_step_end - prof_step_start).count();
+        if (!_payload_modulation.is_qpsk() && (sensing_enabled ||
+            (_measurement_enabled && _measurement_active_epoch_id.load(std::memory_order_relaxed) != 0))) {
+            classify_payload_modulation(ctx.modulation_mask.size(), [&](size_t index) {
+                return ctx.symbols[_payload_symbol_rows_flat[index]][_payload_subcarrier_indices_flat[index]];
+            }, _payload_modulation, ctx.modulation_mask.data());
+        }
         result.profile.eq_base_inv_total += prof_eq_base_inv_us;
         result.profile.eq_channel_select_total += prof_eq_channel_select_us;
         result.profile.eq_symbol_inv_total += prof_eq_symbol_inv_us;
@@ -5579,11 +5588,24 @@ private:
                         continue;
                     }
                     const size_t symbol_idx = static_cast<size_t>(symbol_idx_int);
-                    QPSKModulator::remodulate_symbol(
-                        ctx.symbols[symbol_idx],
-                        zc_freq_,
-                        cfg_.ofdm.pilot_positions,
-                        result.sense_frame.tx_symbols[i]);
+                    auto& reference = result.sense_frame.tx_symbols[i];
+                    if (_payload_modulation.is_qpsk()) {
+                        QPSKModulator::remodulate_symbol(ctx.symbols[symbol_idx], zc_freq_,
+                                                       cfg_.ofdm.pilot_positions, reference);
+                    } else {
+                        const auto& equalized = ctx.symbols[symbol_idx];
+                        _payload_modulation.remodulate_samples(
+                            equalized.data(), reference.data(), equalized.size());
+                        for (size_t idx = _data_resource_layout.payload_offsets[symbol_idx];
+                             idx < _data_resource_layout.payload_offsets[symbol_idx + 1]; ++idx) {
+                            const size_t k = static_cast<size_t>(_payload_subcarrier_indices_flat[idx]);
+                            if (ctx.modulation_mask[idx] == 0)
+                                reference[k] = QPSKModulator{}.remodulate(equalized[k]);
+                            else if (ctx.modulation_mask[idx] == 2)
+                                reference[k] = DigitalModulation::remodulate_mixed(equalized[k], reference[k]);
+                        }
+                        for (size_t k : cfg_.ofdm.pilot_positions) reference[k] = zc_freq_[k];
+                    }
                     const size_t non_pilot_base = _data_resource_layout.non_pilot_offsets[symbol_idx];
                     for (size_t di = 0; di < _data_resource_layout.num_non_pilot_subcarriers; ++di) {
                         const size_t flat_idx = non_pilot_base + di;
@@ -5623,13 +5645,15 @@ private:
             // Stats only; recording happens on the control thread right after
             // it updates the matching per-frame SNR (avoids the cross-thread
             // read of non-atomic _snr_db and keeps SNR/EVM pairing per-frame).
-            result.evm = _compute_frame_evm_stats(ctx.symbols);
+            result.evm = _compute_frame_evm_stats(ctx.symbols, ctx.modulation_mask);
             result.evm_valid = true;
         }
         if (_data_resource_layout.payload_re_count > 0) {
             if (_ldpc_fixed_point) {
-                const float scale_llr_q =
-                    scale_llr * static_cast<float>(cfg_.ldpc.fixed_point_scale);
+                const float nominal_scale = scale_llr * static_cast<float>(cfg_.ldpc.fixed_point_scale);
+                const float scale_llr_q = _payload_modulation.is_qpsk()
+                    ? nominal_scale : std::min(nominal_scale, 8192.0f);
+                result.iq_scale = scale_llr_q;
                 result.llr_i16 = _llr_pool_i16.acquire();
                 int16_t* __restrict__ llr_ptr = result.llr_i16.data();
                 for (size_t sym_idx = 0; sym_idx < ctx.symbols.size(); ++sym_idx) {
@@ -5645,6 +5669,7 @@ private:
                 }
                 result.has_llr_i16 = true;
             } else {
+                result.iq_scale = scale_llr;
                 result.llr = _llr_pool.acquire();
                 float* __restrict__ llr_ptr = result.llr.data();
                 for (size_t sym_idx = 0; sym_idx < ctx.symbols.size(); ++sym_idx) {
@@ -6512,6 +6537,7 @@ private:
                     result.frame_dequeue_time_ns,
                     demod_done_time_ns,
                     frame.identity,
+                    result.iq_scale,
                 }, [this]() {
                     return !_bit_processing_running.load(std::memory_order_acquire);
                 })) {
@@ -6525,6 +6551,7 @@ private:
                     result.frame_dequeue_time_ns,
                     demod_done_time_ns,
                     frame.identity,
+                    result.iq_scale,
                 }, [this]() {
                     return !_bit_processing_running.load(std::memory_order_acquire);
                 })) {
@@ -6813,7 +6840,8 @@ private:
                            ScratchVec& deint_scratch,
                            LlrVec& payload_scratch,
                            CpuLdpcWorkerContext& ctx,
-                           CpuLdpcResult& result) {
+                           CpuLdpcResult& result,
+                           float iq_scale) {
         const size_t bits_per_block = ctx.decoder.get_N();
         const size_t bytes_per_ldpc_block = (ctx.decoder.get_K() + 7) / 8;
         if (bits_per_block != LdpcPacketFraming::kLdpcCodeBitsPerBlock ||
@@ -6868,9 +6896,9 @@ private:
             const size_t payload_llr_offset =
                 control_llr_offset + LdpcPacketFraming::kControlBits;
             const size_t next_symbol_offset =
-                symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+                symbol_offset + LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
 
-            if (payload_llr_offset + required_llr > llr.size()) {
+            if (next_symbol_offset > llr.size() / 2) {
                 LOG_G_WARN_M(Demod) << "[Demod] Mini-header requested payload beyond frame: blocks="
                              << payload_blocks << ", seq=" << mini_header.seq;
                 break;
@@ -6883,9 +6911,8 @@ private:
             }
 
             payload_scratch.resize(required_llr);
-            std::copy(llr.begin() + payload_llr_offset,
-                      llr.begin() + payload_llr_offset + required_llr,
-                      payload_scratch.begin());
+            _payload_modulation.demap_scaled_pairs(
+                llr.data() + payload_llr_offset, required_llr, iq_scale, payload_scratch.data(), bits_per_block);
 
             _bit_interleaver->deinterleave_inplace(payload_scratch, deint_scratch);
             _descrambler.soft_descramble(payload_scratch);
@@ -7452,10 +7479,10 @@ private:
                 result->dropped = true; // stale after resync; token keeps order
             } else if (task.is_i16) {
                 _decode_llr_frame(task.llr_i16, ctx.deint_scratch_i16,
-                                  ctx.payload_llr_i16, ctx, *result);
+                                  ctx.payload_llr_i16, ctx, *result, task.iq_scale);
             } else {
                 _decode_llr_frame(task.llr, ctx.deint_scratch,
-                                  ctx.payload_llr, ctx, *result);
+                                  ctx.payload_llr, ctx, *result, task.iq_scale);
             }
             _release_cpu_ldpc_task(task);
             slot.result_queue.producer_commit();
@@ -7617,6 +7644,7 @@ private:
                 task.process_dequeue_time_ns = frame_llr.process_dequeue_time_ns;
                 task.demod_done_time_ns = frame_llr.demod_done_time_ns;
                 task.identity = frame_llr.identity;
+                task.iq_scale = frame_llr.iq_scale;
                 dispatch_ldpc_task(std::move(task));
             } else {
                 LlrFrame frame_llr;
@@ -7645,6 +7673,7 @@ private:
                 task.process_dequeue_time_ns = frame_llr.process_dequeue_time_ns;
                 task.demod_done_time_ns = frame_llr.demod_done_time_ns;
                 task.identity = frame_llr.identity;
+                task.iq_scale = frame_llr.iq_scale;
                 dispatch_ldpc_task(std::move(task));
             }
         }

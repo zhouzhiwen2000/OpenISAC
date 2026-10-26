@@ -5,6 +5,8 @@ description: Downlink-symbol reconstruction with either OTA LoS tracking or eRTM
 
 UE bistatic sensing observes the same $h_\mathrm{DL}(t,\tau)$ as downlink communication, but communication removes the channel while sensing preserves its frequency-domain and slow-time-domain structure. The UE must reconstruct unknown data symbols and prevent BS–UE timing drift from moving the sensing delay axis.
 
+See the [Sensing Viewer Guide](/docs/tools-workflows/sensing-viewers/) for bistatic interface screenshots, controls, and experiment workflows.
+
 ## 1. Downlink-Symbol Reconstruction
 
 ZC, pilot, and full-band channel-reference symbols are known. On data resources, the UE directly hard-decides the equalized QPSK symbols to reduce sensing-reconstruction complexity and latency, without LDPC re-encoding or constellation remapping:

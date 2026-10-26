@@ -863,6 +863,12 @@ public:
     static constexpr size_t kControlBits = kControlSymbols * 2;
     static constexpr size_t kLdpcInfoBytesPerBlock = 63;
     static constexpr size_t kLdpcCodeBitsPerBlock = 1008;
+    // The mini-header payload length is 16 bits; cover even the largest UDP datagram.
+    static constexpr size_t kMaxPayloadCodeBits = ((65535 + 63 - 1) / 63) * 1008;
+    /** @brief Preserve the legacy QPSK scrambler span; new modes cover full packets. */
+    static size_t scrambler_bits(const DigitalModulation& modulation) {
+        return modulation.is_qpsk() ? 201600 : kMaxPayloadCodeBits;
+    }
     static constexpr size_t kLdpcQpskSymbolsPerBlock = kLdpcCodeBitsPerBlock / 2;
     static constexpr uint8_t kVersion = 1;
     static constexpr uint8_t kFlags = 0;
@@ -948,6 +954,11 @@ public:
 
     static size_t packet_qpsk_symbols(size_t payload_blocks) {
         return kControlSymbols + payload_blocks * kLdpcQpskSymbolsPerBlock;
+    }
+
+    /** @brief QPSK control RE plus packed payload RE for the selected modulation. */
+    static size_t packet_symbols(size_t payload_blocks, const DigitalModulation& modulation) {
+        return kControlSymbols + payload_blocks * modulation.symbol_count(kLdpcCodeBitsPerBlock);
     }
 
     static int marker_symbol(size_t idx) {
@@ -1477,6 +1488,54 @@ private:
 
 
 /**
+ * @brief Classify data RE for decision-directed sensing without LDPC decoding.
+ * @param sample Accessor returning equalized IQ at a flattened payload-RE index.
+ * @param mask Preallocated output: 0 = QPSK control, 1 = payload, 2 = unknown.
+ * A valid BCH header identifies each payload extent, including final mapping
+ * padding. Corrupted headers leave the remainder unknown rather than guessing
+ * packet lengths. Known idle fill uses the configured payload constellation.
+ */
+template<typename SampleAt>
+inline void classify_payload_modulation(size_t count, SampleAt sample,
+                                        const DigitalModulation& modulation,
+                                        uint8_t* mask) {
+    if (count == 0) return;
+    std::fill_n(mask, count, uint8_t{2});
+    std::array<float, 2 * LdpcPacketFraming::kIdentityControlSymbols> control{};
+    size_t offset = 0;
+    while (count - offset >= LdpcPacketFraming::kControlSymbols) {
+        const size_t available = std::min(count - offset, LdpcPacketFraming::kIdentityControlSymbols);
+        for (size_t i = 0; i < available; ++i) {
+            const auto value = sample(offset + i);
+            control[2 * i] = value.real();
+            control[2 * i + 1] = value.imag();
+        }
+        if (!LdpcPacketFraming::detect_marker_llrs(control.data())) {
+            std::fill(mask + offset, mask + count, uint8_t{1});
+            return;
+        }
+        LdpcMiniHeader header{};
+        if (available == LdpcPacketFraming::kIdentityControlSymbols &&
+            LdpcPacketFraming::decode_identity_control_llrs(
+                control.data() + LdpcPacketFraming::kMarkerBits, header)) {
+            std::fill_n(mask + offset, LdpcPacketFraming::kIdentityControlSymbols, uint8_t{0});
+            offset += LdpcPacketFraming::kIdentityControlSymbols;
+            continue;
+        }
+        if (!LdpcPacketFraming::decode_mini_header_llrs(
+                control.data() + LdpcPacketFraming::kMarkerBits, header) ||
+            LdpcPacketFraming::is_air_frame_identity_hi_flags(header.flags)) return;
+        const size_t size = LdpcPacketFraming::packet_symbols(
+            LdpcPacketFraming::payload_blocks_for_len(header.payload_len), modulation);
+        if (size > count - offset) return;
+        std::fill_n(mask + offset, LdpcPacketFraming::kControlSymbols, uint8_t{0});
+        std::fill(mask + offset + LdpcPacketFraming::kControlSymbols, mask + offset + size, uint8_t{1});
+        offset += size;
+    }
+    std::fill(mask + offset, mask + count, uint8_t{1});
+}
+
+/**
  * @brief Manager for FFTW Wisdom.
  * 
  * Handles importing and exporting FFTW wisdom to/from a file.
@@ -1506,7 +1565,7 @@ public:
 };
 
 /**
- * @brief QPSK Scrambler/Descrambler.
+ * @brief Payload bit scrambler/descrambler.
  * 
  * Uses a Linear Feedback Shift Register (LFSR) to generate a pseudo-random sequence
  * for scrambling and descrambling bits. This helps in randomizing the data to avoid
@@ -1560,7 +1619,7 @@ private:
 };
 
 /**
- * @brief Fixed block bit interleaver for LDPC-coded QPSK payloads.
+ * @brief Fixed block bit interleaver for LDPC-coded payloads.
  *
  * The permutation is a row/column matrix transpose applied independently to
  * each coded block. For the default LDPC(1008,504) path, a 21 x 48 layout

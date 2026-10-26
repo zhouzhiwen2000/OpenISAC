@@ -133,7 +133,7 @@ struct QueuedTxFrame {
  * - tx_thread: Streams generated time-domain frames to USRP.
  * - rx_thread: Receives self-reflected signals (for sensing).
  * - sensing_thread: Processes received signals for further analysis.
- * - ldpc_encode_thread: Converts payload packets into LDPC/QPSK symbols.
+ * - ldpc_encode_thread: Converts payload packets into LDPC-coded constellation symbols.
  * - udp_recv_thread: Receives user UDP payloads for downlink transmission.
  */
 class BSEngine {
@@ -249,8 +249,9 @@ public:
 
         const size_t total_data_samples = _data_resource_layout.non_pilot_re_count;
         _pregen_symbols.resize(total_data_samples);
+        _dist = std::uniform_int_distribution<>(0, static_cast<int>(_payload_modulation.order()) - 1);
         for (auto& x : _pregen_symbols) {
-            x = _qpsk_symbol_from_int(_dist(_gen));
+            x = _payload_modulation.modulate(static_cast<unsigned>(_dist(_gen)));
         }
         _build_symbol_templates();
         LOG_G_INFO_M(Sensing) << "Payload resource grid: " << _data_resource_layout.payload_re_count
@@ -469,6 +470,7 @@ public:
 
 private:
     Config _cfg;
+    const DigitalModulation _payload_modulation{_cfg.modulation.scheme};
     radio::IDevicePtr _tx_dev;        // TX (downlink) radio device, any backend
     radio::IDevicePtr _uplink_rx_dev; // dedicated uplink RX device; null when sharing _tx_dev
     radio::ITxStreamPtr _tx_stream;
@@ -532,7 +534,7 @@ private:
     LDPCCodec::AlignedByteVector _ldpc_input_bytes;
     LDPCCodec::AlignedIntVector _ldpc_encoded_bits_scratch;
     LDPCCodec::AlignedIntVector _ldpc_qpsk_scratch;
-    Scrambler scrambler{201600, 0x5A};
+    Scrambler scrambler{LdpcPacketFraming::scrambler_bits(_payload_modulation), 0x5A};
     
     // MTI Filter
 
@@ -1095,7 +1097,7 @@ private:
         }
 
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
-        const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+        const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
         const size_t effective_re = _effective_payload_re_count();
         if (packet_qpsk_symbols > effective_re) {
             LOG_G_WARN_M(Ertm) << "[eRTM] TO payload does not fit in one downlink frame; dropping measurement"
@@ -1895,12 +1897,8 @@ private:
         }
     }
 
-    static std::complex<float> _qpsk_symbol_from_int(int sym) {
-        const int idx = (sym & 3) * 2;
-        return std::complex<float>(
-            QPSKModulator::QPSK_TABLE_FLAT[idx],
-            QPSKModulator::QPSK_TABLE_FLAT[idx + 1]
-        );
+    std::complex<float> _qpsk_symbol_from_int(int sym) const {
+        return _payload_modulation.modulate_token(sym);
     }
 
     void _build_symbol_templates() {
@@ -1982,8 +1980,6 @@ private:
         }
     }
 
-    // Use QPSKModulator from OFDMCore.hpp for QPSK modulation
-    QPSKModulator _qpsk_modulator;
 
     void _append_measurement_epoch_row(uint32_t epoch_id, double tx_gain_db, uint32_t packets_sent) {
         if (_measurement_summary_path.empty()) {
@@ -2046,7 +2042,7 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload_len);
         const size_t padded_len = payload_blocks * bytes_per_ldpc_block;
         const size_t packet_qpsk_symbols =
-            LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+            LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
         // Capacity is after per-frame Identity SIB reservation.
         const size_t effective_re = _effective_payload_re_count();
         if (packet_qpsk_symbols > effective_re) {
@@ -2101,7 +2097,7 @@ private:
             _bit_interleaver->interleave_inplace(
                 _ldpc_encoded_bits_scratch,
                 _interleaver_bits_scratch);
-            LDPCCodec::pack_bits_qpsk(_ldpc_encoded_bits_scratch, _ldpc_qpsk_scratch);
+            _payload_modulation.pack_bits(_ldpc_encoded_bits_scratch, _ldpc_qpsk_scratch, _ldpc.get_N());
         }
         prof_step_end = ProfileClock::now();
         profile.payload_encode_us =
@@ -2281,7 +2277,7 @@ private:
      * 1. Constructs a protocol header.
      * 2. Performs LDPC encoding on the header and payload.
      * 3. Scrambles and interleaves the encoded bits.
-     * 4. Maps interleaved bits to QPSK symbols.
+     * 4. Maps interleaved bits to the selected payload constellation.
      * 5. Pushes ready-to-modulate packets to the data buffer.
      */
     void _ldpc_encode_proc() {
@@ -2548,7 +2544,7 @@ private:
                         continue;
                     }
                     if (!entry.encoded_qpsk.empty()) {
-                        // Cheap retransmit: push pre-encoded QPSK directly
+                        // Cheap retransmit: push pre-encoded symbol tokens directly
                         AlignedIntVector retrans = _data_packet_pool.acquire();
                         retrans.assign(entry.encoded_qpsk.begin(), entry.encoded_qpsk.end());
                         const size_t queued_packets_ahead = _data_packet_buffer.size();
@@ -2582,7 +2578,7 @@ private:
                         const size_t payload_blocks =
                             LdpcPacketFraming::payload_blocks_for_len(entry.raw_payload.size());
                         const size_t packet_qpsk_symbols =
-                            LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+                            LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
                         const int64_t estimated_tx_ms =
                             now + _estimate_arq_queue_delay_ms(encoded_size, packet_qpsk_symbols);
                         _arq_dl_retransmit_enqueued.fetch_add(1, std::memory_order_relaxed);
@@ -2637,7 +2633,7 @@ private:
      * 
      * Continuous loop that:
      * 1. Fetches data packets from the data buffer.
-     * 2. Maps bits to QPSK symbols.
+     * 2. Maps control and payload tokens to constellation points.
      * 3. Inserts pilots and ZC sequences (Sync).
      * 4. Performs IFFT to generate time-domain OFDM symbols.
      * 5. Adds Cyclic Prefix (CP).

@@ -65,6 +65,7 @@ private:
         int32_t applied_duti_samples = 0;
         AlignedVector channel_freq;
         AirFrameIdentity identity;
+        float iq_scale = 1.0f;
     };
 
     // int16 (Q16) variant used when _link_cfg.ldpc.fixed_point is set.
@@ -76,6 +77,7 @@ private:
         int32_t applied_duti_samples = 0;
         AlignedVector channel_freq;
         AirFrameIdentity identity;
+        float iq_scale = 1.0f;
     };
 
     static LDPCCodec::LDPCConfig _ldpc_cfg(const Config& c) {
@@ -903,7 +905,7 @@ public:
                         frame->generation,
                         frame->applied_duti_samples,
                         frame->channel_freq,
-                        frame->identity);
+                        frame->identity, frame->iq_scale);
                 } else {
                     LOG_RT_WARN_HZ_M(UlRx, 5)
                         << "[UL-RX] dropping stale fixed-point LLR frame"
@@ -928,7 +930,7 @@ public:
                         frame->generation,
                         frame->applied_duti_samples,
                         frame->channel_freq,
-                        frame->identity);
+                        frame->identity, frame->iq_scale);
                 } else {
                     LOG_RT_WARN_HZ_M(UlRx, 5)
                         << "[UL-RX] dropping stale floating-point LLR frame"
@@ -1042,8 +1044,9 @@ public:
         // 7) Build the matched payload-RE LLR stream (symbol-major, flat order).
         if (_layout.payload_re_count > 0 && _ldpc_fixed_point) {
             // Fused pow2 quantization: write int16 LLRs directly (no extra pass).
-            const float scale_llr_q =
-                scale_llr * static_cast<float>(_link_cfg.ldpc.fixed_point_scale);
+            const float nominal_scale = scale_llr * static_cast<float>(_link_cfg.ldpc.fixed_point_scale);
+            const float scale_llr_q = _payload_modulation.is_qpsk()
+                ? nominal_scale : std::min(nominal_scale, 8192.0f);
             UplinkLlrFrameI16* llr_frame = nullptr;
             // LLR queue cushions decode; signal_proc may backoff if full.
             SPSCBackoff llr_backoff;
@@ -1058,6 +1061,7 @@ public:
             llr_frame->frame_index = frame_index;
             llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
+            llr_frame->iq_scale = scale_llr_q;
             llr_frame->applied_duti_samples = applied_duti_samples;
             if (llr_frame->channel_freq.size() != _h_est.size()) {
                 llr_frame->channel_freq.resize(_h_est.size());
@@ -1100,6 +1104,7 @@ public:
             llr_frame->frame_index = frame_index;
             llr_frame->generation = generation;
             llr_frame->noise_var = noise_var;
+            llr_frame->iq_scale = scale_llr;
             llr_frame->applied_duti_samples = applied_duti_samples;
             if (llr_frame->channel_freq.size() != _h_est.size()) {
                 llr_frame->channel_freq.resize(_h_est.size());
@@ -1279,7 +1284,8 @@ public:
         uint64_t ul_rx_generation,
         int32_t applied_duti_samples,
         const AlignedVector& channel_freq,
-        const AirFrameIdentity& air_identity)
+        const AirFrameIdentity& air_identity,
+        float iq_scale)
     {
         const size_t bits_per_block = _ldpc.get_N();
         const size_t bytes_per_block = (_ldpc.get_K() + 7) / 8;
@@ -1336,8 +1342,8 @@ public:
             const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(hdr.payload_len);
             const size_t required = payload_blocks * bits_per_block;
             const size_t payload_off = control_off + LdpcPacketFraming::kControlBits;
-            const size_t next_off = symbol_offset + LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
-            if (payload_off + required > frame_llr.size()) {
+            const size_t next_off = symbol_offset + LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+            if (next_off > frame_llr.size() / 2) {
                 LOG_RT_WARN_HZ_M(UlRx, 5)
                     << "[UL-RX] payload extends beyond LLR frame; dropping incomplete packet"
                     << ": seq=" << hdr.seq
@@ -1351,8 +1357,8 @@ public:
             // the hot per-frame path) — std::copy fully overwrites payload_llr.
             LlrVec& payload_llr = payload_scratch;
             payload_llr.resize(required);
-            std::copy(frame_llr.begin() + payload_off,
-                      frame_llr.begin() + payload_off + required, payload_llr.begin());
+            _payload_modulation.demap_scaled_pairs(
+                frame_llr.data() + payload_off, required, iq_scale, payload_llr.data(), bits_per_block);
             _bit_interleaver->deinterleave_inplace(payload_llr, deint_scratch);
             _descrambler.soft_descramble(payload_llr);
             LDPCCodec::AlignedByteVector& decoded = _decoded_scratch;
@@ -1605,6 +1611,7 @@ public:
 
     const Config _link_cfg;
     const Config _cfg;
+    const DigitalModulation _payload_modulation{_cfg.modulation.scheme};
     const DuplexFrameLayout _duplex;
     const DataResourceGridLayout _layout;
     AlignedVector _zc_freq;
@@ -1652,7 +1659,7 @@ public:
     LDPCCodec::AlignedShortVector _deint_scratch_i16;     // int16 path scratch
     LDPCCodec::AlignedShortVector _payload_llr_scratch_i16; // int16 path per-packet input
     LDPCCodec::AlignedByteVector _decoded_scratch;        // reused per-packet LDPC output
-    Scrambler _descrambler{201600, 0x5A};
+    Scrambler _descrambler{LdpcPacketFraming::scrambler_bits(_payload_modulation), 0x5A};
     std::unique_ptr<UdpSender> _udp_out;
 
     HardwareRxAgc _rx_agc;

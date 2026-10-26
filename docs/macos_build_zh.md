@@ -6,7 +6,7 @@
 
 - 主 README 仍然以 Ubuntu 24.04 作为后端主平台。
 - macOS 仅支持 CPU 版构建，不支持 CUDA 目标。
-- `isolate_cpus.bash` 等实时调优脚本是 Linux 专用的。
+- `isolate_cpus.py` 等实时调优脚本是 Linux 专用的。
 - UHD 请只保留一套来源。不要在同一个 shell 环境里混用 Homebrew 和 MacPorts 的 UHD。
 
 ## 1. 安装前置依赖

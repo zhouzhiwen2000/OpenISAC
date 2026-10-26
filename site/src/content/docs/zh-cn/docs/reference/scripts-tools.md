@@ -7,6 +7,8 @@ description: 按用途查找 OpenISAC 常用辅助脚本、启动命令和使用
 
 ## 感知可视化
 
+两个界面的用途、截图、按钮功能和实验流程见[感知界面操作指南](/zh-cn/docs/tools-workflows/sensing-viewers/)。
+
 BS 和 UE 后端已经运行且开启对应感知输出后，启动查看器：
 
 ```bash

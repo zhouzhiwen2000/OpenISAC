@@ -43,6 +43,25 @@ description: BS 运行配置参数、取值和作用说明。
 | `simulation.targets[]` | `object[]` | 可选 | 单站感知点目标，字段为 `range_m`、`velocity_mps`、`gain_db`、`angle_deg`。 |
 | `simulation.bistatic_targets[]` | `object[]` | 可选 | 双站/通信点目标，字段同上。 |
 
+### `modulation`
+
+| 路径 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `modulation.scheme` | `string` | `QPSK` | 业务载荷调制方式：`BPSK`、`QPSK`、`8PSK`、`16QAM`、`32QAM` 或 `64QAM`。同时用于上下行，BS 与 UE 必须一致，重启后生效。 |
+
+在两端 YAML 中添加或修改：
+
+```yaml
+modulation:
+  scheme: 16QAM
+```
+
+也可在 `config_web_editor` 的 BS、UE 页面中选择 **Payload modulation** / `scheme` 并保存。两端停止后修改配置，再使用原启动脚本重新启动。省略该配置时使用 QPSK。
+
+所有载荷星座均采用 Gray 编码，并归一化到单位平均符号能量。32QAM 为 **8×4 矩形星座**。同步序列和导频保持原设计，包标记、包头及帧标识仍使用 QPSK。调制方式由两端配置约定，不进行自动协商。
+
+每个载荷符号分别承载 1、2、3、4、5、6 个编码比特。较高阶调制需要更好的信噪比、相位稳定性和射频线性度；在相同采样率和资源网格下可提高理论载荷容量，实际 UDP 吞吐还取决于 LDPC 处理能力、帧开销和丢包情况。详见[软解调与 LDPC](/zh-cn/docs/signal-processing/ue-reception/#软信息与-ldpc)。
+
 ### `rf_sampling`
 
 | 参数 | 类型/单位 | 典型值 | 说明 |

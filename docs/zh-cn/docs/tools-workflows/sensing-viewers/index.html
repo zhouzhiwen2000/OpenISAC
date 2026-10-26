@@ -1,0 +1,736 @@
+<!DOCTYPE html><html lang="zh-CN" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-vdxcvpsm"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>感知界面操作指南 | OpenISAC 文档</title><link rel="canonical" href="https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/sensing-viewers/"/><link rel="alternate" hreflang="en" href="https://openisac.zzw123app.top/docs/tools-workflows/sensing-viewers/"/><link rel="alternate" hreflang="zh-CN" href="https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/sensing-viewers/"/><link rel="alternate" hreflang="x-default" href="https://openisac.zzw123app.top/docs/tools-workflows/sensing-viewers/"/><link rel="sitemap" href="/sitemap-index.xml"/><link rel="shortcut icon" href="/images/icon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.0.7"/><meta name="generator" content="Starlight v0.41.3"/><meta property="og:title" content="感知界面操作指南"/><meta property="og:type" content="article"/><meta property="og:url" content="https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/sensing-viewers/"/><meta property="og:locale" content="zh-CN"/><meta property="og:description" content="单站与双站感知界面的截图、按钮功能、参数调节和典型实验流程。"/><meta property="og:site_name" content="OpenISAC 文档"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="单站与双站感知界面的截图、按钮功能、参数调节和典型实验流程。"/><script>
+  window.StarlightThemeProvider = (() => {
+    const storageKey = "starlight-theme";
+    const storedTheme =
+      typeof localStorage !== "undefined" && localStorage.getItem(storageKey);
+    const getPreferredColorScheme = () =>
+      window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    const theme =
+      storedTheme === null
+        ? "light"
+        : storedTheme === "dark" || storedTheme === "light"
+          ? storedTheme
+          : getPreferredColorScheme();
+
+    document.documentElement.dataset.theme = theme;
+
+    return {
+      updatePickers(theme = storedTheme === null ? "light" : storedTheme || "auto") {
+        document.querySelectorAll("starlight-theme-select").forEach((picker) => {
+          const select = picker.querySelector("select");
+          if (select) select.value = theme;
+          const tmpl = document.querySelector("#theme-icons");
+          const newIcon = tmpl && tmpl.content.querySelector("." + theme);
+          if (newIcon) {
+            const oldIcon = picker.querySelector("svg.label-icon");
+            if (oldIcon) {
+              oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+            }
+          }
+        });
+      },
+      getPreferredColorScheme,
+    };
+  })();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 6.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11Zm0-3.5a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1ZM4 11h1a1 1 0 1 1 0 2H4a1 1 0 0 1 0-2Zm15 0h1a1 1 0 1 1 0 2h-1a1 1 0 1 1 0-2ZM6.34 4.93l.71.71a1 1 0 0 1-1.41 1.41l-.71-.71a1 1 0 0 1 1.41-1.41Zm11.32 0a1 1 0 0 1 1.41 1.41l-.71.71a1 1 0 0 1-1.41-1.41l.71-.71ZM6.34 19.07a1 1 0 0 1-1.41-1.41l.71-.71a1 1 0 0 1 1.41 1.41l-.71.71Zm12.73-1.41a1 1 0 0 1-1.41 1.41l-.71-.71a1 1 0 0 1 1.41-1.41l.71.71ZM12 19a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0v-1a1 1 0 0 1 1-1Z"></path></svg><svg aria-hidden="true" class="dark" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8 8 0 0 1-11.5-9.36A1 1 0 0 0 7.82 2.3 10 10 0 1 0 22 14.05a1 1 0 0 0-.36-1.05Z"></path></svg><svg aria-hidden="true" class="auto" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17 4H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1h-1V7a3 3 0 0 0-3-3ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"></path></svg></template><link rel="stylesheet" href="/_astro/print.ehPL0gv-.css" media="print"><link rel="stylesheet" href="/_astro/common.Bsh3d0Jh.css"><script type="module" src="/_astro/page.B2uBVZjk.js"></script></head><body class="astro-vdxcvpsm"><a class="sl-skip-link astro-vxeigawq" href="#_top">跳转到内容</a><div class="page sl-flex astro-gqpr5s5a"><header class="header astro-gqpr5s5a"><div class="header astro-nczgtkxc"><div class="title-wrapper sl-flex astro-nczgtkxc"><a href="/zh-cn" class="site-title sl-flex astro-clw6ags5"><img class="light:sl-hidden print:hidden astro-clw6ags5" alt="OpenISAC" src="/_astro/logo_light.BdIggePt.svg" width="975" height="509"><img class="dark:sl-hidden print:block astro-clw6ags5" alt="OpenISAC" src="/_astro/logo.OnmkP0qs.svg" width="975" height="509"><span class="astro-clw6ags5" translate="no">OpenISAC 文档</span></a></div><div class="sl-flex print:hidden astro-nczgtkxc"><site-search class="astro-nczgtkxc astro-r5ar4xm7" data-translations="{&quot;placeholder&quot;:&quot;搜索&quot;}"><button data-open-modal disabled aria-label="搜索" aria-keyshortcuts="Control+K" class="astro-r5ar4xm7"><svg aria-hidden="true" class="astro-r5ar4xm7 astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg><span class="sl-hidden md:sl-block astro-r5ar4xm7" aria-hidden="true">搜索</span><kbd class="sl-hidden md:sl-flex astro-r5ar4xm7" style="display: none;"><kbd class="astro-r5ar4xm7">Ctrl</kbd><kbd class="astro-r5ar4xm7">K</kbd></kbd></button><dialog style="padding:0" aria-label="搜索" class="astro-r5ar4xm7"><div class="dialog-frame sl-flex astro-r5ar4xm7"><button data-close-modal class="sl-flex md:sl-hidden astro-r5ar4xm7">取消</button><div class="search-container astro-r5ar4xm7"><div id="starlight__search" class="astro-r5ar4xm7"></div></div></div></dialog></site-search><script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script><script type="module" src="/_astro/Search.astro_astro_type_script_index_0_lang.vTFUHulS.js"></script></div><div class="sl-hidden md:sl-flex print:hidden right-group astro-nczgtkxc"><div class="sl-flex social-icons astro-nczgtkxc"><a href="https://github.com/zhouzhiwen2000/OpenISAC" rel="me" class="sl-flex astro-cg55etiy"><span class="sr-only astro-cg55etiy">GitHub</span><svg aria-hidden="true" class="astro-cg55etiy astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">选择主题</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="dark" class="astro-r2p65idu">深色</option><option value="light" class="astro-r2p65idu">浅色</option><option value="auto" selected class="astro-r2p65idu">自动</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><script type="module">var e=`starlight-theme`,t=e=>e===`auto`||e===`dark`||e===`light`?e:`auto`,n=()=>t(typeof localStorage<`u`&&localStorage.getItem(e));function r(t){typeof localStorage<`u`&&localStorage.setItem(e,t===`light`||t===`dark`?t:``)}var i=()=>matchMedia(`(prefers-color-scheme: light)`).matches?`light`:`dark`;function a(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e===`auto`?i():e,r(e)}matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,()=>{n()===`auto`&&a(`auto`)});var o=class extends HTMLElement{constructor(){super(),a(n()),this.querySelector(`select`)?.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&a(t(e.currentTarget.value))})}};customElements.define(`starlight-theme-select`,o);</script><starlight-lang-select><label style="--sl-select-width: 7em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">选择语言</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path fill-rule="evenodd" d="M8.516 3a.94.94 0 0 0-.941.94v1.15H2.94a.94.94 0 1 0 0 1.882h7.362a7.422 7.422 0 0 1-1.787 3.958 7.42 7.42 0 0 1-1.422-2.425.94.94 0 1 0-1.774.627 9.303 9.303 0 0 0 1.785 3.043 7.422 7.422 0 0 1-4.164 1.278.94.94 0 1 0 0 1.881 9.303 9.303 0 0 0 5.575-1.855 9.303 9.303 0 0 0 4.11 1.74l-.763 1.525a.968.968 0 0 0-.016.034l-1.385 2.77a.94.94 0 1 0 1.683.841l1.133-2.267h5.806l1.134 2.267a.94.94 0 0 0 1.683-.841l-1.385-2.769a.95.95 0 0 0-.018-.036l-3.476-6.951a.94.94 0 0 0-1.682 0l-1.82 3.639a7.423 7.423 0 0 1-3.593-1.256 9.303 9.303 0 0 0 2.27-5.203h1.894a.94.94 0 0 0 0-1.881H9.456V3.94A.94.94 0 0 0 8.516 3Zm6.426 11.794a1.068 1.068 0 0 1-.02.039l-.703 1.407h3.924l-1.962-3.924-1.24 2.478Z" clip-rule="evenodd"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="/docs/tools-workflows/sensing-viewers/" class="astro-r2p65idu">English</option><option value="/zh-cn/docs/tools-workflows/sensing-viewers/" selected class="astro-r2p65idu">简体中文</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-lang-select><script type="module">var e=class extends HTMLElement{constructor(){super();let e=this.querySelector(`select`);e&&(e.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=e.currentTarget.value)}),window.addEventListener(`pageshow`,t=>{if(!t.persisted)return;let n=e.querySelector(`option[selected]`)?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}};customElements.define(`starlight-lang-select`,e);</script></div></div></header><nav class="sidebar print:hidden astro-gqpr5s5a" aria-label="主要"><starlight-menu-button class="print:hidden astro-vvx7mffu"><button aria-expanded="false" aria-label="菜单" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-vvx7mffu"><svg aria-hidden="true" class="open-menu astro-vvx7mffu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg><svg aria-hidden="true" class="close-menu astro-vvx7mffu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg></button></starlight-menu-button><script type="module">var e=class extends HTMLElement{btn=this.querySelector(`button`);constructor(){super(),this.btn.addEventListener(`click`,()=>this.toggleExpanded());let e=this.closest(`nav`);e&&e.addEventListener(`keyup`,e=>this.closeOnEscape(e)),matchMedia(`(min-width: 50em)`).addEventListener(`change`,()=>this.setExpanded(!1))}setExpanded(e){this.setAttribute(`aria-expanded`,String(e)),document.body.toggleAttribute(`data-mobile-menu-expanded`,e),document.querySelectorAll(`.main-frame, .sl-skip-link`).forEach(t=>{t.toggleAttribute(`inert`,e)})}toggleExpanded(){this.setExpanded(this.getAttribute(`aria-expanded`)!==`true`)}closeOnEscape(e){e.code===`Escape`&&(this.setExpanded(!1),this.btn.focus())}};customElements.define(`starlight-menu-button`,e);</script><div id="starlight__sidebar" class="sidebar-pane astro-gqpr5s5a"><div class="sidebar-content sl-flex astro-gqpr5s5a"><sl-sidebar-state-persist data-hash="19tfha3" class="astro-f5yvicm7"><script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script><ul class="top-level astro-ojxuodky"><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">概览</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="0"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/zh-cn/docs/" class="astro-ojxuodky"><span class="astro-ojxuodky">OpenISAC 概览</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">快速开始</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="1"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/zh-cn/docs/getting-started/hardware/" class="astro-ojxuodky"><span class="astro-ojxuodky">硬件准备</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/getting-started/installation/" class="astro-ojxuodky"><span class="astro-ojxuodky">软件安装</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/getting-started/build/" class="astro-ojxuodky"><span class="astro-ojxuodky">编译</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/getting-started/performance-tuning/" class="astro-ojxuodky"><span class="astro-ojxuodky">系统性能调优</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/getting-started/cpu-isolation-execution/" class="astro-ojxuodky"><span class="astro-ojxuodky">CPU 隔离和执行</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/getting-started/first-ota-run/" class="astro-ojxuodky"><span class="astro-ojxuodky">首次 OTA 运行</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">系统架构</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="2"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/zh-cn/docs/architecture/system/" class="astro-ojxuodky"><span class="astro-ojxuodky">整体架构</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/architecture/bs-pipeline/" class="astro-ojxuodky"><span class="astro-ojxuodky">BS 运行流水线</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/architecture/ue-pipeline/" class="astro-ojxuodky"><span class="astro-ojxuodky">UE 运行流水线</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/architecture/frontend-transport/" class="astro-ojxuodky"><span class="astro-ojxuodky">前端与传输</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">信号处理</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="3"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/" class="astro-ojxuodky"><span class="astro-ojxuodky">处理总览</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/signal-model/" class="astro-ojxuodky"><span class="astro-ojxuodky">信号模型</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/ofdm-resources/" class="astro-ojxuodky"><span class="astro-ojxuodky">OFDM 资源</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/initial-synchronization/" class="astro-ojxuodky"><span class="astro-ojxuodky">初始同步</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/ue-reception/" class="astro-ojxuodky"><span class="astro-ojxuodky">下行通信</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/uplink-communication/" class="astro-ojxuodky"><span class="astro-ojxuodky">上行通信</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/monostatic-sensing/" class="astro-ojxuodky"><span class="astro-ojxuodky">多通道单站感知</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/signal-processing/bistatic-sensing/" class="astro-ojxuodky"><span class="astro-ojxuodky">UE 双站感知</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">工具与工作流</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="4"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/channel-simulator/" class="astro-ojxuodky"><span class="astro-ojxuodky">信道仿真器</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/xr1710g-receiver/" class="astro-ojxuodky"><span class="astro-ojxuodky">XR1710G 接收 UE</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/web-config-console/" class="astro-ojxuodky"><span class="astro-ojxuodky">网页配置台</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/sensing-viewers/" aria-current="page" class="astro-ojxuodky"><span class="astro-ojxuodky">感知界面操作指南</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/calibration-workflows/" class="astro-ojxuodky"><span class="astro-ojxuodky">校准流程</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/video-udp-workflows/" class="astro-ojxuodky"><span class="astro-ojxuodky">视频与 UDP 工作流</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/udp-link-test/" class="astro-ojxuodky"><span class="astro-ojxuodky">UDP 链路测试</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/tools-workflows/macos-development/" class="astro-ojxuodky"><span class="astro-ojxuodky">macOS 与开发说明</span></a></li></ul></details></li><li class="astro-ojxuodky"><details open class="astro-ojxuodky"><summary class="astro-ojxuodky"><span class="group-label astro-ojxuodky"><span class="large astro-ojxuodky">参考</span></span><svg aria-hidden="true" class="caret astro-ojxuodky astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></summary><sl-sidebar-restore data-index="5"></sl-sidebar-restore><ul class="astro-ojxuodky"><li class="astro-ojxuodky"><a href="/zh-cn/docs/reference/" class="astro-ojxuodky"><span class="astro-ojxuodky">参考总览</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/reference/bs-yaml/" class="astro-ojxuodky"><span class="astro-ojxuodky">BS YAML 参考</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/reference/ue-yaml/" class="astro-ojxuodky"><span class="astro-ojxuodky">UE YAML 参考</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/reference/scripts-tools/" class="astro-ojxuodky"><span class="astro-ojxuodky">脚本与工具</span></a></li><li class="astro-ojxuodky"><a href="/zh-cn/docs/reference/troubleshooting/" class="astro-ojxuodky"><span class="astro-ojxuodky">故障排查</span></a></li></ul></details></li></ul><script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script></sl-sidebar-state-persist><div class="md:sl-hidden"><div class="mobile-preferences sl-flex astro-b5gddk54"><div class="social-icons astro-b5gddk54"><a href="https://github.com/zhouzhiwen2000/OpenISAC" rel="me" class="sl-flex astro-cg55etiy"><span class="sr-only astro-cg55etiy">GitHub</span><svg aria-hidden="true" class="astro-cg55etiy astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">选择主题</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="dark" class="astro-r2p65idu">深色</option><option value="light" class="astro-r2p65idu">浅色</option><option value="auto" selected class="astro-r2p65idu">自动</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><starlight-lang-select><label style="--sl-select-width: 7em" class="astro-r2p65idu"><span class="sr-only astro-r2p65idu">选择语言</span><svg aria-hidden="true" class="icon label-icon astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path fill-rule="evenodd" d="M8.516 3a.94.94 0 0 0-.941.94v1.15H2.94a.94.94 0 1 0 0 1.882h7.362a7.422 7.422 0 0 1-1.787 3.958 7.42 7.42 0 0 1-1.422-2.425.94.94 0 1 0-1.774.627 9.303 9.303 0 0 0 1.785 3.043 7.422 7.422 0 0 1-4.164 1.278.94.94 0 1 0 0 1.881 9.303 9.303 0 0 0 5.575-1.855 9.303 9.303 0 0 0 4.11 1.74l-.763 1.525a.968.968 0 0 0-.016.034l-1.385 2.77a.94.94 0 1 0 1.683.841l1.133-2.267h5.806l1.134 2.267a.94.94 0 0 0 1.683-.841l-1.385-2.769a.95.95 0 0 0-.018-.036l-3.476-6.951a.94.94 0 0 0-1.682 0l-1.82 3.639a7.423 7.423 0 0 1-3.593-1.256 9.303 9.303 0 0 0 2.27-5.203h1.894a.94.94 0 0 0 0-1.881H9.456V3.94A.94.94 0 0 0 8.516 3Zm6.426 11.794a1.068 1.068 0 0 1-.02.039l-.703 1.407h3.924l-1.962-3.924-1.24 2.478Z" clip-rule="evenodd"/></svg><select autocomplete="off" class="astro-r2p65idu"><option value="/docs/tools-workflows/sensing-viewers/" class="astro-r2p65idu">English</option><option value="/zh-cn/docs/tools-workflows/sensing-viewers/" selected class="astro-r2p65idu">简体中文</option></select><svg aria-hidden="true" class="icon caret astro-r2p65idu astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-lang-select></div></div></div></div></nav><div class="main-frame astro-gqpr5s5a"><script type="module">var e=document.getElementById(`starlight__sidebar`),t=e?.querySelector(`sl-sidebar-state-persist`),n=`sl-sidebar-state`,r=()=>{let r=[],i=t?.dataset.hash||``;try{let e=sessionStorage.getItem(n),t=JSON.parse(e||`{}`);Array.isArray(t.open)&&t.hash===i&&(r=t.open)}catch{}return{hash:i,open:r,scroll:e?.scrollTop||0}},i=e=>{try{sessionStorage.setItem(n,JSON.stringify(e))}catch{}},a=()=>i(r()),o=(e,t)=>{let n=r();n.open[t]=e,i(n)};t?.addEventListener(`click`,e=>{if(!(e.target instanceof Element))return;let t=e.target.closest(`summary`)?.closest(`details`);if(!t)return;let n=t.querySelector(`sl-sidebar-restore`),r=parseInt(n?.dataset.index||``);isNaN(r)||o(!t.open,r)}),addEventListener(`visibilitychange`,()=>{document.visibilityState===`hidden`&&a()}),addEventListener(`pageHide`,a);</script><div class="lg:sl-flex astro-abfeecmu"><aside class="right-sidebar-container print:hidden astro-abfeecmu"><div class="right-sidebar astro-abfeecmu"><div class="lg:sl-hidden astro-q5mffni3"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-5ulgm6bh"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-5ulgm6bh"><details id="starlight__mobile-toc" class="astro-5ulgm6bh"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-5ulgm6bh"><span class="toggle sl-flex astro-5ulgm6bh">本页内容<svg aria-hidden="true" class="caret astro-5ulgm6bh astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></span><span class="display-current astro-5ulgm6bh"></span></summary><div class="dropdown astro-5ulgm6bh"><ul class="isMobile astro-cxyftcne" style="--depth: 0;"><li style="--depth: 0;" class="astro-cxyftcne"><a href="#_top" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">概述</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#界面用途" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">界面用途</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#启动与连接" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">启动与连接</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#界面总览" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">界面总览</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#单站感知界面" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">单站感知界面</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#双站感知界面" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">双站感知界面</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#主谱图" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">主谱图</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#微多普勒图" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">微多普勒图</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#状态栏" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">状态栏</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#显示与观察范围" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">显示与观察范围</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#bin-与距离时延和频率" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">bin 与距离、时延和频率</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#感知处理开关" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">感知处理开关</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#目标检测" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">目标检测</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#检测方法与开关" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">检测方法与开关</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#os-cfar-参数" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">OS-CFAR 参数</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#clean-参数" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">CLEAN 参数</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#目标聚类" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">目标聚类</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#单站时延估计" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">单站时延估计</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#时延对齐" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">时延对齐</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#系统控制与校准" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">系统控制与校准</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#采样步长和增益" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">采样步长和增益</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#hsys-系统响应校准" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Hsys 系统响应校准</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#目标列表" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">目标列表</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#数据保存" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">数据保存</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#典型操作流程" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">典型操作流程</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#运动目标观察" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">运动目标观察</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#静态路径观察" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">静态路径观察</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#微多普勒观察" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">微多普勒观察</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#运行状态检查" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">运行状态检查</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#相关操作资料" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">相关操作资料</span></a><ul class="isMobile astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#单站可选径向速度显示" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">单站可选径向速度显示</span></a></li></ul></li></ul></div></details></nav></mobile-starlight-toc><script type="module" src="/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.BcSo_yiZ.js"></script></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-q5mffni3"><div class="sl-container astro-q5mffni3"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">本页内容</h2><ul class="astro-cxyftcne" style="--depth: 0;"><li style="--depth: 0;" class="astro-cxyftcne"><a href="#_top" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">概述</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#界面用途" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">界面用途</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#启动与连接" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">启动与连接</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#界面总览" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">界面总览</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#单站感知界面" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">单站感知界面</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#双站感知界面" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">双站感知界面</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#主谱图" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">主谱图</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#微多普勒图" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">微多普勒图</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#状态栏" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">状态栏</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#显示与观察范围" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">显示与观察范围</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#bin-与距离时延和频率" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">bin 与距离、时延和频率</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#感知处理开关" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">感知处理开关</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#目标检测" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">目标检测</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#检测方法与开关" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">检测方法与开关</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#os-cfar-参数" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">OS-CFAR 参数</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#clean-参数" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">CLEAN 参数</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#目标聚类" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">目标聚类</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#单站时延估计" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">单站时延估计</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#时延对齐" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">时延对齐</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#系统控制与校准" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">系统控制与校准</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#采样步长和增益" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">采样步长和增益</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#hsys-系统响应校准" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">Hsys 系统响应校准</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#目标列表" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">目标列表</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#数据保存" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">数据保存</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#典型操作流程" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">典型操作流程</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#运动目标观察" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">运动目标观察</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#静态路径观察" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">静态路径观察</span></a></li><li style="--depth: 1;" class="astro-cxyftcne"><a href="#微多普勒观察" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">微多普勒观察</span></a></li></ul></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#运行状态检查" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">运行状态检查</span></a></li><li style="--depth: 0;" class="astro-cxyftcne"><a href="#相关操作资料" style="--depth: 0;" class="astro-cxyftcne"><span style="--depth: 0;" class="astro-cxyftcne">相关操作资料</span></a><ul class="astro-cxyftcne" style="--depth: 1;"><li style="--depth: 1;" class="astro-cxyftcne"><a href="#单站可选径向速度显示" style="--depth: 1;" class="astro-cxyftcne"><span style="--depth: 1;" class="astro-cxyftcne">单站可选径向速度显示</span></a></li></ul></li></ul></nav></starlight-toc><script type="module" src="/_astro/TableOfContents.astro_astro_type_script_index_0_lang.Csloo1VZ.js"></script></div></div></div></aside><div class="main-pane astro-abfeecmu"><main data-pagefind-body class="astro-vdxcvpsm" lang="zh-CN" dir="ltr"><div class="content-panel astro-oil7k7jf"><div class="sl-container astro-oil7k7jf"><h1 id="_top" class="astro-2sm4b3ln">感知界面操作指南</h1></div></div><div class="content-panel astro-oil7k7jf"><div class="sl-container astro-oil7k7jf"><div class="sl-markdown-content"><p>适用界面：<code dir="auto">scripts/plot_sensing_fast.py</code> 与 <code dir="auto">scripts/plot_bi_sensing_fast.py</code>。本页对应 2026 年 10 月 15 日的界面，面向具有雷达、无线通信或信号处理基础的实验用户。</p>
+<p>两个界面用于连接已经运行的 OpenISAC 系统，查看距离或时延与多普勒谱、观察微动、提取目标，并调整感知与射频参数。</p>
+<p>截图由当前界面代码离线生成，谱图与读数采用示例数据。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="界面用途">界面用途</h2><a class="sl-anchor-link" href="#界面用途"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “界面用途”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>项目</th><th>单站感知界面</th><th>双站感知界面</th></tr></thead><tbody><tr><td>启动脚本</td><td><code dir="auto">plot_sensing_fast.py</code></td><td><code dir="auto">plot_bi_sensing_fast.py</code></td></tr><tr><td>连接对象</td><td>运行 BS 的电脑</td><td>运行 UE 的电脑</td></tr><tr><td>主要观测</td><td>基站发射信号经目标反射后的回波</td><td>发射站与接收站分离时的传播路径及目标散射</td></tr><tr><td>主谱图纵轴</td><td>距离，单位 m</td><td>相对时延，单位 ns</td></tr><tr><td>主谱图横轴</td><td>多普勒频率 Hz，或可选径向速度 m/s</td><td>多普勒频率，单位 Hz</td></tr><tr><td>微多普勒与目标检测</td><td>微多普勒、OS-CFAR、CLEAN</td><td>微多普勒、OS-CFAR、CLEAN</td></tr><tr><td>时延估计方法</td><td>FFT、MUSIC、CAPON、ROOTMUSIC、ESPRIT</td><td>FFT</td></tr><tr><td>射频增益设置</td><td>在界面中调整 TX/RX 增益</td><td>通过 BS/UE 配置设置</td></tr><tr><td>Hsys 系统响应校准</td><td>校准单站收发链路</td><td>校准 BS 到 UE 的感知链路</td></tr></tbody></table>
+<p>单站距离按照往返传播关系换算，零点由系统时延校准确定。双站相对时延以当前同步、补偿和人工对齐设置为参考；采用直达径跟踪时，通常用于观察散射路径相对直达路径的附加时延。多普勒反映传播路径长度随时间的变化，解释结果时结合对应的单站或双站几何关系。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="启动与连接">启动与连接</h2><a class="sl-anchor-link" href="#启动与连接"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “启动与连接”</span></a></div>
+<p><img src="/images/sensing-viewers/connection.webp" alt="Backend IP、Connect 按钮与连接状态区"></p>
+<p>先启动对应 BS/UE 后端并启用感知输出，再在项目根目录运行需要的界面：</p>
+<div class="expressive-code"><link rel="stylesheet" href="/_astro/ec.v4551.css"><script type="module" src="/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># 单站感知</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">python</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/plot_sensing_fast.py</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># 双站感知</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">python</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">scripts/plot_bi_sensing_fast.py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="python scripts/plot_sensing_fast.pypython scripts/plot_bi_sensing_fast.py"><div></div></button></div></figure></div>
+<p>若环境中的 Python 命令名为 <code dir="auto">python3</code>，相应替换即可。同机运行时填写 <code dir="auto">127.0.0.1</code>；异机运行时填写后端电脑的 IP。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>控件或操作</th><th>作用与使用方法</th></tr></thead><tbody><tr><td><code dir="auto">Backend IP</code> + <code dir="auto">Connect</code></td><td>输入运行 BS 或 UE 的电脑地址，点击后连接或重新连接。地址框按回车也会连接。等待状态和谱图更新后开始观察。</td></tr><tr><td>分区标题前的箭头</td><td>展开或收起 <code dir="auto">Display &#x26; View</code>、<code dir="auto">Delay Estimation</code>、<code dir="auto">Target Detection</code>、<code dir="auto">Clustering</code>、<code dir="auto">Alignment</code>、<code dir="auto">Hardware &#x26; RF</code>、<code dir="auto">Processing Toggles</code>。已启用的功能在分区收起后继续工作。</td></tr><tr><td>主窗口关闭按钮</td><td>退出查看器并关闭目标窗口。独立运行的 BS/UE 后端继续运行。</td></tr></tbody></table>
+<p>界面会记住多项输入和开关。连接或后端重连成功后，会恢复保存的 MTI、STRD 等控制；单站还会下发保存的增益。连接前核对增益，尤其是在射频直连校准时。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="界面总览">界面总览</h2><a class="sl-anchor-link" href="#界面总览"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “界面总览”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="单站感知界面">单站感知界面</h3><a class="sl-anchor-link" href="#单站感知界面"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “单站感知界面”</span></a></div>
+<p><img src="/images/sensing-viewers/monostatic-overview.webp" alt="单站感知界面：距离与多普勒谱、微多普勒图及控制分区"></p>
+<div class="sl-heading-wrapper level-h3"><h3 id="双站感知界面">双站感知界面</h3><a class="sl-anchor-link" href="#双站感知界面"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “双站感知界面”</span></a></div>
+<p><img src="/images/sensing-viewers/bistatic-overview.webp" alt="双站感知界面：相对时延与多普勒谱、微多普勒图及控制分区"></p>
+<div class="sl-heading-wrapper level-h3"><h3 id="主谱图">主谱图</h3><a class="sl-anchor-link" href="#主谱图"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “主谱图”</span></a></div>
+<p><code dir="auto">Range-Doppler Spectrum</code> 展示距离或时延与多普勒的联合分布。亮点表示较强谱响应；开启检测后，圆点标记提取出的目标位置。零多普勒附近通常包含静态反射、直达泄漏和低速目标。多普勒正负号对应频移方向，运动方向结合实验几何判断。</p>
+<p>单击主谱图可用叉号标记观察位置。微多普勒的观察单元通过 <code dir="auto">Range Bin</code> 单独设置。</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="微多普勒图">微多普勒图</h3><a class="sl-anchor-link" href="#微多普勒图"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “微多普勒图”</span></a></div>
+<p><code dir="auto">Micro-Doppler Spectrum</code> 展示选定距离单元的多普勒随时间变化。横轴为时间，单位 s；纵轴为多普勒频率，单位 Hz。可用于观察人体摆臂、肢体运动和旋转等引起的微动特征。目标跨越距离单元时，需要重新选择观察位置。</p>
+<p>FFT 图的色标采用当前感知谱的 dB 尺度，适合比较谱分量的相对强弱。MUSIC/CAPON 使用相对伪谱尺度，适合比较峰的位置和分离情况。</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="状态栏">状态栏</h3><a class="sl-anchor-link" href="#状态栏"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “状态栏”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>状态</th><th>含义与用途</th></tr></thead><tbody><tr><td><code dir="auto">Display</code></td><td>当前显示的数据来源。</td></tr><tr><td><code dir="auto">FPS</code></td><td>界面刷新速率，用于判断画面流畅程度。</td></tr><tr><td><code dir="auto">Queue</code></td><td>待处理或待显示的数据积压情况。持续积压且画面延迟时，可降低本地处理负担。</td></tr><tr><td><code dir="auto">Sender</code>、<code dir="auto">Status</code></td><td>数据来源、连接及接收状态。</td></tr><tr><td><code dir="auto">Params</code></td><td>当前数据和处理参数摘要，连接或修改 STRD 后可据此核对。</td></tr><tr><td><code dir="auto">MD Buffer</code></td><td>微多普勒历史数据的积累程度。切换距离单元后重新积累。</td></tr><tr><td><code dir="auto">Detector</code></td><td>当前检测方法、开关和结果摘要。</td></tr></tbody></table>
+<p>较长的状态文字可悬停查看完整提示。设备控制执行情况结合新数据、参数回报及后端日志确认。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="显示与观察范围">显示与观察范围</h2><a class="sl-anchor-link" href="#显示与观察范围"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “显示与观察范围”</span></a></div>
+<p><img src="/images/sensing-viewers/display-view.webp" alt="Display &#x26; View 显示设置与观察范围"></p>
+<p><code dir="auto">Display &#x26; View</code> 控制观察单元、处理网格、显示范围和色标。修改输入后，点击所在行的 <code dir="auto">Set</code> 或 <code dir="auto">Apply</code>。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>控件或按钮</th><th>作用</th><th>使用要点</th></tr></thead><tbody><tr><td><code dir="auto">Range Bin</code> + <code dir="auto">Set</code></td><td>选择微多普勒观察的距离或时延单元，索引从 0 开始。</td><td>先确定目标位置，再选择单元。应用后清空微多普勒历史，等待重新积累。</td></tr><tr><td><code dir="auto">Delay FFT</code> + <code dir="auto">Set</code></td><td>设置查看器的距离或时延变换长度。</td><td>增加补零长度可细化谱网格，便于读峰值，同时增加计算量。物理距离分辨率由有效带宽等条件决定。有效长度至少覆盖输入数据。</td></tr><tr><td><code dir="auto">Doppler FFT</code> + <code dir="auto">Set</code></td><td>设置多普勒变换长度。</td><td>较大的补零长度细化频率网格；实际多普勒分辨能力由相干观测时间等条件决定。</td></tr><tr><td><code dir="auto">Delay View</code> + <code dir="auto">Set</code></td><td>设置从零起显示的距离或时延 bin 数量。</td><td>可集中观察近端区域或扩展范围；本地目标列表也限于当前观察范围。必要时，Range Bin 随范围缩小而调整。</td></tr><tr><td><code dir="auto">Doppler View</code> + <code dir="auto">Set</code></td><td>设置零多普勒附近的显示 bin 数量。</td><td>缩小便于观察低速目标，扩大可观察更大的频移范围；本地目标输出随范围变化。</td></tr><tr><td><code dir="auto">Delay Doppler dB</code> 的 Min、Max + <code dir="auto">Apply</code></td><td>调整主谱图颜色上下限。</td><td>降低下限可显示更弱的背景；降低上限可让弱谱值更亮。主要用于 FFT 模式，超分辨方法采用自身色标。</td></tr><tr><td><code dir="auto">MicroDoppler dB</code> 的 Min、Max + <code dir="auto">Apply</code></td><td>独立调整微多普勒图的颜色上下限。</td><td>用于突出弱微动纹理。颜色下限应小于上限。</td></tr></tbody></table>
+<p>色标调整作用于显示。目标检出强弱通过检测参数调整，接收信号幅度通过 RX 增益调整。</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="bin-与距离时延和频率">bin 与距离、时延和频率</h3><a class="sl-anchor-link" href="#bin-与距离时延和频率"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “bin 与距离、时延和频率”</span></a></div>
+<p>图轴显示 m、ns、Hz；输入框中的 bin 表示离散网格索引。改变 FFT 长度后，相同索引对应的物理位置会变化，观察目标时应重新核对。</p>
+<p>双站 FFT 谱图当前每 2 个距离和多普勒单元显示一个点；<code dir="auto">Range Bin</code> 按完整距离网格选择微多普勒单元。例如目标列表显示 <code dir="auto">R=40</code> 时，对应微多普勒单元可从 <code dir="auto">Range Bin=80</code> 查找。单站默认按完整网格显示。图轴的物理单位已经包含换算。</p>
+<p>调整 FFT 长度和显示范围后，感知结果与微多普勒历史会重新建立，等待新数据稳定后继续观察。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="感知处理开关">感知处理开关</h2><a class="sl-anchor-link" href="#感知处理开关"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “感知处理开关”</span></a></div>
+<p><img src="/images/sensing-viewers/processing-toggles.webp" alt="Processing Toggles 微多普勒、MTI 与窗函数开关"></p>
+<p><code dir="auto">Processing Toggles</code> 集中控制微多普勒、动目标显示和窗函数。MTI 和两个窗函数以绿色表示开启。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>按钮</th><th>开启后的作用</th><th>适用场景</th></tr></thead><tbody><tr><td><code dir="auto">Micro-Doppler: ON/OFF</code></td><td>开启或停止微多普勒历史积累和计算。</td><td>人体或机械微动观察时开启；仅查看主谱图时可关闭以减少计算。关闭后保留的图像是之前的结果。</td></tr><tr><td><code dir="auto">MTI</code></td><td>控制后端动目标显示处理，抑制静态或缓慢变化的背景。</td><td>运动目标检测时有助于压低静态杂波；研究静止反射、直达路径或低速运动时，对比关闭后的结果。</td></tr><tr><td><code dir="auto">Range Window</code></td><td>对距离处理启用 Hamming 窗，降低距离旁瓣。</td><td>适合强回波旁瓣影响弱回波观察的场景。加窗同时使主瓣展宽，调节时兼顾邻近目标分离。</td></tr><tr><td><code dir="auto">Doppler Window</code></td><td>对多普勒处理启用 Hamming 窗，降低频谱泄漏与多普勒旁瓣。</td><td>适合观察较弱的运动分量，同时需要考虑主瓣展宽。</td></tr></tbody></table>
+<p>选择 FFT 下的 CLEAN 后，两个 Window 按钮会自动关闭并禁用。切回 OS-CFAR 后可按需重新开启。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="目标检测">目标检测</h2><a class="sl-anchor-link" href="#目标检测"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “目标检测”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="检测方法与开关">检测方法与开关</h3><a class="sl-anchor-link" href="#检测方法与开关"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “检测方法与开关”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>控件或按钮</th><th>作用与使用方法</th></tr></thead><tbody><tr><td><code dir="auto">Local Detector</code> 下拉框</td><td>在 <code dir="auto">OS-CFAR</code> 和 <code dir="auto">CLEAN</code> 之间选择本地检测方法，选择后立即切换。</td></tr><tr><td><code dir="auto">Local OS-CFAR: ON/OFF</code></td><td>开启或关闭 OS-CFAR 检测。开启后根据局部背景估计门限，并输出目标标记和列表。</td></tr><tr><td><code dir="auto">Local CLEAN: ON/OFF</code></td><td>选择 CLEAN 后，同一开关显示此名称。开启后逐步提取强目标并扣除其响应，寻找剩余分量。</td></tr><tr><td><code dir="auto">Apply OS-CFAR</code></td><td>应用当前 OS-CFAR 参数。应用后确认检测开关为 ON。</td></tr><tr><td><code dir="auto">Apply CLEAN</code></td><td>应用当前 CLEAN 参数。应用后确认检测开关为 ON。</td></tr></tbody></table>
+<p>OS-CFAR 适合依据局部噪声与杂波水平提取显著回波；CLEAN 适合检查强目标及其旁瓣影响下的其他分量。目标标记表示当前帧中的候选散射目标，需结合位置、稳定性和实验场景判断。</p>
+<p>单站切换到 MUSIC 等非 FFT 方法后，由相应方法直接给出目标，普通检测控件随之隐藏；切回 FFT 后恢复。</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="os-cfar-参数">OS-CFAR 参数</h3><a class="sl-anchor-link" href="#os-cfar-参数"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “OS-CFAR 参数”</span></a></div>
+<p><img src="/images/sensing-viewers/os-cfar.webp" alt="OS-CFAR 检测开关与参数区"></p>
+<p><code dir="auto">D</code> 表示多普勒方向，<code dir="auto">R</code> 表示距离或时延方向；窗口尺寸以当前检测网格的 bin 为单位。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>参数</th><th>含义</th><th>调整效果</th></tr></thead><tbody><tr><td><code dir="auto">Rank(%)</code></td><td>对参考单元功率排序后，用于估计背景的分位位置。</td><td>其余设置相同时，提高该值通常会提高背景估计和门限，使检测更保守。</td></tr><tr><td><code dir="auto">Train D</code>、<code dir="auto">Train R</code></td><td>多普勒、距离方向的参考区域宽度。</td><td>小窗口更易受局部波动影响，大窗口可能包含其他目标或不同杂波区域。</td></tr><tr><td><code dir="auto">Guard D</code>、<code dir="auto">Guard R</code></td><td>目标附近保护区域的半宽，保护区内的数据从背景估计中排除。</td><td>通常应覆盖目标主瓣附近区域，降低目标能量对背景估计的影响。</td></tr><tr><td><code dir="auto">Supp D</code>、<code dir="auto">Supp R</code></td><td>接受一个峰后，抑制其周围重复报告的半宽。</td><td>增大可减少重复点，也可能压掉相邻真实目标；同时联动 DBSCAN 邻域。</td></tr><tr><td><code dir="auto">Alpha(dB)</code></td><td>在估计背景之上增加的门限偏移。</td><td>增大可减少弱点和虚警；减小会提高对弱目标的敏感度。</td></tr><tr><td><code dir="auto">Min R</code></td><td>目标搜索的最小距离单元索引。</td><td>用于排除近端泄漏或无兴趣区域。</td></tr><tr><td><code dir="auto">Min P(dB)</code></td><td>候选点需达到的最低谱强度。</td><td>采用当前界面的谱值尺度，和局部自适应门限共同限制目标输出。</td></tr><tr><td><code dir="auto">DC Excl</code></td><td>零多普勒附近排除区域的半宽。0 表示保留该区域。</td><td>增大可减少静态残留点，同时减少静止和低速目标的检出。</td></tr></tbody></table>
+<p>通常先调整 <code dir="auto">Alpha(dB)</code> 和 <code dir="auto">Min P(dB)</code>，获得稳定目标，再依据旁瓣宽度与目标间隔调整保护、抑制和参考区域。谱图边界附近需要足够的参考单元。</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="clean-参数">CLEAN 参数</h3><a class="sl-anchor-link" href="#clean-参数"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “CLEAN 参数”</span></a></div>
+<p><img src="/images/sensing-viewers/clean.webp" alt="CLEAN 检测开关与参数区"></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>参数</th><th>含义</th><th>调整效果</th></tr></thead><tbody><tr><td><code dir="auto">Loop Gain</code></td><td>每轮扣除所选目标响应的比例，范围为 0.001～1。</td><td>较小值留下更多残余响应，可能产生邻近候选分量；较大值扣除更充分，对模型误差更敏感。</td></tr><tr><td><code dir="auto">Max Targets</code></td><td>一次处理最多提取的目标分量数。</td><td>根据场景复杂度设置提取上限。</td></tr><tr><td><code dir="auto">Min R</code></td><td>排除低于该索引的近端距离单元。</td><td>用于避开泄漏等强分量。</td></tr><tr><td><code dir="auto">Min P(dB)</code></td><td>剩余峰低于该强度时停止提取。</td><td>降低可提取更多弱分量，也可能增加噪声或残留旁瓣。</td></tr><tr><td><code dir="auto">DC Excl</code></td><td>零多普勒附近的排除区域半宽。</td><td>观察静态目标时设为 0，并对比关闭 MTI 后的结果。</td></tr></tbody></table>
+<p>两种检测方法共用 <code dir="auto">Min R</code> 与 <code dir="auto">DC Excl</code> 的当前限制，切换方法后核对这两项。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="目标聚类">目标聚类</h2><a class="sl-anchor-link" href="#目标聚类"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “目标聚类”</span></a></div>
+<p><img src="/images/sensing-viewers/clustering.webp" alt="DBSCAN 邻域、MinPts 与 Apply DBSCAN 按钮"></p>
+<p><code dir="auto">Clustering</code> 用于整理 OS-CFAR 检测点。一个散射目标可能产生多个相邻点，聚类将它们合并成目标条目，减少重复报告。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>控件或按钮</th><th>作用与使用方法</th></tr></thead><tbody><tr><td><code dir="auto">DBSCAN Eps</code></td><td>显示多普勒和距离方向的聚类邻域大小，分别为 <code dir="auto">Supp D + 1</code>、<code dir="auto">Supp R + 1</code>。通过调整 OS-CFAR 的抑制范围并应用来改变。</td></tr><tr><td><code dir="auto">MinPts</code> + <code dir="auto">Apply DBSCAN</code></td><td>设置形成有效密集区域所需的邻近检测点数。增大有助于剔除孤立点，也可能减少弱目标；1 允许单点形成目标。</td></tr></tbody></table>
+<p>DBSCAN 作用于 OS-CFAR 结果。CLEAN 和超分辨方法直接输出目标；选择超分辨方法后，聚类控件隐藏。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="单站时延估计">单站时延估计</h2><a class="sl-anchor-link" href="#单站时延估计"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “单站时延估计”</span></a></div>
+<p><img src="/images/sensing-viewers/delay-estimation.webp" alt="Delay Estimator 方法选择与 Peak Rel 门限"></p>
+<p><code dir="auto">Delay Estimation</code> 改变距离或时延方向的估计方法，用于比较相邻路径或目标的分离表现。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code dir="auto">Delay Estimator</code> 选项</th><th>结果形式与用途</th></tr></thead><tbody><tr><td><code dir="auto">FFT</code></td><td>常规距离与多普勒谱，适合建立基线、观察整体场景，并配合 OS-CFAR 或 CLEAN。</td></tr><tr><td><code dir="auto">MUSIC</code></td><td>显示时延伪谱及峰值，适合检查相邻路径；结果受信噪比、数据条件和模型误差影响。</td></tr><tr><td><code dir="auto">CAPON</code></td><td>显示自适应时延谱，用于比较邻近分量的分离情况与干扰影响。</td></tr><tr><td><code dir="auto">ROOTMUSIC</code></td><td>直接输出时延候选点，以目标点和列表作为主要结果。</td></tr><tr><td><code dir="auto">ESPRIT</code></td><td>直接估计时延候选点，可与 FFT、MUSIC 结果交叉比较。</td></tr></tbody></table>
+<p><code dir="auto">Peak Rel(dB)</code> + <code dir="auto">Apply</code> 设置相对于本次最强峰的候选峰保留门限。例如 <code dir="auto">-12</code> 保留最强峰以下约 12 dB 范围内的候选峰；改为 <code dir="auto">-6</code> 更严格，改为 <code dir="auto">-20</code> 会保留更多弱峰。</p>
+<p>切换方法后等待重新计算。比较超分辨结果时，结合已知目标位置、峰值稳定性和 FFT 基线评估。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="时延对齐">时延对齐</h2><a class="sl-anchor-link" href="#时延对齐"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “时延对齐”</span></a></div>
+<p><img src="/images/sensing-viewers/alignment.webp" alt="Alignment 时延增量输入与调整按钮"></p>
+<p><code dir="auto">Alignment</code> 调整感知时延参考。输入单位为原始信号的采样点数，所有按钮按增量执行。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>按钮</th><th>作用</th></tr></thead><tbody><tr><td><code dir="auto">Delay</code> + <code dir="auto">Apply</code></td><td>将输入的有符号整数作为本次对齐增量。例如输入 10 并点击两次，累计执行两次 +10。</td></tr><tr><td><code dir="auto">+57600</code></td><td>正向调整 57600 个采样点，用于较大偏差的粗调。</td></tr><tr><td><code dir="auto">-57600</code></td><td>反向调整 57600 个采样点。</td></tr><tr><td><code dir="auto">+10</code></td><td>正向调整 10 个采样点。</td></tr><tr><td><code dir="auto">-10</code></td><td>反向调整 10 个采样点。</td></tr><tr><td><code dir="auto">+1</code></td><td>正向调整 1 个采样点，用于细调。</td></tr><tr><td><code dir="auto">-1</code></td><td>反向调整 1 个采样点。</td></tr></tbody></table>
+<p>单站调整感知接收的对齐量；双站叠加 UE 感知的人工时延修正。先选一个清晰参考峰，用 +1 或 -1 观察变化方向，再选择合适步长。</p>
+<p>对齐直接影响距离或时延参考。记录最终对齐条件，并通过系统配置保存适用的标定值，有助于复现实验。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="系统控制与校准">系统控制与校准</h2><a class="sl-anchor-link" href="#系统控制与校准"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “系统控制与校准”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="采样步长和增益">采样步长和增益</h3><a class="sl-anchor-link" href="#采样步长和增益"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “采样步长和增益”</span></a></div>
+<p><img src="/images/sensing-viewers/hardware-rf.webp" alt="Hardware &#x26; RF 采样步长、收发增益与 Hsys 校准"></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>控件或按钮</th><th>作用</th><th>使用要点</th></tr></thead><tbody><tr><td><code dir="auto">STRD</code> + <code dir="auto">Set</code></td><td>设置感知慢时间采样的 OFDM 符号间隔。</td><td>同等采样点数下，较大步长覆盖更长时间，但会降低慢时间采样率、缩小无模糊多普勒范围；较小步长适合较快运动。</td></tr><tr><td><code dir="auto">Frame every N</code> + <code dir="auto">Set</code></td><td>每 N 个完整感知帧处理并输出 1 帧；<code dir="auto">1</code> 表示全部输出。</td><td>保留帧内 STRD 和无模糊多普勒范围；降低刷新率和后级负载。单站快速上位机保留滚动历史并按缺失时间补零；需要连续观测时使用 <code dir="auto">1</code>。</td></tr><tr><td><code dir="auto">TX Gain(dB)</code> + <code dir="auto">Set</code></td><td>修改 BS 发射增益，单站界面提供。</td><td>会改变实际发射信号，同时影响感知回波和通信链路。</td></tr><tr><td><code dir="auto">RX Gain(dB)</code> + <code dir="auto">Set</code></td><td>修改单站感知接收增益。</td><td>按信号强弱调整，兼顾弱目标可见度和接收机线性工作范围。</td></tr></tbody></table>
+<p>STRD 可用取值由系统配置决定。采用 <code dir="auto">compact_mask</code> 资源图样时，采样位置由图样确定，需通过配置调整。修改后以回报参数和日志确认实际设置。双站的 TX/RX 增益在相应 BS/UE 配置中设置。</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="hsys-系统响应校准">Hsys 系统响应校准</h3><a class="sl-anchor-link" href="#hsys-系统响应校准"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Hsys 系统响应校准”</span></a></div>
+<p><code dir="auto">Calibrate Hsys</code> 请求测量并补偿收发链路的频率响应，减少硬件幅相起伏对感知谱的影响。单站校准其收发链路；双站校准 BS 到 UE 的感知链路。</p>
+<ol>
+<li>先完成系统时延对齐，设置适当的 TX/RX 增益，并准备足够的外部衰减，使接收机保持在线性工作区。</li>
+<li>按校准链路连接发射端与接收端的射频线缆。双站连接 BS 发射与 UE 接收，并运行两端后端。</li>
+<li>点击 <code dir="auto">Calibrate Hsys</code>，保持接线和增益稳定。</li>
+<li>等待后端日志确认校准完成并保存文件。</li>
+<li>停止相关后端后恢复天线或实验连接，再继续空口测量。</li>
+</ol>
+<p>当前运行会使用新校准，后续启动时加载匹配文件。改变增益、线缆或其他射频条件后，重新检查校准适用性。Hsys 应在准备好的射频直连条件下执行，完整准备与验证步骤见<a href="https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/calibration-workflows/">校准流程</a>。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="目标列表">目标列表</h2><a class="sl-anchor-link" href="#目标列表"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “目标列表”</span></a></div>
+<p><img src="/images/sensing-viewers/targets.webp" alt="OpenISAC Top Targets 目标列表"></p>
+<p><code dir="auto">OpenISAC Top Targets</code> 窗口按当前帧目标强度排序，最多列出 12 个条目。序号随每帧目标排序更新。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody><tr><td><code dir="auto">R</code></td><td>当前显示网格中的距离或时延索引。</td></tr><tr><td><code dir="auto">rel</code></td><td>相对于当前参考起点的距离或时延，有物理参数时使用 m 或 ns。</td></tr><tr><td>单站 <code dir="auto">f_D</code> / <code dir="auto">v_r</code>，双站 <code dir="auto">D</code></td><td>单站显示频率 Hz 或径向速度 m/s，与图轴一致；双站 <code dir="auto">D</code> 仍为相对于零多普勒的 bin 索引。</td></tr><tr><td><code dir="auto">S</code></td><td>目标强度，结合所用方法的谱值尺度解释。</td></tr><tr><td><code dir="auto">N</code></td><td>该目标条目包含的检测点数。</td></tr><tr><td><code dir="auto">C</code></td><td>检测点簇中心的距离和多普勒索引。</td></tr></tbody></table>
+<p>列表用于检查目标位置、强度及点簇分布。结合谱图观察同一位置附近的结果是否稳定，可以帮助判断阈值与聚类参数是否合适。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="数据保存">数据保存</h2><a class="sl-anchor-link" href="#数据保存"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “数据保存”</span></a></div>
+<p><img src="/images/sensing-viewers/save-data.webp" alt="Save Raw、Save RD 与 Save MD 数据保存按钮"></p>
+<p>三个按钮分别保存当前的一份数据快照，文件采用 MATLAB <code dir="auto">.mat</code> 格式，也可用 Python 读取。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>按钮</th><th>保存内容</th><th>适用用途</th></tr></thead><tbody><tr><td><code dir="auto">Save Raw</code></td><td>查看器收到的感知输入帧，通常为复数信道数据，变量名 <code dir="auto">raw_frame</code>。</td><td>离线重新处理或比较算法。数据所处的处理阶段随系统输出模式确定。</td></tr><tr><td><code dir="auto">Save RD</code></td><td>当前距离或时延与多普勒显示矩阵，变量名 <code dir="auto">rd_map</code>。</td><td>留存当前谱结果，包含显示裁剪和算法效果。ROOTMUSIC/ESPRIT 的主要结果为目标点，点列表需另行记录。</td></tr><tr><td><code dir="auto">Save MD</code></td><td>已积累的微多普勒显示矩阵，变量名 <code dir="auto">md_map</code>。</td><td>保存目标微动的时频结果。先确认微多普勒图已更新。</td></tr></tbody></table>
+<p>文件写入启动命令所在目录的 <code dir="auto">capture/</code>，例如 <code dir="auto">capture/capture_rd_20261015_143000.mat</code>。保存成功路径会显示在终端。</p>
+<p>同时记录 FFT 长度、STRD、算法和观察单元等实验条件，便于恢复距离、时延和频率单位并复现实验。文件名时间精度为秒，同一类型的连续保存应间隔至少一秒。若需要对比同一帧数据，应额外核对采集时刻。</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="典型操作流程">典型操作流程</h2><a class="sl-anchor-link" href="#典型操作流程"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “典型操作流程”</span></a></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="运动目标观察">运动目标观察</h3><a class="sl-anchor-link" href="#运动目标观察"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “运动目标观察”</span></a></div>
+<ol>
+<li>连接对应 BS 或 UE，确认主谱图持续更新，以 FFT 建立初始观察结果。</li>
+<li>开启 MTI；使用 OS-CFAR 时按需开启两个窗函数，观察旁瓣和主瓣宽度。</li>
+<li>设置 Delay View、Doppler View 和色标，让目标位于清晰可见的范围。</li>
+<li>开启 OS-CFAR，逐步调整 Alpha 与 Min P，再根据重复点调整抑制和聚类。</li>
+<li>查看目标列表的位置、强度和稳定性，保存 RD 并记录参数。</li>
+</ol>
+<div class="sl-heading-wrapper level-h3"><h3 id="静态路径观察">静态路径观察</h3><a class="sl-anchor-link" href="#静态路径观察"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “静态路径观察”</span></a></div>
+<ol>
+<li>关闭 MTI，将检测器的 DC Excl 设为 0 并应用。</li>
+<li>检查 Min R，使参考路径和近端目标处于搜索范围。</li>
+<li>观察零多普勒附近的谱，逐步开启和调整检测。</li>
+<li>双站实验记录时延补偿方式与人工对齐量，便于比较传播路径变化。</li>
+</ol>
+<div class="sl-heading-wrapper level-h3"><h3 id="微多普勒观察">微多普勒观察</h3><a class="sl-anchor-link" href="#微多普勒观察"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “微多普勒观察”</span></a></div>
+<ol>
+<li>从主谱图确定目标所在距离或时延位置。</li>
+<li>将完整距离网格索引填入 Range Bin 并点击 Set；双站按前述比例换算。</li>
+<li>开启 Micro-Doppler，等待历史积累，再调整色标观察微动纹理。</li>
+<li>目标跨越距离单元时重新选择，等待新一段数据建立。</li>
+<li>点击 Save MD，同时记录观察单元、STRD 和采样条件。</li>
+</ol>
+<div class="sl-heading-wrapper level-h2"><h2 id="运行状态检查">运行状态检查</h2><a class="sl-anchor-link" href="#运行状态检查"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “运行状态检查”</span></a></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>现象</th><th>检查内容</th></tr></thead><tbody><tr><td>连接后没有谱图</td><td>后端电脑地址、BS/UE 运行状态、感知输出开关、数据模式及终端错误提示。</td></tr><tr><td>谱图有目标而列表为空</td><td>检测开关、Alpha 和 Min P、Min R 与 DC Excl、观察范围，以及 OS-CFAR 的 MinPts。</td></tr><tr><td>静止反射或直达路径消失</td><td>对比关闭 MTI 后的结果，并检查零多普勒排除区域。</td></tr><tr><td>微多普勒空白或停留在旧图</td><td>Micro-Doppler 开关、历史积累程度、Range Bin 位置及最近的参数调整。</td></tr><tr><td>两个 Window 按钮呈灰色</td><td>当前是否选择 CLEAN；切回 OS-CFAR 后按需开启。</td></tr><tr><td>某些控件隐藏</td><td>当前界面类型、FFT/超分辨方法选择，以及分区的展开状态。</td></tr><tr><td>增大 FFT 后目标仍难以分开</td><td>有效带宽、相干时间、信噪比、窗函数和目标间隔。补零主要用于细化网格。</td></tr><tr><td>STRD 修改后结果未变化</td><td>是否采用资源图样采样，输入值是否符合配置要求；核对回报参数和日志。</td></tr><tr><td>重新启动后恢复了之前的设置</td><td>界面自动记忆的输入和开关；当前会话的修改通过 Set/Apply 应用后再核对。</td></tr></tbody></table>
+<div class="sl-heading-wrapper level-h2"><h2 id="相关操作资料">相关操作资料</h2><a class="sl-anchor-link" href="#相关操作资料"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “相关操作资料”</span></a></div>
+<ul>
+<li><a href="https://openisac.zzw123app.top/zh-cn/docs/reference/scripts-tools/">脚本与工具</a></li>
+<li><a href="https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/calibration-workflows/">系统时延与 Hsys 校准</a></li>
+<li><a href="https://openisac.zzw123app.top/zh-cn/docs/signal-processing/monostatic-sensing/">单站感知</a></li>
+<li><a href="https://openisac.zzw123app.top/zh-cn/docs/signal-processing/bistatic-sensing/">双站感知</a></li>
+<li><a href="https://openisac.zzw123app.top/zh-cn/docs/reference/troubleshooting/">运行故障排查</a></li>
+</ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="单站可选径向速度显示">单站可选径向速度显示</h3><a class="sl-anchor-link" href="#单站可选径向速度显示"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “单站可选径向速度显示”</span></a></div>
+<p>在 <code dir="auto">plot_sensing_fast.py</code> 的 <strong>Display &#x26; View</strong> 中，将实际发射的射频载频填入 <strong>Velocity RF Carrier (GHz)</strong>，点击 <strong>Set</strong> 或按回车。主谱图横轴、微多普勒图纵轴和检测目标列表随即显示径向速度，单位 <strong>m/s</strong>。清空输入框并应用后，恢复多普勒频率 <strong>Hz</strong>。已应用的值会自动保存，下次启动继续使用。</p>
+<p>换算关系为 <span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>v</mi><mi>r</mi></msub><mo>=</mo><msub><mi>f</mi><mi>D</mi></msub><mi>c</mi><mi mathvariant="normal">/</mi><mo stretchy="false">(</mo><mn>2</mn><msub><mi>f</mi><mi>c</mi></msub><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">v_r = f_D c / (2 f_c)</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.5806em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.0359em;">v</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:-0.0359em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.0278em;">r</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.1076em;">f</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3283em;"><span style="top:-2.55em;margin-left:-0.1076em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right:0.0278em;">D</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mord mathnormal">c</span><span class="mord">/</span><span class="mopen">(</span><span class="mord">2</span><span class="mord"><span class="mord mathnormal" style="margin-right:0.1076em;">f</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:-0.1076em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">c</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mclose">)</span></span></span></span>，正负号沿用图中的多普勒频率。使用外接毫米波变频器时，应填写变频后的实际射频载频，而非 USRP 中频；例如只有实际射频为 77 GHz 时才填 <code dir="auto">77</code>。该设置仅用于显示换算，不改变设备调谐、FFT 运算、检测门限或 bin 坐标。正负速度对应的实际运动方向需结合变频器的频谱方向和实验约定确认。双站界面保持多普勒频率显示，因为不能直接套用单站公式换算径向速度。</p>
+<p>主谱图右上角以黄色文字单独显示最强检测回波的距离及速度，保留一位小数；载频留空时显示多普勒频率。信息框位置与尺寸固定，没有检出目标时数值显示 <strong>N/A</strong>。</p>
+<p>单站快速上位机在丢帧或帧抽取时保留微多普勒滚动历史，按缺失的慢时间位置补零。这样可保留真实时间间隔，但不能恢复缺失回波，空档仍可能降低谱峰或引入旁瓣。改变距离单元、采样几何或时间戳回退时，历史重新建立。</p></div><footer class="sl-flex astro-xhxjzfa7"><div class="meta sl-flex astro-xhxjzfa7"></div><div class="pagination-links print:hidden astro-jgq3vlii" dir="ltr"><a href="/zh-cn/docs/tools-workflows/web-config-console/" rel="prev" class="astro-jgq3vlii"><svg aria-hidden="true" class="astro-jgq3vlii astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-jgq3vlii">上一页<br class="astro-jgq3vlii"><span class="link-title astro-jgq3vlii">网页配置台</span></span></a><a href="/zh-cn/docs/tools-workflows/calibration-workflows/" rel="next" class="astro-jgq3vlii"><svg aria-hidden="true" class="astro-jgq3vlii astro-n5k4ipy7" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-jgq3vlii">下一页<br class="astro-jgq3vlii"><span class="link-title astro-jgq3vlii">校准流程</span></span></a></div></footer></div></div></main></div></div></div></div></body></html>

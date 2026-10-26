@@ -5,6 +5,8 @@ description: BS-side multichannel modulation removal, clutter suppression, range
 
 The BS illuminates the scene with its known downlink OFDM waveform and receives echoes through $R$ synchronized sensing channels. Keeping their relative complex phases allows the system to estimate angle under the ULA model in addition to range and Doppler.
 
+See the [Sensing Viewer Guide](/docs/tools-workflows/sensing-viewers/) for monostatic interface screenshots, controls, and experiment workflows.
+
 ## 1. Multichannel Time-Frequency Grid
 
 Define the received vector on resource $(n,m,\gamma)$ as

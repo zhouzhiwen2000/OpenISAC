@@ -119,8 +119,13 @@ set_target_properties(aff3ct::aff3ct-shared-lib PROPERTIES
 )
 
 # Find third-party libraries
+set(OPENISAC_DPDK_TARGET "")
 if(PKG_CONFIG_FOUND)
-    pkg_check_modules(LIBDPDK QUIET libdpdk)
+    # Preserve pkg-config library paths and link options for non-system installs.
+    pkg_check_modules(LIBDPDK QUIET IMPORTED_TARGET libdpdk)
+    if(TARGET PkgConfig::LIBDPDK)
+        set(OPENISAC_DPDK_TARGET PkgConfig::LIBDPDK)
+    endif()
 endif()
 
 find_package(FFTW3f CONFIG QUIET)
@@ -302,7 +307,6 @@ add_executable(BS
 
 target_include_directories(BS PRIVATE
     ${UHD_INCLUDE_DIRS}
-    ${LIBDPDK_INCLUDE_DIRS}
     ${FFTW3f_INCLUDE_DIRS}
     ${YAMLCPP_INCLUDE_DIRS}
     ${OPENISAC_ZMQ_INCLUDE_DIRS}
@@ -315,7 +319,7 @@ target_link_libraries(BS PRIVATE
     ${UHD_LIBRARIES}
     Threads::Threads
     OpenMP::OpenMP_CXX
-    ${LIBDPDK_LIBRARIES}
+    ${OPENISAC_DPDK_TARGET}
     ${FFTW3f_LIBRARIES}
     ${FFTW3f_THREADS_LIBRARY}
     aff3ct::aff3ct-shared-lib
@@ -513,6 +517,31 @@ if(BUILD_TESTING)
     target_compile_options(LDPCConfigTest PRIVATE ${COMMON_COMPILE_OPTIONS} -ffast-math)
     add_test(NAME LDPCConfig COMMAND LDPCConfigTest "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(LDPCConfig PROPERTIES LABELS "cpu;ldpc" TIMEOUT 120)
+
+    add_executable(ModulationTest
+        tests/modulation_test.cpp
+        ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
+        ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
+        ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    )
+    target_include_directories(ModulationTest PRIVATE
+        ${UHD_INCLUDE_DIRS} ${FFTW3f_INCLUDE_DIRS} ${YAMLCPP_INCLUDE_DIRS}
+        ${OPENISAC_ZMQ_INCLUDE_DIRS} ${OPENISAC_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR} ${Boost_INCLUDE_DIRS}
+    )
+    target_link_libraries(ModulationTest PRIVATE
+        ${UHD_LIBRARIES} ${FFTW3f_LIBRARIES} ${FFTW3f_THREADS_LIBRARY}
+        Threads::Threads OpenMP::OpenMP_CXX aff3ct::aff3ct-shared-lib
+        ${OPENISAC_YAMLCPP_TARGET} ${YAMLCPP_LIBRARIES} ${OPENISAC_ZMQ_LINK} rt
+    )
+    target_compile_options(ModulationTest PRIVATE ${COMMON_COMPILE_OPTIONS} -ffast-math)
+    add_test(NAME Modulation COMMAND ModulationTest "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(Modulation PROPERTIES LABELS "cpu;modulation;ldpc" TIMEOUT 120)
+
+    add_executable(ModulationBench tools/modulation_bench.cpp)
+    target_include_directories(ModulationBench PRIVATE ${OPENISAC_INCLUDE_DIR})
+    target_link_libraries(ModulationBench PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_options(ModulationBench PRIVATE ${COMMON_COMPILE_OPTIONS} -ffast-math)
 endif()
 
 #===========================================================

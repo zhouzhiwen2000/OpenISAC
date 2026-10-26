@@ -246,3 +246,7 @@ logging:
   timestamps: false  # Prefix each line with local HH:MM:SS.uuuuuu
   force_error: true  # Always emit Error (unrecoverable failures only)
   modules: {}  # Optional overrides, e.g. air_frame: info, mod: warn, ul_rx: warn
+
+# ===== Payload Modulation =====
+modulation:
+  scheme: QPSK  # BPSK/QPSK/8PSK/16QAM/32QAM/64QAM; must match BS and UE; restart to apply

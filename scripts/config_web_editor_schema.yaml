@@ -580,6 +580,17 @@ common:
       comment: Number of contiguous subcarriers in this block
       kind: int
       default: 1
+- title: Payload modulation
+  yaml_key: modulation
+  order: 59
+  fields:
+  - type: scalar
+    key: scheme
+    kind: string
+    comment: Payload constellation; match BS and UE and restart both backends. Control headers remain QPSK; 32QAM uses an 8x4 grid.
+    default: QPSK
+    optional: true
+    options: [BPSK, QPSK, 8PSK, 16QAM, 32QAM, 64QAM]
 - title: LDPC decode
   yaml_key: ldpc
   order: 60

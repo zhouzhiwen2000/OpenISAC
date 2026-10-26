@@ -28,7 +28,7 @@ Each sensing path may independently select a device, USRP channel, gain, antenna
 ## UE-to-BS uplink reception
 
 1. The BS uplink receive path captures the UE waveform according to the duplex mode: only the in-frame uplink window in TDD, or continuous full frames on a separate carrier in FDD.
-2. Uplink demodulation performs synchronization, FFT, channel estimation, pilot tracking, and equalization to produce QPSK soft information.
+2. Uplink demodulation performs synchronization, FFT, channel estimation, pilot tracking, and equalization to produce soft information for the selected payload constellation.
 3. LDPC decoding recovers UE payloads and forwards them to BS-side applications over UDP.
 
 Uplink reception runs independently of downlink transmission and sensing reception. Optional channel-estimate, delay-spectrum, and constellation streams expose uplink state for live observation.

@@ -43,6 +43,7 @@
 #include <boost/circular_buffer.hpp>
 #include <functional>
 #include <unordered_map>
+#include "DigitalModulation.hpp"
 #include "RadioTypes.hpp"
 #include "Xr1710gConfig.hpp"
 #include "AirFrameClock.hpp"
@@ -1585,7 +1586,12 @@ inline void validate_ldpc_decode_config(const LdpcDecodeConfig& cfg) {
     }
 }
 
+struct ModulationConfig {
+    ModulationScheme scheme = ModulationScheme::Qpsk; ///< Payload mapping; control headers remain QPSK.
+};
+
 struct Config {
+    ModulationConfig modulation;
     RadioConfig radio;
     SimConfig simulation;               // Channel simulator parameters (used when radio.radio_backend == "sim")
     OfdmFrameConfig ofdm;
@@ -3646,6 +3652,10 @@ inline bool load_bs_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node ldpc = config_detail::section_node(config, "ldpc");
 
         config_detail::load_ldpc_decode_config(ldpc, cfg.ldpc);
+        const YAML::Node modulation = config_detail::section_node(config, "modulation");
+        if (modulation["scheme"]) {
+            cfg.modulation.scheme = parse_modulation_scheme(modulation["scheme"].as<std::string>());
+        }
 
         config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
         config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);
@@ -4124,6 +4134,10 @@ inline bool load_ue_config_from_yaml(Config& cfg, const std::string& filepath) {
         const YAML::Node ldpc = config_detail::section_node(config, "ldpc");
 
         config_detail::load_ldpc_decode_config(ldpc, cfg.ldpc);
+        const YAML::Node modulation = config_detail::section_node(config, "modulation");
+        if (modulation["scheme"]) {
+            cfg.modulation.scheme = parse_modulation_scheme(modulation["scheme"].as<std::string>());
+        }
 
         config_detail::load_value(ofdm, "fft_size", cfg.ofdm.fft_size);
         config_detail::load_value(ofdm, "cp_length", cfg.ofdm.cp_length);

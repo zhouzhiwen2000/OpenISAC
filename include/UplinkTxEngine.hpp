@@ -4,7 +4,7 @@
 // UplinkTxEngine — focused uplink (UE->BS) OFDM transmit engine.
 //
 // This is the matched TX half of the duplex uplink. It builds a self-contained
-// compact OFDM frame (ZC sync at symbol 0, comb pilots, LDPC/QPSK payload) using
+// compact OFDM frame (ZC sync at symbol 0, comb pilots, LDPC-coded payload) using
 // the uplink config derived by make_uplink_config(), then places that frame at
 // the uplink symbol window of the downlink frame period and streams it. The UE
 // can gate the whole uplink waveform to zero until downlink synchronization is locked.
@@ -422,10 +422,8 @@ private:
         }
     }
 
-    static std::complex<float> _qpsk_from_int(int sym) {
-        const int idx = (sym & 3) * 2;
-        return std::complex<float>(QPSKModulator::QPSK_TABLE_FLAT[idx],
-                                   QPSKModulator::QPSK_TABLE_FLAT[idx + 1]);
+    std::complex<float> _qpsk_from_int(int sym) const {
+        return _payload_modulation.modulate_token(sym);
     }
 
     size_t _effective_user_payload_re() const {
@@ -541,7 +539,7 @@ private:
                         continue;
                     }
                     if (!entry.encoded_qpsk.empty()) {
-                        // Cheap retransmit: push pre-encoded QPSK directly
+                        // Cheap retransmit: push pre-encoded symbol tokens directly
                         AlignedIntVector retrans(entry.encoded_qpsk);
                         SPSCBackoff bo;
                         bool enqueued = false;
@@ -716,7 +714,7 @@ private:
             return false;
         }
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(len);
-        const size_t packet_qpsk = LdpcPacketFraming::packet_qpsk_symbols(payload_blocks);
+        const size_t packet_qpsk = LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
         // Capacity after per-period Identity SIB reservation (mirrors BS DL).
         const size_t effective_re = _effective_user_payload_re();
         if (packet_qpsk > effective_re) {
@@ -751,7 +749,7 @@ private:
             _ldpc.encode_frame(input_bytes, encoded_bits);
             _scrambler.scramble(encoded_bits);
             _bit_interleaver->interleave_inplace(encoded_bits, _interleaver_scratch);
-            LDPCCodec::pack_bits_qpsk(encoded_bits, qpsk_ints);
+            _payload_modulation.pack_bits(encoded_bits, qpsk_ints, _ldpc.get_N());
             packet.insert(packet.end(), qpsk_ints.begin(), qpsk_ints.end());
         }
         if (packet.size() != packet_qpsk) {
@@ -1517,6 +1515,7 @@ private:
 
     const Config _link_cfg;
     const Config _cfg;                       // derived uplink (sub)frame config
+    const DigitalModulation _payload_modulation{_cfg.modulation.scheme};
     const DuplexFrameLayout _duplex;
     const DataResourceGridLayout _layout;
 
@@ -1545,7 +1544,7 @@ private:
     LDPCCodec _ldpc{make_ldpc_5041008_cfg()};
     std::unique_ptr<BitBlockInterleaver> _bit_interleaver;
     LDPCCodec::AlignedIntVector _interleaver_scratch;
-    Scrambler _scrambler{201600, 0x5A};
+    Scrambler _scrambler{LdpcPacketFraming::scrambler_bits(_payload_modulation), 0x5A};
     std::atomic<uint32_t> _packet_seq{0};
     std::atomic<uint32_t> _idle_seq{0};
     SPSCRingBuffer<AlignedIntVector> _packet_buffer{256};

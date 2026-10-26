@@ -14,7 +14,7 @@ $$
 \rightarrow
 \text{equalization}
 \rightarrow
-\text{QPSK LLRs}
+\text{payload LLRs}
 \rightarrow
 \text{LDPC decoding}.
 $$
@@ -161,7 +161,11 @@ $$
 |\hat p_{n,m}^\mathrm{DL}-p_{n,m}^\mathrm{DL}|^2.
 $$
 
-## QPSK Soft Information and LDPC
+## Soft Information and LDPC
+
+`modulation.scheme` selects BPSK, QPSK, 8PSK, 16QAM, 32QAM, or 64QAM; QPSK is the default. Packet markers and headers always use QPSK. The receiver parses the header first, then soft-demaps its payload with the selected constellation. Average symbol energy is normalized to one; 32QAM uses an 8×4 rectangular Gray constellation.
+
+Each 1008-bit LDPC codeword maps independently to whole payload symbols. 32QAM adds two trailing zero bits per codeword, which are discarded after demapping. The LDPC code rate remains 1/2.
 
 For equalized symbol $\hat d$, the max-log LLR of bit $i$ is
 
@@ -174,6 +178,6 @@ L_i(\hat d)
 }{\hat\sigma_\mathrm{eq}^2},
 $$
 
-where $\mathcal A_i^{(b)}$ is the QPSK subset whose $i$th label bit equals $b$. Keeping LLR magnitude gives the LDPC decoder reliability information that hard decisions discard.
+where $\mathcal A_i^{(b)}$ is the subset of the selected constellation whose $i$th label bit equals $b$. Keeping LLR magnitude gives the LDPC decoder reliability information that hard decisions discard.
 
-The transmit order is LDPC encoding, scrambling, interleaving, and QPSK mapping. The UE reverses this order with soft deinterleaving, soft descrambling, and LDPC decoding. The resulting $\hat H_{n,m,\gamma}^\mathrm{DL}$ and symbol decisions also feed [bistatic sensing](/docs/signal-processing/bistatic-sensing/).
+The transmit order is LDPC encoding, scrambling, interleaving, and constellation mapping. The UE reverses this order with soft deinterleaving, soft descrambling, and LDPC decoding. The resulting $\hat H_{n,m,\gamma}^\mathrm{DL}$ and symbol decisions also feed [bistatic sensing](/docs/signal-processing/bistatic-sensing/).

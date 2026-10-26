@@ -2379,6 +2379,10 @@ class ConfigEditorApp:
         current_data, layout, _, _ = load_yaml_with_layout(name, tab.yaml_path, tab.sample_candidates)
         new_data = normalize_payload_data(name, layout, payload, current_data)
         validate_ldpc_config_values(new_data)
+        if str(new_data.get("scheme", "QPSK")).upper() not in {
+            "BPSK", "QPSK", "8PSK", "16QAM", "32QAM", "64QAM"
+        }:
+            raise RuntimeError("modulation.scheme must be BPSK, QPSK, 8PSK, 16QAM, 32QAM or 64QAM.")
         warnings = sanitize_resource_blocks_around_tdd(new_data)
         cfo_warning = clip_sensing_mask_blocks_around_cfo(new_data)
         if cfo_warning is not None:

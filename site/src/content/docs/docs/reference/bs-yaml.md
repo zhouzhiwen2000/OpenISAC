@@ -43,6 +43,25 @@ The tables follow the top-level YAML structure and use full paths such as `uplin
 | `simulation.targets[]` | `object[]` | optional | Monostatic point scatterers with `range_m`, `velocity_mps`, `gain_db`, and `angle_deg`. |
 | `simulation.bistatic_targets[]` | `object[]` | optional | Bistatic/communication point scatterers with the same target fields. |
 
+### `modulation`
+
+| Path | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `modulation.scheme` | `string` | `QPSK` | Payload modulation: `BPSK`, `QPSK`, `8PSK`, `16QAM`, `32QAM`, or `64QAM`. Applies to both downlink and uplink. Match BS and UE settings and restart both backends. |
+
+Add or edit the following in both YAML files:
+
+```yaml
+modulation:
+  scheme: 16QAM
+```
+
+Alternatively, select **Payload modulation** / `scheme` on both the BS and UE pages in `config_web_editor` and save. Stop both backends before changing the files, then restart using your usual launch script. Omitting this section selects QPSK.
+
+All payload constellations use Gray labels and unit average symbol energy. 32QAM uses an **8×4 rectangular constellation**. Synchronization sequences and pilots retain their existing design; packet markers, headers, and frame identities remain QPSK. The two endpoints must agree through configuration; modulation is not negotiated automatically.
+
+The six modes carry 1, 2, 3, 4, 5, and 6 coded bits per payload symbol respectively. Higher orders require better SNR, phase stability, and RF linearity. They increase theoretical payload capacity at a fixed sample rate and resource grid; actual UDP throughput also depends on LDPC processing capacity, frame overhead, and packet loss. See [soft demapping and LDPC](/docs/signal-processing/ue-reception/#soft-information-and-ldpc).
+
 ### `rf_sampling`
 
 | Path | Type/Unit | Typical Value | Description |

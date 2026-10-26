@@ -14,7 +14,7 @@ $$
 \rightarrow
 \text{均衡}
 \rightarrow
-\text{QPSK LLR}
+\text{载荷 LLR}
 \rightarrow
 \text{LDPC 解码}.
 $$
@@ -162,7 +162,11 @@ $$
 |\hat p_{n,m}^\mathrm{DL}-p_{n,m}^\mathrm{DL}|^2.
 $$
 
-## QPSK 软信息与 LDPC
+## 软信息与 LDPC
+
+`modulation.scheme` 选择 BPSK、QPSK、8PSK、16QAM、32QAM 或 64QAM，默认 QPSK。包标记与包头始终采用 QPSK；接收端先解析包头，再对相应载荷执行所选星座的软解调。星座的平均符号能量归一化为 1，32QAM 使用 8×4 矩形 Gray 星座。
+
+每个 1008 bit LDPC 码字独立映射为完整载荷符号；32QAM 的末尾补 2 个零比特，解调后丢弃补位。LDPC 码率保持 1/2。
 
 对每个均衡符号 $\hat d$，第 $i$ 个比特的 max-log LLR 为
 
@@ -175,7 +179,7 @@ L_i(\hat d)
 }{\hat\sigma_\mathrm{eq}^2},
 $$
 
-其中 $\mathcal A_i^{(b)}$ 是第 $i$ 位标记为 $b$ 的 QPSK 子集。保留 LLR 幅度比先做硬判决能向 LDPC 解码器提供可靠度信息。
+其中 $\mathcal A_i^{(b)}$ 是第 $i$ 位标记为 $b$ 的所选星座子集。保留 LLR 幅度比先做硬判决能向 LDPC 解码器提供可靠度信息。
 
 发送端的逻辑顺序为
 
@@ -184,7 +188,7 @@ $$
 \rightarrow\text{LDPC 编码}
 \rightarrow\text{加扰}
 \rightarrow\text{交织}
-\rightarrow\text{QPSK 映射},
+\rightarrow\text{星座映射},
 $$
 
 UE 按相反顺序执行软解交织、软解扰和 LDPC 解码，最终恢复下行信息比特。与此同时，$\hat H_{n,m,\gamma}^\mathrm{DL}$ 与均衡判决还会继续供[双站感知](/zh-cn/docs/signal-processing/bistatic-sensing/)使用。

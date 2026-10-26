@@ -6,7 +6,7 @@ Scope and limitations:
 
 - Ubuntu 24.04 remains the primary backend platform documented in the main README.
 - macOS builds are CPU-only. CUDA targets are not available.
-- Real-time tuning helpers such as `isolate_cpus.bash` are Linux-specific.
+- Real-time tuning helpers such as `isolate_cpus.py` are Linux-specific.
 - Use one package manager for UHD. Do not mix Homebrew and MacPorts UHD installs in the same shell environment.
 
 ## 1. Install prerequisites
