@@ -46,6 +46,7 @@ class LdpcWebConfigTest(unittest.TestCase):
             for values in (
                 {"code_rate": "0.75"},
                 {"code_rate": "4/3"},
+                {"code_rate": "1/3"},
                 {"decoder_iterations": "0"},
                 {"decoder_iterations": "2147483648"},
                 {"nms_normalization_factor": "0"},
@@ -65,7 +66,8 @@ class LdpcWebConfigTest(unittest.TestCase):
             fields = {f["key"]: f for section in self.app.load_config(role)["sections"]
                       for f in section["fields"]}
             self.assertEqual(fields["code_rate"]["default_text"], "1/2")
-            for rate in ("1/3", "1/2", "2/3", "3/4"):
+            self.assertEqual(fields["code_rate"]["options"], ["1/2", "2/3", "3/4"])
+            for rate in ("1/2", "2/3", "3/4"):
                 self.app.save_config(role, {"scalars": {"code_rate": rate}})
                 saved = yaml.safe_load((self.build_dir / f"{role.upper()}.yaml").read_text())
                 self.assertEqual(saved["ldpc"]["code_rate"], rate)

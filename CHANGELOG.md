@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-26 - LDPC 码率选项调整
+
+移除 `1/3` 重复传输码率，保留 `1/2`（默认）、`2/3` 和 `3/4`。统一更新各后端、配置编辑器、示例配置和中英文文档；包含 `ldpc.code_rate: "1/3"` 的配置须修改为受支持的码率后再启动。
+
 ## 2026-10-26 - 上行仿真定时发送修复
 
 修复上行仿真在定时发送起点之前或接收端处理较慢时，将共享内存背压误判为发送欠载的问题。等待缓存空间后继续提交剩余样本，保留首样本时间戳和连续发送顺序，避免错误触发 UE 收发重启及仿真停滞。真实 USRP 的发送错误处理保持原有行为。

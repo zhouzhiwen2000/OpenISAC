@@ -141,7 +141,7 @@ ldpc:
 
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `ldpc.code_rate` | `string` | `1/2` | 载荷码率：`1/3`、`1/2`、`2/3` 或 `3/4`；两端须一致，修改后重启两端。 |
+| `ldpc.code_rate` | `string` | `1/2` | 载荷码率：`1/2`、`2/3` 或 `3/4`；两端须一致，修改后重启两端。 |
 | `ldpc.decoder_iterations` | `int` | `12` | CPU LDPC 最大迭代次数，必须大于等于 1；保留 syndrome 提前结束。 |
 | `ldpc.nms_normalization_factor` | `float` | `0.75` | CPU NMS 归一化系数，有限值且在 `(0, 1]` 内；Q16 模式使用 `0.125` 的整数倍。 |
 | `ldpc.fixed_point` | `bool` | `false` | 使用 int16/Q16 CPU LDPC 解码路径。 |

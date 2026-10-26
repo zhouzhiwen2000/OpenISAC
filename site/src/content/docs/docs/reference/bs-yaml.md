@@ -135,7 +135,7 @@ See [rate matching and decoding](/docs/signal-processing/ue-reception/#soft-info
 
 | Path | Type/Unit | Typical Value | Description |
 | :--- | :--- | :--- | :--- |
-| `ldpc.code_rate` | `string` | `1/2` | Payload rate: `1/3`, `1/2`, `2/3`, or `3/4`; match BS and UE and restart both. |
+| `ldpc.code_rate` | `string` | `1/2` | Payload rate: `1/2`, `2/3`, or `3/4`; match BS and UE and restart both. |
 | `ldpc.decoder_iterations` | `int` | `12` | Maximum CPU LDPC iterations, at least 1; syndrome early stopping stays enabled. |
 | `ldpc.nms_normalization_factor` | `float` | `0.75` | CPU NMS normalization factor, finite and in `(0, 1]`; Q16 requires multiples of `0.125`. |
 | `ldpc.fixed_point` | `bool` | `false` | Use the int16/Q16 layered-NMS CPU decoder instead of float32. |

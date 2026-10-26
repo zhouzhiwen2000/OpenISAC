@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <random>
 #include <stdexcept>
 #include "LDPCCodec.hpp"
@@ -9,8 +10,8 @@
 
 namespace {
 void require(bool ok, const char* text) { if (!ok) throw std::runtime_error(text); }
-constexpr const char* rates[] = {"1/3", "1/2", "2/3", "3/4"};
-constexpr size_t lengths[] = {1512, 1008, 756, 672};
+constexpr const char* rates[] = {"1/2", "2/3", "3/4"};
+constexpr size_t lengths[] = {1008, 756, 672};
 constexpr const char* modes[] = {"BPSK", "QPSK", "8PSK", "16QAM", "32QAM", "64QAM"};
 void yaml_config() {
     const auto path = std::filesystem::temp_directory_path() /
@@ -21,26 +22,18 @@ void yaml_config() {
         Config legacy;
         require(loader(legacy, path.string()) && legacy.ldpc.code_rate == LdpcCodeRate::R12,
                 "default code rate changed");
-        for (size_t i=0; i<4; ++i) {
+        for (size_t i=0; i<std::size(rates); ++i) {
             std::ofstream(path) << "ldpc:\n  code_rate: '" << rates[i] << "'\n";
             Config cfg;
             require(loader(cfg, path.string()), "code rate YAML failed");
             require(LdpcRateMatching(cfg.ldpc.code_rate).code_bits() == lengths[i], "rate length mismatch");
         }
-        for (const char* invalid : {"0", "1", "0.75", "4/3", "bogus"}) {
+        for (const char* invalid : {"0", "1", "0.75", "1/3", "4/3", "bogus"}) {
             std::ofstream(path) << "ldpc:\n  code_rate: '" << invalid << "'\n";
             Config cfg;
             require(!loader(cfg, path.string()), "unsupported rate accepted");
         }
     }
-}
-void saturating_repetition() {
-    LdpcRateMatching rate(LdpcCodeRate::R13);
-    LDPCCodec::AlignedShortVector values(1512, 30000), scratch;
-    values[1]=-30000;values[1009]=-30000;
-    rate.recover_inplace(values,scratch);
-    require(values[0]==32767 && values[1]==-32767 && values[504]==30000,
-            "repetition LLR overflow or wrong unrepeated value");
 }
 void round_trips(const std::string& root) {
     auto cfg=make_ldpc_5041008_cfg();cfg.fixed_point=true;
@@ -56,7 +49,7 @@ void round_trips(const std::string& root) {
     LDPCCodec::AlignedIntVector encoded,interleave_scratch;
     codec.encode_frame(input,encoded);
     BitBlockInterleaver interleaver(1008,21);
-    for(size_t r=0;r<4;++r) {
+    for(size_t r=0;r<std::size(rates);++r) {
         const LdpcRateMatching rate(parse_ldpc_code_rate(rates[r]));
         for(const auto* name:modes) {
             const DigitalModulation modem(parse_modulation_scheme(name));
@@ -67,7 +60,7 @@ void round_trips(const std::string& root) {
             const auto before=transmitted;
             rate.match_inplace(transmitted,interleave_scratch);
             require(transmitted.size()==blocks*lengths[r],"wrong transmitted length");
-            if(r==1)require(transmitted==before,"legacy rate bitstream changed");
+            if(r==0)require(transmitted==before,"legacy rate bitstream changed");
             LDPCCodec::AlignedIntVector symbols;
             modem.pack_bits(transmitted,symbols,rate.code_bits());
             require(symbols.size()==blocks*modem.symbol_count(lengths[r]),"block RE padding mismatch");
@@ -107,6 +100,6 @@ void round_trips(const std::string& root) {
 }
 }
 int main(int argc,char** argv) {
-    try { require(argc==2,"usage: LDPCRateTest SOURCE_ROOT");yaml_config();saturating_repetition();round_trips(argv[1]); }
+    try { require(argc==2,"usage: LDPCRateTest SOURCE_ROOT");yaml_config();round_trips(argv[1]); }
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

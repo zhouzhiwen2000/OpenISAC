@@ -20,7 +20,7 @@ OpenISAC 是一个面向实时实验的 OFDM 通信感知一体化（ISAC）平�
 
 - 支持实时 OFDM 通信，以及单站和双站感知
 - 上下行载荷支持 BPSK、QPSK、8PSK、16QAM、32QAM 和 64QAM，可通过 YAML 或网页配置编辑器选择
-- 上下行载荷支持 1/3、1/2（默认）、2/3、3/4 四种 LDPC 传输码率
+- 上下行载荷支持 1/2（默认）、2/3、3/4 三种 LDPC 传输码率
 - 支持双站实验所需的空口同步机制
 - 可选的 [LoS 相位参考](site/src/content/docs/zh-cn/docs/reference/ue-yaml.md#los-相位参考) 可改善较差时钟下的感知表现；要求收发机之间有 LoS 且两者相对静止（YAML 配置开关，重启生效）。
 - 后端采用 C++ 实时链路，前端提供 Python 可视化与工具脚本

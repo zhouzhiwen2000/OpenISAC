@@ -34,7 +34,7 @@ def main() -> None:
     parser.add_argument("--ue", default="UE")
     parser.add_argument("--modes", nargs="+", choices=MODES, default=MODES)
     parser.add_argument("--cpu-precision", choices=("q16", "float32"), default="q16")
-    parser.add_argument("--code-rate", choices=("1/3", "1/2", "2/3", "3/4"), default="1/2")
+    parser.add_argument("--code-rate", choices=("1/2", "2/3", "3/4"), default="1/2")
     parser.add_argument("--direction", choices=("downlink", "uplink"), default="downlink")
     parser.add_argument("--payload-bytes", type=int, default=1316)
     parser.add_argument("--packets", type=int, default=40)

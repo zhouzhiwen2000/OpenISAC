@@ -1,35 +1,30 @@
 #ifndef LDPC_RATE_MATCHING_HPP
 #define LDPC_RATE_MATCHING_HPP
 
-#include <algorithm>
 #include <cstddef>
-#include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 
 /** @brief Payload rates for the LDPC(1008,504) mother code. */
-enum class LdpcCodeRate { R13, R12, R23, R34 };
+enum class LdpcCodeRate { R12, R23, R34 };
 
 /** @brief Parse the exact YAML code-rate notation. */
 inline LdpcCodeRate parse_ldpc_code_rate(const std::string& value) {
-    if (value == "1/3") return LdpcCodeRate::R13;
     if (value == "1/2") return LdpcCodeRate::R12;
     if (value == "2/3") return LdpcCodeRate::R23;
     if (value == "3/4") return LdpcCodeRate::R34;
-    throw std::invalid_argument("ldpc.code_rate must be 1/3, 1/2, 2/3, or 3/4");
+    throw std::invalid_argument("ldpc.code_rate must be 1/2, 2/3, or 3/4");
 }
 
 /** @brief Rate matching after the existing scrambler and 21-row interleaver.
- * Each 504-bit information block emits 1512, 1008, 756, or 672 bits.
- * Punctured positions have zero LLR; repeated observations are added before
- * deinterleaving and descrambling. The 1/2 path performs no copies or resizing.
+ * Each 504-bit information block emits 1008, 756, or 672 bits.
+ * Punctured positions have zero LLR before deinterleaving and descrambling.
+ * The 1/2 path performs no copies or resizing.
  */
 class LdpcRateMatching {
 public:
     explicit constexpr LdpcRateMatching(LdpcCodeRate rate = LdpcCodeRate::R12)
-        : _bits(rate == LdpcCodeRate::R13 ? 1512 :
-                rate == LdpcCodeRate::R23 ? 756 :
+        : _bits(rate == LdpcCodeRate::R23 ? 756 :
                 rate == LdpcCodeRate::R34 ? 672 : 1008) {}
 
     /** @brief Transmitted bits per mother-code block, excluding RE padding. */
@@ -44,10 +39,7 @@ public:
         for (size_t block = 0; block < blocks; ++block) {
             const auto* input = bits.data() + block * 1008;
             auto* output = scratch.data() + block * _bits;
-            if (_bits == 1512) {
-                std::copy_n(input, 1008, output);
-                std::copy_n(input, 504, output + 1008);
-            } else if (_bits == 756) {
+            if (_bits == 756) {
                 #pragma omp simd
                 for (size_t i = 0; i < 756; ++i) output[i] = input[(i / 3) * 4 + i % 3];
             } else {
@@ -58,7 +50,7 @@ public:
         bits.swap(scratch);
     }
 
-    /** @brief Restore mother-code LLRs; saturate Q16 sums without signed overflow. */
+    /** @brief Restore mother-code LLRs with zeros at punctured positions. */
     template<typename Vector>
     void recover_inplace(Vector& llrs, Vector& scratch) const {
         if (_bits == 1008) return;
@@ -68,18 +60,7 @@ public:
         for (size_t block = 0; block < blocks; ++block) {
             const auto* input = llrs.data() + block * _bits;
             auto* output = scratch.data() + block * 1008;
-            if (_bits == 1512) {
-                #pragma omp simd
-                for (size_t i = 0; i < 504; ++i) {
-                    if constexpr (std::is_integral_v<Value>) {
-                        output[i] = static_cast<Value>(std::clamp(
-                            static_cast<int>(input[i]) + input[1008 + i], -32767, 32767));
-                    } else {
-                        output[i] = input[i] + input[1008 + i];
-                    }
-                }
-                std::copy_n(input + 504, 504, output + 504);
-            } else if (_bits == 756) {
+            if (_bits == 756) {
                 #pragma omp simd
                 for (size_t i = 0; i < 252; ++i) {
                     output[4*i] = input[3*i];
