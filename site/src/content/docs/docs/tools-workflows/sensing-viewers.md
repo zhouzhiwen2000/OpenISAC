@@ -342,3 +342,9 @@ The conversion is $v_r = f_D c / (2 f_c)$, with the sign inherited from the disp
 A separate yellow annotation at the top right of the main spectrum shows the strongest detected return's range and velocity to one decimal place (or Doppler frequency when the carrier is blank). The annotation keeps a fixed position and size; missing target values are shown as **N/A**.
 
 The monostatic fast viewer keeps its rolling micro-Doppler history across dropped or decimated frames and inserts zeros at missing slow-time positions. This preserves elapsed time; it does not reconstruct missing echoes, and gaps can weaken peaks or introduce sidelobes. History restarts when the range cell or sampling geometry changes, or the timestamp moves backwards.
+
+### Strongest target in the bistatic viewer
+
+`plot_bi_sensing_fast.py` shows the strongest detected target's relative delay (**ns**) and Doppler frequency (**Hz**) in yellow at the top right of the main spectrum, both to two decimal places. Missing targets are shown as **N/A**; the fixed annotation does not shift the plot layout. Delay is relative to the current receive-alignment reference and matches the main plot's vertical axis.
+
+The bistatic defaults are **Delay FFT = 20480** and **Doppler FFT = 1000**. Existing saved settings take precedence. Target values are converted using the current FFT and sampling parameters.

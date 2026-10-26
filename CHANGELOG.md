@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-10-26 - 双站最强目标读数
+
+双站快速感知界面在主谱图右上角以固定黄色信息框显示最强检测目标的相对时延（ns）和多普勒频率（Hz），均保留两位小数；没有目标时显示 N/A。读数使用当前 FFT、显示抽取和采样参数换算，双站默认距离 FFT 调整为 20480，多普勒 FFT 保持 1000。
+
 ## 2026-10-26 - LDPC 码率选项调整
 
 移除 `1/3` 重复传输码率，保留 `1/2`（默认）、`2/3` 和 `3/4`。统一更新各后端、配置编辑器、示例配置和中英文文档；包含 `ldpc.code_rate: "1/3"` 的配置须修改为受支持的码率后再启动。

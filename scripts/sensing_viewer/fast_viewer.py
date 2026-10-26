@@ -124,7 +124,7 @@ HEADER_SIZE = 12
 SOCKET_BUFFER_SIZE = 8 * 1024 * 1024
 MAX_RANGE_BIN = 1000
 MAX_DOPPLER_BINS = 1000
-RANGE_FFT_SIZE = 10240
+RANGE_FFT_SIZE = 20480 if IS_BI_MODE else 10240
 DOPPLER_FFT_SIZE = 1000
 PROCESS_RANGE_FFT_SIZE = RANGE_FFT_SIZE
 PROCESS_DOPPLER_FFT_SIZE = DOPPLER_FFT_SIZE
@@ -3393,7 +3393,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strongest_target_label.setTextWidth(self._scale_px(250))
         self.strongest_target_label.setZValue(20)
         self.rd_plot.addItem(self.strongest_target_label, ignoreBounds=True)
-        self.strongest_target_label.setVisible(not IS_BI_MODE)
         self.rd_plot.getViewBox().sigRangeChanged.connect(self._position_strongest_target_label)
         self.rd_plot.getViewBox().sigResized.connect(self._position_strongest_target_label)
         self.rd_plot.setLabel('left', 'Range / Relative Delay (waiting for parameters)')
@@ -3953,6 +3952,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # ── Load saved settings, then connect persistence ──
         self._load_and_apply_settings()
         self._connect_settings_persistence()
+        self._set_spectrum_titles()
 
         self._auto_load_latest_phase_calibration()
 
@@ -4766,13 +4766,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_spectrum_titles(self, strongest=None, range_scale=1.0, range_unit="m"):
         """Show the strongest return in a separate top-right plot annotation."""
-        if IS_BI_MODE:
-            return
-        base = "Range-Velocity Spectrum" if self.velocity_carrier_hz is not None else "Range-Doppler Spectrum"
-        axis_label = "Radial Velocity (m/s)" if self.velocity_carrier_hz is not None else "Doppler Frequency (Hz)"
+        carrier_hz = None if IS_BI_MODE else self.velocity_carrier_hz
+        base = "Range-Velocity Spectrum" if carrier_hz is not None else "Range-Doppler Spectrum"
+        axis_label = "Radial Velocity (m/s)" if carrier_hz is not None else "Doppler Frequency (Hz)"
         self.rd_plot.setLabel("bottom", axis_label)
         self.md_plot.setLabel("left", axis_label)
-        if strongest is None:
+        if IS_BI_MODE:
+            delay = (f"{strongest['range_idx'] * range_scale:.2f} ns"
+                     if strongest is not None and range_unit == "ns" else "N/A ns")
+            doppler = f"{strongest['doppler_hz']:+.2f} Hz" if strongest is not None else "N/A Hz"
+            summary = f"Strongest Target\nDelay: {delay}\nf_D: {doppler}"
+        elif strongest is None:
             motion_label = "v_r: N/A m/s" if self.velocity_carrier_hz is not None else "f_D: N/A Hz"
             summary = f"Strongest Target\nR: N/A m\n{motion_label}"
         else:
@@ -4783,7 +4787,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strongest_target_label.setText(summary, color="#facc15")
         self._position_strongest_target_label()
         self.rd_plot.setTitle(base)
-        self.md_plot.setTitle("Micro-Velocity Spectrum" if self.velocity_carrier_hz is not None
+        self.md_plot.setTitle("Micro-Velocity Spectrum" if carrier_hz is not None
                               else "Micro-Doppler Spectrum")
 
     def _target_doppler_hz(self, latest_disp, doppler_idx):
@@ -5256,7 +5260,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 'rank': rank,
                 'range_idx': r_idx,
                 'doppler_text': doppler_text,
-                'doppler_hz': self._target_doppler_hz(latest_disp, d_idx) if not IS_BI_MODE else None,
+                'doppler_hz': self._target_doppler_hz(latest_disp, d_idx),
                 'relative_range_bins': relative_range_bins,
                 'range_value': range_value,
                 'aoa_deg': aoa_deg,
