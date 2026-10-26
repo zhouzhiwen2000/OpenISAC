@@ -121,14 +121,24 @@ X310 PPS 捕获本身的量化（200 MHz master clock 下为 5 ns）。
 
 ### `ldpc`
 
+在 Web 编辑器的 **LDPC → code_rate** 中选择载荷码率，或在两端 YAML 中设置：
+
+```yaml
+ldpc:
+  code_rate: "2/3"
+```
+
+码率定义和使用取舍见[码率匹配与译码](/zh-cn/docs/signal-processing/ue-reception/#软信息与-ldpc)。
+
 | 参数 | 类型/单位 | 典型值 | 说明 |
 | :--- | :--- | :--- | :--- |
+| `ldpc.code_rate` | `string` | `1/2` | 载荷码率：`1/3`、`1/2`、`2/3` 或 `3/4`；两端须一致，修改后重启两端。 |
 | `ldpc.decoder_iterations` | `int` | `12` | CPU LDPC 最大迭代次数，必须大于等于 1；保留 syndrome 提前结束。 |
 | `ldpc.nms_normalization_factor` | `float` | `0.75` | CPU NMS 归一化系数，有限值且在 `(0, 1]` 内；Q16 模式使用 `0.125` 的整数倍。 |
 | `ldpc.fixed_point` | `bool` | `false` | 使用 int16/Q16 layered-NMS CPU 解码器而不是 float32。 |
 | `ldpc.fixed_point_scale` | `int` | `16` | 固定点模式下 int16 饱和前的 LLR 缩放。 |
 
-这两项用于 BS 上行的 CPU 译码，float32 和 Q16 共用设置。省略时使用 12 次迭代和系数 0.75。已有 YAML 的显式值继续生效；要在已有配置中使用这组默认值，请更新这两项。可在 [Web 配置控制台](/zh-cn/docs/tools-workflows/web-config-console/) 的 **LDPC decode** 中修改，保存后重启后端。Q16 支持 `0.125、0.25、0.375、0.5、0.625、0.75、0.875、1.0`；LLR 比例仅在 `fixed_point: true` 时参与计算。增加迭代次数可能改善纠错，同时增加弱信号时的计算量。
+这两项用于 BS 上行的 CPU 译码，float32 和 Q16 共用设置。省略时使用 12 次迭代和系数 0.75。已有 YAML 的显式值继续生效；要在已有配置中使用这组默认值，请更新这两项。可在 [Web 配置控制台](/zh-cn/docs/tools-workflows/web-config-console/) 的 **LDPC** 中修改，保存后重启后端。Q16 支持 `0.125、0.25、0.375、0.5、0.625、0.75、0.875、1.0`；LLR 比例仅在 `fixed_point: true` 时参与计算。增加迭代次数可能改善纠错，同时增加弱信号时的计算量。
 
 ### `downlink`
 

@@ -538,6 +538,26 @@ if(BUILD_TESTING)
     add_test(NAME Modulation COMMAND ModulationTest "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(Modulation PROPERTIES LABELS "cpu;modulation;ldpc" TIMEOUT 120)
 
+    add_executable(LDPCRateTest
+        tests/ldpc_rate_test.cpp
+        ${OPENISAC_SRC_DIR}/LDPCCodec.cpp
+        ${OPENISAC_SRC_DIR}/LDPC5041008SIMD.cpp
+        ${OPENISAC_SRC_DIR}/AsyncLogger.cpp
+    )
+    target_include_directories(LDPCRateTest PRIVATE
+        ${UHD_INCLUDE_DIRS} ${FFTW3f_INCLUDE_DIRS} ${YAMLCPP_INCLUDE_DIRS}
+        ${OPENISAC_ZMQ_INCLUDE_DIRS} ${OPENISAC_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR} ${Boost_INCLUDE_DIRS}
+    )
+    target_link_libraries(LDPCRateTest PRIVATE
+        ${UHD_LIBRARIES} ${FFTW3f_LIBRARIES} ${FFTW3f_THREADS_LIBRARY}
+        Threads::Threads OpenMP::OpenMP_CXX aff3ct::aff3ct-shared-lib
+        ${OPENISAC_YAMLCPP_TARGET} ${YAMLCPP_LIBRARIES} ${OPENISAC_ZMQ_LINK} rt
+    )
+    target_compile_options(LDPCRateTest PRIVATE ${COMMON_COMPILE_OPTIONS} -ffast-math)
+    add_test(NAME LDPCRate COMMAND LDPCRateTest "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(LDPCRate PROPERTIES LABELS "cpu;modulation;ldpc" TIMEOUT 120)
+
     add_executable(ModulationBench tools/modulation_bench.cpp)
     target_include_directories(ModulationBench PRIVATE ${OPENISAC_INCLUDE_DIR})
     target_link_libraries(ModulationBench PRIVATE OpenMP::OpenMP_CXX)

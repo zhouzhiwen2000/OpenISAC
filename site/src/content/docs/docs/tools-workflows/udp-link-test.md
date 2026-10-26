@@ -54,7 +54,7 @@ python scripts/plot_udp_link.py \
 Change **目标速率** and click **应用** to change the sender's target rate.
 Set it to zero to pause traffic. Enter a fraction such as `1/2` or `2/3` in
 **LDPC 码率** and press Enter to update the encoded-rate display. This field
-does not change the backend's LDPC codec.
+only affects the displayed rates. Match it to `ldpc.code_rate` in both YAML files. To change the actual payload code rate, edit YAML or the configuration editor and restart both backends.
 
 Use Ctrl+C to stop the sender, then allow at least one second for the receiver
 to confirm the last packet counts before stopping it. Closing the dashboard

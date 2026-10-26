@@ -44,6 +44,7 @@
 #include <functional>
 #include <unordered_map>
 #include "DigitalModulation.hpp"
+#include "LdpcRateMatching.hpp"
 #include "RadioTypes.hpp"
 #include "Xr1710gConfig.hpp"
 #include "AirFrameClock.hpp"
@@ -1552,9 +1553,10 @@ struct ResourcePreviewConfig {
  * Mirrors the sectioned YAML layout. YAML is parsed once into this structure;
  * hot paths use typed fields instead of querying YAML nodes.
  */
-// CPU LDPC decode options. Applies to both UE downlink RX and BS
-// uplink RX. Default reproduces the float32 decode path exactly.
+// Payload code rate for both link directions and all backends, plus CPU
+// decoder settings. The default rate preserves the original wire format.
 struct LdpcDecodeConfig {
+    LdpcCodeRate code_rate = LdpcCodeRate::R12; ///< Payload rate; control coding is unchanged.
     int decoder_iterations = 12; ///< Maximum iterations; syndrome early stopping stays enabled.
     float nms_normalization_factor = 0.75f; ///< NMS check-node scale in (0, 1].
     bool fixed_point = false;     // use int16 (Q16) layered-NMS decoder instead of float32
@@ -3364,6 +3366,8 @@ inline void load_value(const YAML::Node& section, const char* key, T& value) {
 }
 
 inline void load_ldpc_decode_config(const YAML::Node& section, LdpcDecodeConfig& cfg) {
+    if (section && section["code_rate"])
+        cfg.code_rate = parse_ldpc_code_rate(section["code_rate"].as<std::string>());
     load_value(section, "decoder_iterations", cfg.decoder_iterations);
     load_value(section, "nms_normalization_factor", cfg.nms_normalization_factor);
     load_value(section, "fixed_point", cfg.fixed_point);

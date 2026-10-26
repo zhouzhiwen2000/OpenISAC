@@ -68,6 +68,7 @@ sensing:
   frame_decimation: 1  # Process/output one complete sensing frame out of N (1..1000)
 
 ldpc:
+  code_rate: "1/2"                  # Payload rate: 1/3, 1/2, 2/3, 3/4; match BS and UE
   decoder_iterations: 12
   nms_normalization_factor: 0.75
 

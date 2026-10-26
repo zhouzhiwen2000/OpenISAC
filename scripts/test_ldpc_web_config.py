@@ -44,6 +44,8 @@ class LdpcWebConfigTest(unittest.TestCase):
         for role in ("bs", "ue"):
             path = self.build_dir / f"{role.upper()}.yaml"
             for values in (
+                {"code_rate": "0.75"},
+                {"code_rate": "4/3"},
                 {"decoder_iterations": "0"},
                 {"decoder_iterations": "2147483648"},
                 {"nms_normalization_factor": "0"},
@@ -57,6 +59,19 @@ class LdpcWebConfigTest(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         self.app.save_config(role, {"scalars": values})
                     self.assertEqual(path.read_bytes(), before)
+
+    def test_code_rates(self) -> None:
+        for role in ("bs", "ue"):
+            fields = {f["key"]: f for section in self.app.load_config(role)["sections"]
+                      for f in section["fields"]}
+            self.assertEqual(fields["code_rate"]["default_text"], "1/2")
+            for rate in ("1/3", "1/2", "2/3", "3/4"):
+                self.app.save_config(role, {"scalars": {"code_rate": rate}})
+                saved = yaml.safe_load((self.build_dir / f"{role.upper()}.yaml").read_text())
+                self.assertEqual(saved["ldpc"]["code_rate"], rate)
+            self.app.save_config(role, {"scalars": {"code_rate": ""}})
+            saved = yaml.safe_load((self.build_dir / f"{role.upper()}.yaml").read_text())
+            self.assertNotIn("code_rate", saved["ldpc"])
 
     def test_float_and_q16_factors(self) -> None:
         for role in ("bs", "ue"):

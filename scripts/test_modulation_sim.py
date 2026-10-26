@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Verify UDP payloads through the local simulator and selectable BS/UE binaries.
 
-Example: python3 scripts/test_modulation_sim.py --bs BS --ue UE
+Examples:
+  python3 scripts/test_modulation_sim.py --bs BS --ue UE
+  python3 scripts/test_modulation_sim.py --direction uplink --code-rate 3/4
 Creates isolated YAML files and logs; never edits build/BS.yaml or build/UE.yaml.
 """
 from __future__ import annotations
@@ -32,6 +34,8 @@ def main() -> None:
     parser.add_argument("--ue", default="UE")
     parser.add_argument("--modes", nargs="+", choices=MODES, default=MODES)
     parser.add_argument("--cpu-precision", choices=("q16", "float32"), default="q16")
+    parser.add_argument("--code-rate", choices=("1/3", "1/2", "2/3", "3/4"), default="1/2")
+    parser.add_argument("--direction", choices=("downlink", "uplink"), default="downlink")
     parser.add_argument("--payload-bytes", type=int, default=1316)
     parser.add_argument("--packets", type=int, default=40)
     args = parser.parse_args()
@@ -61,25 +65,35 @@ def main() -> None:
         run = output / f"{index}-{mode}"
         session = f"modulation_test_{os.getpid()}_{index}"
         udp_in, udp_out = free_port(), free_port()
+        downlink_in, downlink_out = (free_port(), free_port()) if args.direction == "uplink" else (udp_in, udp_out)
         for role in ("BS", "UE"):
             directory = run / role.lower()
             directory.mkdir(parents=True)
-            config = yaml.safe_load((ROOT / "config" / f"{role}_Sim.yaml").read_text())
+            preset = f"{role}_Sim_Duplex.yaml" if args.direction == "uplink" else f"{role}_Sim.yaml"
+            config = yaml.safe_load((ROOT / "config" / preset).read_text())
             config["modulation"] = {"scheme": mode}
             config["rf_sampling"].update(sample_rate=2_000_000, bandwidth=2_000_000)
             config["simulation"].update(
-                session=session, enable_sensing_rx=False, enable_uplink=False,
+                session=session, enable_sensing_rx=False, enable_uplink=args.direction == "uplink",
                 cfo_hz=0, target_snr_db=40, targets=[], bistatic_targets=[],
                 pacing_enabled=True, control_port=free_port(),
             )
             config["ofdm_frame"]["midframe_pilot_symbols"] = []
-            config["uplink"].update(enabled=False, symbol_count=0)
+            config["uplink"].update(enabled=args.direction == "uplink",
+                                    symbol_start=50, symbol_count=50 if args.direction == "uplink" else 0)
+            if args.direction == "uplink":
+                config["uplink"]["bs_dl_ul_timing_diff" if role == "BS" else "ue_timing_advance"] = 0
+                # Force partial writes and backpressure before the timed UL
+                # start: this ring holds less than the BS/UE startup offset.
+                config["simulation"]["ring_capacity_samples"] = 1048576
             config["cpu_cores"] = {
                 "downlink_cpu_cores": [-1] * (4 if role == "BS" else 3),
                 "demod_worker_cpu_cores": [-1, -1], "ldpc_worker_cpu_cores": [-1, -1],
                 "main_cpu_core": -1, "sensing_cpu_cores": [-1],
+                "uplink_cpu_cores": [-1] * (3 if role == "BS" else 4),
             }
-            config["ldpc"] = {"fixed_point": args.cpu_precision == "q16", "fixed_point_scale": 16,
+            config["ldpc"] = {"code_rate": args.code_rate,
+                              "fixed_point": args.cpu_precision == "q16", "fixed_point_scale": 16,
                               "decoder_iterations": 12, "nms_normalization_factor": 0.75}
             config["logging"] = {"default_level": "warn", "force_error": True}
             network = config["network_output"]
@@ -88,6 +102,9 @@ def main() -> None:
                     network[key] = free_port()
             network.update(udp_input_ip="127.0.0.2", udp_input_port=udp_in,
                            udp_output_ip="127.0.0.2", udp_output_port=udp_out)
+            if args.direction == "uplink":
+                network["udp_input_port" if role == "BS" else "udp_output_port"] = (
+                    downlink_in if role == "BS" else downlink_out)
             if role == "BS":
                 config["sensing"].update(rx_channel_count=0, rx_channels=[])
             else:
@@ -125,6 +142,7 @@ def main() -> None:
             time.sleep(0.5)
             launch("bs", [str(build / args.bs)], run / "bs")
             warmup = b"OPENISAC_MODULATION_PROBE" + bytes(range(256)) * 5
+            warmup = warmup[:args.payload_bytes]
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:
                 tx.sendto(warmup, ("127.0.0.2", udp_in))
@@ -158,6 +176,11 @@ def main() -> None:
             while time.monotonic() < deadline and len(received) < args.packets:
                 time.sleep(0.05)
                 record()
+            # Check before SIGINT: shutdown may legitimately interrupt a send.
+            if args.direction == "uplink":
+                ue_log = (run / "ue.log").read_text()
+                if "short send" in ue_log or "shared_restart_begin" in ue_log:
+                    raise RuntimeError(f"uplink transport/restart regression; inspect {run}")
             result = {"modulation": mode, "sent": args.packets, "received": len(received),
                       "corrupt": corrupt, "logs": str(run)}
             results.append(result)

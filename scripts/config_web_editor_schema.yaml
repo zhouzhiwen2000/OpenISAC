@@ -591,10 +591,17 @@ common:
     default: QPSK
     optional: true
     options: [BPSK, QPSK, 8PSK, 16QAM, 32QAM, 64QAM]
-- title: LDPC decode
+- title: LDPC
   yaml_key: ldpc
   order: 60
   fields:
+  - type: scalar
+    key: code_rate
+    kind: string
+    comment: Payload code rate; BS and UE must match; restart both backends to apply
+    default: '1/2'
+    optional: true
+    options: ['1/3', '1/2', '2/3', '3/4']
   - type: scalar
     key: decoder_iterations
     kind: int

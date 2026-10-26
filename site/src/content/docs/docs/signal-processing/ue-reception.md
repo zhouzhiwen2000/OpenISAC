@@ -165,7 +165,18 @@ $$
 
 `modulation.scheme` selects BPSK, QPSK, 8PSK, 16QAM, 32QAM, or 64QAM; QPSK is the default. Packet markers and headers always use QPSK. The receiver parses the header first, then soft-demaps its payload with the selected constellation. Average symbol energy is normalized to one; 32QAM uses an 8×4 rectangular Gray constellation.
 
-Each 1008-bit LDPC codeword maps independently to whole payload symbols. 32QAM adds two trailing zero bits per codeword, which are discarded after demapping. The LDPC code rate remains 1/2.
+`ldpc.code_rate` selects the payload rate: `1/3`, `1/2` (default), `2/3`, or `3/4`. Set the same value in BS and UE, then restart both backends. The setting applies to both link directions and can be combined with any supported payload modulation. Packet markers, BCH mini-headers, and frame identifiers retain their existing QPSK format.
+
+| Payload rate | Information bits per block | Transmitted coded bits per block |
+| --- | ---: | ---: |
+| `1/3` | 504 | 1512 |
+| `1/2` | 504 | 1008 |
+| `2/3` | 504 | 756 |
+| `3/4` | 504 | 672 |
+
+These are transmission rates derived from the existing LDPC(1008,504) mother code. Rate `1/3` repeats 504 coded bits; `2/3` and `3/4` puncture 252 and 336 bits respectively. Higher rates use fewer payload symbols but leave less error-correction margin. They do not reduce the mother-code decoder's work per information block in proportion to the transmitted length. The rates exclude control overhead, packet padding, and padding to a complete constellation symbol.
+
+Each rate-matched block is mapped separately to whole payload symbols. Any trailing padding bits are discarded after demapping. Before LDPC decoding, the receiver inserts zero LLRs at punctured positions and adds the LLRs of repeated observations.
 
 For equalized symbol $\hat d$, the max-log LLR of bit $i$ is
 
@@ -180,4 +191,4 @@ $$
 
 where $\mathcal A_i^{(b)}$ is the subset of the selected constellation whose $i$th label bit equals $b$. Keeping LLR magnitude gives the LDPC decoder reliability information that hard decisions discard.
 
-The transmit order is LDPC encoding, scrambling, interleaving, and constellation mapping. The UE reverses this order with soft deinterleaving, soft descrambling, and LDPC decoding. The resulting $\hat H_{n,m,\gamma}^\mathrm{DL}$ and symbol decisions also feed [bistatic sensing](/docs/signal-processing/bistatic-sensing/).
+The transmit order is LDPC encoding, scrambling, interleaving, rate matching, and constellation mapping. The UE reverses this order with rate recovery, soft deinterleaving, soft descrambling, and LDPC decoding. The resulting $\hat H_{n,m,\gamma}^\mathrm{DL}$ and symbol decisions also feed [bistatic sensing](/docs/signal-processing/bistatic-sensing/).

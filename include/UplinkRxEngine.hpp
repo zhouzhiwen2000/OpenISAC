@@ -1340,9 +1340,9 @@ public:
                 break;
             }
             const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(hdr.payload_len);
-            const size_t required = payload_blocks * bits_per_block;
+            const size_t required = payload_blocks * _payload_rate.code_bits();
             const size_t payload_off = control_off + LdpcPacketFraming::kControlBits;
-            const size_t next_off = symbol_offset + LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+            const size_t next_off = symbol_offset + LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation, _payload_rate.code_bits());
             if (next_off > frame_llr.size() / 2) {
                 LOG_RT_WARN_HZ_M(UlRx, 5)
                     << "[UL-RX] payload extends beyond LLR frame; dropping incomplete packet"
@@ -1358,7 +1358,8 @@ public:
             LlrVec& payload_llr = payload_scratch;
             payload_llr.resize(required);
             _payload_modulation.demap_scaled_pairs(
-                frame_llr.data() + payload_off, required, iq_scale, payload_llr.data(), bits_per_block);
+                frame_llr.data() + payload_off, required, iq_scale, payload_llr.data(), _payload_rate.code_bits());
+            _payload_rate.recover_inplace(payload_llr, deint_scratch);
             _bit_interleaver->deinterleave_inplace(payload_llr, deint_scratch);
             _descrambler.soft_descramble(payload_llr);
             LDPCCodec::AlignedByteVector& decoded = _decoded_scratch;
@@ -1612,6 +1613,7 @@ public:
     const Config _link_cfg;
     const Config _cfg;
     const DigitalModulation _payload_modulation{_cfg.modulation.scheme};
+    const LdpcRateMatching _payload_rate{_cfg.ldpc.code_rate};
     const DuplexFrameLayout _duplex;
     const DataResourceGridLayout _layout;
     AlignedVector _zc_freq;

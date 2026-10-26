@@ -102,7 +102,7 @@ the UE computer’s management address:</p>
 <p>Change <strong>目标速率</strong> and click <strong>应用</strong> to change the sender’s target rate.
 Set it to zero to pause traffic. Enter a fraction such as <code dir="auto">1/2</code> or <code dir="auto">2/3</code> in
 <strong>LDPC 码率</strong> and press Enter to update the encoded-rate display. This field
-does not change the backend’s LDPC codec.</p>
+only affects the displayed rates. Match it to <code dir="auto">ldpc.code_rate</code> in both YAML files. To change the actual payload code rate, edit YAML or the configuration editor and restart both backends.</p>
 <p>Use Ctrl+C to stop the sender, then allow at least one second for the receiver
 to confirm the last packet counts before stopping it. Closing the dashboard
 leaves the sender and receiver running. Restart both tester processes for a

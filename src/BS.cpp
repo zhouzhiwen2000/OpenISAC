@@ -471,6 +471,7 @@ public:
 private:
     Config _cfg;
     const DigitalModulation _payload_modulation{_cfg.modulation.scheme};
+    const LdpcRateMatching _payload_rate{_cfg.ldpc.code_rate};
     radio::IDevicePtr _tx_dev;        // TX (downlink) radio device, any backend
     radio::IDevicePtr _uplink_rx_dev; // dedicated uplink RX device; null when sharing _tx_dev
     radio::ITxStreamPtr _tx_stream;
@@ -1097,7 +1098,7 @@ private:
         }
 
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload.size());
-        const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+        const size_t packet_qpsk_symbols = LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation, _payload_rate.code_bits());
         const size_t effective_re = _effective_payload_re_count();
         if (packet_qpsk_symbols > effective_re) {
             LOG_G_WARN_M(Ertm) << "[eRTM] TO payload does not fit in one downlink frame; dropping measurement"
@@ -2042,7 +2043,7 @@ private:
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(payload_len);
         const size_t padded_len = payload_blocks * bytes_per_ldpc_block;
         const size_t packet_qpsk_symbols =
-            LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+            LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation, _payload_rate.code_bits());
         // Capacity is after per-frame Identity SIB reservation.
         const size_t effective_re = _effective_payload_re_count();
         if (packet_qpsk_symbols > effective_re) {
@@ -2097,7 +2098,8 @@ private:
             _bit_interleaver->interleave_inplace(
                 _ldpc_encoded_bits_scratch,
                 _interleaver_bits_scratch);
-            _payload_modulation.pack_bits(_ldpc_encoded_bits_scratch, _ldpc_qpsk_scratch, _ldpc.get_N());
+            _payload_rate.match_inplace(_ldpc_encoded_bits_scratch, _interleaver_bits_scratch);
+            _payload_modulation.pack_bits(_ldpc_encoded_bits_scratch, _ldpc_qpsk_scratch, _payload_rate.code_bits());
         }
         prof_step_end = ProfileClock::now();
         profile.payload_encode_us =
@@ -2578,7 +2580,7 @@ private:
                         const size_t payload_blocks =
                             LdpcPacketFraming::payload_blocks_for_len(entry.raw_payload.size());
                         const size_t packet_qpsk_symbols =
-                            LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+                            LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation, _payload_rate.code_bits());
                         const int64_t estimated_tx_ms =
                             now + _estimate_arq_queue_delay_ms(encoded_size, packet_qpsk_symbols);
                         _arq_dl_retransmit_enqueued.fetch_add(1, std::memory_order_relaxed);

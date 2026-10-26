@@ -119,8 +119,8 @@ public:
     void set_tx_stream(radio::ITxStreamPtr stream) { _tx_stream = std::move(stream); }
     radio::ITxStreamPtr tx_stream() const { return _tx_stream; }
 
-    // Enable timed (real-USRP) transmission scheduled on the radio clock. When
-    // not enabled (sim), frames are streamed back-to-back, paced by the shm ring.
+    // Schedule transmission on the radio clock, including the simulator's
+    // absolute sample clock. Simulator pacing still comes from its shm ring.
     void set_timed_tx(radio::TimeSpec start_time, double tick_rate, double tx_sample_rate) {
         std::lock_guard<std::mutex> lock(_timing_mutex);
         _start_time = start_time;
@@ -714,7 +714,7 @@ private:
             return false;
         }
         const size_t payload_blocks = LdpcPacketFraming::payload_blocks_for_len(len);
-        const size_t packet_qpsk = LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+        const size_t packet_qpsk = LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation, _payload_rate.code_bits());
         // Capacity after per-period Identity SIB reservation (mirrors BS DL).
         const size_t effective_re = _effective_user_payload_re();
         if (packet_qpsk > effective_re) {
@@ -749,7 +749,8 @@ private:
             _ldpc.encode_frame(input_bytes, encoded_bits);
             _scrambler.scramble(encoded_bits);
             _bit_interleaver->interleave_inplace(encoded_bits, _interleaver_scratch);
-            _payload_modulation.pack_bits(encoded_bits, qpsk_ints, _ldpc.get_N());
+            _payload_rate.match_inplace(encoded_bits, _interleaver_scratch);
+            _payload_modulation.pack_bits(encoded_bits, qpsk_ints, _payload_rate.code_bits());
             packet.insert(packet.end(), qpsk_ints.begin(), qpsk_ints.end());
         }
         if (packet.size() != packet_qpsk) {
@@ -1180,7 +1181,7 @@ private:
             const uint64_t period_seq = ++tx_period_seq;
 
             // Absolute-frame UL-TX timing history for eRTM stale-UL compensation.
-            // Timed path: hard-gate expected identity. Sim/non-timed path: the
+            // Timed path: hard-gate expected identity. Untimed path: the
             // selected period's stamped identity (no TX grid tick mapping).
             const AirFrameIdentity& timing_identity =
                 (_use_timed_tx || !has_frame)
@@ -1418,12 +1419,12 @@ private:
         // UHD handles transport-packet fragmentation internally. Do not retry a
         // short return here: a second application call would no longer be the
         // same one-frame transaction.
-        if (_use_timed_tx) {
+        if (!radio_is_sim(_cfg)) {
             return _tx_stream->send(data, sample_count, first_md, 0.1);
         }
 
-        // Untimed mode is the shared-memory simulator. Preserve backpressure
-        // retries there; this does not create additional UHD calls.
+        // A timed simulator burst can fill the ring before its scheduled start.
+        // Retry backpressure without dropping samples or restarting RX/TX.
         size_t sent_total = 0;
         radio::TxMetadata md = first_md;
         SPSCBusySpin spin;
@@ -1516,6 +1517,7 @@ private:
     const Config _link_cfg;
     const Config _cfg;                       // derived uplink (sub)frame config
     const DigitalModulation _payload_modulation{_cfg.modulation.scheme};
+    const LdpcRateMatching _payload_rate{_cfg.ldpc.code_rate};
     const DuplexFrameLayout _duplex;
     const DataResourceGridLayout _layout;
 

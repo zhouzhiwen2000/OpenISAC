@@ -957,8 +957,9 @@ public:
     }
 
     /** @brief QPSK control RE plus packed payload RE for the selected modulation. */
-    static size_t packet_symbols(size_t payload_blocks, const DigitalModulation& modulation) {
-        return kControlSymbols + payload_blocks * modulation.symbol_count(kLdpcCodeBitsPerBlock);
+    static size_t packet_symbols(size_t payload_blocks, const DigitalModulation& modulation,
+                                 size_t transmitted_bits = kLdpcCodeBitsPerBlock) {
+        return kControlSymbols + payload_blocks * modulation.symbol_count(transmitted_bits);
     }
 
     static int marker_symbol(size_t idx) {
@@ -1498,7 +1499,7 @@ private:
 template<typename SampleAt>
 inline void classify_payload_modulation(size_t count, SampleAt sample,
                                         const DigitalModulation& modulation,
-                                        uint8_t* mask) {
+                                        uint8_t* mask, size_t transmitted_bits = 1008) {
     if (count == 0) return;
     std::fill_n(mask, count, uint8_t{2});
     std::array<float, 2 * LdpcPacketFraming::kIdentityControlSymbols> control{};
@@ -1526,7 +1527,7 @@ inline void classify_payload_modulation(size_t count, SampleAt sample,
                 control.data() + LdpcPacketFraming::kMarkerBits, header) ||
             LdpcPacketFraming::is_air_frame_identity_hi_flags(header.flags)) return;
         const size_t size = LdpcPacketFraming::packet_symbols(
-            LdpcPacketFraming::payload_blocks_for_len(header.payload_len), modulation);
+            LdpcPacketFraming::payload_blocks_for_len(header.payload_len), modulation, transmitted_bits);
         if (size > count - offset) return;
         std::fill_n(mask + offset, LdpcPacketFraming::kControlSymbols, uint8_t{0});
         std::fill(mask + offset + LdpcPacketFraming::kControlSymbols, mask + offset + size, uint8_t{1});

@@ -20,6 +20,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 
 - Real-time OFDM communication plus monostatic and bistatic sensing
 - Configurable BPSK, QPSK, 8PSK, 16QAM, 32QAM and 64QAM payload modulation for both link directions
+- Configurable LDPC payload rates: 1/3, 1/2 (default), 2/3 and 3/4
 - Over-the-air synchronization support for bistatic experiments
 - Optional [LoS phase reference](site/src/content/docs/docs/reference/ue-yaml.md#los-phase-reference) improves sensing with less stable clocks; requires LoS between transmitter and receiver and no relative motion between them (YAML option, restart required).
 - C++ backend for the radio path and Python frontend tools for visualization

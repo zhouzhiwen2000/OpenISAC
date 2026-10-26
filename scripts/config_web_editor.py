@@ -1579,7 +1579,9 @@ def normalized_sensing_channel_items(data: dict[str, Any], items: list[Any]) -> 
 
 
 def validate_ldpc_config_values(data: dict[str, Any]) -> None:
-    """Reject CPU LDPC settings that the backend or Q16 decoder cannot use."""
+    """Validate payload rate and CPU LDPC decoder settings."""
+    if data.get("code_rate", "1/2") not in ("1/3", "1/2", "2/3", "3/4"):
+        raise RuntimeError("ldpc.code_rate must be 1/3, 1/2, 2/3, or 3/4.")
     iterations = data.get("decoder_iterations", 12)
     if isinstance(iterations, (bool, float)):
         raise RuntimeError("ldpc.decoder_iterations must be an integer >= 1.")

@@ -1595,6 +1595,7 @@ private:
 
     const bool _ldpc_fixed_point{cfg_.ldpc.fixed_point};
     const DigitalModulation _payload_modulation{cfg_.modulation.scheme};
+    const LdpcRateMatching _payload_rate{cfg_.ldpc.code_rate};
     // Per-worker LDPCCodec instances live in _cpu_ldpc_contexts (aff3ct
     // decoders are stateful and not shareable); the interleaver/scrambler are
     // const after construction and shared by all workers.
@@ -5555,7 +5556,7 @@ private:
             (_measurement_enabled && _measurement_active_epoch_id.load(std::memory_order_relaxed) != 0))) {
             classify_payload_modulation(ctx.modulation_mask.size(), [&](size_t index) {
                 return ctx.symbols[_payload_symbol_rows_flat[index]][_payload_subcarrier_indices_flat[index]];
-            }, _payload_modulation, ctx.modulation_mask.data());
+            }, _payload_modulation, ctx.modulation_mask.data(), _payload_rate.code_bits());
         }
         result.profile.eq_base_inv_total += prof_eq_base_inv_us;
         result.profile.eq_channel_select_total += prof_eq_channel_select_us;
@@ -6892,11 +6893,11 @@ private:
 
             const size_t payload_blocks =
                 LdpcPacketFraming::payload_blocks_for_len(mini_header.payload_len);
-            const size_t required_llr = payload_blocks * bits_per_block;
+            const size_t required_llr = payload_blocks * _payload_rate.code_bits();
             const size_t payload_llr_offset =
                 control_llr_offset + LdpcPacketFraming::kControlBits;
             const size_t next_symbol_offset =
-                symbol_offset + LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation);
+                symbol_offset + LdpcPacketFraming::packet_symbols(payload_blocks, _payload_modulation, _payload_rate.code_bits());
 
             if (next_symbol_offset > llr.size() / 2) {
                 LOG_G_WARN_M(Demod) << "[Demod] Mini-header requested payload beyond frame: blocks="
@@ -6912,7 +6913,8 @@ private:
 
             payload_scratch.resize(required_llr);
             _payload_modulation.demap_scaled_pairs(
-                llr.data() + payload_llr_offset, required_llr, iq_scale, payload_scratch.data(), bits_per_block);
+                llr.data() + payload_llr_offset, required_llr, iq_scale, payload_scratch.data(), _payload_rate.code_bits());
+            _payload_rate.recover_inplace(payload_scratch, deint_scratch);
 
             _bit_interleaver->deinterleave_inplace(payload_scratch, deint_scratch);
             _descrambler.soft_descramble(payload_scratch);

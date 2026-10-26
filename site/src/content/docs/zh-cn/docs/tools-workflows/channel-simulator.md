@@ -13,7 +13,7 @@ description: 不连接 USRP，也能验证 OpenISAC 的通信、单站感知和�
 
 `ChannelSimulator`、BS 和 UE 通过 `simulation.session` 标识的共享内存连接。配置 `radio_backend: sim` 后，BS/UE 使用仿真后端收发样本；改回默认的 `radio_backend: uhd` 即可恢复 USRP 后端，不需要修改通信或感知处理链。
 
-所有共享内存流使用同一条绝对样本时间轴。模拟设备时钟会在首个样本发送前独立运行；timed TX 元数据负责把突发首样本放到指定时刻，timed RX 命令则从指定的绝对样本开始读取。UE 尚未开始发送时，BS 上行 RX 仍会在同一时间轴上接收空口静默，而不是从另一个 ring 的局部零点重新计时。因此，UE 下行 RX 对齐与上行 TX 窗口移动保持和 timed USRP 流一致的时钟关系。调整 `sync_tracking.desired_peak_pos` 会改变本地 delay/`TO_UE` 的参考坐标，但 eRTM 校正后的物理 delay peak 位置保持不变。
+所有共享内存流使用同一条绝对样本时间轴。BS 开始发送前，模拟设备时钟保持为零；开始发送后，时钟随已处理的样本推进。timed TX 元数据负责把突发首样本放到指定时刻，timed RX 命令则从指定的绝对样本开始读取。UE 尚未开始发送时，BS 上行 RX 仍会在同一时间轴上接收空口静默，而不是从另一个 ring 的局部零点重新计时。因此，UE 下行 RX 对齐与上行 TX 窗口移动保持和 timed USRP 流一致的时钟关系。调整 `sync_tracking.desired_peak_pos` 会改变本地 delay/`TO_UE` 的参考坐标，但 eRTM 校正后的物理 delay peak 位置保持不变。
 
 ## 编译
 
@@ -188,6 +188,6 @@ TDD 下 $f_{\mathrm{TX,corr}}=f_{\mathrm{RX,corr}}$；FDD 下上行 TX 校正按
 - 默认启用实时节拍。需要尽快完成批量仿真时，可设置 `simulation.pacing_enabled: false`。
 - 建议将 `ring_capacity_samples` 控制在约几帧，避免发射端运行过快并造成单站 TX/RX 配对队列溢出。
 - `sample_rate_offset_ppm` 建模一个端点级 UE/BS SFO；`timing_offset_samples` 仍只是固定整数样本偏移，不会随时间漂移。
-- timed 仿真流共享绝对样本时钟。首个 TX 前时钟保持为零，使先启动的 UE 与后启动的 BS 仍选择相同的初始定时起点；首个 TX 建立原点后，时钟只随已处理的空中样本推进，不受仿真是否达到实时速度影响。RX 请求早于实际 TX 原点时会自动对齐到该原点。
+- timed 仿真流共享绝对样本时钟。BS 首次发送前，时钟保持为零，为先启动的 UE 提供确定的初始时间参考；BS 和 UE 可以在该时钟上安排不同的启动时刻。此后时钟只随已处理的空中样本推进，不受仿真是否达到实时速度影响。RX 请求早于实际 TX 原点时会自动对齐到该原点。
 - 当 `sync_tracking.predictive_delay: true` 时，UE 会检查 `cfo_hz / center_freq` 对应的同源晶振 ppm 是否与 `sample_rate_offset_ppm` 一致。仿真允许独立配置 CFO 与 SRO，因此不一致时会给出警告；若两者有意独立建模，应关闭预测时延，避免把 CFO 误判为采样时钟漂移。
 - 当前仿真没有建模分数时延；所有传播时延与配置定时偏移都会取整到样本级。
