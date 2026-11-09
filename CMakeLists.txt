@@ -236,7 +236,12 @@ else()
 endif()
 # Check SIMD instruction set support (common optimization)
 include(CheckCXXCompilerFlag)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
+set(OPENISAC_CPU_ARCH "native" CACHE STRING
+    "CPU instruction set passed to -march; empty uses the compiler baseline")
+if(OPENISAC_CPU_ARCH AND NOT OPENISAC_CPU_ARCH STREQUAL "native")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-march=${OPENISAC_CPU_ARCH}>")
+    message(STATUS "OpenISAC CPU architecture: ${OPENISAC_CPU_ARCH}")
+elseif(OPENISAC_CPU_ARCH AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel")
     check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
     check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
     check_cxx_compiler_flag("-mavx512dq" COMPILER_SUPPORTS_AVX512DQ)
@@ -567,7 +572,7 @@ endif()
 #===========================================================
 # Installation Rules
 #===========================================================
-set(INSTALL_TARGETS BS UE UdpLinkTest)
+set(INSTALL_TARGETS BS UE ChannelSimulator UdpLinkTest)
 
 install(TARGETS ${INSTALL_TARGETS}
     RUNTIME DESTINATION bin

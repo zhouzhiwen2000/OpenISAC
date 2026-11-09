@@ -38,6 +38,8 @@ def main() -> None:
     parser.add_argument("--direction", choices=("downlink", "uplink"), default="downlink")
     parser.add_argument("--payload-bytes", type=int, default=1316)
     parser.add_argument("--packets", type=int, default=40)
+    parser.add_argument("--pin-cpus", type=int, nargs="+",
+                        help="Bind test backend threads to these host CPU IDs (split BS/UE)")
     args = parser.parse_args()
     if not 8 <= args.payload_bytes <= 65507 or args.packets < 1:
         parser.error("payload bytes must be 8..65507 and packets must be positive")
@@ -92,6 +94,15 @@ def main() -> None:
                 "main_cpu_core": -1, "sensing_cpu_cores": [-1],
                 "uplink_cpu_cores": [-1] * (3 if role == "BS" else 4),
             }
+            if args.pin_cpus:
+                available = set(os.sched_getaffinity(0))
+                if any(cpu not in available for cpu in args.pin_cpus) or len(args.pin_cpus) < 2:
+                    parser.error("--pin-cpus needs at least two available host CPU IDs")
+                split = len(args.pin_cpus) // 2
+                cores = args.pin_cpus[:split] if role == "BS" else args.pin_cpus[split:]
+                for key, value in config["cpu_cores"].items():
+                    config["cpu_cores"][key] = ([cores[i % len(cores)] for i in range(len(value))]
+                                                  if isinstance(value, list) else cores[-1])
             config["ldpc"] = {"code_rate": args.code_rate,
                               "fixed_point": args.cpu_precision == "q16", "fixed_point_scale": 16,
                               "decoder_iterations": 12, "nms_normalization_factor": 0.75}

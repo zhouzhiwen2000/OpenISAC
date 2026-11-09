@@ -21,6 +21,7 @@ const sidebar = [
     items: [
       { label: "Hardware", translations: { "zh-CN": "硬件准备" }, link: "/docs/getting-started/hardware/" },
       { label: "Installation", translations: { "zh-CN": "软件安装" }, link: "/docs/getting-started/installation/" },
+      { label: "Docker deployment", translations: { "zh-CN": "Docker 部署" }, link: "/docs/getting-started/docker/" },
       { label: "Build", translations: { "zh-CN": "编译" }, link: "/docs/getting-started/build/" },
       { label: "System Performance Tuning", translations: { "zh-CN": "系统性能调优" }, link: "/docs/getting-started/performance-tuning/" },
       { label: "CPU Isolation and Execution", translations: { "zh-CN": "CPU 隔离和执行" }, link: "/docs/getting-started/cpu-isolation-execution/" },

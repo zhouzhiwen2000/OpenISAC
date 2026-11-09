@@ -1,74 +1,64 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 app_home="${OPENISAC_HOME:-/opt/openisac}"
 run_dir="${OPENISAC_RUN_DIR:-/work/build}"
-
 usage() {
-    cat <<'EOF'
-Usage:
-  openisac-run BS [x310|b210] [extra args...]
-  openisac-run UE [x310|b210] [extra args...]
-  openisac-run bash
+    cat <<'HELP'
+Usage: openisac-run {BS|UE} [x310|b210|sim|sim-duplex]
+       openisac-run ChannelSimulator [BS.yaml]
+       openisac-run doctor [config.yaml]
+       openisac-run usrp-check [config.yaml | --args addr=IP]
+       openisac-run <command> [args...]
 
-Environment:
-  OPENISAC_RUN_DIR=/work/build       Directory used as the runtime cwd.
-  OPENISAC_CONFIG=/path/to/file.yaml Copy this config instead of a preset.
-  OPENISAC_REFRESH_CONFIG=1          Overwrite existing BS.yaml/UE.yaml.
-EOF
+OPENISAC_CONFIG=/config/BS.yaml   External YAML; loaded on every start.
+OPENISAC_RUN_DIR=/work/build      Writable cwd for logs and FFTW wisdom.
+OPENISAC_REQUIRE_RT=1            Fail if FIFO priority/locked memory is unavailable.
+OPENISAC_REFRESH_CONFIG=1        Replace an existing config with the selected preset.
+CPU numbers in YAML are host CPU IDs. Use scripts/docker_run.sh for host networking,
+real-time limits and USB access. Mount external configuration read-only.
+HELP
 }
-
-if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    usage
-    exit 0
-fi
-
+if [[ $# -eq 0 || "$1" == --help || "$1" == -h ]]; then usage; exit 0; fi
 target="$1"
-shift || true
-
+shift
 case "$target" in
-    bs|BS)
-        binary="${app_home}/bin/BS"
-        runtime_yaml="BS.yaml"
-        preset_prefix="BS"
-        ;;
-    ue|UE)
-        binary="${app_home}/bin/UE"
-        runtime_yaml="UE.yaml"
-        preset_prefix="UE"
-        ;;
-    *)
-        exec "$target" "$@"
-        ;;
+    bs|BS) target=BS; role=BS ;;
+    ue|UE) target=UE; role=UE ;;
+    usrp-check) exec python3 "$app_home/docker_uhd_prepare.py" "$@" ;;
+    doctor) exec python3 "$app_home/docker_preflight.py" "$@" ;;
+    *) exec "$target" "$@" ;;
 esac
-
-profile="${1:-${OPENISAC_PROFILE:-x310}}"
-if [[ "$profile" == "x310" || "$profile" == "X310" || "$profile" == "b210" || "$profile" == "B210" ]]; then
-    shift || true
-else
-    profile="${OPENISAC_PROFILE:-x310}"
-fi
-
-profile_upper="$(printf '%s' "$profile" | tr '[:lower:]' '[:upper:]')"
-default_config="${app_home}/config/${preset_prefix}_${profile_upper}.yaml"
-source_config="${OPENISAC_CONFIG:-$default_config}"
-
+binary="$app_home/bin/$target"
 if [[ ! -x "$binary" ]]; then
-    echo "OpenISAC binary not found or not executable: $binary" >&2
+    echo "$target is not installed in this image; build the CPU image with scripts/docker_build.sh cpu." >&2
     exit 127
 fi
-
-if [[ ! -f "$source_config" ]]; then
-    echo "Config file not found: $source_config" >&2
-    exit 2
-fi
-
+profile="${OPENISAC_PROFILE:-x310}"
+case "${1:-}" in x310|b210|sim|sim-duplex) profile="$1"; shift ;; esac
+case "$profile" in
+    x310|X310) suffix=X310 ;; b210|B210) suffix=B210 ;;
+    sim) suffix=Sim ;; sim-duplex) suffix=Sim_Duplex ;;
+    *) echo "Unknown profile: $profile" >&2; exit 2 ;;
+esac
 mkdir -p "$run_dir"
 cd "$run_dir"
-
-if [[ ! -f "$runtime_yaml" || "${OPENISAC_REFRESH_CONFIG:-0}" == "1" ]]; then
-    cp "$source_config" "$runtime_yaml"
+runtime_yaml="$role.yaml"
+source_config="${OPENISAC_CONFIG:-$app_home/config/${role}_${suffix}.yaml}"
+if [[ -n "${OPENISAC_CONFIG:-}" || ! -f "$runtime_yaml" || "${OPENISAC_REFRESH_CONFIG:-0}" == 1 ]]; then
+    if [[ ! -f "$source_config" ]]; then echo "Config file not found: $source_config" >&2; exit 2; fi
+    if [[ ! "$source_config" -ef "$runtime_yaml" ]]; then
+        config_tmp=$(mktemp "$run_dir/.${role}.yaml.XXXXXX")
+        trap 'rm -f "$config_tmp"' EXIT
+        cp -- "$source_config" "$config_tmp"
+        mv -f -- "$config_tmp" "$runtime_yaml"
+        trap - EXIT
+    fi
 fi
-
-echo "OpenISAC: running $(basename "$binary") with $PWD/$runtime_yaml"
+python3 "$app_home/docker_preflight.py" "$runtime_yaml"
+# Bash defers these traps while the foreground updater finishes its flash transaction.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+python3 "$app_home/docker_uhd_prepare.py" --role "$role" "$runtime_yaml"
+trap - INT TERM
+echo "OpenISAC: $target config=$PWD/$runtime_yaml"
 exec "$binary" "$@"

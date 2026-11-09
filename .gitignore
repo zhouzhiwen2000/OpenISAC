@@ -1,4 +1,5 @@
 /build*/
+/docker-run/
 capture/*.mat
 capture/plot_results
 *.log

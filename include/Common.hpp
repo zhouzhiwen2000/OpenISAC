@@ -39,6 +39,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
 #include <fftw3.h>
 #include <boost/circular_buffer.hpp>
 #include <functional>
@@ -3234,8 +3238,26 @@ inline bool bind_current_thread_to_core(const std::optional<size_t>& core) {
     if (!core.has_value()) {
         return false;
     }
+#if defined(__linux__)
+    // Some UHD packages declare affinity helpers without exporting their symbols.
+    // Use the native Linux API and report errors for the selected host CPU.
+    if (*core >= CPU_SETSIZE) {
+        LOG_G_WARN_M(Config) << "CPU affinity index out of range: " << *core;
+        return false;
+    }
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(*core, &cpuset);
+    const int error = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    if (error != 0) {
+        LOG_G_WARN_M(Config) << "Failed to bind thread to CPU " << *core
+                           << ": " << std::strerror(error);
+        return false;
+    }
+#else
     std::vector<size_t> cpu_list = {*core};
     uhd::set_thread_affinity(cpu_list);
+#endif
     return true;
 }
 

@@ -24,6 +24,7 @@ OpenISAC 是一个面向实时实验的 OFDM 通信感知一体化（ISAC）平�
 - 支持双站实验所需的空口同步机制
 - 可选的 [LoS 相位参考](site/src/content/docs/zh-cn/docs/reference/ue-yaml.md#los-相位参考) 可改善较差时钟下的感知表现；要求收发机之间有 LoS 且两者相对静止（YAML 配置开关，重启生效）。
 - 后端采用 C++ 实时链路，前端提供 Python 可视化与工具脚本
+- Docker 部署共享宿主机网络并使用 UHD 4.11；X300/X310 不兼容时默认在验证 Flash 备份后自动更新
 - 基于 YAML 的运行时配置，仓库内提供 X310/B210 样例，也可扩展到其他 UHD 支持的 USRP
 - 自带 CPU 隔离、绘图分析、网页配置与进程控制工具
 
@@ -39,6 +40,7 @@ OpenISAC 是一个面向实时实验的 OFDM 通信感知一体化（ISAC）平�
 
 - 文档站点：[英文手册](https://openisac.zzw123app.top/docs/) 和 [中文手册](https://openisac.zzw123app.top/zh-cn/docs/)
 - 环境准备与安装：[硬件准备](https://openisac.zzw123app.top/zh-cn/docs/getting-started/hardware/)、[软件安装](https://openisac.zzw123app.top/zh-cn/docs/getting-started/installation/)、[编译](https://openisac.zzw123app.top/zh-cn/docs/getting-started/build/)
+- [Docker 部署](https://openisac.zzw123app.top/zh-cn/docs/getting-started/docker/)
 - 先跑起来：[首次 OTA 运行](https://openisac.zzw123app.top/zh-cn/docs/getting-started/first-ota-run/)
 - 运行参数说明：[BS YAML 参考](https://openisac.zzw123app.top/zh-cn/docs/reference/bs-yaml/) 和 [UE YAML 参考](https://openisac.zzw123app.top/zh-cn/docs/reference/ue-yaml/)
 - 无 USRP 仿真：[信道仿真器](https://openisac.zzw123app.top/zh-cn/docs/tools-workflows/channel-simulator/)

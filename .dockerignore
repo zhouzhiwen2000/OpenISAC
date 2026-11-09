@@ -2,7 +2,7 @@
 .claude
 .qoder
 __pycache__
-build
+build*
 cmake-build-*
 docs/_astro
 site/node_modules
@@ -16,3 +16,12 @@ capture/*.bin
 capture/*.dat
 capture/*.npy
 capture/*.npz
+docker-run
+knowledge
+plans
+.agents
+.codex
+.hermes
+site/public
+docs
+capture
