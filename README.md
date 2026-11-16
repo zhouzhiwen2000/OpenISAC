@@ -24,7 +24,7 @@ If your goal is "idea -> OTA experiment" with a minimal and readable codebase, t
 - Over-the-air synchronization support for bistatic experiments
 - Optional [LoS phase reference](site/src/content/docs/docs/reference/ue-yaml.md#los-phase-reference) improves sensing with less stable clocks; requires LoS between transmitter and receiver and no relative motion between them (YAML option, restart required).
 - C++ backend for the radio path and Python frontend tools for visualization
-- Docker deployment with host networking and UHD 4.11; X300/X310 compatibility updates are enabled by default after verified Flash backups
+- Docker deployment with host networking and UHD 4.11; configured USRPs use UHD's device-specific image updates by default, with terminal warnings for MPM version mismatches
 - YAML-based runtime configuration with sample presets for X310/B210, adaptable to other UHD-supported USRPs
 - Included utilities for CPU isolation, plotting, web-based config editing, and process control
 

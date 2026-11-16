@@ -159,28 +159,51 @@ limit which CPUs a container may use, without keeping other programs off them, u
 are checked for compatibility with this version. To check a USRP without starting
 OpenISAC:</p>
 <div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">scripts/docker_run.sh</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">usrp-check</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--args</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">addr=</span><span style="--0:#F78C6C;--1:#AA0982">192.168.30.2</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="scripts/docker_run.sh usrp-check --args addr=192.168.30.2"><div></div></button></div></figure></div>
-<p>If an <strong>X300/X310</strong> has an incompatible FPGA image, it is <strong>updated automatically</strong> to the
-matching official image before OpenISAC starts:</p>
+<p>If a configured USRP reports an incompatible FPGA/firmware version, startup
+<strong>automatically invokes UHD’s image loader for that device type</strong>. This applies to
+all configured devices for which the installed UHD provides an image loader,
+including X3xx, X4xx, N3xx, E3xx, B2xx and N200/N210. The container includes the
+release’s FPGA/firmware image sets and their companion files. UHD selects the image
+for the detected model and hardware revision; a configured <code dir="auto">fpga=</code> selects the
+FPGA flavor.</p>
 <ul>
-<li>The current image is backed up first, to <code dir="auto">~/.local/state/openisac/firmware/&#x3C;serial>/</code>
-(choose another location with <code dir="auto">--firmware-state DIR</code>). Keep the backup in case you
-need to restore the old image.</li>
+<li>Update records are kept in <code dir="auto">~/.local/state/openisac/firmware/&#x3C;serial>/</code>
+(choose another location with <code dir="auto">--firmware-state DIR</code>). X300/X310 also save two
+matching readbacks of the current Flash image before writing. Other device
+loaders use their model-specific recovery procedures; these records are not
+backups of the device’s Flash or operating system.</li>
 <li><strong>Do not power off or disconnect the USRP during the update</strong>, which takes a few
 minutes. Some devices need a power cycle afterwards; you are told when this is the case.</li>
 <li>After the update, the USRP may no longer work with older UHD versions installed
 elsewhere.</li>
 <li>Compatible devices are never modified, and nothing is written when the device cannot
-be identified reliably. If one device string contains several X310s
-(<code dir="auto">addr0=...,addr1=...</code>), run <code dir="auto">usrp-check</code> on each address first.</li>
+be identified reliably. Numbered device arguments (<code dir="auto">addr0=...,addr1=...</code>,
+<code dir="auto">serial0=...,serial1=...</code>, or <code dir="auto">mgmt_addr0=...,mgmt_addr1=...</code>) are checked and updated
+one motherboard at a time, followed by a check of the combined configuration.</li>
 <li>If an update fails, automatic updates for that USRP are paused. Power-cycle the device
-and start again. If it is still incompatible, <code dir="auto">transaction.json</code> in the device’s backup
-folder contains a command that restores the saved image. Once the device works again,
-move that file away to re-enable automatic updates.</li>
+if the loader requests it and start again. If it is still incompatible, inspect
+<code dir="auto">transaction.json</code> and the update log in the device’s state folder. X300/X310
+records include a command to restore the saved image; other models require their
+UHD recovery procedure. Once the device works again, move the pending transaction
+file away to re-enable automatic updates.</li>
 </ul>
+<p><strong>X4xx MPM version differences produce a prominent terminal warning</strong>, including
+the device’s MPM software version and the container UHD version, or the expected
+and actual compatibility versions reported by UHD. Software release differences
+and compatible newer MPM minor versions permit startup with a warning. An
+incompatible MPM version stops startup and
+requires updating the device-side MPM/system image to match the container’s UHD.
+The FPGA/firmware updater does not install MPM or replace the device OS. The same
+warning applies to other MPM-based devices.</p>
 <p>To turn automatic updates off, for example when you use a custom FPGA image, start with
 <code dir="auto">OPENISAC_AUTO_UPDATE_FIRMWARE=0</code>; an incompatible device then stops startup with an
-error instead. B200/B210 never need an update: UHD loads their firmware every time the
-device is opened.</p>
+error instead. USB radios require <code dir="auto">--usb</code>; UHD handles their normal volatile image
+loading, and a reported FPGA mismatch can also invoke the device’s image loader.
+Some firmware or legacy-device updates require a power cycle or the device’s
+dedicated recovery tool, as reported by UHD.</p>
+<p>When using <code dir="auto">--uhd-images DIR</code> with automatic updates, supply the complete,
+unmodified FPGA/firmware image set from the same container build. Companion DTS
+and checksum files are checked along with the images before an update.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="simulation-with-your-own-configuration">Simulation with your own configuration</h2><a class="sl-anchor-link" href="#simulation-with-your-own-configuration"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Simulation with your own configuration”</span></a></div>
 <p>Put the simulation YAML files (for example copies of <code dir="auto">config/BS_Sim.yaml</code> and
 <code dir="auto">config/UE_Sim.yaml</code>) in a folder, then start the three programs with them:</p>
@@ -244,7 +267,7 @@ time need different <code dir="auto">simulation.session</code> names and ports. 
 
 
 
-<table><thead><tr><th>Option</th><th>Purpose</th></tr></thead><tbody><tr><td><code dir="auto">--config FILE</code></td><td>YAML configuration, re-read on every start</td></tr><tr><td><code dir="auto">--work-dir DIR</code></td><td>Folder for logs and runtime files (default <code dir="auto">docker-run/PROGRAM</code>)</td></tr><tr><td><code dir="auto">--name NAME</code></td><td>Container name, for use with <code dir="auto">docker stop</code></td></tr><tr><td><code dir="auto">--usb</code></td><td>Allow access to USB USRPs (B200/B210)</td></tr><tr><td><code dir="auto">--isolation-plan FILE</code></td><td>Use the CPUs saved by <code dir="auto">isolate_cpus.py</code></td></tr><tr><td><code dir="auto">--cpuset-cpus LIST</code></td><td>Limit the CPUs the container may use</td></tr><tr><td><code dir="auto">--memory SIZE</code></td><td>Limit container memory, for example <code dir="auto">4g</code> (unlimited by default)</td></tr><tr><td><code dir="auto">--firmware-state DIR</code></td><td>Folder for USRP firmware backups</td></tr><tr><td><code dir="auto">--uhd-images DIR</code></td><td>Use UHD firmware/FPGA images from a host folder</td></tr><tr><td><code dir="auto">--image IMAGE</code></td><td>Use another image instead of <code dir="auto">openisac:cpu</code></td></tr><tr><td><code dir="auto">--dry-run</code></td><td>Print the Docker command without running it</td></tr></tbody></table>
+<table><thead><tr><th>Option</th><th>Purpose</th></tr></thead><tbody><tr><td><code dir="auto">--config FILE</code></td><td>YAML configuration, re-read on every start</td></tr><tr><td><code dir="auto">--work-dir DIR</code></td><td>Folder for logs and runtime files (default <code dir="auto">docker-run/PROGRAM</code>)</td></tr><tr><td><code dir="auto">--name NAME</code></td><td>Container name, for use with <code dir="auto">docker stop</code></td></tr><tr><td><code dir="auto">--usb</code></td><td>Allow access to USB USRPs</td></tr><tr><td><code dir="auto">--isolation-plan FILE</code></td><td>Use the CPUs saved by <code dir="auto">isolate_cpus.py</code></td></tr><tr><td><code dir="auto">--cpuset-cpus LIST</code></td><td>Limit the CPUs the container may use</td></tr><tr><td><code dir="auto">--memory SIZE</code></td><td>Limit container memory, for example <code dir="auto">4g</code> (unlimited by default)</td></tr><tr><td><code dir="auto">--firmware-state DIR</code></td><td>Folder for USRP update records and supported Flash backups</td></tr><tr><td><code dir="auto">--uhd-images DIR</code></td><td>Use UHD firmware/FPGA images from a host folder</td></tr><tr><td><code dir="auto">--image IMAGE</code></td><td>Use another image instead of <code dir="auto">openisac:cpu</code></td></tr><tr><td><code dir="auto">--dry-run</code></td><td>Print the Docker command without running it</td></tr></tbody></table>
 
 
 
@@ -262,7 +285,7 @@ time need different <code dir="auto">simulation.session</code> names and ports. 
 
 
 
-<table><thead><tr><th>Environment variable</th><th>Purpose</th></tr></thead><tbody><tr><td><code dir="auto">OPENISAC_REQUIRE_RT=0</code></td><td>Allow starting without real-time scheduling</td></tr><tr><td><code dir="auto">OPENISAC_AUTO_UPDATE_FIRMWARE=0</code></td><td>Disable automatic X300/X310 FPGA updates</td></tr></tbody></table>
+<table><thead><tr><th>Environment variable</th><th>Purpose</th></tr></thead><tbody><tr><td><code dir="auto">OPENISAC_REQUIRE_RT=0</code></td><td>Allow starting without real-time scheduling</td></tr><tr><td><code dir="auto">OPENISAC_AUTO_UPDATE_FIRMWARE=0</code></td><td>Disable automatic USRP FPGA/firmware updates</td></tr></tbody></table>
 <div class="sl-heading-wrapper level-h3"><h3 id="build-options">Build options</h3><a class="sl-anchor-link" href="#build-options"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Build options”</span></a></div>
 <p><code dir="auto">scripts/docker_build.sh cpu</code> accepts these environment variables:</p>
 
@@ -290,7 +313,20 @@ time need different <code dir="auto">simulation.session</code> names and ports. 
 
 
 
-<table><thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead><tbody><tr><td><code dir="auto">CPU_ARCH</code></td><td><code dir="auto">x86-64-v3</code></td><td>CPU instruction set; use <code dir="auto">native</code> only if the image runs on the same CPU model it is built on</td></tr><tr><td><code dir="auto">BUILD_JOBS</code></td><td><code dir="auto">4</code></td><td>Parallel build jobs; lower it if the build runs out of memory</td></tr><tr><td><code dir="auto">UHD_REF</code></td><td><code dir="auto">v4.11.0.0</code></td><td>UHD release to include</td></tr></tbody></table>
+
+
+
+
+
+<table><thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead><tbody><tr><td><code dir="auto">CPU_ARCH</code></td><td><code dir="auto">x86-64-v3</code></td><td>CPU instruction set; use <code dir="auto">native</code> only if the image runs on the same CPU model it is built on</td></tr><tr><td><code dir="auto">BUILD_JOBS</code></td><td><code dir="auto">4</code></td><td>Parallel build jobs; lower it if the build runs out of memory</td></tr><tr><td><code dir="auto">UHD_REF</code></td><td><code dir="auto">v4.11.0.0</code></td><td>UHD release to include</td></tr><tr><td><code dir="auto">APT_MIRROR</code></td><td><code dir="auto">official</code></td><td>Ubuntu package source: retain the base image’s sources (<code dir="auto">official</code>), or select <code dir="auto">ustc</code> or <code dir="auto">tuna</code></td></tr></tbody></table>
+<p>For example, build using the USTC Ubuntu mirror:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">APT_MIRROR</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">ustc</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">scripts/docker_build.sh</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">cpu</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="APT_MIRROR=ustc scripts/docker_build.sh cpu"><div></div></button></div></figure></div>
+<p>Use <code dir="auto">APT_MIRROR=tuna</code> for Tsinghua’s mirror. With <code dir="auto">sudo</code>, use
+<code dir="auto">sudo env APT_MIRROR=ustc scripts/docker_build.sh cpu</code>. Direct <code dir="auto">docker build</code> calls
+accept <code dir="auto">--build-arg APT_MIRROR=ustc</code> as well. The choice applies to Ubuntu APT packages
+in every build stage and the runtime image; Git repositories and UHD image downloads
+use their own upstream URLs. Mirror package downloads use HTTP so minimal base images
+can install CA certificates, with APT signature verification enabled.</p>
 <div class="sl-heading-wrapper level-h3"><h3 id="stopping">Stopping</h3><a class="sl-anchor-link" href="#stopping"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Stopping”</span></a></div>
 <p>Press <code dir="auto">Ctrl+C</code>, or run <code dir="auto">docker stop NAME</code> for a container started with <code dir="auto">--name</code>. If a
 firmware update is in progress, the container finishes it before exiting.</p>

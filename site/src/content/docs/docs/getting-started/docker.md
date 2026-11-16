@@ -149,28 +149,53 @@ OpenISAC:
 scripts/docker_run.sh usrp-check --args addr=192.168.30.2
 ```
 
-If an **X300/X310** has an incompatible FPGA image, it is **updated automatically** to the
-matching official image before OpenISAC starts:
+If a configured USRP reports an incompatible FPGA/firmware version, startup
+**automatically invokes UHD's image loader for that device type**. This applies to
+all configured devices for which the installed UHD provides an image loader,
+including X3xx, X4xx, N3xx, E3xx, B2xx and N200/N210. The container includes the
+release's FPGA/firmware image sets and their companion files. UHD selects the image
+for the detected model and hardware revision; a configured `fpga=` selects the
+FPGA flavor.
 
-- The current image is backed up first, to `~/.local/state/openisac/firmware/<serial>/`
-  (choose another location with `--firmware-state DIR`). Keep the backup in case you
-  need to restore the old image.
+- Update records are kept in `~/.local/state/openisac/firmware/<serial>/`
+  (choose another location with `--firmware-state DIR`). X300/X310 also save two
+  matching readbacks of the current Flash image before writing. Other device
+  loaders use their model-specific recovery procedures; these records are not
+  backups of the device's Flash or operating system.
 - **Do not power off or disconnect the USRP during the update**, which takes a few
   minutes. Some devices need a power cycle afterwards; you are told when this is the case.
 - After the update, the USRP may no longer work with older UHD versions installed
   elsewhere.
 - Compatible devices are never modified, and nothing is written when the device cannot
-  be identified reliably. If one device string contains several X310s
-  (`addr0=...,addr1=...`), run `usrp-check` on each address first.
+  be identified reliably. Numbered device arguments (`addr0=...,addr1=...`,
+  `serial0=...,serial1=...`, or `mgmt_addr0=...,mgmt_addr1=...`) are checked and updated
+  one motherboard at a time, followed by a check of the combined configuration.
 - If an update fails, automatic updates for that USRP are paused. Power-cycle the device
-  and start again. If it is still incompatible, `transaction.json` in the device's backup
-  folder contains a command that restores the saved image. Once the device works again,
-  move that file away to re-enable automatic updates.
+  if the loader requests it and start again. If it is still incompatible, inspect
+  `transaction.json` and the update log in the device's state folder. X300/X310
+  records include a command to restore the saved image; other models require their
+  UHD recovery procedure. Once the device works again, move the pending transaction
+  file away to re-enable automatic updates.
+
+**X4xx MPM version differences produce a prominent terminal warning**, including
+the device's MPM software version and the container UHD version, or the expected
+and actual compatibility versions reported by UHD. Software release differences
+and compatible newer MPM minor versions permit startup with a warning. An
+incompatible MPM version stops startup and
+requires updating the device-side MPM/system image to match the container's UHD.
+The FPGA/firmware updater does not install MPM or replace the device OS. The same
+warning applies to other MPM-based devices.
 
 To turn automatic updates off, for example when you use a custom FPGA image, start with
 `OPENISAC_AUTO_UPDATE_FIRMWARE=0`; an incompatible device then stops startup with an
-error instead. B200/B210 never need an update: UHD loads their firmware every time the
-device is opened.
+error instead. USB radios require `--usb`; UHD handles their normal volatile image
+loading, and a reported FPGA mismatch can also invoke the device's image loader.
+Some firmware or legacy-device updates require a power cycle or the device's
+dedicated recovery tool, as reported by UHD.
+
+When using `--uhd-images DIR` with automatic updates, supply the complete,
+unmodified FPGA/firmware image set from the same container build. Companion DTS
+and checksum files are checked along with the images before an update.
 
 ## Simulation with your own configuration
 
@@ -198,11 +223,11 @@ time need different `simulation.session` names and ports. See
 | `--config FILE` | YAML configuration, re-read on every start |
 | `--work-dir DIR` | Folder for logs and runtime files (default `docker-run/PROGRAM`) |
 | `--name NAME` | Container name, for use with `docker stop` |
-| `--usb` | Allow access to USB USRPs (B200/B210) |
+| `--usb` | Allow access to USB USRPs |
 | `--isolation-plan FILE` | Use the CPUs saved by `isolate_cpus.py` |
 | `--cpuset-cpus LIST` | Limit the CPUs the container may use |
 | `--memory SIZE` | Limit container memory, for example `4g` (unlimited by default) |
-| `--firmware-state DIR` | Folder for USRP firmware backups |
+| `--firmware-state DIR` | Folder for USRP update records and supported Flash backups |
 | `--uhd-images DIR` | Use UHD firmware/FPGA images from a host folder |
 | `--image IMAGE` | Use another image instead of `openisac:cpu` |
 | `--dry-run` | Print the Docker command without running it |
@@ -210,7 +235,7 @@ time need different `simulation.session` names and ports. See
 | Environment variable | Purpose |
 | --- | --- |
 | `OPENISAC_REQUIRE_RT=0` | Allow starting without real-time scheduling |
-| `OPENISAC_AUTO_UPDATE_FIRMWARE=0` | Disable automatic X300/X310 FPGA updates |
+| `OPENISAC_AUTO_UPDATE_FIRMWARE=0` | Disable automatic USRP FPGA/firmware updates |
 
 ### Build options
 
@@ -221,6 +246,20 @@ time need different `simulation.session` names and ports. See
 | `CPU_ARCH` | `x86-64-v3` | CPU instruction set; use `native` only if the image runs on the same CPU model it is built on |
 | `BUILD_JOBS` | `4` | Parallel build jobs; lower it if the build runs out of memory |
 | `UHD_REF` | `v4.11.0.0` | UHD release to include |
+| `APT_MIRROR` | `official` | Ubuntu package source: retain the base image's sources (`official`), or select `ustc` or `tuna` |
+
+For example, build using the USTC Ubuntu mirror:
+
+```bash
+APT_MIRROR=ustc scripts/docker_build.sh cpu
+```
+
+Use `APT_MIRROR=tuna` for Tsinghua's mirror. With `sudo`, use
+`sudo env APT_MIRROR=ustc scripts/docker_build.sh cpu`. Direct `docker build` calls
+accept `--build-arg APT_MIRROR=ustc` as well. The choice applies to Ubuntu APT packages
+in every build stage and the runtime image; Git repositories and UHD image downloads
+use their own upstream URLs. Mirror package downloads use HTTP so minimal base images
+can install CA certificates, with APT signature verification enabled.
 
 ### Stopping
 

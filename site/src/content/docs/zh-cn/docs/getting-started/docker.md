@@ -118,15 +118,19 @@ scripts/docker_run.sh --isolation-plan /tmp/isolate_cpus_state.json \
 scripts/docker_run.sh usrp-check --args addr=192.168.30.2
 ```
 
-如果 **X300/X310** 的 FPGA 镜像不兼容，会在 OpenISAC 启动前**自动更新**为匹配的官方镜像：
+如果配置中的 USRP 报告 FPGA/固件版本不兼容，启动流程会**自动调用该设备类型对应的 UHD 镜像加载器**。此功能适用于当前 UHD 提供镜像加载器的所有已配置设备，包括 X3xx、X4xx、N3xx、E3xx、B2xx 和 N200/N210。容器包含该发行版的 FPGA/固件镜像及配套文件；UHD 根据检测到的型号和硬件修订版选择镜像，配置中的 `fpga=` 可指定 FPGA 类型。
 
-- 更新前先备份当前镜像，保存在 `~/.local/state/openisac/firmware/<序列号>/`（可用 `--firmware-state DIR` 指定其他位置）。如果以后可能需要恢复旧镜像，请保留该备份。
+- 更新记录保存在 `~/.local/state/openisac/firmware/<序列号>/`（可用 `--firmware-state DIR` 指定其他位置）。X300/X310 会在写入前保存两份内容一致的当前 Flash 镜像备份。其他设备加载器使用各型号对应的恢复流程，其更新记录不包含设备 Flash 或操作系统备份。
 - **更新过程中不要断电或断开 USRP**，更新需要几分钟。部分设备在更新后需要断电重启，届时会有提示。
 - 更新后，USRP 可能无法再配合其他地方安装的旧版 UHD 使用。
-- 兼容的设备不会被改动；无法可靠识别设备时也不会写入。若一个设备字符串中包含多台 X310（`addr0=...,addr1=...`），请先对每个地址分别执行 `usrp-check`。
-- 更新失败后，该 USRP 的自动更新会暂停。请将设备断电重启后再次启动。若仍不兼容，设备备份目录中的 `transaction.json` 包含恢复已保存镜像的命令。设备恢复正常后，将该文件移走即可重新启用自动更新。
+- 兼容的设备不会被改动；无法可靠识别设备时也不会写入。编号设备参数（`addr0=...,addr1=...`、`serial0=...,serial1=...` 或 `mgmt_addr0=...,mgmt_addr1=...`）会逐台检查和更新，完成后再检查组合配置。
+- 更新失败后，该 USRP 的自动更新会暂停。若加载器提示需要断电重启，请按提示操作后再次启动。若仍不兼容，请查看设备状态目录中的 `transaction.json` 和更新日志。X300/X310 的记录包含恢复已保存镜像的命令；其他型号需要使用其 UHD 恢复流程。设备恢复正常后，将未完成的事务文件移走即可重新启用自动更新。
 
-如需关闭自动更新（例如使用自定义 FPGA 镜像时），请在启动时设置 `OPENISAC_AUTO_UPDATE_FIRMWARE=0`；此时遇到不兼容的设备会报错并停止启动。B200/B210 无需更新：每次打开设备时，UHD 都会加载其固件。
+**X4xx 的 MPM 版本不一致时，终端会显示醒目警告**，包含设备端 MPM 软件版本与容器 UHD 版本，或 UHD 报告的期望与实际兼容版本。软件发行版本不同但兼容性检查通过，或 MPM 次版本较新且兼容时，会警告并继续启动；不兼容的 MPM 版本会阻止启动，需要将设备端 MPM/系统镜像更新到与容器 UHD 配套的版本。FPGA/固件更新流程不会安装 MPM 或替换设备操作系统；其他采用 MPM 的设备也会显示同类警告。
+
+如需关闭自动更新（例如使用自定义 FPGA 镜像时），请在启动时设置 `OPENISAC_AUTO_UPDATE_FIRMWARE=0`；此时遇到不兼容的设备会报错并停止启动。USB 设备需要使用 `--usb`；正常的易失性镜像加载由 UHD 处理，报告 FPGA 不匹配时也会调用对应加载器。部分固件或旧型号设备的更新需要断电重启或专用恢复工具，请按照 UHD 提示操作。
+
+使用 `--uhd-images DIR` 配合自动更新时，请提供来自同一容器构建的完整、未经修改的 FPGA/固件镜像目录；更新前会同时校验镜像及配套的 DTS、校验和文件。
 
 ## 使用自定义配置仿真
 
@@ -151,11 +155,11 @@ scripts/docker_run.sh --config sim-config/UE.yaml UE
 | `--config FILE` | YAML 配置文件，每次启动重新读取 |
 | `--work-dir DIR` | 日志和运行文件目录（默认 `docker-run/程序名`） |
 | `--name NAME` | 容器名称，可用于 `docker stop` |
-| `--usb` | 允许访问 USB USRP（B200/B210） |
+| `--usb` | 允许访问 USB USRP |
 | `--isolation-plan FILE` | 使用 `isolate_cpus.py` 保存的 CPU 集合 |
 | `--cpuset-cpus LIST` | 限制容器可用的 CPU |
 | `--memory SIZE` | 限制容器内存，例如 `4g`（默认不限制） |
-| `--firmware-state DIR` | USRP 固件备份目录 |
+| `--firmware-state DIR` | USRP 更新记录与受支持的 Flash 备份目录 |
 | `--uhd-images DIR` | 使用宿主机目录中的 UHD 固件/FPGA 镜像 |
 | `--image IMAGE` | 使用其他镜像代替 `openisac:cpu` |
 | `--dry-run` | 只显示 Docker 命令，不执行 |
@@ -163,7 +167,7 @@ scripts/docker_run.sh --config sim-config/UE.yaml UE
 | 环境变量 | 作用 |
 | --- | --- |
 | `OPENISAC_REQUIRE_RT=0` | 允许在没有实时调度时启动 |
-| `OPENISAC_AUTO_UPDATE_FIRMWARE=0` | 关闭 X300/X310 FPGA 自动更新 |
+| `OPENISAC_AUTO_UPDATE_FIRMWARE=0` | 关闭 USRP FPGA/固件自动更新 |
 
 ### 构建选项
 
@@ -174,6 +178,19 @@ scripts/docker_run.sh --config sim-config/UE.yaml UE
 | `CPU_ARCH` | `x86-64-v3` | CPU 指令集；仅当镜像在与构建机相同型号的 CPU 上运行时才使用 `native` |
 | `BUILD_JOBS` | `4` | 并行构建任务数；构建时内存不足可调低 |
 | `UHD_REF` | `v4.11.0.0` | 镜像包含的 UHD 版本 |
+| `APT_MIRROR` | `official` | Ubuntu 软件源：`official` 沿用基础镜像的源，或选择 `ustc`（中科大）、`tuna`（清华） |
+
+例如，使用中科大 Ubuntu 镜像构建：
+
+```bash
+APT_MIRROR=ustc scripts/docker_build.sh cpu
+```
+
+清华镜像使用 `APT_MIRROR=tuna`。需要 `sudo` 时执行
+`sudo env APT_MIRROR=ustc scripts/docker_build.sh cpu`。直接调用 `docker build` 时也可传入
+`--build-arg APT_MIRROR=ustc`。该选项应用于每个构建阶段及运行镜像的 Ubuntu APT 软件包；
+Git 仓库与 UHD 镜像下载仍使用各自的上游地址。镜像站软件包通过 HTTP 下载，便于最小基础镜像安装
+CA 证书，APT 签名校验保持启用。
 
 ### 停止
 

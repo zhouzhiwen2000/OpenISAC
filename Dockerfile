@@ -3,6 +3,9 @@ ARG BUILD_IMAGE=ubuntu:24.04
 ARG RUNTIME_IMAGE=ubuntu:24.04
 FROM ubuntu:24.04 AS uhd-builder
 ARG DEBIAN_FRONTEND=noninteractive
+ARG APT_MIRROR=official
+COPY scripts/docker_apt_mirror.sh /tmp/openisac-apt-mirror.sh
+RUN bash /tmp/openisac-apt-mirror.sh "${APT_MIRROR}" && rm /tmp/openisac-apt-mirror.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cmake git pkg-config \
         libboost-filesystem-dev libboost-program-options-dev libboost-serialization-dev \
@@ -24,16 +27,21 @@ RUN git clone --branch "${UHD_REF}" --depth 1 --recurse-submodules \
     && git -C /tmp/uhd rev-parse HEAD > /opt/uhd/share/uhd/openisac-source-revision.txt \
     && echo /opt/uhd/lib > /etc/ld.so.conf.d/openisac-uhd.conf && ldconfig \
     && rm -rf /tmp/uhd
-RUN /opt/uhd/bin/uhd_images_downloader --types '^(x3|b2)' --yes --test \
+COPY scripts/docker_uhd_manifest.py /tmp/openisac-uhd-manifest.py
+RUN /opt/uhd/bin/uhd_images_downloader --types '_fpga_|_fw_' --yes --test \
         --install-location /opt/uhd/share/uhd/images \
     && test -s /opt/uhd/share/uhd/images/usrp_x310_fpga_XG.bit \
     && test -s /opt/uhd/share/uhd/images/usrp_b210_fpga.bin \
-    && python3 -c 'import hashlib,json,pathlib; p=pathlib.Path("/opt/uhd/share/uhd/images"); (p.parent/"openisac-image-sha256.json").write_text(json.dumps({f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in p.iterdir() if f.is_file() and f.suffix in (".bit",".bin",".hex")},sort_keys=True,indent=2)+"\n")'
+    && python3 /tmp/openisac-uhd-manifest.py /opt/uhd/share/uhd/images \
+        /opt/uhd/share/uhd/openisac-image-sha256.json
 
 
 FROM ${BUILD_IMAGE} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG APT_MIRROR=official
+COPY scripts/docker_apt_mirror.sh /tmp/openisac-apt-mirror.sh
+RUN bash /tmp/openisac-apt-mirror.sh "${APT_MIRROR}" && rm /tmp/openisac-apt-mirror.sh
 ARG AFF3CT_REF=v4.1.2
 ARG BUILD_JOBS=4
 ARG CPU_ARCH=x86-64-v3
@@ -78,6 +86,9 @@ RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release \
 
 FROM ${RUNTIME_IMAGE} AS runtime
 ARG DEBIAN_FRONTEND=noninteractive
+ARG APT_MIRROR=official
+COPY scripts/docker_apt_mirror.sh /tmp/openisac-apt-mirror.sh
+RUN bash /tmp/openisac-apt-mirror.sh "${APT_MIRROR}" && rm /tmp/openisac-apt-mirror.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libfftw3-single3 libgomp1 \
         libboost-filesystem1.83.0 libboost-program-options1.83.0 libboost-serialization1.83.0 \

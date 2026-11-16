@@ -12,11 +12,12 @@ Usage: scripts/docker_run.sh [options] {BS|UE|ChannelSimulator|doctor|usrp-check
   --isolation-plan FILE  Use the process CPU set saved by isolate_cpus.py
   --cgroup-parent NAME  Override dedicated rt-workload.slice (systemd hosts)
   --name NAME         Container name
-  --usb               Pass through /dev/bus/usb for B210 (including re-enumeration)
-  --firmware-state DIR  Persistent verified backups/journals (shared across containers)
+  --usb               Pass through USB USRPs (including re-enumeration)
+  --firmware-state DIR  Persistent update records and supported Flash backups
   --uhd-images DIR    Host UHD firmware/FPGA image directory
   --dry-run           Print the exact docker command
 Environment: OPENISAC_REQUIRE_RT=0 permits a non-real-time development run.
+             OPENISAC_AUTO_UPDATE_FIRMWARE=0 disables USRP image updates.
 Native Linux host network and IPC are used; no bridge, NAT or CPU quota is configured.
 HELP
 }

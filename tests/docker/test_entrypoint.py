@@ -61,6 +61,32 @@ class EntrypointTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertNotIn('generation:', result.stdout)
 
+    def test_real_mpm_warning_is_visible_and_obeys_uhd_compatibility(self):
+        (self.app / 'docker_uhd_prepare.py').write_text((ROOT / 'scripts/docker_uhd_prepare.py').read_text())
+        self.config.write_text('usrp_device:\n  device_args: type=x4xx,addr=192.0.2.1\n'
+                               'sensing:\n  rx_channel_count: 0\n')
+        self.env['PATH'] = str(self.app / 'bin') + ':' + self.env['PATH']
+        probe = self.app / 'bin/uhd_usrp_probe'
+        config_info = self.app / 'bin/uhd_config_info'
+        config_info.write_text('#!/bin/sh\necho "UHD 4.11.0.0"\n')
+        config_info.chmod(0o755)
+        for code, actual in ((0, '5.4'), (1, '5.2')):
+            probe.write_text('#!/bin/sh\n'
+                             'if [ "$3" = --string ]; then echo 4.10.0.0; exit 0; fi\n'
+                             f'echo "MPM minor compat number mismatch. Expected: 5.3 Actual: {actual}"\n'
+                             f'exit {code}\n')
+            probe.chmod(0o755)
+            for binary in ('BS', 'UE'):
+                with self.subTest(code=code, binary=binary):
+                    result = self.launch(binary)
+                    self.assertEqual(result.returncode, 0 if code == 0 else 2, result.stderr)
+                    self.assertIn('WARNING: USRP MPM VERSION MISMATCH', result.stderr)
+                    self.assertIn('Expected: 5.3', result.stderr)
+                    if code == 0:
+                        self.assertIn('MPM software: 4.10.0.0', result.stderr)
+                        self.assertIn('Container UHD: 4.11.0.0', result.stderr)
+                    self.assertEqual('OpenISAC:' in result.stdout, code == 0)
+
     def test_missing_program_is_clear(self):
         (self.app / 'bin/UE').unlink()
         result = self.launch('UE')

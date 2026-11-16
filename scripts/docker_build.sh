@@ -10,6 +10,7 @@ fi
 exec docker build -f "$root/Dockerfile" -t "openisac:$backend" \
     --build-arg "BUILD_IMAGE=${BUILD_IMAGE:-ubuntu:24.04}" \
     --build-arg "RUNTIME_IMAGE=${RUNTIME_IMAGE:-ubuntu:24.04}" \
+    --build-arg "APT_MIRROR=${APT_MIRROR:-official}" \
     --build-arg "BUILD_JOBS=${BUILD_JOBS:-4}" \
     --build-arg "UHD_REF=${UHD_REF:-v4.11.0.0}" \
     --build-arg "CPU_ARCH=${CPU_ARCH-x86-64-v3}" \

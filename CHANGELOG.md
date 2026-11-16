@@ -8,6 +8,16 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-11-16 - Docker Ubuntu 软件源选择
+
+Docker 构建支持 `APT_MIRROR=official|ustc|tuna`，默认沿用基础镜像的软件源，可通过构建脚本环境变量或 Docker build 参数选择中科大、清华镜像。选择应用于 UHD、应用编译及运行镜像各阶段，保留发行版、组件及签名校验设置。中英文部署指南提供构建示例。
+
+## 2026-11-10 - 配置设备的 UHD 镜像自动更新与 MPM 警告
+
+容器启动时按用户配置的 USRP 类型调用对应 UHD 镜像加载器，支持该 UHD 提供加载器的设备；镜像包含发行版的各设备 FPGA/固件及配套文件。编号多设备参数逐台处理并复检组合配置，保留设备身份核对、镜像校验、持久化事务和失败后防重复写入，以及 X300/X310 的双份 Flash 备份。
+
+X4xx 及其他 MPM 设备的 MPM 软件发行版本或兼容号不匹配会显示醒目的终端警告。兼容性检查通过时继续启动；不兼容时提示更新设备端 MPM/系统镜像并停止启动。中英文 Docker 文档同步说明各设备的更新与恢复方式。
+
 ## 2026-11-09 - Docker 部署与 UHD 4.11
 
 提供包含 BS、UE 和信道仿真器的 CPU 镜像及构建、启动脚本。容器默认共享宿主机网络和 IPC，支持外部只读 YAML、持久化工作目录、USB USRP、绑核与隔离计划、实时权限检查及可选内存上限。Linux 绑核使用原生线程接口并报告失败；构建支持显式 CPU 指令集。新增中英文部署指南。
