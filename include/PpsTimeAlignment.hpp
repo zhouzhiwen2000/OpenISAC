@@ -53,6 +53,8 @@ struct PpsTimeAlignmentResult {
  * that edge so all commands have almost one full second to reach the common
  * next edge. It then polls until every device time counter is observed to reset
  * at that edge and verifies that the resulting device-time values agree.
+ * USRP2/N210 latches the old time on the load edge. In that case, wait for
+ * a subsequent PPS transition before giving BS/UE a timestamp in the new epoch.
  *
  * @param targets Devices to align; duplicate pointers are collapsed while
  *                retaining their first label. Distinct devices must resolve
@@ -107,12 +109,18 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
         }
     }
 
-    const double authority_tick_rate = unique.front().device->master_clock_rate();
-    if (!(authority_tick_rate > 0.0) || !std::isfinite(authority_tick_rate)) {
-        throw std::runtime_error(
-            "PPS time alignment has invalid master clock rate on " +
-            unique.front().label);
+    std::vector<double> tick_rates;
+    tick_rates.reserve(unique.size());
+    for (const auto& target : unique) {
+        const double tick_rate = target.device->master_clock_rate();
+        if (!(tick_rate > 0.0) || !std::isfinite(tick_rate)) {
+            throw std::runtime_error(
+                "PPS time alignment has invalid master clock rate on " +
+                target.label);
+        }
+        tick_rates.push_back(tick_rate);
     }
+    const double authority_tick_rate = tick_rates.front();
     const int64_t initial_last_pps =
         unique.front().device->time_last_pps().to_ticks(authority_tick_rate);
     const auto edge_deadline =
@@ -137,31 +145,22 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
             "timed out waiting for PPS transition on " + unique.front().label);
     }
 
+    // Sample before arming: the load can happen while a control call is in flight.
+    std::vector<int64_t> previous_now_ticks;
+    previous_now_ticks.reserve(unique.size());
+    for (size_t i = 0; i < unique.size(); ++i) {
+        previous_now_ticks.push_back(unique[i].device->time_now().to_ticks(tick_rates[i]));
+    }
     for (const auto& target : unique) {
         target.device->set_time_next_pps(TimeSpec(0.0));
     }
 
-    std::vector<double> tick_rates;
-    std::vector<int64_t> previous_now_ticks;
     std::vector<bool> observed_time_reset(unique.size(), false);
-    tick_rates.reserve(unique.size());
-    previous_now_ticks.reserve(unique.size());
-    for (const auto& target : unique) {
-        const double tick_rate = target.device->master_clock_rate();
-        if (!(tick_rate > 0.0) || !std::isfinite(tick_rate)) {
-            throw std::runtime_error(
-                "PPS time alignment has invalid master clock rate on " +
-                target.label);
-        }
-        tick_rates.push_back(tick_rate);
-        previous_now_ticks.push_back(
-            target.device->time_now().to_ticks(tick_rate));
-    }
-
-    const auto apply_deadline =
+    auto verify_deadline =
         std::chrono::steady_clock::now() + options.apply_timeout;
+    PpsTimeAlignmentResult load_edge;
     PpsTimeAlignmentResult last_result;
-    while (std::chrono::steady_clock::now() < apply_deadline) {
+    while (std::chrono::steady_clock::now() < verify_deadline) {
         if (options.poll_interval.count() > 0) {
             std::this_thread::sleep_for(options.poll_interval);
         }
@@ -170,6 +169,10 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
         current.devices.reserve(unique.size());
         bool all_reset = true;
         bool all_target_pps_zero = true;
+        const bool waiting_for_post_load = !load_edge.devices.empty();
+        bool all_post_load_pps = waiting_for_post_load;
+        double min_pps_s = std::numeric_limits<double>::infinity();
+        double max_pps_s = -std::numeric_limits<double>::infinity();
         double min_now_s = std::numeric_limits<double>::infinity();
         double max_now_s = -std::numeric_limits<double>::infinity();
         for (size_t i = 0; i < unique.size(); ++i) {
@@ -180,6 +183,10 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
             snapshot.tick_rate = tick_rate;
             snapshot.now_ticks = target.device->time_now().to_ticks(tick_rate);
             if (snapshot.now_ticks < previous_now_ticks[i]) {
+                if (observed_time_reset[i]) {
+                    throw std::runtime_error(
+                        "device time reset again during PPS alignment on " + target.label);
+                }
                 observed_time_reset[i] = true;
             }
             previous_now_ticks[i] = snapshot.now_ticks;
@@ -188,6 +195,16 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
             all_reset = all_reset && observed_time_reset[i];
             all_target_pps_zero =
                 all_target_pps_zero && snapshot.last_pps_ticks == 0;
+            if (waiting_for_post_load) {
+                const auto latch = snapshot.last_pps_ticks;
+                all_post_load_pps = all_post_load_pps &&
+                    latch != load_edge.devices[i].last_pps_ticks &&
+                    latch > 0 && latch <= snapshot.now_ticks &&
+                    static_cast<double>(snapshot.now_ticks - latch) < tick_rate;
+                const double pps_s = static_cast<double>(latch) / tick_rate;
+                min_pps_s = std::min(min_pps_s, pps_s);
+                max_pps_s = std::max(max_pps_s, pps_s);
+            }
             const double now_s =
                 static_cast<double>(snapshot.now_ticks) / tick_rate;
             min_now_s = std::min(min_now_s, now_s);
@@ -197,9 +214,17 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
 
         const double max_skew_s = std::chrono::duration<double>(
             options.max_device_time_skew).count();
-        if (all_reset && all_target_pps_zero &&
-            max_now_s - min_now_s <= max_skew_s) {
-            return current;
+        if (all_reset && max_now_s <= min_now_s + max_skew_s) {
+            if ((!waiting_for_post_load && all_target_pps_zero) ||
+                (all_post_load_pps && max_pps_s <= min_pps_s + max_skew_s)) {
+                return current;
+            }
+            if (!waiting_for_post_load && min_now_s >= 0.0 && max_now_s < 1.0) {
+                load_edge = current;
+                // If the old latch equals the first post-load latch, only the
+                // second post-load edge produces an observable change.
+                verify_deadline = std::chrono::steady_clock::now() + 2 * options.edge_timeout;
+            }
         }
         last_result = std::move(current);
         if (options.poll_interval.count() <= 0) {
@@ -216,7 +241,8 @@ inline PpsTimeAlignmentResult align_device_times_to_next_pps(
             ", now_ticks=" + std::to_string(snapshot.now_ticks) + "}";
     }
     throw std::runtime_error(
-        "timed out verifying PPS time alignment" + detail);
+        (load_edge.devices.empty() ? "timed out verifying PPS time alignment"
+                                   : "timed out verifying post-load PPS transition") + detail);
 }
 
 /**

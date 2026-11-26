@@ -8,6 +8,10 @@
 - Date: `2026-04-02 22:59:43 +08:00`
 - Subject: `Improve overflow/underflow recovery, add macOS support, benchmark scripts, and configurable data resource blocks`
 
+## 2026-11-26 - USRP2/N210 的 PPS 启动对时
+
+修复 USRP2/N210 已在 PPS 边沿清零、BS 或 UE 仍报告对时超时的问题。遇到锁存清零前时间的设备时，启动流程会等到后续 PPS 更新各设备的时间戳，并复核设备间时差，再使用新的 PPS 时间戳。
+
 ## 2026-11-16 - Docker Ubuntu 软件源选择
 
 Docker 构建支持 `APT_MIRROR=official|ustc|tuna`，默认沿用基础镜像的软件源，可通过构建脚本环境变量或 Docker build 参数选择中科大、清华镜像。选择应用于 UHD、应用编译及运行镜像各阶段，保留发行版、组件及签名校验设置。中英文部署指南提供构建示例。

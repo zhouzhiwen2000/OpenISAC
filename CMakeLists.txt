@@ -493,6 +493,12 @@ if(BUILD_TESTING)
     add_test(NAME BistaticTimeline COMMAND BistaticTimelineTest)
     set_tests_properties(BistaticTimeline PROPERTIES LABELS "cpu;sensing;recovery" TIMEOUT 15)
 
+    add_executable(PpsTimeAlignmentTest tests/pps_time_alignment_test.cpp)
+    target_include_directories(PpsTimeAlignmentTest PRIVATE ${OPENISAC_INCLUDE_DIR} ${YAMLCPP_INCLUDE_DIRS})
+    target_link_libraries(PpsTimeAlignmentTest PRIVATE Threads::Threads ${OPENISAC_YAMLCPP_TARGET})
+    add_test(NAME PpsTimeAlignment COMMAND PpsTimeAlignmentTest)
+    set_tests_properties(PpsTimeAlignment PROPERTIES LABELS "cpu;sync" TIMEOUT 15)
+
     add_executable(SyncPreambleTest tests/sync_preamble_test.cpp ${OPENISAC_SRC_DIR}/AsyncLogger.cpp)
     target_include_directories(SyncPreambleTest PRIVATE
         ${OPENISAC_INCLUDE_DIR} ${FFTW3f_INCLUDE_DIRS} ${OPENISAC_ZMQ_INCLUDE_DIRS}
